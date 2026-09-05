@@ -63,12 +63,16 @@ int hex_nibble(char c) {
 
 char nibble_hex(uint32_t v) { return static_cast<char>(v < 10 ? '0' + v : 'A' + (v - 10)); }
 
-std::string format_mc_version(const std::string& data) {
-    // ":e" replies with 6 hex chars. TODO: validate the byte order of the
-    // version fields against Wave 100i hardware (INDI swaps the first and
-    // third bytes of the straight-parsed value).
+// Decode the 6 hex chars of a ":e" reply. Byte layout is
+// <fw major><fw minor><mount code>: the third byte identifies the MODEL, it is
+// not a firmware patch level. Verified two ways on an EQM-35 Pro: ":e1" returns
+// "=032732" (0x32 = 50) while the SynScan handset on the same mount reports
+// model ID 50 from its own "m" command. Matches INDI skywatcherAPI.cpp, whose
+// MountType enum lists 0x44/0x45 for the Wave 100i/150i -- the Wave's
+// "=033A44" third byte 0x44 is likewise an identity, not a ".68" patch.
+bool decode_mc_version(const std::string& data, int& fw_major, int& fw_minor, std::uint8_t& mount_code) {
     if (data.size() < 6) {
-        return "";
+        return false;
     }
     auto byte_at = [&data](std::size_t i) {
         int hi = hex_nibble(data[i]);
@@ -80,10 +84,24 @@ std::string format_mc_version(const std::string& data) {
     int b1 = byte_at(2);
     int b2 = byte_at(4);
     if (b0 < 0 || b1 < 0 || b2 < 0) {
+        return false;
+    }
+    fw_major = b0;
+    fw_minor = b1;
+    mount_code = static_cast<std::uint8_t>(b2);
+    return true;
+}
+
+// Firmware string only, e.g. "3.39". Empty on a malformed reply.
+std::string format_mc_version(const std::string& data) {
+    int major = 0;
+    int minor = 0;
+    std::uint8_t code = 0;
+    if (!decode_mc_version(data, major, minor, code)) {
         return "";
     }
     std::ostringstream oss;
-    oss << b0 << "." << b1 << "." << b2;
+    oss << major << "." << (minor < 10 ? "0" : "") << minor;
     return oss.str();
 }
 
@@ -140,6 +158,45 @@ std::string mc_error_message(const std::string& code) {
 }
 
 }  // namespace
+
+// Mount-code byte of the ":e" reply. Values follow INDI's skywatcherAPI.cpp
+// MountType enum, plus 0x32 for the EQM-35 Pro, which appears in neither INDI's
+// table nor Sky-Watcher's published SynScan model list but is what the hardware
+// reports on both protocols.
+std::string mount_code_to_name(std::uint8_t mount_code) {
+    switch (mount_code) {
+        case 0x00: return "EQ6";
+        case 0x01: return "HEQ5";
+        case 0x02: return "EQ5";
+        case 0x03: return "EQ3";
+        case 0x04: return "EQ8";
+        case 0x05: return "AZ-EQ6";
+        case 0x06: return "AZ-EQ5";
+        case 0x0A: return "Star Adventurer";
+        case 0x0C: return "Star Adventurer GTi";
+        case 0x20: return "EQ8-R Pro";
+        case 0x22: return "AZ-EQ6 Pro";
+        case 0x23: return "EQ6-R Pro";
+        case 0x24: return "EQ6 Pro";
+        case 0x25: return "CQ350 Pro";
+        case 0x31: return "EQ5 Pro";
+        case 0x32: return "EQM-35 Pro";
+        case 0x44: return "Wave 100i";
+        case 0x45: return "Wave 150i";
+        case 0xA2: return "AZ-GTe";
+        case 0xA5: return "AZ-GTi";
+        default: {
+            // Unknown board: surface the raw code so a new model can be
+            // identified from the logs and added above.
+            static constexpr char kHex[] = "0123456789ABCDEF";
+            std::string out = "Mount (code 0x";
+            out += kHex[(mount_code >> 4) & 0xF];
+            out += kHex[mount_code & 0xF];
+            out += ")";
+            return out;
+        }
+    }
+}
 
 std::string SkyWatcherProtocolWrapper::encode_u24(uint32_t value) {
     // 0x123456 -> "563412": low byte first, each byte high-nibble-first.
@@ -246,8 +303,43 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     if (reply.size() < 7 || reply[0] != kReplyOk) {
         return "";
     }
-    std::string version = format_mc_version(reply.substr(1));
-    return version.empty() ? "unknown" : version;
+    // Raw 6-hex-char payload: the caller decodes firmware AND mount code.
+    return reply.substr(1, 6);
+}
+
+// Probe a port at each baud a Sky-Watcher board is known to use, returning the
+// first that answers ":e1". The Wave's STM32 CDC-ACM port ignores baud, so 9600
+// succeeds there on the first try; Synta EQ boards reached over the mount's
+// built-in USB port or an EQDIR cable are real UART bridges -- the EQM-35 Pro's
+// onboard PL2303 runs at 115200, so a 9600-only scan silently misses it.
+constexpr int kProbeBauds[] = {9600, 115200};
+
+bool probe_skywatcher_port_any_baud(const std::string& port_path, MotorBoardInfo& info_out, int& baud_out) {
+    for (int baud : kProbeBauds) {
+        std::string payload = probe_skywatcher_port(port_path, baud);
+        if (payload.empty()) {
+            continue;
+        }
+        int major = 0;
+        int minor = 0;
+        MotorBoardInfo info;
+        if (!decode_mc_version(payload, major, minor, info.mount_code)) {
+            // Answered on the frame level but the payload is not a version;
+            // treat as a non-match rather than adopting a bogus identity.
+            continue;
+        }
+        info.firmware_version = format_mc_version(payload);
+        info.model_name = mount_code_to_name(info.mount_code);
+        info_out = std::move(info);
+        baud_out = baud;
+        return true;
+    }
+    return false;
+}
+
+std::string describe_found_port(const SkyWatcherPortInfo& port) {
+    return "Found Sky-Watcher " + port.model_name + " on " + port.port_path + " (MC firmware " +
+           port.firmware_version + ", " + std::to_string(port.baud_rate) + " baud)";
 }
 
 bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
@@ -294,15 +386,13 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
                 msg += ")...";
                 ALPACA_LOG_INFO("SkyWatcher", msg);
             }
-            std::string fw = probe_skywatcher_port(resolved, 9600);
-            if (!fw.empty()) {
-                std::string msg = "Found Sky-Watcher motor controller on ";
-                msg += resolved;
-                msg += " (MC firmware ";
-                msg += fw;
-                msg += ")";
-                ALPACA_LOG_INFO("SkyWatcher", msg);
-                results.push_back({resolved, name, fw});
+            int baud = 9600;
+            MotorBoardInfo board;
+            if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
+                SkyWatcherPortInfo found{resolved, name, board.firmware_version, baud, board.mount_code,
+                                         board.model_name};
+                ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
+                results.push_back(std::move(found));
             }
         }
     }
@@ -326,15 +416,13 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         if (!raw_port_looks_like_skywatcher_candidate(resolved)) continue;
         probed.insert(resolved);
         ALPACA_LOG_INFO("SkyWatcher", "Probing " + resolved + "...");
-        std::string fw = probe_skywatcher_port(resolved, 9600);
-        if (!fw.empty()) {
-            std::string msg = "Found Sky-Watcher motor controller on ";
-            msg += resolved;
-            msg += " (MC firmware ";
-            msg += fw;
-            msg += ")";
-            ALPACA_LOG_INFO("SkyWatcher", msg);
-            results.push_back({resolved, "", fw});
+        int baud = 9600;
+        MotorBoardInfo board;
+        if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
+            SkyWatcherPortInfo found{resolved, "", board.firmware_version, baud, board.mount_code,
+                                     board.model_name};
+            ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
+            results.push_back(std::move(found));
         }
     }
 #endif
@@ -938,13 +1026,19 @@ std::string SkyWatcherProtocolWrapper::send_raw_command(const std::string& frame
     return pimpl_->exchange(frame, timeout);
 }
 
-std::string SkyWatcherProtocolWrapper::get_motor_board_version() {
+std::string SkyWatcherProtocolWrapper::get_motor_board_version() { return get_motor_board_info().firmware_version; }
+
+MotorBoardInfo SkyWatcherProtocolWrapper::get_motor_board_info() {
     std::string data = send_command('e', kAxisRa);
-    std::string version = format_mc_version(data);
-    if (version.empty()) {
+    int major = 0;
+    int minor = 0;
+    MotorBoardInfo info;
+    if (!decode_mc_version(data, major, minor, info.mount_code)) {
         throw AlpacaException("Unparseable motor board version reply: '" + data + "'");
     }
-    return version;
+    info.firmware_version = format_mc_version(data);
+    info.model_name = mount_code_to_name(info.mount_code);
+    return info;
 }
 
 AxisParameters SkyWatcherProtocolWrapper::get_axis_parameters(int axis) {

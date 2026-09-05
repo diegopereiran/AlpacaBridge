@@ -41,18 +41,56 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace alpacacore::test {
 
+// A simulated board's identity and geometry. Both presets are REAL hardware
+// captures, so the loopback tests exercise the same numbers the driver sees on
+// the bench rather than idealised ones.
+struct FakeMountProfile {
+    uint32_t cpr = 4147200;
+    uint32_t timer_freq = 14000000;
+    std::string version_reply = "033A44";  // ":e" payload: fw 3.58, mount code 0x44
+    std::string high_speed_ratio_reply = "01";
+    uint32_t features = 0x100C;  // ":q" 0x000001: POLAR_LED | IS_AZEQ | HOME_INDEXER
+    uint32_t steps_per_worm = 0;
+
+    // Wave 100i, MC firmware 3.58, mount code 0x44 (AGENTS.md capture).
+    static FakeMountProfile wave_100i() { return FakeMountProfile{}; }
+
+    // Sky-Watcher EQM-35 Pro, MC firmware 3.39, mount code 0x32. Captured over
+    // the mount's built-in USB port (onboard PL2303 @ 115200) on 2026-09-06:
+    //   :e -> =032732   :a -> 9216000   :b -> 16000000   :g -> 01
+    //   :s -> 68266 (9216000/68266 = 135 worm teeth)
+    //   :q 0x000001 -> 0x7000  POLAR_LED | COMMON_SLEW_START | HALF_CURRENT_TRACKING
+    // No HOME_INDEXER bit (0x04) -> CanFindHome must be false on this board.
+    static FakeMountProfile eqm35_pro() {
+        FakeMountProfile p;
+        p.cpr = 9216000;
+        p.timer_freq = 16000000;
+        p.version_reply = "032732";
+        p.high_speed_ratio_reply = "01";
+        p.features = 0x7000;
+        p.steps_per_worm = 68266;
+        return p;
+    }
+};
+
 class FakeSkyWatcherMount {
 public:
-    static constexpr uint32_t kCpr = 4147200;
-    static constexpr uint32_t kTimerFreq = 14000000;
     static constexpr uint32_t kHome = 0x800000;
     static constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
     static constexpr double kGotoDegPerSec = 800.0 * kSiderealDegPerSec;
 
-    FakeSkyWatcherMount() {
+    const uint32_t kCpr;
+    const uint32_t kTimerFreq;
+
+    explicit FakeSkyWatcherMount(FakeMountProfile profile = FakeMountProfile::wave_100i())
+        : kCpr(profile.cpr), kTimerFreq(profile.timer_freq), profile_(std::move(profile)) {
+        for (Axis& a : axes_) {
+            a.cpr = kCpr;
+        }
         fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (fd_ < 0) {
             return;
@@ -85,6 +123,8 @@ public:
             ::close(fd_);
         }
     }
+
+    const FakeMountProfile& profile() const { return profile_; }
 
     bool ok() const { return fd_ >= 0; }
     int port() const { return port_; }
@@ -153,6 +193,9 @@ public:
 
 private:
     struct Axis {
+        // Copy of the profile CPR: the goto ramp below needs it, and a nested
+        // type cannot reach the enclosing object's non-static members.
+        uint32_t cpr = 4147200;
         int64_t counts = kHome;
         double rate_counts = 0.0;  // signed counts/sec while running
         bool running = false;
@@ -188,7 +231,7 @@ private:
             int64_t before = counts;
             if (in_goto) {
                 double dir_sign = goto_target >= counts ? 1.0 : -1.0;
-                double step = kGotoDegPerSec * kCpr / 360.0 * dt;
+                double step = kGotoDegPerSec * cpr / 360.0 * dt;
                 double remaining = std::abs(static_cast<double>(goto_target - counts));
                 if (step >= remaining) {
                     counts = goto_target;
@@ -255,13 +298,16 @@ private:
         a.advance(now());
         switch (cmd) {
             case 'e':
-                return "=033A44";  // MC firmware 3.58.68 (real Wave 100i reply)
+                return "=" + profile_.version_reply;
             case 'a':
                 return "=" + u24(kCpr);
             case 'b':
                 return "=" + u24(kTimerFreq);
             case 'g':
-                return "=01";  // high-speed ratio 1 (as the real Wave reports)
+                return "=" + profile_.high_speed_ratio_reply;
+            case 's':
+                if (profile_.steps_per_worm == 0) return "!0";
+                return "=" + u24(profile_.steps_per_worm);
             case 'j':
                 return "=" + u24(static_cast<uint32_t>(a.counts & 0xFFFFFF));
             case 'f': {
@@ -327,7 +373,7 @@ private:
                 return "=";
             case 'q': {
                 uint32_t inquiry = parse_u24(data);
-                if (inquiry == 0x000001) return "=0C1000";  // features 0x100C
+                if (inquiry == 0x000001) return "=" + u24(profile_.features);
                 if (inquiry == 0x000000) return "=" + u24(a.indexer);
                 return "!0";
             }
@@ -368,6 +414,7 @@ private:
 
     int fd_ = -1;
     int port_ = 0;
+    FakeMountProfile profile_;
     std::atomic<bool> stop_{false};
     std::thread thread_;
     std::mutex mutex_;

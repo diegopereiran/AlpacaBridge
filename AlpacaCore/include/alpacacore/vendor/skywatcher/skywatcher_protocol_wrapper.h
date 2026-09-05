@@ -24,10 +24,30 @@ namespace alpacacore::vendor::skywatcher {
 // the Wave series (Wave 100i/150i), AZ-GTi and other mounts when talking to
 // the mount directly over USB serial or the built-in Wi-Fi module (UDP 11880).
 
+// Decoded ":e" reply. The three payload bytes are firmware major, firmware
+// minor, and the MOUNT CODE -- the third byte is an identity, not a patch
+// level (0x44 = Wave 100i, 0x32 = EQM-35 Pro), matching INDI's
+// skywatcherAPI.cpp MountType enum.
+struct MotorBoardInfo {
+    std::string firmware_version;  // e.g. "3.39"
+    std::uint8_t mount_code = 0;
+    std::string model_name;  // e.g. "EQM-35 Pro", or "Mount (code 0xNN)"
+};
+
+// Map a ":e" mount-code byte to a human-readable model name.
+std::string mount_code_to_name(std::uint8_t mount_code);
+
 struct SkyWatcherPortInfo {
     std::string port_path;
     std::string device_id;
-    std::string firmware_version;  // motor board version, e.g. "3.42.09"
+    std::string firmware_version;  // motor board version, e.g. "3.39"
+    // Baud the probe actually succeeded at. Synta EQ boards reached over the
+    // mount's built-in USB port or an EQDIR cable are real UART bridges and
+    // answer at 115200 (EQM-35 Pro) or 9600; the Wave's STM32 CDC-ACM port
+    // ignores baud entirely. Auto-detect MUST carry this into ConnectionInfo.
+    int baud_rate = 9600;
+    std::uint8_t mount_code = 0;
+    std::string model_name;
 };
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports();
@@ -98,7 +118,8 @@ public:
     std::string send_raw_command(const std::string& frame, int timeout_ms_override = 0);
 
     // ── Inquiries ──
-    std::string get_motor_board_version();         // ":e" axis 1
+    std::string get_motor_board_version();         // ":e" axis 1 (firmware only)
+    MotorBoardInfo get_motor_board_info();         // ":e" axis 1, decoded
     AxisParameters get_axis_parameters(int axis);  // ":a"/":b"/":g"
     uint32_t inquire_position(int axis);           // ":j" (24-bit counts)
     AxisStatus inquire_status(int axis);           // ":f"

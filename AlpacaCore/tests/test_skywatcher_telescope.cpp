@@ -51,7 +51,8 @@ TEST_CASE("SkyWatcher Telescope Driver - Defaults", "[skywatcher][telescope][uni
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_device_type() == DeviceType::Telescope);
     REQUIRE_FALSE(driver->get_connected());
-    CHECK(driver->get_name() == "Sky-Watcher Wave Mount");
+    // Disconnected: no ":e" mount code has been read yet, so the name is generic.
+    CHECK(driver->get_name() == "Sky-Watcher Mount");
 
     REQUIRE(driver->get_can_slew());
     REQUIRE(driver->get_can_slew_async());
