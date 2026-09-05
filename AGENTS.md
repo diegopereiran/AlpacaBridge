@@ -1255,6 +1255,39 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   reports 16 for EQ6-class boards, and this value scales slew step periods.
 - Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
   `eqm35_pro()`, so loopback tests run against real captured geometry.
+- **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
+  Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
+  - Auto-detect found it unaided: `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0
+    (MC firmware 3.39, 115200 baud)`; `Name` reports "Sky-Watcher EQM-35 Pro",
+    firmware "3.39". CCDciel connected over Alpaca with zero driver warnings.
+  - Pointing math is hemisphere-correct at latitude -37.2 with no changes: home
+    points at the SOUTH celestial pole, so `dec = -90 + a2`. Verified against raw
+    counts — reported HA matched axis 1 to 0.0004 deg, and alt/az recomputed
+    independently from the reported RA/Dec matched the driver to 4 decimal places.
+  - `MoveAxis` produces motion on both axes in both senses. NOTE: this does NOT yet
+    close the "physical rotation signs unvalidated" TODO — observing that the mount
+    moves four ways only proves the axes respond, not that the commanded direction
+    matches the physical/celestial one. Confirming the SIGNS needs the reported
+    Dec/RA to change in the expected sense for each button (N -> Dec increases,
+    S -> decreases, E -> RA increases, W -> decreases) AND the OTA to physically
+    move that way. Still open.
+  - **Tracking rate measured at 0.99995x sidereal over 5 minutes** (-46 ppm,
+    -2.5 arcsec/hour, against a +/-31 ppm encoder-quantisation floor), Dec drift
+    exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1.
+  - **Technique worth reusing:** the protocol wrapper does NOT log individual
+    commands, so do not plan to read step periods out of the journal. Sample
+    `":j1"`/`":j2"` through the Alpaca `commandstring` passthrough instead and
+    differentiate — that measures what the mount ACTUALLY does rather than what it
+    was told, and needs no rebuild. Expected sidereal counts/s = `CPR * 360.98564736629
+    / 86400 / 360` (106.959 on this mount). Make sure nothing else is driving the
+    mount while sampling; a manual slew mid-run silently corrupts the result.
+  - Note this validates driver -> board -> encoder counts. It validates counts -> SKY
+    only if the gear ratio matches what the firmware's `":a"` assumes; a belt/pulley
+    mod that changes the reduction would track perfectly in counts and still drift on
+    sky. (Confirmed ratio-preserving on this unit.)
+  - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
+    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, and the
+    `":g"` high-speed ratio under fast slews.
 
 ### iOptron
 
