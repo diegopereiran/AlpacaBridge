@@ -1289,6 +1289,46 @@ them unchanged. What differs is the transport and the identity, and both bit us:
     sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, and the
     `":g"` high-speed ratio under fast slews.
 
+#### KNOWN BUG (open): superseded MoveAxis stop task strands `Slewing` and kills tracking
+
+Found on an EQM-35 Pro 2026-09-06, but **not hemisphere- or model-specific — the Wave
+100i is equally affected.** Not caused by the southern-hemisphere RA fix; that change
+only altered a rate sign and does not touch this machinery.
+
+**Symptom.** After a sequence of `MoveAxis` presses, the driver reports `Slewing = true`
+indefinitely while the axis is demonstrably stopped (`":f1"` running bit clear, `":j1"`
+counts frozen), AND tracking is never restarted even though `Tracking` still reports
+true. The mount sits motionless claiming to be both tracking and slewing. Reported RA
+then drifts at 1.0x sidereal — the signature of a stationary mount — instead of holding.
+
+This is the dangerous shape: a sequencer that waits for `Slewing` to clear before
+exposing hangs forever, and one that does not wait images on an untracked mount.
+
+**Mechanism.** `move_axis()` uses a SINGLE shared `stop_task_thread_` for both axes.
+When a new stop supersedes a pending one, the old task is cancelled
+(`stop_task_cancel_.store(true)`) and returns early from `task_wait_for()` — before
+reaching `manual_axis_slewing_[axis] = false` and the restore-tracking tail. Its axis's
+flag is stranded set, and `get_hardware_slewing_locked()` returns true forever because
+it ORs both `manual_axis_slewing_` entries.
+
+**Reproduction.** Drive MoveAxis on alternating axes with stops close together — CCDciel
+issues MoveAxis pairs ~44 ms apart on button release (observed in the journal), which is
+enough for the second stop to cancel the first axis's task. N, S, E, W in sequence
+reproduced it reliably.
+
+**Recovery (user-level).** `PUT moveaxis Axis=<n> Rate=0` on the stranded axis clears the
+flag and restores tracking, because a stop on an axis whose flag is set spawns a fresh
+task that runs to completion.
+
+**Fix direction (not yet done).** Give each axis its own stop task rather than sharing
+one thread, or make the cancel path still clear its own axis's flag and evaluate the
+tracking restore before returning. Note the generation guard
+(`motion_generation_ == stop_task_generation`) exists to stop a stale task re-starting
+tracking that a concurrent `SetTracking(false)` just stopped — any fix must keep that
+property while still releasing the flag. See the concurrency checklist at the top of
+this file; this is exactly the "async tail that can be skipped leaves shared state
+inconsistent" class.
+
 ### iOptron
 
 Devices: Telescope (mount), Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, via Player One SDK).
