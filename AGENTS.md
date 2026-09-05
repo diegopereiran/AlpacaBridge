@@ -1215,6 +1215,47 @@ datagrams before each send so replies cannot get off-by-one.
   `md5sum /usr/bin/alpacabridge` after restart; a wedged park/slew thread can hang
   `systemctl stop` (use `systemctl kill -s SIGKILL`).
 
+#### EQ-class Synta boards (EQM-35 Pro and relatives) — 2026-09-06
+
+The `:` command set is identical on classic Synta EQ mounts, so the Wave driver drives
+them unchanged. What differs is the transport and the identity, and both bit us:
+
+- **Baud is NOT irrelevant off the Wave.** The Wave's USB port is STM32 CDC-ACM, where
+  the baud setting is ignored. Synta EQ boards reached over the mount's own USB port or
+  an EQDIR cable are real UART bridges: the **EQM-35 Pro's built-in port is a soldered
+  Prolific PL2303 (067b:23a3, "ATEN Serial Bridge") at 115200**, and a 9600-only scan
+  finds nothing at all. Enumeration probes 9600 then 115200; the probe's winning baud
+  MUST be carried into `ConnectionInfo` (auto-detect used to drop it, so a board found
+  at 115200 was reopened at 9600 and every command timed out).
+- **`":e"` byte 3 is the MOUNT CODE, not a firmware patch level.** Layout is
+  `<fw major><fw minor><mount code>`, matching INDI `skywatcherAPI.cpp`. The Wave's
+  `=033A44` is firmware 3.58 + code 0x44 (WAVE_100I), never "3.58.68". EQM-35 Pro:
+  `=032732` -> firmware 3.39, code **0x32**, a code in neither INDI's `MountType` enum
+  nor Sky-Watcher's published SynScan model list. Cross-confirmed: the SynScan handset
+  on the same mount reports model id 50 (= 0x32) from its own `m` command, so
+  `synscan_model_id_to_name` gained `case 50` too.
+- **Feature word tells you which mount you are on.** `":q"` with data 0x000001 succeeds
+  on EQ boards — it does not throw — the home-index bit is simply absent. EQM-35 Pro
+  returns **0x7000** (POLAR_LED | COMMON_SLEW_START | HALF_CURRENT_TRACKING); the Wave
+  returns 0x100C (POLAR_LED | IS_AZEQ | HOME_INDEXER). Flags follow EQMod's set. Gate
+  AutoHome on the 0x04 bit, never on `":q"` failing: an EQM-35 takes the count-frame
+  `FindHome` fallback, and running the sensor hunt on a mount with no index sensors
+  would drive the axes looking for an edge that never arrives.
+- **The rate math ports across unchanged, and there is a free way to prove it.** The
+  board reports its own sidereal step period via `":D"`. On the EQM-35 Pro that is
+  149,592, and the driver's `T1 = TMR_Freq * 360 / rate / CPR` gives
+  `16e6 * 360 / 9,216,000 = 625`, then `625 / 0.00417807 deg/s` = 149,590 — agreement
+  to ~1e-5 on different CPR *and* a different timer frequency. Read `":D"` first on any
+  new board; if it disagrees with the formula, the pointing model is wrong before you
+  have moved a motor.
+- EQM-35 Pro geometry (captured 2026-09-06, MC fw 3.39): CPR 9,216,000, timer 16 MHz,
+  high-speed ratio 1, steps/worm 68,266 (9,216,000 / 68,266 = 135 worm teeth exactly —
+  a good parse sanity check). Home reference is the usual 0x800000. TODO: the
+  high-speed ratio of 1 is taken from the board but is unverified in motion; EQMod
+  reports 16 for EQ6-class boards, and this value scales slew step periods.
+- Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
+  `eqm35_pro()`, so loopback tests run against real captured geometry.
+
 ### iOptron
 
 Devices: Telescope (mount), Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, via Player One SDK).

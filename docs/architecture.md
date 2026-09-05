@@ -112,7 +112,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |
 | iOptron | Telescope, Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, routed to the Player One SDK wrapper) | Protocol wrapper (+ Player One SDK wrapper for iCAM) | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
-| SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, motor controller protocol over USB or WiFi UDP) | Protocol wrapper | Production |
+| SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, and Synta EQ boards such as the EQM-35 Pro; motor controller protocol over USB serial at 9600/115200 or WiFi UDP) | Protocol wrapper | Production |
 | Celestron | Telescope | Protocol wrapper | Production |
 | OnStep | Telescope (generic DIY/retrofit mounts) | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3) | Protocol wrapper | Production |

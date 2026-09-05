@@ -412,11 +412,15 @@
                         <div class="form-group">
                             <label for="skywatcher-port-path">Serial Port:</label>
                             <input type="text" id="skywatcher-port-path" name="skywatcherPortPath" placeholder="/dev/ttyACM0">
-                            <small>Linux: /dev/ttyACM0 (Wave USB port) or /dev/ttyUSB0 (EQDIRECT cable)</small>
+                            <small>Linux: /dev/ttyACM0 (Wave USB port) or /dev/ttyUSB0 (mount USB port / EQDIRECT cable)</small>
                         </div>
                         <div class="form-group">
                             <label for="skywatcher-baud-rate">Baud Rate:</label>
-                            <input type="number" id="skywatcher-baud-rate" name="skywatcherBaudRate" value="9600" min="1200" max="115200">
+                            <select id="skywatcher-baud-rate" name="skywatcherBaudRate">
+                                <option value="9600">9600 (Wave series, EQDIRECT cable)</option>
+                                <option value="115200">115200 (mount built-in USB port, e.g. EQM-35 Pro)</option>
+                            </select>
+                            <small>The Wave's USB port is CDC-ACM and ignores this. Synta EQ boards reached over the mount's own USB port need 115200. Auto-Detect probes both.</small>
                         </div>
                     </div>
 
