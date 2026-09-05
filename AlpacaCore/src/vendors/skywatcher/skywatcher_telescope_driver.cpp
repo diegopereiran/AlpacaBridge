@@ -1581,8 +1581,12 @@ private:
     // TODO: Validate physical rotation signs on Wave 100i hardware — the
     // positive-count direction of each axis relative to the sky is a wiring
     // convention this math assumes; flip kRaAxisSign/kDecAxisSign if slews
-    // mirror. Southern hemisphere handling (dec mirrored, RA direction
-    // reversed) is likewise unvalidated.
+    // mirror.
+    // Southern hemisphere: the dec mirror below is hardware-validated (EQM-35
+    // Pro at latitude -37.2 — reported HA matched axis 1 to 0.0004 deg and
+    // alt/az recomputed from the reported RA/Dec matched to 4 decimals). The
+    // RA-direction reversal that used to accompany it was WRONG and has been
+    // removed; see start_speed_motion_locked().
 
     std::pair<double, double> compute_ra_dec_locked() const {
         // Dead-reckon between hardware reads: while an axis runs at a
@@ -1818,11 +1822,27 @@ private:
         }
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
         // Motion mode: '1' = speed slow, '3' = speed fast.
-        double rate = signed_rate_deg_per_sec;
-        if (channel == kAxisRa && hemisphere_south_locked()) {
-            // TODO: Validate southern hemisphere RA direction on hardware.
-            rate = -rate;
-        }
+        // NO hemisphere flip. The RA axis count frame relates to hour angle the
+        // same way in both hemispheres (HA hours = a1 / 15), so tracking must
+        // drive counts in the SAME sense everywhere -- what changes with
+        // hemisphere is the pointing math (dec is mirrored), not the direction
+        // the sky moves in the count frame.
+        //
+        // This previously negated the RA rate below the equator, carrying a
+        // "TODO: Validate southern hemisphere RA direction on hardware" marker.
+        // Hardware validation (EQM-35 Pro, latitude -37.2, 2026-09-06) showed the
+        // flip was wrong: tracking drove axis 1 counts DOWN at 107 counts/s when
+        // holding a star requires them to go UP (HA must increase with LST), so
+        // reported RA advanced at 2.007x sidereal instead of standing still --
+        // the sky's motion was doubled rather than cancelled. The rate magnitude
+        // was correct throughout (measured 0.99995x sidereal), which is why a
+        // rate-only check missed it; only comparing RA against LST exposes it.
+        //
+        // The flip was also self-inconsistent: dispatch_goto_locked() derives its
+        // direction from the signed count delta and never applied it, so gotos
+        // and tracking disagreed about which way the RA axis should turn below
+        // the equator.
+        const double rate = signed_rate_deg_per_sec;
         protocol.set_motion_mode(channel, fast ? '3' : '1', direction_char(rate));
         protocol.set_step_period(channel, step_period_for_locked(channel, rate, fast));
         protocol.start_motion(channel);
