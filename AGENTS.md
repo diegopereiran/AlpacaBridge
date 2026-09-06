@@ -1250,9 +1250,17 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   have moved a motor.
 - EQM-35 Pro geometry (captured 2026-09-06, MC fw 3.39): CPR 9,216,000, timer 16 MHz,
   high-speed ratio 1, steps/worm 68,266 (9,216,000 / 68,266 = 135 worm teeth exactly —
-  a good parse sanity check). Home reference is the usual 0x800000. TODO: the
-  high-speed ratio of 1 is taken from the board but is unverified in motion; EQMod
-  reports 16 for EQ6-class boards, and this value scales slew step periods.
+  a good parse sanity check). Home reference is the usual 0x800000. **The `":g"` ratio of
+  1 is VERIFIED in motion (2026-09-06, OTA and counterweight off):** with fast mode
+  engaged (mode `'3'`, above 128x sidereal) the encoder rate from `":j"` sampling was
+  x0.99-1.01 of the commanded `MoveAxis` rate on both axes (0.6 deg/s probe and 2.0 deg/s
+  x 5 s: Dec 1.9996 / RA 2.0038 deg/s measured), and slow mode (0.4 deg/s) was x0.999.
+  Had the board been EQ6-like (ratio 16) while reporting 1, fast mode would have run 16x
+  over -- it does not. Both axes: `":g"`=01, `":a"`=9,216,000, `":b"`=16 MHz. GoTo (mode
+  `'0'`, board-managed profile + the driver's landing refinement) took ~48 s for a
+  15 deg / 15 deg move with a sampled peak of ~3.7 deg/s and landed within 3 arcsec RA /
+  exact Dec both ways; the board's own goto speed profile is what sets that time, not
+  the ratio.
 - Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
   `eqm35_pro()`, so loopback tests run against real captured geometry.
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
@@ -1308,8 +1316,9 @@ them unchanged. What differs is the transport and the identity, and both bit us:
     ~90 s of tracking (RA tracking-direction fix confirmed), and `MoveAxis(Dec, +rate)`
     again moved reported Dec and the counts up. Mount returned to home, tracking off.
   - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
-    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, and the
-    `":g"` high-speed ratio under fast slews.
+    sync) and `SideOfPier` / meridian-flip behaviour in the southern hemisphere. (The
+    `":g"` high-speed ratio was verified in motion the same day -- see the geometry
+    bullet above.)
 
 #### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
 
