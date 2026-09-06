@@ -166,26 +166,46 @@ std::string mc_error_message(const std::string& code) {
 // reports on both protocols.
 std::string mount_code_to_name(std::uint8_t mount_code) {
     switch (mount_code) {
-        case 0x00: return "EQ6";
-        case 0x01: return "HEQ5";
-        case 0x02: return "EQ5";
-        case 0x03: return "EQ3";
-        case 0x04: return "EQ8";
-        case 0x05: return "AZ-EQ6";
-        case 0x06: return "AZ-EQ5";
-        case 0x0A: return "Star Adventurer";
-        case 0x0C: return "Star Adventurer GTi";
-        case 0x20: return "EQ8-R Pro";
-        case 0x22: return "AZ-EQ6 Pro";
-        case 0x23: return "EQ6-R Pro";
-        case 0x24: return "EQ6 Pro";
-        case 0x25: return "CQ350 Pro";
-        case 0x31: return "EQ5 Pro";
-        case 0x32: return "EQM-35 Pro";
-        case 0x44: return "Wave 100i";
-        case 0x45: return "Wave 150i";
-        case 0xA2: return "AZ-GTe";
-        case 0xA5: return "AZ-GTi";
+        case 0x00:
+            return "EQ6";
+        case 0x01:
+            return "HEQ5";
+        case 0x02:
+            return "EQ5";
+        case 0x03:
+            return "EQ3";
+        case 0x04:
+            return "EQ8";
+        case 0x05:
+            return "AZ-EQ6";
+        case 0x06:
+            return "AZ-EQ5";
+        case 0x0A:
+            return "Star Adventurer";
+        case 0x0C:
+            return "Star Adventurer GTi";
+        case 0x20:
+            return "EQ8-R Pro";
+        case 0x22:
+            return "AZ-EQ6 Pro";
+        case 0x23:
+            return "EQ6-R Pro";
+        case 0x24:
+            return "EQ6 Pro";
+        case 0x25:
+            return "CQ350 Pro";
+        case 0x31:
+            return "EQ5 Pro";
+        case 0x32:
+            return "EQM-35 Pro";
+        case 0x44:
+            return "Wave 100i";
+        case 0x45:
+            return "Wave 150i";
+        case 0xA2:
+            return "AZ-GTe";
+        case 0xA5:
+            return "AZ-GTi";
         default: {
             // Unknown board: surface the raw code so a new model can be
             // identified from the logs and added above.
@@ -349,8 +369,8 @@ bool probe_skywatcher_port_any_baud(const std::string& port_path, MotorBoardInfo
 }
 
 std::string describe_found_port(const SkyWatcherPortInfo& port) {
-    return "Found Sky-Watcher " + port.model_name + " on " + port.port_path + " (MC firmware " +
-           port.firmware_version + ", " + std::to_string(port.baud_rate) + " baud)";
+    return "Found Sky-Watcher " + port.model_name + " on " + port.port_path + " (MC firmware " + port.firmware_version +
+           ", " + std::to_string(port.baud_rate) + " baud)";
 }
 
 bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
@@ -404,7 +424,7 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
             int baud = 9600;
             MotorBoardInfo board;
             if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
-                SkyWatcherPortInfo found{resolved, name, board.firmware_version, baud, board.mount_code,
+                SkyWatcherPortInfo found{resolved,        name, board.firmware_version, baud, board.mount_code,
                                          board.model_name};
                 ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
                 results.push_back(std::move(found));
@@ -435,8 +455,7 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         int baud = 9600;
         MotorBoardInfo board;
         if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
-            SkyWatcherPortInfo found{resolved, "", board.firmware_version, baud, board.mount_code,
-                                     board.model_name};
+            SkyWatcherPortInfo found{resolved, "", board.firmware_version, baud, board.mount_code, board.model_name};
             ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
             results.push_back(std::move(found));
         }
@@ -663,7 +682,7 @@ private:
 
         if (alpacacore::util::is_serial_port_in_use(registry_key)) {
             ALPACA_LOG_ERROR("SkyWatcher",
-                              "Port " + registry_key + " is already held open by another connected device");
+                             "Port " + registry_key + " is already held open by another connected device");
             return false;
         }
         // Claim BEFORE opening: a concurrent auto-detect scan (this vendor's

@@ -128,7 +128,8 @@ std::string synscan_model_id_to_name(int model_id) {
         // 50 (0x32) is absent from the published V3/V4 table but is what an
         // EQM-35 Pro reports; cross-confirmed against the same mount's motor
         // controller, whose ":e" mount-code byte is also 0x32.
-        case 50: return "EQM-35 Pro";
+        case 50:
+            return "EQM-35 Pro";
         case 56: return "HEQ5 Pro";
         case 160: return "AllView";
         default:

@@ -184,9 +184,10 @@ TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tra
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - independent MoveAxis stops on both axes do not strand Slewing "
-          "or block the RA tracking restore",
-          "[skywatcher][async]") {
+TEST_CASE(
+    "SkyWatcher async - independent MoveAxis stops on both axes do not strand Slewing "
+    "or block the RA tracking restore",
+    "[skywatcher][async]") {
     // Regression (found during EQM-35 Pro hardware bring-up, 2026-09-06), fixed in two
     // steps:
     //
@@ -723,7 +724,6 @@ TEST_CASE("SkyWatcher async - rate offset entry keeps the reported RA continuous
     driver->set_connected(false);
 }
 
-
 // ── EQM-35 Pro (Synta EQ board) ─────────────────────────────────────────────
 // The driver was written against the Wave 100i. These cases pin the behaviour
 // that differs on a classic Synta board, using the geometry captured from real
@@ -787,8 +787,7 @@ TEST_CASE("SkyWatcher Wave - home indexer still enables FindHome", "[skywatcher]
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period",
-          "[skywatcher][telescope][eqm35]") {
+TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period", "[skywatcher][telescope][eqm35]") {
     // The EQM-35's motor board reports its sidereal step period via ":D" as
     // 149592. The driver derives it independently as
     //   T1 = timer_freq * 360 / rate / CPR
@@ -817,7 +816,6 @@ TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period",
     driver->set_tracking(false);
     driver->set_connected(false);
 }
-
 
 // ── Southern hemisphere tracking direction ──────────────────────────────────
 
@@ -851,8 +849,7 @@ TEST_CASE("SkyWatcher southern hemisphere - tracking turns RA the right way",
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged",
-          "[skywatcher][telescope][hemisphere]") {
+TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[skywatcher][telescope][hemisphere]") {
     // The fix removed a hemisphere conditional; guard that the northern
     // behaviour (which was correct, and is what the Wave 100i was validated
     // on) is untouched -- both hemispheres now drive RA the same way.
