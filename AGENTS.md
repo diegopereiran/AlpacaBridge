@@ -1291,12 +1291,25 @@ them unchanged. What differs is the transport and the identity, and both bit us:
     only if the gear ratio matches what the firmware's `":a"` assumes; a belt/pulley
     mod that changes the reduction would track perfectly in counts and still drift on
     sky. (Confirmed ratio-preserving on this unit.)
+  - **Dec-axis direction of `DeclinationRate` / `PulseGuide` North-South below the
+    equator: MEASURED on the mount 2026-09-06** (build `d29d650`, Pi-native arm64 build,
+    daylight, OTA mounted). Method: `Connected=true`, tracking on at sidereal, Dec axis
+    first offset +0.51 deg from home with `MoveAxis` so a2 > 0 -- **do not run this test
+    from the home position: at a2 = 0 (Dec -90) reported Dec rises for EITHER mechanical
+    direction, so the pass/fail signature is invisible there.** Reported Dec and raw
+    `":j2"` counts (via `commandstring`) sampled around each command:
+    PulseGuide North 5000 ms -> Dec +37.7" / +268 counts (expected +37.6" / +267 at the
+    default 0.5x sidereal guide rate); South -> -37.7" / -268, net 0.
+    `DeclinationRate` +5"/s for 60 s -> +302.9" / +2159 counts (expected +300" / +2133,
+    the excess is the ~60.7 s wall time); -5"/s -> -299.7" / -2144; rate 0 -> 0 counts of
+    drift in 30 s. Both call sites of the KNOWN BUG fix below are confirmed on the a2 > 0
+    branch; the a2 < 0 branch rests on the loopback tests and gets hardware coverage
+    from the meridian-flip item. Same session: reported RA held constant to 1e-5 h over
+    ~90 s of tracking (RA tracking-direction fix confirmed), and `MoveAxis(Dec, +rate)`
+    again moved reported Dec and the counts up. Mount returned to home, tracking off.
   - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
-    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, the
-    `":g"` high-speed ratio under fast slews, and the Dec-axis direction of
-    `DeclinationRate` / `PulseGuide` North-South below the equator (fixed in code from
-    the pointing model -- see the KNOWN BUG below -- but not yet measured on the mount;
-    a short autoguiding session is the cheapest check).
+    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, and the
+    `":g"` high-speed ratio under fast slews.
 
 #### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
 
@@ -1425,12 +1438,14 @@ and both were confirmed to fail before the fix (axis moved -19.97 arcsec and -11
 arcsec respectively, the exact mirror of the passing northern-hemisphere cases). The
 existing northern-hemisphere tests are untouched and still pass.
 
-**Still open.** This is validated against the pointing model and the loopback
-simulator, not measured on the mount. The cheapest hardware confirmation is a short
-autoguiding session (PHD2 calibration reports the Dec direction directly) or a
-plate-solved drift run with a non-zero `DeclinationRate`. Do this before ConformU: the
-suite's offset-rate tests measure the Dec direction and will fail on the old code at a
-southern site.
+**Measured on the mount 2026-09-06 (a2 > 0 branch): CONFIRMED.** PulseGuide North moved
+reported Dec +37.7" (+268 counts) and `DeclinationRate` +5"/s moved it +302.9" in 60 s,
+each returning to baseline on the opposite command, with 0 counts of Dec drift at rate 0
+-- full numbers in the hardware bring-up notes above. Method note: run the test with the
+Dec axis OFF the home position; at a2 = 0 (Dec -90) reported Dec rises for either
+mechanical direction and the signature is invisible. The a2 < 0 branch is covered by the
+loopback regressions and will get hardware coverage with the meridian-flip check.
+ConformU's offset-rate tests should now pass at a southern site.
 
 #### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
 
