@@ -1328,7 +1328,7 @@ dispatched, Dec stop dispatched while RA's stop task is still mid-ramp) and asse
 (`motion_generation_ == stop_task_generation`) is unchanged and still gates the
 tracking-restore tail — which is exactly what exposed the SECOND bug below.
 
-#### KNOWN BUG (open): cross-axis `motion_generation_` can block a same-axis tracking restore
+#### KNOWN BUG (FIXED): cross-axis `motion_generation_` can block a same-axis tracking restore
 
 Found while writing the regression test for the bug above, on the SAME night
 (2026-09-06) — the per-axis stop-task fix is necessary but not sufficient. Not
@@ -1360,20 +1360,20 @@ generation cannot tell a same-axis supersession from an unrelated other-axis com
 (exact wording from that code's own comment). The MoveAxis stop-task tail does not apply
 this idiom and should.
 
-**Fix direction (not yet done).** Either (a) apply the same `same_axis_owner` idiom to
-the stop-task tail's restore check, or (b) introduce a genuinely per-axis generation
-counter bumped only by operations that affect that specific axis (goto/park/home bump
-both; a manual MoveAxis, pulse guide, or SetTracking write on one axis bumps only its
-own). Option (b) is more correct but touches roughly fifteen `++motion_generation_`
-call sites across Park, AutoHome, PulseGuide, DriveRate changes and AbortSlew — all
-paths this file's own concurrency-checklist history documents as already hardened
-through multiple past review rounds. Not attempted tonight: this wants a dedicated
-session with a clear head, not a addition at the tail end of a hardware bring-up night.
-Test coverage for whichever fix lands: the regression test added for the FIRST bug
-above intentionally stops short of asserting the RA axis resumes running (see its
-in-code comment) — extend it once this is fixed, and confirm it fails without the fix
-the same way the first regression was verified (temporarily revert, confirm the new
-assertion fails, restore).
+**Fix (done).** Applied option (a): the stop-task restore tail now computes a
+channel-scoped `same_axis_owner` (`goto_in_progress_ || parking_ || homing_ ||
+slewing_cached_ || manual_axis_slewing_[axis] || (pulse_guiding_active_ &&
+pulse_axis_ == channel)`), the exact idiom the duty-cycle worker already uses, and only
+treats a `motion_generation_` mismatch as a real supersession when `same_axis_owner`
+is true. Verified the historical regression this guards against (PR #216 round-5:
+`SetTracking(false)` racing the restore) is still covered independently: that path sets
+`tracking_ = false` under the SAME `mutex_` this task also holds, so there is no
+interleaving where the restore reads `tracking_ == true` while a completed
+`SetTracking(false)` meant otherwise -- the `tracking_ &&`/`dec_rate_arcsec_per_sec_ !=
+0.0 &&` guards already ahead of the generation check cover that case on their own.
+Extended the regression test from the first bug to assert the RA axis actually resumes
+running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
+with the fix reverted to the raw equality check, and passes with it restored.
 
 #### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
 
