@@ -1272,7 +1272,11 @@ them unchanged. What differs is the transport and the identity, and both bit us:
     also the hardware reference for which way a raw Dec-axis rate moves reported
     Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
     rests on. Reported coordinates come from the driver's own pointing model; an
-    independent sky check (plate solve) is still on the list below.
+    independent sky check (plate solve) is still on the list below. Do NOT "fix"
+    MoveAxis to follow sky Dec: the ASCOM spec says the sign of the Rate parameter
+    "is purposely left undefined" and the motion is about the MECHANICAL axis, so
+    the no-transform behaviour is correct in both hemispheres (checked against
+    ascom-standards.org/newdocs/telescope.html#Telescope.MoveAxis, 2026-09-06).
   - **Tracking rate measured at 0.99995x sidereal over 5 minutes** (-46 ppm,
     -2.5 arcsec/hour, against a +/-31 ppm encoder-quantisation floor), Dec drift
     exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1.

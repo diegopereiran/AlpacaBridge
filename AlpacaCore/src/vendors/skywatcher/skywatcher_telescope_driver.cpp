@@ -2357,8 +2357,11 @@ private:
     // (consistent direction kills backlash), then re-stamps the position
     // registers to kHomeCounts at the sensed mark — re-anchoring the count
     // frame to the physical home regardless of where the mount was powered on.
-    // TODO: Validate AutoHome direction conventions in the southern hemisphere
-    // (start_speed_motion_locked flips the RA sign there).
+    // TODO: Validate AutoHome direction conventions in the southern hemisphere.
+    // (start_speed_motion_locked no longer flips the RA sign there -- see
+    // 48afe0d -- so the hunt runs the same way in both hemispheres; the only
+    // southern mount tested so far, the EQM-35 Pro, has no index sensors and
+    // never reaches this code.)
 
     void autohome_sleep(std::unique_lock<std::mutex>& lock, std::chrono::milliseconds d) const {
         lock.unlock();
