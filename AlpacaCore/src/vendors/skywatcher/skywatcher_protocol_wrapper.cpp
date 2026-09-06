@@ -1073,6 +1073,11 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
 
     int timeout = timeout_ms_override > 0 ? timeout_ms_override : pimpl_->default_timeout();
     std::string reply = pimpl_->exchange(frame, timeout, expected_reply_data_len(command));
+    // TRACE-only wire log: every motor-controller frame and its reply. Cheap
+    // below TRACE (the macro gates on level before formatting) and the only
+    // way to see what the board was actually told when a driver-level
+    // symptom (e.g. a pulse that produced no motion) has no other trace.
+    ALPACA_LOG_TRACE("SkyWatcher", "MC " + frame.substr(0, frame.size() - 1) + " -> " + reply);
     if (!reply.empty() && reply[0] == kReplyOk) {
         return reply.substr(1);
     }
@@ -1086,7 +1091,9 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
 
 std::string SkyWatcherProtocolWrapper::send_raw_command(const std::string& frame, int timeout_ms_override) {
     int timeout = timeout_ms_override > 0 ? timeout_ms_override : pimpl_->default_timeout();
-    return pimpl_->exchange(frame, timeout);
+    std::string reply = pimpl_->exchange(frame, timeout);
+    ALPACA_LOG_TRACE("SkyWatcher", "MC raw " + frame.substr(0, frame.empty() ? 0 : frame.size() - 1) + " -> " + reply);
+    return reply;
 }
 
 std::string SkyWatcherProtocolWrapper::get_motor_board_version() { return get_motor_board_info().firmware_version; }
