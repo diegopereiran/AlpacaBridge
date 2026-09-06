@@ -1425,17 +1425,38 @@ public:
                                                   " still reported running at timeout");
             }
             // ASCOM: MoveAxis(axis, 0) restores the previous tracking state —
-            // but only if no newer motion command superseded this stop while
-            // the task polled (generation guard, same as every other path).
-            if (channel == kAxisRa && tracking_ && motion_generation_ == stop_task_generation) {
+            // but only if no newer command took over THIS axis while the task
+            // polled. motion_generation_ is bumped by every motion command on
+            // EITHER axis (see its declaration), so a raw equality check here
+            // was a false positive: stopping the OTHER axis bumped the shared
+            // counter and silently skipped this restore, even though nothing
+            // touched this axis at all (found via a loopback regression test
+            // during EQM-35 Pro bring-up, 2026-09-06). `tracking_`/
+            // `dec_rate_arcsec_per_sec_` below already guard the specific
+            // regression the generation check was originally added for (PR
+            // #216 round-5: SetTracking(false) racing this restore) --
+            // SetTracking(false) sets tracking_ = false under the SAME mutex_
+            // this task also holds here, so there is no interleaving where
+            // this reads tracking_ == true while a completed SetTracking(false)
+            // meant otherwise. What the generation check still needs to catch
+            // is a goto/park/home/pulse-guide that took over THIS axis, none
+            // of which necessarily touch tracking_/dec_rate_arcsec_per_sec_ --
+            // hence the same same_axis_owner idiom already used by the duty-
+            // cycle worker above (same rationale, same comment there: "the
+            // global generation cannot tell a same-axis supersession from an
+            // unrelated other-axis command").
+            const bool same_axis_owner = goto_in_progress_ || parking_ || homing_ || slewing_cached_ ||
+                                         manual_axis_slewing_[axis] ||
+                                         (pulse_guiding_active_ && pulse_axis_ == channel);
+            const bool generation_ok = motion_generation_ == stop_task_generation || !same_axis_owner;
+            if (channel == kAxisRa && tracking_ && generation_ok) {
                 try {
                     set_tracking_locked(lock, true);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("SkyWatcher",
                                     std::string("MoveAxis stop: failed to restore tracking: ") + e.what());
                 }
-            } else if (channel == kAxisDec && tracking_ && dec_rate_arcsec_per_sec_ != 0.0 &&
-                       motion_generation_ == stop_task_generation) {
+            } else if (channel == kAxisDec && tracking_ && dec_rate_arcsec_per_sec_ != 0.0 && generation_ok) {
                 // Same restore contract for Dec: a manual nudge must not
                 // silently cancel an active DeclinationRate offset.
                 try {
