@@ -958,4 +958,29 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a step-period write the board acked but dropped is resent", "[skywatcher][async]") {
+    // EQM-35 Pro, ConformU 4.5 (2026-09-06): a PulseGuide East produced no RA
+    // motion — the ":I" was acknowledged but the axis stayed at sidereal —
+    // in 3 of 5 runs, never in isolation. Whatever swallows the write, the
+    // wrapper now reads the preset back (":i") and resends. The fake acks the
+    // first write and ignores it; the driver's in-place tracking-rate change
+    // must still land, without restarting the axis.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+    const int starts_before = mount.start_count(1);
+
+    mount.drop_step_period_writes(1, 1);
+    driver->set_right_ascension_rate(0.5);  // continuous, same direction: live ":I" on the tracking axis
+
+    REQUIRE(mount.step_period(1) != sidereal_preset);  // the resend was applied
+    REQUIRE(mount.start_count(1) == starts_before);    // and it stayed in place (no stop/restart)
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

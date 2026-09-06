@@ -652,6 +652,21 @@ public:
     // Read lock-free from send paths; published in connect() under io_mutex_.
     int default_timeout() const { return response_timeout_ms_.load(std::memory_order_relaxed); }
 
+    // After a mis-paired reply: absorb whatever else is in flight so the
+    // resend starts from a quiet link.
+    void settle_after_mispair() {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        if (!connected_) {
+            return;
+        }
+        if (info_.type == ConnectionType::Serial) {
+            settle_serial(200);
+        } else {
+            settle_drain(300);
+            link_dirty_ = true;  // force the ":e1" resync probe on the next UDP exchange
+        }
+    }
+
 private:
     void disconnect_locked() {
 #ifndef _WIN32
@@ -793,10 +808,48 @@ private:
 #endif
     }
 
+    // Absorb a late reply on the serial link: read and discard until the line
+    // has been quiet for a short while or the window elapses. Used after a
+    // timeout (the reply may still be in flight) and after a mis-paired reply,
+    // so the NEXT command cannot consume a stale frame as its own answer.
+    void settle_serial(int window_ms) {
+#ifndef _WIN32
+        auto now = std::chrono::steady_clock::now();
+        const auto deadline = now + std::chrono::milliseconds(window_ms);
+        auto quiet_until = now + std::chrono::milliseconds(30);
+        while (now < deadline) {
+            char ch = 0;
+            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            now = std::chrono::steady_clock::now();
+            if (r == 1) {
+                quiet_until = now + std::chrono::milliseconds(30);
+                continue;
+            }
+            if (now >= quiet_until) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        tcflush(serial_fd_, TCIFLUSH);
+#else
+        (void)window_ms;
+#endif
+    }
+
     std::string exchange_serial(const std::string& frame, int timeout_ms) {
 #ifndef _WIN32
         // Leftover bytes from a timed-out earlier exchange would be parsed as
-        // this command's reply — drain them first.
+        // this command's reply — drain them first. A plain flush only catches
+        // bytes that have ALREADY arrived; after a timeout the reply may still
+        // be in flight, so settle (wait for the line to go quiet) before the
+        // write. Otherwise the stale frame lands after the flush and is read
+        // as this command's reply: a bare "=" ack command (":I") would then be
+        // "acknowledged" by the previous command's data while its own frame
+        // was never applied.
+        if (serial_dirty_) {
+            settle_serial(200);
+            serial_dirty_ = false;
+        }
         tcflush(serial_fd_, TCIFLUSH);
         if (!util::write_all(serial_fd_, frame.data(), frame.size())) {
             throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)));
@@ -813,12 +866,16 @@ private:
                 }
                 reply.push_back(ch);
                 if (reply.size() > 32) {
+                    serial_dirty_ = true;
                     throw AlpacaException("Motor controller reply overflow");
                 }
             } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
                 throw AlpacaException("Serial read failed: " + std::string(std::strerror(errno)));
             }
         }
+        serial_dirty_ = true;
+        ALPACA_LOG_WARN("SkyWatcher", "Timeout (" + std::to_string(timeout_ms) + " ms) waiting for the reply to '" +
+                                          frame.substr(0, frame.size() - 1) + "'; link marked dirty");
         throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "'");
 #else
         (void)frame;
@@ -1035,6 +1092,7 @@ private:
     // Set after a UDP timeout/error: the next exchange runs a settle drain
     // before sending so a late reply cannot be mis-paired. Guarded by io_mutex_.
     bool link_dirty_ = false;
+    bool serial_dirty_ = false;  // a serial exchange timed out; settle before the next write
     std::string fw_reply_;
 #endif
     // Outside the platform guard: connect()/default_timeout() touch it on
@@ -1072,12 +1130,35 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
     frame.push_back(kFrameEnd);
 
     int timeout = timeout_ms_override > 0 ? timeout_ms_override : pimpl_->default_timeout();
-    std::string reply = pimpl_->exchange(frame, timeout, expected_reply_data_len(command));
-    // TRACE-only wire log: every motor-controller frame and its reply. Cheap
-    // below TRACE (the macro gates on level before formatting) and the only
-    // way to see what the board was actually told when a driver-level
-    // symptom (e.g. a pulse that produced no motion) has no other trace.
-    ALPACA_LOG_TRACE("SkyWatcher", "MC " + frame.substr(0, frame.size() - 1) + " -> " + reply);
+    const int expected_len = expected_reply_data_len(command);
+    std::string reply;
+    for (int attempt = 0;; ++attempt) {
+        reply = pimpl_->exchange(frame, timeout, expected_len);
+        // TRACE-only wire log: every motor-controller frame and its reply.
+        // Cheap below TRACE (the macro gates on level before formatting) and
+        // the only way to see what the board was actually told when a
+        // driver-level symptom (e.g. a pulse that produced no motion) has no
+        // other trace.
+        ALPACA_LOG_TRACE("SkyWatcher", "MC " + frame.substr(0, frame.size() - 1) + " -> " + reply);
+        // Shape check: an OK reply whose data length does not match the
+        // command is a reply to SOMETHING ELSE (a late frame from a timed-out
+        // exchange). Accepting it would report success for a command the
+        // board may never have applied. Settle the link and resend once.
+        const bool mispaired = expected_len >= 0 && !reply.empty() && reply[0] == kReplyOk &&
+                               static_cast<int>(reply.size()) - 1 != expected_len;
+        if (!mispaired) {
+            break;
+        }
+        ALPACA_LOG_WARN("SkyWatcher", "Mis-paired reply to '" + frame.substr(0, frame.size() - 1) + "': got '" + reply +
+                                          "' (expected " + std::to_string(expected_len) +
+                                          " data chars); settling the link and " +
+                                          (attempt == 0 ? "resending" : "giving up"));
+        if (attempt > 0) {
+            throw AlpacaException("Mis-paired motor controller reply to '" + std::string(1, command) +
+                                  std::to_string(axis) + "': '" + reply + "'");
+        }
+        pimpl_->settle_after_mispair();
+    }
     if (!reply.empty() && reply[0] == kReplyOk) {
         return reply.substr(1);
     }
@@ -1162,7 +1243,45 @@ void SkyWatcherProtocolWrapper::set_goto_target(int axis, uint32_t counts) {
 }
 
 void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset) {
-    send_command('I', axis, encode_u24(t1_preset));
+    // ":I" is the one write whose effect is invisible until the axis has
+    // moved for a while (a pulse or a tracking-rate change): read the preset
+    // back with ":i" and resend if the board did not take it. Boards without
+    // ":i" disable the readback on first use and keep the plain write.
+    static std::atomic<bool> readback_supported{true};
+    constexpr int kWriteAttempts = 3;
+    // The board does not store the preset verbatim: an EQM-35 Pro (MC fw 3.39)
+    // rounds it to a multiple of 4, clamps below 168 to 168, and reads the
+    // all-ones "stopped" preset back as 0. Verify only presets inside that
+    // representable range, with the rounding tolerance.
+    constexpr uint32_t kReadbackFloor = 168;
+    constexpr uint32_t kReadbackCeiling = 0xFFFFF0;
+    constexpr uint32_t kReadbackTolerance = 4;
+    const bool verifiable = t1_preset > kReadbackFloor && t1_preset < kReadbackCeiling;
+    for (int attempt = 0; attempt < kWriteAttempts; ++attempt) {
+        send_command('I', axis, encode_u24(t1_preset));
+        if (!verifiable || !readback_supported.load(std::memory_order_relaxed)) {
+            return;
+        }
+        uint32_t readback = 0;
+        try {
+            readback = decode_u24(send_command('i', axis));
+        } catch (const std::exception& e) {
+            readback_supported.store(false, std::memory_order_relaxed);
+            ALPACA_LOG_WARN("SkyWatcher",
+                            std::string("Step-period readback (':i') unavailable on this board; verification "
+                                        "disabled: ") +
+                                e.what());
+            return;
+        }
+        const uint32_t diff = readback > t1_preset ? readback - t1_preset : t1_preset - readback;
+        if (diff <= kReadbackTolerance) {
+            return;
+        }
+        ALPACA_LOG_WARN("SkyWatcher", "Axis " + std::to_string(axis) + " step period readback " +
+                                          std::to_string(readback) + " != written " + std::to_string(t1_preset) +
+                                          (attempt + 1 < kWriteAttempts ? "; resending" : "; giving up"));
+    }
+    throw AlpacaException("Motor controller did not apply the step period on axis " + std::to_string(axis));
 }
 
 void SkyWatcherProtocolWrapper::start_motion(int axis) { send_command('J', axis); }
