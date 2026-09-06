@@ -1264,13 +1264,15 @@ them unchanged. What differs is the transport and the identity, and both bit us:
     points at the SOUTH celestial pole, so `dec = -90 + a2`. Verified against raw
     counts — reported HA matched axis 1 to 0.0004 deg, and alt/az recomputed
     independently from the reported RA/Dec matched the driver to 4 decimal places.
-  - `MoveAxis` produces motion on both axes in both senses. NOTE: this does NOT yet
-    close the "physical rotation signs unvalidated" TODO — observing that the mount
-    moves four ways only proves the axes respond, not that the commanded direction
-    matches the physical/celestial one. Confirming the SIGNS needs the reported
-    Dec/RA to change in the expected sense for each button (N -> Dec increases,
-    S -> decreases, E -> RA increases, W -> decreases) AND the OTA to physically
-    move that way. Still open.
+  - `MoveAxis` verified semantically in all four directions, not just for motion:
+    each button was checked against the change in REPORTED RA/Dec. N: Dec +15.59
+    deg, S: Dec -16.96 deg, E: RA +15.47 deg, W: RA -15.28 deg, zero cross-axis
+    coupling in every case. `move_axis()` applies NO branch or hemisphere sign
+    transform (the rate goes straight to `start_speed_motion_locked`), so this is
+    also the hardware reference for which way a raw Dec-axis rate moves reported
+    Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
+    rests on. Reported coordinates come from the driver's own pointing model; an
+    independent sky check (plate solve) is still on the list below.
   - **Tracking rate measured at 0.99995x sidereal over 5 minutes** (-46 ppm,
     -2.5 arcsec/hour, against a +/-31 ppm encoder-quantisation floor), Dec drift
     exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1.
@@ -1286,8 +1288,11 @@ them unchanged. What differs is the transport and the identity, and both bit us:
     mod that changes the reduction would track perfectly in counts and still drift on
     sky. (Confirmed ratio-preserving on this unit.)
   - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
-    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, and the
-    `":g"` high-speed ratio under fast slews.
+    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, the
+    `":g"` high-speed ratio under fast slews, and the Dec-axis direction of
+    `DeclinationRate` / `PulseGuide` North-South below the equator (fixed in code from
+    the pointing model -- see the KNOWN BUG below -- but not yet measured on the mount;
+    a short autoguiding session is the cheapest check).
 
 #### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
 
@@ -1374,6 +1379,54 @@ interleaving where the restore reads `tracking_ == true` while a completed
 Extended the regression test from the first bug to assert the RA axis actually resumes
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.
+
+#### KNOWN BUG (FIXED): DeclinationRate and PulseGuide North/South run backwards south of the equator
+
+Found by static review on 2026-09-06 while auditing the hemisphere-conditional code
+after the RA tracking-direction fix above -- NOT on hardware. Not model-specific: any
+Sky-Watcher mount on this driver at a southern site was affected; northern sites never
+were.
+
+**Symptom.** Below the equator, a positive `DeclinationRate` drives the reported
+Declination DOWN, and a `PulseGuide` North pushes the star further south. For an
+autoguider this is the dangerous shape: every Dec correction lands on the wrong side, so
+the guide loop diverges instead of converging. Magnitudes were always right, only the
+direction was wrong -- exactly the signature of the RA bug above, which is why a
+rate-only check never caught it.
+
+**Mechanism.** Both `apply_dec_rate_offset_locked()` and the North/South branch of
+`pulse_guide()` chose the axis direction with the plain rule "a2 >= 0 -> negate the
+rate", derived from the northern pointing formula `dec = 90 - a2` (so d(dec)/d(a2) = -1
+on that branch). But `compute_ra_dec_locked()` mirrors Dec below the equator
+(`dec_sky = -(90 - a2) = a2 - 90` on the same branch), which flips the sign of that
+derivative. Neither call site consulted `hemisphere_south_locked()`, so south of the
+equator the rule was backwards on BOTH dec-axis branches. The full sign table:
+
+| Site      | a2 >= 0 (east branch) | a2 < 0 (west branch) |
+|-----------|-----------------------|----------------------|
+| Northern  | negate (was correct)  | keep (was correct)   |
+| Southern  | keep (was: negate)    | negate (was: keep)   |
+
+**Why it survived.** The Wave 100i was ConformU-validated in the northern hemisphere,
+where the rule is right, and the ConformU measured-rate tests that "confirmed" the sign
+ran there. The southern-hemisphere hardware session (2026-09-06) exercised tracking and
+`MoveAxis` -- and `move_axis()` applies no sign transform at all, so it was never
+exposed to this rule.
+
+**Fix (done).** Both call sites now negate when `(a2 >= 0) != hemisphere_south_locked()`
+(XOR), which reproduces the table above. Two loopback regressions on the EQM-35 Pro
+profile at latitude -37.2 assert the ASCOM contract against the driver's own pointing
+model -- reported Declination RISES under `+DeclinationRate` and after a North pulse --
+and both were confirmed to fail before the fix (axis moved -19.97 arcsec and -11.25
+arcsec respectively, the exact mirror of the passing northern-hemisphere cases). The
+existing northern-hemisphere tests are untouched and still pass.
+
+**Still open.** This is validated against the pointing model and the loopback
+simulator, not measured on the mount. The cheapest hardware confirmation is a short
+autoguiding session (PHD2 calibration reports the Dec direction directly) or a
+plate-solved drift run with a non-zero `DeclinationRate`. Do this before ConformU: the
+suite's offset-rate tests measure the Dec direction and will fail on the old code at a
+southern site.
 
 #### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
 
