@@ -29,9 +29,9 @@ namespace alpacacore::vendor::skywatcher {
 // level (0x44 = Wave 100i, 0x32 = EQM-35 Pro), matching INDI's
 // skywatcherAPI.cpp MountType enum.
 struct MotorBoardInfo {
-    std::string firmware_version;  // e.g. "3.39"
+    std::string firmware_version = "";  // e.g. "3.39"
     std::uint8_t mount_code = 0;
-    std::string model_name;  // e.g. "EQM-35 Pro", or "Mount (code 0xNN)"
+    std::string model_name = "";  // e.g. "EQM-35 Pro", or "Mount (code 0xNN)"
 };
 
 // Map a ":e" mount-code byte to a human-readable model name.
