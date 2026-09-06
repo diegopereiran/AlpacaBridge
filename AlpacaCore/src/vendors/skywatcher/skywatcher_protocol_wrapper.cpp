@@ -14,6 +14,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
 #ifndef _WIN32
@@ -241,6 +242,16 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     if (fd < 0) {
         return "";
     }
+    // Re-check after opening: another vendor's driver may have claimed this
+    // port (its connect marks it before opening) in the window between the
+    // caller's is_serial_port_in_use() check and this open(). Bail rather
+    // than reading for up to 1.5s and stealing bytes from that device's
+    // stream (issue #230: EQDIR cables share PL2303/CH340/FTDI chips with
+    // other vendor probes, e.g. iOptron, ZWO EAF, Gemini).
+    if (alpacacore::util::is_serial_port_in_use(port_path)) {
+        close(fd);
+        return "";
+    }
 
     struct termios tty {};
     if (tcgetattr(fd, &tty) != 0) {
@@ -378,6 +389,10 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
+            // issue #230: don't steal bytes from a port another connected
+            // vendor's device (iOptron, ZWO EAF, Gemini, ...) is streaming on
+            // -- several share the same PL2303/CH340/FTDI chip families.
+            if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
             {
                 std::string msg = "Probing ";
                 msg += resolved;
@@ -415,6 +430,7 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_skywatcher_candidate(resolved)) continue;
         probed.insert(resolved);
+        if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
         ALPACA_LOG_INFO("SkyWatcher", "Probing " + resolved + "...");
         int baud = 9600;
         MotorBoardInfo board;
@@ -628,21 +644,45 @@ private:
             close(socket_fd_);
             socket_fd_ = -1;
         }
+        if (!registered_port_.empty()) {
+            alpacacore::util::mark_serial_port_closed(registered_port_);
+            registered_port_.clear();
+        }
 #endif
         connected_ = false;
     }
 
     bool connect_serial(const ConnectionInfo& info) {
 #ifndef _WIN32
+        // Canonicalize so this matches whatever form enumerate_skywatcher_ports()
+        // or a user-typed config path resolves to (issue #230: a by-id symlink
+        // and its /dev/ttyUSBn target must compare equal in the registry).
+        std::error_code path_ec;
+        std::string canonical_path = std::filesystem::canonical(info.port_path, path_ec).string();
+        std::string registry_key = path_ec ? info.port_path : canonical_path;
+
+        if (alpacacore::util::is_serial_port_in_use(registry_key)) {
+            ALPACA_LOG_ERROR("SkyWatcher",
+                              "Port " + registry_key + " is already held open by another connected device");
+            return false;
+        }
+        // Claim BEFORE opening: a concurrent auto-detect scan (this vendor's
+        // own, or another's) checks is_serial_port_in_use() then opens -- claiming
+        // first closes the window where it could slip in between our check and
+        // our open() and start reading this mount's replies.
+        alpacacore::util::mark_serial_port_open(registry_key);
+
         serial_fd_ = open(info.port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
             ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + std::strerror(errno));
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         speed_t speed = info.baud_rate == 115200 ? B115200 : B9600;
@@ -665,14 +705,17 @@ private:
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         if (!util::clear_nonblocking(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         tcflush(serial_fd_, TCIOFLUSH);
+        registered_port_ = registry_key;
         return true;
 #else
         (void)info;
@@ -969,6 +1012,7 @@ private:
 #ifndef _WIN32
     int serial_fd_ = -1;
     int socket_fd_ = -1;
+    std::string registered_port_;  // canonical path marked open in the cross-vendor registry
     // Set after a UDP timeout/error: the next exchange runs a settle drain
     // before sending so a late reply cannot be mis-paired. Guarded by io_mutex_.
     bool link_dirty_ = false;

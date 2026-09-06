@@ -1289,7 +1289,7 @@ them unchanged. What differs is the transport and the identity, and both bit us:
     sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, and the
     `":g"` high-speed ratio under fast slews.
 
-#### KNOWN BUG (open): superseded MoveAxis stop task strands `Slewing` and kills tracking
+#### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
 
 Found on an EQM-35 Pro 2026-09-06, but **not hemisphere- or model-specific — the Wave
 100i is equally affected.** Not caused by the southern-hemisphere RA fix; that change
@@ -1320,14 +1320,110 @@ reproduced it reliably.
 flag and restores tracking, because a stop on an axis whose flag is set spawns a fresh
 task that runs to completion.
 
-**Fix direction (not yet done).** Give each axis its own stop task rather than sharing
-one thread, or make the cancel path still clear its own axis's flag and evaluate the
-tracking restore before returning. Note the generation guard
-(`motion_generation_ == stop_task_generation`) exists to stop a stale task re-starting
-tracking that a concurrent `SetTracking(false)` just stopped — any fix must keep that
-property while still releasing the flag. See the concurrency checklist at the top of
-this file; this is exactly the "async tail that can be skipped leaves shared state
-inconsistent" class.
+**Fix (done).** `stop_task_thread_` and `stop_task_cancel_` are now per-axis arrays;
+`reap_stop_task(axis)` and the spawn/retry-join block only ever race with a prior task
+for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
+dispatched, Dec stop dispatched while RA's stop task is still mid-ramp) and asserts
+`Slewing` clears promptly. The generation guard
+(`motion_generation_ == stop_task_generation`) is unchanged and still gates the
+tracking-restore tail — which is exactly what exposed the SECOND bug below.
+
+#### KNOWN BUG (open): cross-axis `motion_generation_` can block a same-axis tracking restore
+
+Found while writing the regression test for the bug above, on the SAME night
+(2026-09-06) — the per-axis stop-task fix is necessary but not sufficient. Not
+hemisphere- or model-specific.
+
+**Symptom.** With the per-axis fix in place, `Slewing` now clears correctly after
+stopping both axes close together — but the RA axis can still fail to resume tracking
+after a `MoveAxis(0, 0)` stop, even though `Tracking` reports true throughout. Caught by
+a loopback test asserting `mount.axis_running(1)` becomes true again after the stop
+settles: it does not, reliably, when a Dec-axis stop is dispatched while the RA stop
+task is still polling.
+
+**Mechanism.** The restore-tracking tail guards itself with
+`motion_generation_ == stop_task_generation` — "only restore if nothing newer
+superseded this stop." But `motion_generation_` is ONE counter bumped by every motion
+command on EITHER axis (see its declaration: "bumped by every motion command"). A Dec
+stop dispatched while RA's stop task is polling bumps the shared counter for a reason
+that has nothing to do with RA, so the RA task's tail reads a mismatch and silently
+skips restoring RA's tracking — even though nothing actually superseded the RA stop
+itself (which is correctly detected via the now-per-axis `stop_task_cancel_[0]`, a
+separate and correctly-scoped check).
+
+The codebase already has the right idiom for this elsewhere: the duty-cycle worker
+(`apply_ra_drive_locked`'s burst path, guarding sub-floor rate duty-cycling) computes a
+`same_axis_owner` flag from `goto_in_progress_ || parking_ || homing_ || slewing_cached_
+|| manual_axis_slewing_[i] || (pulse_guiding_active_ && pulse_axis_ == channel)` before
+trusting a generation mismatch as a real supersession, specifically BECAUSE "the global
+generation cannot tell a same-axis supersession from an unrelated other-axis command"
+(exact wording from that code's own comment). The MoveAxis stop-task tail does not apply
+this idiom and should.
+
+**Fix direction (not yet done).** Either (a) apply the same `same_axis_owner` idiom to
+the stop-task tail's restore check, or (b) introduce a genuinely per-axis generation
+counter bumped only by operations that affect that specific axis (goto/park/home bump
+both; a manual MoveAxis, pulse guide, or SetTracking write on one axis bumps only its
+own). Option (b) is more correct but touches roughly fifteen `++motion_generation_`
+call sites across Park, AutoHome, PulseGuide, DriveRate changes and AbortSlew — all
+paths this file's own concurrency-checklist history documents as already hardened
+through multiple past review rounds. Not attempted tonight: this wants a dedicated
+session with a clear head, not a addition at the tail end of a hardware bring-up night.
+Test coverage for whichever fix lands: the regression test added for the FIRST bug
+above intentionally stops short of asserting the RA axis resumes running (see its
+in-code comment) — extend it once this is fixed, and confirm it fails without the fix
+the same way the first regression was verified (temporarily revert, confirm the new
+assertion fails, restore).
+
+#### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
+
+open-astro/AlpacaBridge#230, filed by the maintainer, asks for exactly the work in this
+section: generalizing the Wave driver to classic Sky-Watcher/Orion EQ mounts (HEQ5, EQ6,
+EQ6-R, AZ-EQ6, EQ5 Pro, etc.) via EQDIR cable, with no hand controller in the loop. Status
+against its checklist, 2026-09-06:
+
+- [x] Model/feature detection via `:e`/`:q` — done (mount-code table, feature-word gating).
+- [x] CPR/high-speed-ratio/timer-freq read from the board, not hardcoded for Wave —
+  confirmed: EQM-35 Pro geometry (CPR 9,216,000, timer 16 MHz) differs from the Wave
+  (4,147,200 / 14 MHz) and the SAME driver code tracked correctly on it (0.99995x
+  sidereal), so this was already correct, just unverified until now.
+- [x] High/low speed mode switch threshold — already board-generic:
+  `kFastModeThresholdDegPerSec = 128.0 * kSiderealDegPerSec`, derived from the MC
+  protocol's universal 128x switchover, not a Wave-specific constant.
+- [x] AutoHome/FindHome gracefully disabled without home-index sensors — hardware
+  verified: the EQM-35's `0x7000` feature word has no `HOME_INDEXER` bit, and `FindHome`
+  correctly takes the count-frame goto fallback rather than hunting a sensor that
+  doesn't exist.
+- [x] Naming/config: model auto-detected under the existing `vendor: skywatcher` key
+  (no separate `eqmod` alias needed) — done, `get_name()` reports the real model.
+- [x] **Auto-detect distinguishing an EQDIR cable from other vendors' PL2303/CH340/FTDI
+  devices** — was a real gap: the enumeration scan and `connect_serial()` did not use
+  `alpacacore/util/serial_port_registry.h` (the cross-vendor in-use registry originally
+  built for WandererAstro, explicitly designed to generalize "across wrappers"). Fixed:
+  both scan loops skip a port another connected device holds open, `probe_skywatcher_port`
+  re-checks after `open()` for the TOCTOU window, and `connect_serial()` claims the port
+  in the registry BEFORE opening it and releases it in `disconnect_locked()`. This is a
+  project-wide gap outside WandererAstro (synscan, ioptron, gemini, celestron, onstep none
+  use the registry either) — only `skywatcher` was closed here, in scope for this issue.
+- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open; this
+  session's prime remaining suspect (see the EQ-class bring-up notes above).
+- [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session
+  (no plate solve performed; see bring-up notes).
+- [ ] Park/unpark weights-down convention — not specifically re-verified on a classic
+  board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
+- [ ] ConformU 4.5.x on a classic mount — blocked on OTA removal (see bring-up notes);
+  not the EQM-35 specifically, but the issue's ask applies equally.
+- [ ] Fake mount test double extended with a classic-board profile (9600 baud, no home
+  index, older firmware string) — deliberately NOT added with invented numbers tonight.
+  `FakeMountProfile::eqm35_pro()` is a REAL hardware capture; fabricating a plausible
+  HEQ5/EQ6 profile without hardware to source it from would misrepresent guessed values
+  as measured ones. The issue notes HEQ5 PRO and EQ6 hardware is already on hand via the
+  `synscan` (hand-controller) driver validation (#7, #29) — reuse an actual reading from
+  that hardware over an EQDIR cable when available, rather than inventing one.
+- Also not yet done: renaming the `SUPPORTED-DRIVERS.md` "Sky-Watcher Wave" section to
+  "Sky-Watcher Direct Motor Controller" per the issue's suggestion. Deferred alongside the
+  EQM-35 row addition (both intentionally withheld until ConformU passes, per this
+  project's own bar that `SUPPORTED-DRIVERS.md` documents hardware actually validated).
 
 ### iOptron
 
