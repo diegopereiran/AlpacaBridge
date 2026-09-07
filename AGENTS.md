@@ -1311,14 +1311,41 @@ them unchanged. What differs is the transport and the identity, and both bit us:
     `DeclinationRate` +5"/s for 60 s -> +302.9" / +2159 counts (expected +300" / +2133,
     the excess is the ~60.7 s wall time); -5"/s -> -299.7" / -2144; rate 0 -> 0 counts of
     drift in 30 s. Both call sites of the KNOWN BUG fix below are confirmed on the a2 > 0
-    branch; the a2 < 0 branch rests on the loopback tests and gets hardware coverage
-    from the meridian-flip item. Same session: reported RA held constant to 1e-5 h over
-    ~90 s of tracking (RA tracking-direction fix confirmed), and `MoveAxis(Dec, +rate)`
-    again moved reported Dec and the counts up. Mount returned to home, tracking off.
+    branch; the a2 < 0 branch rests on the loopback tests only -- see the PENDING BENCH
+    TEST below, which reaches it WITHOUT a real meridian flip. Same session: reported RA
+    held constant to 1e-5 h over ~90 s of tracking (RA tracking-direction fix confirmed),
+    and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
+    to home, tracking off.
   - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
     sync) and `SideOfPier` / meridian-flip behaviour in the southern hemisphere. (The
     `":g"` high-speed ratio was verified in motion the same day -- see the geometry
     bullet above.)
+  - **PENDING BENCH TEST (not yet run): `a2 < 0` Dec-direction sign coverage.** Closes the
+    gap above. Key realization (2026-09-07): `a2` is the raw Dec-axis angle relative to
+    home (see `compute_ra_dec_locked()`) and is NOT coupled to the RA axis at all, so the
+    `a2 < 0` branch does not require an actual GOTO across the meridian -- the same
+    `MoveAxis` bench technique already used for `a2 > 0` reaches it directly, mirrored:
+    1. `Connected=true`, tracking on at sidereal, OTA mounted, daylight is fine (same
+       setup as the `a2 > 0` session, 2026-09-06).
+    2. `MoveAxis` the Dec axis to roughly **-0.5 deg from home** (the OPPOSITE direction
+       from the `a2 > 0` session's +0.51 deg) so `a2 < 0`. Do NOT start from `a2 = 0`
+       (Dec -90): reported Dec rises for either mechanical direction there, so the
+       pass/fail signature is invisible right at home -- same caveat as the `a2 > 0` run.
+    3. Sample reported `Declination` and raw `":j2"` counts via the `commandstring`
+       passthrough around each command (same technique as the `a2 > 0` bring-up notes).
+    4. `PulseGuide` North 5000 ms -> expect reported Dec to RISE; South -> back to
+       baseline, net 0 counts.
+    5. `DeclinationRate` +5"/s for ~60 s -> expect Dec rising roughly 300" (accounting for
+       actual wall time as in the `a2 > 0` run); -5"/s -> back down; rate 0 -> no drift in
+       30 s.
+    6. Compare signs against the fix's table: on the `a2 < 0` (west) branch, southern
+       sites should NEGATE (previously wrongly kept) and northern sites should KEEP
+       (unchanged) -- the mirror image of the `a2 > 0` row already confirmed.
+    This closes ONLY the sign-rule coverage gap. It does NOT validate `SideOfPier`
+    reporting or automatic pier-flip behaviour during a real GOTO across the meridian --
+    that is the separate, still-open bullet directly above, and realistically waits on
+    the plate-solve work since confirming a flip landed correctly needs an independent
+    sky check.
 
 #### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
 
