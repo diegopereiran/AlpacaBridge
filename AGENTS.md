@@ -1491,6 +1491,7 @@ EQ6-R, AZ-EQ6, EQ5 Pro, etc.) via EQDIR cable, with no hand controller in the lo
 against its checklist, 2026-09-06:
 
 - [x] Model/feature detection via `:e`/`:q` — done (mount-code table, feature-word gating).
+- [ ] Board-capability gating for PPEC, dual-encoder, WiFi, and the polar-scope LED per the issue's list — only the home-index bit (`0x04`) is actually read and gated today. Checked 2026-09-07: none of the other three are implemented as driver features anywhere in this vendor (no PPEC action, no dual-encoder read, no polar-LED toggle), so there is nothing yet for a capability check to guard. Low severity as long as that stays true, but it is a real unchecked box, not a done one -- revisit if/when any of those three gets implemented.
 - [x] CPR/high-speed-ratio/timer-freq read from the board, not hardcoded for Wave —
   confirmed: EQM-35 Pro geometry (CPR 9,216,000, timer 16 MHz) differs from the Wave
   (4,147,200 / 14 MHz) and the SAME driver code tracked correctly on it (0.99995x
