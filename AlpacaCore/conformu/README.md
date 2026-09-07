@@ -21,6 +21,12 @@ Test results are organized by vendor/driver:
 
 ## Notes
 
+- **Scrub observing-site coordinates before committing a telescope report.** ConformU reads
+  `SiteLatitude` / `SiteLongitude` / `SiteElevation` off the mount and prints them at
+  house-level precision, several times each (including the "restored original" and derived
+  "Test value" lines). Round them to the nearest degree, keeping the hemisphere and rough
+  region so the log stays coherent. This is a privacy matter for the contributor who ran the
+  test, not a correctness one — the assertions the report exists to carry are unaffected.
 - All drivers must pass ConformU verification before being added to the supported drivers list
 - Test results are generated using ConformU version 4.1.0 or later
 - For more information about ConformU, see the [ASCOM ConformU documentation](https://ascom-standards.org/)

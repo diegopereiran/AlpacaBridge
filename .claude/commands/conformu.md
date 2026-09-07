@@ -351,6 +351,42 @@ grep -nE "WARN|ERROR|CRITICAL|exception|retry|timeout|reconnect" "$TMPDIR/ab.log
 
 If matches appear, show them to the user. A passing ConformU with a stack trace in the AB log is still a yellow flag — ask the user whether to proceed with saving or to investigate first. Default to proceeding only after the user confirms the matches are benign (e.g. expected NotConnected errors during a controlled disconnect test).
 
+### 6b0. Scrub site coordinates from the report (MANDATORY before saving)
+
+`AlpacaCore/conformu/` is committed and published upstream. A telescope ConformU run
+records the observing site read straight off the mount, at **house-level precision** — the
+`SiteLatitude` / `SiteLongitude` / `SiteElevation` tests print the real values several
+times each, including in the "restored original" lines:
+
+```
+SiteLatitude Read       OK   -37:12:13.0
+SiteLongitude Read      OK   +174:52:57.0
+```
+
+Do not commit a contributor's home coordinates. Before copying the log into the repo,
+replace them with a rounded location in the same region (keeping the hemisphere and rough
+longitude so the report stays internally coherent):
+
+```bash
+# Round to the nearest degree. Replace the <...> values with what the report actually
+# contains, and mind that ConformU also writes DERIVED "Test value" coordinates
+# (the real value ±10 degrees) — those leak the original too.
+sed -i \
+  -e 's/-37:12:13\.0/-37:00:00.0/g'  -e 's/-47:12:13\.0/-47:00:00.0/g' \
+  -e 's/+174:52:57\.0/+175:00:00.0/g' -e 's/+164:52:57\.0/+165:00:00.0/g' \
+  "$TMPDIR/conformu.txt"
+```
+
+Then confirm nothing survived before saving:
+
+```bash
+grep -nE "SiteLatitude|SiteLongitude|SiteElevation" "$TMPDIR/conformu.txt"
+```
+
+Note the limit of this: `SiderealTime` values elsewhere in the log still correlate with
+longitude given the run's timestamps, so this reduces precision rather than making the
+report truly anonymous. Rounding off the house is the goal, not perfect anonymity.
+
 ### 6b. Save logs
 
 Compute the destination directory:
