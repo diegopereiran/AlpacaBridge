@@ -74,6 +74,16 @@ inline bool socket_set_timeouts(SocketHandle handle, int seconds) {
     return ok;
 }
 
+// Bound only the receive side. Used between keep-alive requests, where the
+// peer may legitimately go quiet for a while but must not pin a worker
+// thread indefinitely; the send timeout set by socket_set_timeouts is kept.
+inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
+    struct timeval tv {};
+    tv.tv_sec = seconds;
+    tv.tv_usec = 0;
+    return setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
+}
+
 // Send the whole payload, looping over short sends and retrying EINTR.
 // MSG_NOSIGNAL is always passed so a peer drop mid-send returns an error
 // instead of delivering SIGPIPE (which would kill the server). Mirrors

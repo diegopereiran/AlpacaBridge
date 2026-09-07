@@ -21,8 +21,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -88,10 +91,77 @@ std::string make_request_with_header_size(std::size_t header_bytes) {
     return req;
 }
 
+// --- keep-alive helpers ------------------------------------------------------
+
+int connect_local(std::uint16_t port) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    EXPECT(fd >= 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+void send_all(int fd, const std::string& data) {
+    EXPECT(::send(fd, data.data(), data.size(), 0) == static_cast<ssize_t>(data.size()));
+}
+
+// Read exactly one HTTP response (status line + headers + Content-Length body)
+// from `fd`. `carry` holds bytes already received past the previous response
+// (pipelined replies) and is updated for the next call. Returns "" if the
+// peer closed before a full header block arrived.
+std::string read_one_response(int fd, std::string& carry) {
+    char tmp[4096];
+    std::size_t header_end = carry.find("\r\n\r\n");
+    while (header_end == std::string::npos) {
+        ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
+        if (n <= 0) {
+            return "";
+        }
+        carry.append(tmp, static_cast<std::size_t>(n));
+        header_end = carry.find("\r\n\r\n");
+    }
+    std::string headers = carry.substr(0, header_end);
+    std::transform(headers.begin(), headers.end(), headers.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::size_t content_length = 0;
+    auto pos = headers.find("content-length:");
+    if (pos != std::string::npos) {
+        content_length = std::stoul(headers.substr(pos + std::strlen("content-length:")));
+    }
+    const std::size_t total = header_end + 4 + content_length;
+    while (carry.size() < total) {
+        ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
+        if (n <= 0) {
+            break;
+        }
+        carry.append(tmp, static_cast<std::size_t>(n));
+    }
+    std::string response = carry.substr(0, total);
+    carry.erase(0, total);
+    return response;
+}
+
+// True if the server has closed the connection (EOF within `ms`); false if it
+// is still open (the peek times out).
+bool peer_closed(int fd, int ms) {
+    struct timeval tv {};
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char c = 0;
+    return ::recv(fd, &c, 1, MSG_PEEK) == 0;
+}
+
 }  // namespace
 
 int main() {
-    std::cout << "Testing Server socket read path...\n";
+    std::cout << "Testing Server socket read path and keep-alive...\n";
 
     alpacahttp::Config config;
     config.set_http_port(6871);
@@ -130,6 +200,92 @@ int main() {
         std::string status = send_split_request(port, req, req.size() - 4);
         EXPECT(status.rfind("HTTP/1.1 ", 0) == 0);
         EXPECT(status.find(" 431") == std::string::npos);
+    }
+
+    // --- Keep-alive ---------------------------------------------------------
+    const std::string kGet11 = "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+    // HTTP/1.1 is persistent by default: two requests on one connection, each
+    // answered with "Connection: keep-alive", then "Connection: close" ends it.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        send_all(fd, kGet11);
+        std::string r1 = read_one_response(fd, carry);
+        EXPECT(r1.rfind("HTTP/1.1 ", 0) == 0);
+        EXPECT(r1.find("Connection: keep-alive\r\n") != std::string::npos);
+        EXPECT(!peer_closed(fd, 200));
+        send_all(fd, kGet11);
+        std::string r2 = read_one_response(fd, carry);
+        EXPECT(r2.rfind("HTTP/1.1 ", 0) == 0);
+        EXPECT(r2.find("Connection: keep-alive\r\n") != std::string::npos);
+        send_all(fd, "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        std::string r3 = read_one_response(fd, carry);
+        EXPECT(r3.find("Connection: close\r\n") != std::string::npos);
+        EXPECT(peer_closed(fd, 2000));
+        ::close(fd);
+    }
+
+    // HTTP/1.0 closes by default...
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        send_all(fd, "GET /management/apiversions HTTP/1.0\r\nHost: localhost\r\n\r\n");
+        std::string r = read_one_response(fd, carry);
+        EXPECT(r.find("Connection: close\r\n") != std::string::npos);
+        EXPECT(peer_closed(fd, 2000));
+        ::close(fd);
+    }
+
+    // ...unless the client asks for keep-alive.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        const std::string get10_ka =
+            "GET /management/apiversions HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n";
+        send_all(fd, get10_ka);
+        std::string r1 = read_one_response(fd, carry);
+        EXPECT(r1.find("Connection: keep-alive\r\n") != std::string::npos);
+        EXPECT(!peer_closed(fd, 200));
+        send_all(fd, get10_ka);
+        std::string r2 = read_one_response(fd, carry);
+        EXPECT(r2.find("Connection: keep-alive\r\n") != std::string::npos);
+        ::close(fd);
+    }
+
+    // Pipelined: two requests in a single write are answered in order on the
+    // same connection (the bytes past the first request are carried over).
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        send_all(fd, kGet11 + kGet11);
+        std::string r1 = read_one_response(fd, carry);
+        std::string r2 = read_one_response(fd, carry);
+        EXPECT(r1.rfind("HTTP/1.1 ", 0) == 0);
+        EXPECT(r2.rfind("HTTP/1.1 ", 0) == 0);
+        EXPECT(r2.find("Connection: keep-alive\r\n") != std::string::npos);
+        EXPECT(!peer_closed(fd, 200));
+        ::close(fd);
+    }
+
+    // A malformed request on a persistent connection gets 400 and a close.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        send_all(fd, kGet11);
+        std::string r1 = read_one_response(fd, carry);
+        EXPECT(r1.find("Connection: keep-alive\r\n") != std::string::npos);
+        send_all(fd, "GARBAGE\r\n\r\n");
+        std::string r2 = read_one_response(fd, carry);
+        EXPECT(r2.find(" 400 ") != std::string::npos);
+        EXPECT(r2.find("Connection: close\r\n") != std::string::npos);
+        EXPECT(peer_closed(fd, 2000));
+        ::close(fd);
     }
 
     server.stop();

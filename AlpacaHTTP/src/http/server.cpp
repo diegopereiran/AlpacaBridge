@@ -368,6 +368,16 @@ constexpr int kSocketTimeoutSeconds = 30;
 // large ImageArray responses are unaffected (this bounds the read side only).
 constexpr int kRequestDeadlineSeconds = 120;
 
+// How long a keep-alive connection may sit idle between requests before the
+// worker gives it up. Persistent connections matter for timing: ConformU's
+// .NET client stalled ~175 ms before opening each new TCP connection on a
+// Raspberry Pi 3B, and with every response marked "Connection: close" that
+// stall landed inside its FAST-target measurements (CameraState, CameraXSize,
+// SensorType on a ZWO camera; DeviceState, AlignmentMode, EquatorialSystem on
+// a mount) while the server itself answered in 2-8 ms. Kept well under the
+// per-request slowloris bound so idle clients cannot pin the pool.
+constexpr int kKeepAliveIdleSeconds = 15;
+
 // Upper bound on the request line + headers; larger header blocks are
 // rejected before any body is read.
 constexpr std::size_t kMaxHeaderBytes = std::size_t{64} * 1024;
@@ -380,24 +390,72 @@ void send_error(util::SocketHandle socket_fd, int status, const char* reason, co
     util::socket_send_all(socket_fd, response_str.c_str(), response_str.size());
 }
 
-// Read the full HTTP request: loop until the end-of-headers marker, then read
+// True when the client wants the connection kept open after this request
+// (RFC 7230 §6.3): HTTP/1.1 persists unless it says "Connection: close";
+// anything else (HTTP/1.0, or no version at all) closes unless it says
+// "Connection: keep-alive". The header is a comma-separated token list, so
+// match whole tokens rather than substrings.
+bool wants_keep_alive(const Request& request) {
+    std::string connection = request.get_header("connection");
+    std::transform(connection.begin(), connection.end(), connection.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    bool says_close = false;
+    bool says_keep_alive = false;
+    std::size_t start = 0;
+    while (start <= connection.size()) {
+        std::size_t comma = connection.find(',', start);
+        std::string token = connection.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        token.erase(0, token.find_first_not_of(" \t"));
+        token.erase(token.find_last_not_of(" \t") + 1);
+        if (token == "close") {
+            says_close = true;
+        } else if (token == "keep-alive") {
+            says_keep_alive = true;
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    if (says_close) {
+        return false;
+    }
+    if (request.http_version() != "HTTP/1.1") {
+        return says_keep_alive;
+    }
+    return true;
+}
+
+// Read one full HTTP request: loop until the end-of-headers marker, then read
 // exactly Content-Length body bytes (bounded by Request::kMaxBodyBytes).
+// `raw_request` may arrive holding bytes left over from the previous request
+// on a keep-alive connection (a pipelining client); any bytes past the end of
+// this request are handed back in `surplus` for the next call.
 // Returns false after sending an error response where possible (on a dead or
 // timed-out socket nothing can be sent); the caller closes the connection.
-bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
+bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus) {
     char buffer[8192];
-    std::size_t header_end = std::string::npos;
 
     // Total-request wall-clock deadline. SO_RCVTIMEO bounds each individual
     // recv, but a peer trickling one byte per just-under-timeout interval
     // would pass every per-recv check and pin this worker indefinitely.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kRequestDeadlineSeconds);
 
-    // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv
-    while (true) {
+    // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv.
+    // Carried-over bytes may already hold the terminator, so look before the
+    // first recv.
+    std::size_t header_end = raw_request.find("\r\n\r\n");
+    while (header_end == std::string::npos) {
+        // Enforce the header-size cap before reading more: without a
+        // terminator the whole buffer is header so far.
+        if (raw_request.size() > kMaxHeaderBytes) {
+            send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
+            return false;
+        }
         int bytes_read = util::socket_recv(socket_fd, buffer, static_cast<int>(sizeof(buffer)));
         if (bytes_read <= 0) {
-            // Peer closed, error, or receive timeout — drop the connection
+            // Peer closed, error, or receive timeout — drop the connection.
+            // Between keep-alive requests this is the normal way out.
             return false;
         }
         if (std::chrono::steady_clock::now() > deadline) {
@@ -406,19 +464,13 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
         }
         raw_request.append(buffer, static_cast<std::size_t>(bytes_read));
         header_end = raw_request.find("\r\n\r\n");
-        // Enforce the header-size cap on every iteration, including the one that
-        // finds the terminator — otherwise the terminating chunk could push the
-        // header block up to one recv buffer past the cap unchecked. When the
-        // terminator is found, only the bytes up to it count as headers (the
-        // rest is body); before that, the whole buffer is header so far.
-        const std::size_t header_bytes = (header_end != std::string::npos) ? header_end : raw_request.size();
-        if (header_bytes > kMaxHeaderBytes) {
-            send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
-            return false;
-        }
-        if (header_end != std::string::npos) {
-            break;
-        }
+    }
+    // The chunk that finds the terminator is size-checked too — otherwise it
+    // could push the header block up to one recv buffer past the cap
+    // unchecked. Only the bytes up to the terminator count as headers.
+    if (header_end > kMaxHeaderBytes) {
+        send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
+        return false;
     }
 
     // Parse Content-Length (case-insensitive) out of the header block
@@ -474,6 +526,13 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
         raw_request.append(buffer, static_cast<std::size_t>(bytes_read));
     }
 
+    // The body loop never over-reads, but the header phase can pull in the
+    // start of a pipelined next request; hand those bytes back to the caller.
+    if (raw_request.size() > expected_total) {
+        surplus.assign(raw_request, expected_total, std::string::npos);
+        raw_request.resize(expected_total);
+    }
+
     return true;
 }
 
@@ -489,21 +548,10 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
         return;
     }
 
-    // Read request (headers, then exactly Content-Length body bytes)
-    std::string raw_request;
-    if (!read_request(socket_fd, raw_request)) {
-        return;
-    }
-
-    // Parse request
-    Request request;
-    if (!request.parse(raw_request)) {
-        send_error(socket_fd, 400, "Bad Request", "Invalid request");
-        return;
-    }
-
-    // Stamp the peer address so the router can discriminate clients that
-    // send no ClientID in the per-client Connected registry (issue #163).
+    // Resolve the peer address once per connection so the router can
+    // discriminate clients that send no ClientID in the per-client Connected
+    // registry (issue #163).
+    std::string remote_address;
     {
         struct sockaddr_storage peer {};
         util::SocketLen peer_len = sizeof(peer);
@@ -526,20 +574,68 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
                 }
             }
         }
-        request.set_remote_address(addr_buf);
+        remote_address = addr_buf;
     }
 
-    // Generate transaction ID (thread-safe)
-    static std::atomic<std::uint32_t> transaction_counter{0};
-    std::uint32_t server_tx_id = ++transaction_counter;
+    // Serve requests on this connection until the client asks to close, the
+    // request is malformed, the idle gap runs out, or the send fails. Bytes
+    // read past the end of one request (a pipelining client) seed the next.
+    std::string carried;
+    bool first_request = true;
+    while (true) {
+        if (!first_request) {
+            // Between requests the peer may legitimately go quiet; bound how
+            // long an idle keep-alive connection can hold this worker.
+            if (!util::socket_set_recv_timeout(socket_fd, kKeepAliveIdleSeconds)) {
+                return;
+            }
+        }
 
-    // Route request
-    Response response = router_.route(request, server_tx_id);
+        // Read request (headers, then exactly Content-Length body bytes)
+        std::string raw_request = std::move(carried);
+        carried.clear();
+        if (!read_request(socket_fd, raw_request, carried)) {
+            return;
+        }
 
-    // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
-    std::string response_str = response.to_string();
-    if (!util::socket_send_all(socket_fd, response_str.c_str(), response_str.size())) {
-        util::log_warning("Failed to send full response: " + util::socket_error_message(util::socket_get_last_error()));
+        // Parse request
+        Request request;
+        if (!request.parse(raw_request)) {
+            send_error(socket_fd, 400, "Bad Request", "Invalid request");
+            return;
+        }
+        request.set_remote_address(remote_address);
+
+        bool keep_alive = wants_keep_alive(request);
+
+        // Generate transaction ID (thread-safe)
+        static std::atomic<std::uint32_t> transaction_counter{0};
+        std::uint32_t server_tx_id = ++transaction_counter;
+
+        // Route request
+        Response response = router_.route(request, server_tx_id);
+
+        // A handler that set its own Connection header wins; otherwise mark
+        // the connection persistent (Response defaults to "close").
+        const std::string& connection_header = response.get_header("Connection");
+        if (!connection_header.empty()) {
+            keep_alive = keep_alive && connection_header == "keep-alive";
+        } else if (keep_alive) {
+            response.set_header("Connection", "keep-alive");
+        }
+
+        // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
+        std::string response_str = response.to_string();
+        if (!util::socket_send_all(socket_fd, response_str.c_str(), response_str.size())) {
+            util::log_warning("Failed to send full response: " +
+                              util::socket_error_message(util::socket_get_last_error()));
+            return;
+        }
+
+        if (!keep_alive) {
+            return;
+        }
+        first_request = false;
     }
 }
 

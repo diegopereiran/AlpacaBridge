@@ -761,6 +761,42 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   back an ephemeral mutex). If you add any new
   endpoint that connects or disconnects a device, route the decision
   through this registry and take the op mutex.
+- **Connections are persistent (HTTP keep-alive) — never emit
+  `Connection: close` on a normal response** (2026-09-07). `Response::to_string()`
+  defaulted to `Connection: close`, and `Server::handle_connection` served one
+  request per TCP connection — real non-compliance with the README's existing
+  keep-alive claim, and unnecessary overhead for every long-lived Alpaca
+  client (NINA, PHD2, ConformU). `handle_connection` now loops over requests
+  on one connection (RFC 7230 §6.3: HTTP/1.1 persists unless the client sends
+  `Connection: close`, HTTP/1.0 closes unless it sends `Connection: keep-alive`),
+  carries pipelined surplus bytes into the next `read_request`, marks the
+  response `Connection: keep-alive`, respects a handler-set `Connection`
+  header, and drops an idle connection after `kKeepAliveIdleSeconds` (15 s,
+  well under the per-request slowloris bound) so idle clients cannot pin the
+  worker pool. Error responses (`send_error`) still close. Regression tests:
+  the keep-alive cases in `AlpacaHTTP/tests/test_server_socket.cpp`.
+  **Not a fix for ConformU FAST-target misses** (Raspberry Pi 3B, ZWO
+  ASI533MC Pro and Sky-Watcher EQM-35): three properties per device
+  (`CameraState`/`CameraXSize`/`SensorType`; `DeviceState`/`AlignmentMode`/
+  `EquatorialSystem`) deterministically miss the 0.1 s FAST target by
+  ~150-200 ms across every run, while the server itself answers in 2-8 ms and
+  ~50 other FAST members on the same run are within 20 ms — so it looked like
+  a transport cost, and an initial `strace` on both processes (server, and
+  ConformU under strace) showed the gap followed by a `socket()`/`connect()`
+  pair, which read as ConformU stalling before opening its next connection.
+  That reading was wrong: re-run after this fix, with `strace` confirming a
+  single `accept()` for the entire 274-request run (one TCP connection, real
+  keep-alive), reproduced the identical three misses at the identical
+  magnitudes. Correlated tracing during a live miss showed the server idle in
+  `recvfrom` the whole gap while ConformU's only activity was
+  `futex`/`epoll_pwait` — a stall entirely inside ConformU's own .NET process,
+  unrelated to sockets. Diagnostic rule this earns: a FAST miss on a constant
+  getter that curl answers in ~2 ms is not driver latency, but don't assume
+  transport either — the `socket()`/`connect()` adjacency in the first trace
+  was coincidental, not causal; correlate both processes on one clock and
+  confirm before writing up the mechanism. Unresolved and outside
+  AlpacaBridge's control; a Pi 5 (faster cores) is the next thing worth
+  trying, not another transport change.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging
