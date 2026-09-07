@@ -958,14 +958,16 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - a step-period write the board acked but dropped is resent", "[skywatcher][async]") {
-    // EQM-35 Pro, ConformU 4.5 (2026-09-06): a PulseGuide East produced no RA
-    // motion — the ":I" was acknowledged but the axis stayed at sidereal —
-    // in 3 of 5 runs, never in isolation. Whatever swallows the write, the
-    // wrapper now reads the preset back (":i") and resends. The fake acks the
-    // first write and ignores it; the driver's in-place tracking-rate change
-    // must still land, without stopping the axis (a stop would show up as a
-    // ":K"/":L" -- stop_count -- which a live rate change must never send).
+TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not resent and not thrown",
+          "[skywatcher][async]") {
+    // 6b4988b read every ":I" preset back with ":i" and resent, then threw,
+    // on a mismatch. Reverted to the contract INDI's skywatcherAPI.cpp and
+    // indi-eqmod use (PR #1 review): a transport failure throws, what the
+    // board STORED never does -- the rounding tolerance was measured on one
+    // board, and on the real EQM-35 a matching readback proved nothing anyway
+    // (the board stores a live preset without applying it; next test). The
+    // fake acks and drops one write: the rate change must return normally,
+    // the dropped write must not be resent, and the axis must not be stopped.
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
@@ -975,10 +977,10 @@ TEST_CASE("SkyWatcher async - a step-period write the board acked but dropped is
     const int stops_before = mount.stop_count(1);
 
     mount.drop_step_period_writes(1, 1);
-    driver->set_right_ascension_rate(0.5);  // continuous, same direction: live ":I" on the tracking axis
+    REQUIRE_NOTHROW(driver->set_right_ascension_rate(0.5));  // live ":I" on the tracking axis
 
-    REQUIRE(mount.step_period(1) != sidereal_preset);  // the resend was applied
-    REQUIRE(mount.stop_count(1) == stops_before);      // and it stayed in place (no stop/restart)
+    REQUIRE(mount.step_period(1) == sidereal_preset);  // logged, not resent
+    REQUIRE(mount.stop_count(1) == stops_before);      // and the axis was left running
     driver->set_right_ascension_rate(0.0);
     driver->set_tracking(false);
     driver->set_connected(false);

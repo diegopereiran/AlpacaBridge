@@ -184,8 +184,8 @@ public:
     }
 
     /// Acknowledge but silently DROP the next @p n ":I" step-period writes on
-    /// an axis (regression: a write the board acked but never applied must be
-    /// caught by the ":i" readback and resent).
+    /// an axis (regression: the ":i" readback logs the mismatch but the write
+    /// is NOT resent and the call does NOT throw -- the INDI/EQMod contract).
     void drop_step_period_writes(int axis, int n) {
         std::lock_guard<std::mutex> lock(mutex_);
         ax(axis).drop_step_period_writes = n;

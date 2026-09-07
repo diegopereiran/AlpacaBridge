@@ -621,6 +621,7 @@ public:
             return false;
         }
         info_ = info;
+        step_period_readback_.store(true, std::memory_order_relaxed);
         response_timeout_ms_.store(info.response_timeout_ms > 0 ? info.response_timeout_ms : 1000,
                                    std::memory_order_relaxed);
         bool ok = info.type == ConnectionType::Serial ? connect_serial(info) : connect_udp(info);
@@ -632,6 +633,11 @@ public:
         std::lock_guard<std::mutex> lock(io_mutex_);
         disconnect_locked();
     }
+
+    // ":i" step-period readback diagnostic: on for each new connection, off
+    // for the rest of it once the board fails to answer ":i".
+    bool step_period_readback() const { return step_period_readback_.load(std::memory_order_relaxed); }
+    void disable_step_period_readback() { step_period_readback_.store(false, std::memory_order_relaxed); }
 
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(io_mutex_);
@@ -1085,6 +1091,7 @@ private:
     mutable std::mutex io_mutex_;
     bool connected_ = false;
     ConnectionInfo info_{};
+    std::atomic<bool> step_period_readback_{true};  // see step_period_readback()
 #ifndef _WIN32
     int serial_fd_ = -1;
     int socket_fd_ = -1;
@@ -1243,45 +1250,49 @@ void SkyWatcherProtocolWrapper::set_goto_target(int axis, uint32_t counts) {
 }
 
 void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset) {
-    // ":I" is the one write whose effect is invisible until the axis has
-    // moved for a while (a pulse or a tracking-rate change): read the preset
-    // back with ":i" and resend if the board did not take it. Boards without
-    // ":i" disable the readback on first use and keep the plain write.
-    static std::atomic<bool> readback_supported{true};
-    constexpr int kWriteAttempts = 3;
-    // The board does not store the preset verbatim: an EQM-35 Pro (MC fw 3.39)
-    // rounds it to a multiple of 4, clamps below 168 to 168, and reads the
-    // all-ones "stopped" preset back as 0. Verify only presets inside that
-    // representable range, with the rounding tolerance.
+    // A plain ":I" write, the way INDI's skywatcherAPI.cpp and indi-eqmod do
+    // it: a transport failure (no, garbled or rejected reply) throws from
+    // send_command; what the board STORED is never a failure condition.
+    send_command('I', axis, encode_u24(t1_preset));
+
+    // The ":i" readback is a diagnostic only -- compare the stored preset and
+    // WARN on a mismatch, never resend, never throw. Two reasons. On an
+    // EQM-35 Pro the readback matched exactly while the axis kept its old
+    // speed (the board stores a live preset without applying it; the driver
+    // checks the change in MOTION instead, see verify_live_rate_or_rekick),
+    // so a matching readback proves nothing. And the rounding tolerated
+    // below was measured on ONE board (MC fw 3.39); failing the write on a
+    // Synta board that rounds differently would turn a harmless imprecision
+    // into a hard MoveAxis/PulseGuide error (PR #1 review).
+    if (!pimpl_->step_period_readback()) {
+        return;
+    }
+    // An EQM-35 Pro (MC fw 3.39) rounds the preset to a multiple of 4,
+    // clamps below 168 to 168, and reads the all-ones "stopped" preset back
+    // as 0: only compare presets inside the range it stores near-verbatim.
     constexpr uint32_t kReadbackFloor = 168;
     constexpr uint32_t kReadbackCeiling = 0xFFFFF0;
     constexpr uint32_t kReadbackTolerance = 4;
-    const bool verifiable = t1_preset > kReadbackFloor && t1_preset < kReadbackCeiling;
-    for (int attempt = 0; attempt < kWriteAttempts; ++attempt) {
-        send_command('I', axis, encode_u24(t1_preset));
-        if (!verifiable || !readback_supported.load(std::memory_order_relaxed)) {
-            return;
-        }
-        uint32_t readback = 0;
-        try {
-            readback = decode_u24(send_command('i', axis));
-        } catch (const std::exception& e) {
-            readback_supported.store(false, std::memory_order_relaxed);
-            ALPACA_LOG_WARN("SkyWatcher",
-                            std::string("Step-period readback (':i') unavailable on this board; verification "
-                                        "disabled: ") +
-                                e.what());
-            return;
-        }
-        const uint32_t diff = readback > t1_preset ? readback - t1_preset : t1_preset - readback;
-        if (diff <= kReadbackTolerance) {
-            return;
-        }
+    if (t1_preset <= kReadbackFloor || t1_preset >= kReadbackCeiling) {
+        return;
+    }
+    uint32_t readback = 0;
+    try {
+        readback = decode_u24(send_command('i', axis));
+    } catch (const std::exception& e) {
+        // This board has no ":i" -- off until the next connect.
+        pimpl_->disable_step_period_readback();
+        ALPACA_LOG_WARN("SkyWatcher", std::string("Step-period readback (':i') unavailable on this board; diagnostic "
+                                                  "disabled until reconnect: ") +
+                                          e.what());
+        return;
+    }
+    const uint32_t diff = readback > t1_preset ? readback - t1_preset : t1_preset - readback;
+    if (diff > kReadbackTolerance) {
         ALPACA_LOG_WARN("SkyWatcher", "Axis " + std::to_string(axis) + " step period readback " +
                                           std::to_string(readback) + " != written " + std::to_string(t1_preset) +
-                                          (attempt + 1 < kWriteAttempts ? "; resending" : "; giving up"));
+                                          " (diagnostic only; not resent)");
     }
-    throw AlpacaException("Motor controller did not apply the step period on axis " + std::to_string(axis));
 }
 
 void SkyWatcherProtocolWrapper::start_motion(int axis) { send_command('J', axis); }
