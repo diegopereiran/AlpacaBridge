@@ -16,13 +16,14 @@
 #include <alpacahttp/util/socket_utils.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <thread>
 #include <vector>
 
@@ -65,24 +66,66 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<util::SocketHandle> server_fd_{util::kInvalidSocket};
     std::thread server_thread_;
-    
-    // Thread pool for handling concurrent requests
+
+    // One client connection. Owned by exactly one party at a time: the accept
+    // loop (briefly, until it is parked), the reactor (while idle, waiting for
+    // the peer's next request), the ready queue, or a worker (while a request
+    // is being served). Ownership moves with the unique_ptr, so a connection
+    // can never be polled and served at the same time.
+    struct Connection {
+        util::SocketHandle fd{util::kInvalidSocket};
+        std::string remote_address;
+        // Bytes read past the end of the last request (a pipelining client).
+        // A connection with buffered bytes is never parked: the worker keeps
+        // serving until it is empty, since the reactor polls the socket and
+        // would not see them.
+        std::string carried;
+        std::uint64_t requests_served{0};
+        std::chrono::steady_clock::time_point opened_at;
+        // When the reactor gives up waiting on this connection: the first
+        // request's slowloris bound, then the keep-alive idle gap, and never
+        // past the connection lifetime cap.
+        std::chrono::steady_clock::time_point deadline;
+        // Set by the reactor when the deadline passed: the worker that picks
+        // it up closes it (gracefully, off the reactor thread) instead of
+        // reading from it.
+        bool close_only{false};
+    };
+    using ConnectionPtr = std::unique_ptr<Connection>;
+
+    // Workers: fixed pool, each serves one request at a time. thread_pool_size
+    // therefore bounds concurrent REQUESTS; idle connections cost no worker.
     std::vector<std::thread> worker_threads_;
-    std::queue<util::SocketHandle> connection_queue_;
+    std::deque<ConnectionPtr> ready_queue_;
     std::mutex queue_mutex_;
     std::condition_variable queue_condition_;
     bool shutdown_workers_{false};
 
-    // Workers currently parked on a keep-alive connection between requests.
-    // A parked worker is blocked in recv and cannot see connection_queue_
-    // grow, so handle_connection consults this on the way in to decide
-    // whether parking one more is affordable. Stopgap until idle connections
-    // live on a poll set instead of a worker.
-    std::atomic<std::size_t> keepalive_workers_{0};
+    // Reactor: one thread parks idle connections on a poll set and hands them
+    // to the ready queue when their next request arrives. Woken through a
+    // self-pipe when a worker parks a connection or stop() begins.
+    std::thread reactor_thread_;
+    int reactor_wake_fds_[2]{-1, -1};
+    std::mutex reactor_mutex_;
+    std::vector<ConnectionPtr> reactor_incoming_;
+    bool reactor_accepting_{false};
+
+    // Connections alive in any owner. Bounded by Config::max_connections so
+    // idle keep-alive clients cannot exhaust the process's descriptors; at
+    // the bound the accept loop pauses and new clients wait in the listen
+    // backlog.
+    std::atomic<std::size_t> live_connections_{0};
 
     void run_server();
-    void handle_connection(util::SocketHandle socket_fd);
+    void reactor_loop();
     void worker_thread();
+    enum class ServeResult : std::uint8_t { KeepOpen, Close };
+    ServeResult serve_one_request(Connection& conn);
+    void park_connection(ConnectionPtr conn);
+    void enqueue_ready(ConnectionPtr conn);
+    void close_connection(ConnectionPtr conn, bool graceful);
+    void wake_reactor();
+    void close_wake_pipe();
     void handle_shutdown_request();
     void handle_restart_request();
 

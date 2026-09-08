@@ -766,8 +766,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   defaulted to `Connection: close`, and `Server::handle_connection` served one
   request per TCP connection — real non-compliance with the README's existing
   keep-alive claim, and unnecessary overhead for every long-lived Alpaca
-  client (NINA, PHD2, ConformU). `handle_connection` now loops over requests
-  on one connection (RFC 7230 §6.3: HTTP/1.1 persists unless the client sends
+  client (NINA, PHD2, ConformU). Connections now persist across requests
+  (`Server::serve_one_request` serves one; the reactor, below, holds the
+  connection between them) (RFC 7230 §6.3: HTTP/1.1 persists unless the client sends
   `Connection: close`, HTTP/1.0 closes unless it sends `Connection: keep-alive`),
   carries pipelined surplus bytes into the next `read_request`, marks the
   response `Connection: keep-alive`, respects a handler-set `Connection`
@@ -810,16 +811,20 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   own `Connection` header. The reconnect this costs a well-behaved long-lived
   client (PHD2 autoguiding, ConformU) is negligible next to the per-request
   handshake this whole feature exists to avoid. **Also capped by wall clock**:
-  `kMaxConnectionLifetimeSeconds` (300s) forces the same reconnect regardless
-  of request count, since the count cap alone still lets a connection that
-  sends one request every `kKeepAliveIdleSeconds` hold a worker for up to
-  ~4 hours (1000 × 15s) and simply reconnect afterward (PR #2 review, round
-  2). The handler-set `Connection` header comparison (`server.cpp`) is
+  `Config::keep_alive_lifetime_seconds` (300 s default; settable so the cap
+  can be tested, see the lifetime-cap case in `test_server_socket.cpp`)
+  forces the same reconnect regardless of request count, since the count cap
+  alone still lets a connection that sends one request every
+  `kKeepAliveIdleSeconds` stay persistent for up to ~4 hours (1000 × 15s)
+  and simply reconnect afterward (PR #2 review, round 2). **The lifetime cap
+  is enforced only on a response** (`Connection: close` on the first one
+  past it), never by closing an idle socket the moment the cap passes: that
+  would race a polling client's next request, which would meet EOF instead
+  of an answer, and .NET `HttpClient` does not retry a PUT on a dead pooled
+  connection. An idle connection past the cap just runs out its idle gap.
+  The handler-set `Connection` header comparison (`server.cpp`) is
   case-insensitive for the same reason `wants_keep_alive` is on the request
-  side. `note_recv()`'s restore of the normal per-request timeout after the
-  idle wait fails closed (drops the connection) like every other
-  timeout-setting call in this path, rather than silently continuing on the
-  tighter 15s budget if the `setsockopt` call itself fails. The outgoing
+  side. The outgoing
   `Connection` header is now always rewritten to match the final `keep_alive`
   decision, rather than only set when absent -- a handler that had set
   `Connection: keep-alive` before the count/lifetime caps forced closure
@@ -855,11 +860,14 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   cover: they bound how long a connection may live, not whether it outlives
   the server. Measured with a client sending every 2s: `stop()` blocked
   26,006 ms and served 13 further requests before the check, 1 ms after.
-  Worst case now is one idle gap (`kKeepAliveIdleSeconds`, 15s) for a
-  worker blocked in `recv` — the same order as the pre-existing 30s
-  per-request bound. Regression test: the last case in
-  `AlpacaHTTP/tests/test_server_socket.cpp` (it has to be last; it stops
-  the server).
+  With the reactor (below) no worker is ever parked, so `stop()` no longer
+  waits out an idle gap at all: a request in flight is answered with
+  `Connection: close`, a request already on the wire at the reactor's final
+  zero-timeout poll is handed to the draining workers and answered the same
+  way, and an idle connection is closed at once (measured: 7 ms with three
+  parked clients; 14 s on the pre-reactor design with two). Regression test:
+  the last case in `AlpacaHTTP/tests/test_server_socket.cpp` (it has to be
+  last; it stops the server).
 - **`Response` header names compare case-insensitively** (2026-09-09, review
   round 5). `Response::headers_` was a plain case-sensitive map while
   `Request` lowercases its keys on parse, so the keep-alive override's
@@ -871,16 +879,17 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   default-`close` check match case-insensitively. No handler sets a
   `Connection` header today; the override exists precisely for the day one
   does. Test: the `Response` case at the end of `test_routing.cpp`.
-- **Pre-carried (pipelined) headers restore the per-request timeout before
-  the first recv** (same review round). `read_request` restored the 30s
-  budget only *after* a successful recv, so when request B's headers had
-  arrived in the same write as request A (carried over, terminator already
-  present, header loop does no recv) B's first *body* recv still ran under
-  the 15s idle bound — the slow-body bug fixed earlier, reached through
-  carry-over. Now non-empty carried bytes mean "this request has begun" and
-  the restore happens up front. Test: the pre-carried-headers case in
-  `test_server_socket.cpp` (A complete + B's headers in one write, 16s gap,
-  then B's body).
+- **A connection with carried (pipelined) bytes is never parked** (issue
+  #234). The reactor polls the *socket*, so bytes already read into
+  `Connection::carried` would be invisible to it; the worker keeps serving
+  until `carried` is empty (after stripping a lone trailing CRLF, which is
+  padding, not a request). This also settles the per-request timeout
+  question that two review rounds on #233 got wrong in different ways: a
+  worker only ever reads a connection whose request has already begun
+  arriving, so every recv runs under the plain 30 s `kSocketTimeoutSeconds`
+  bound set at accept time and there is no idle timeout to restore. Tests:
+  the slow-body and pre-carried-headers cases in `test_server_socket.cpp`
+  (16 s gap inside request 2's body, in its own write and pre-carried).
 - **Persistence is opt-in: a connection may only stay open for an exchange we
   framed correctly** (2026-09-08, PR #233 review). Keep-alive turned every
   latent framing gap into a stream desync, because leftover or mis-framed
@@ -910,31 +919,49 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   its next request already in flight. Use `util::socket_close_graceful`, never
   a bare `util::socket_close`, on a **client** socket. The drain budget is
   deliberately short (100 ms x 4) so it cannot become the worker-pinning
-  problem it sits next to. `Server::worker_thread` is the single client-close
-  site; the listener closed by `stop()` is not a client connection. Test: the
+  problem it sits next to. `Server::close_connection` is the single
+  client-close site (it also keeps `live_connections_` honest); the one
+  non-graceful call, from the reactor at `stop()`, is safe because a socket
+  that was not readable at the last poll has nothing queued, so `close()`
+  sends FIN. The listener closed by `stop()` is not a client connection. Test: the
   graceful-close case in `test_server_socket.cpp` (a `Connection: close`
   request with 10 KB of trailing bytes the server never reads; on Linux a
   bare `close()` still delivered the queued response but ended the
   connection in `ECONNRESET` instead of EOF, and Windows stacks discard the
   queued response outright).
-- **`thread_pool_size` bounds concurrent REQUESTS, not connections — keep it
-  that way** (same review). A parked keep-alive connection holds a worker for
-  up to `kKeepAliveIdleSeconds`, so without a bound the pool's documented
-  meaning (`config.h`: "32 concurrent requests") silently became a cap on
-  concurrent *connections*; a browser tab alone opens ~6, and a new client
-  then waits in `connection_queue_`, which is unbounded and has no dequeue
-  deadline. `keepalive_worker_reserve()` holds back a proportional slice
-  (floor of 1, since `thread_pool_size` may be 1) and forces a close once the
-  pool nears saturation, degrading to pre-keep-alive close-per-request. This
-  is a **stopgap**: the real fix is to park idle connections on a poll set
-  rather than on a worker, which also removes the `SO_RCVTIMEO` restore
-  dance (`idle_timeout_pending`/`note_recv`) that two separate review rounds
-  found bugs in. Test: the pool-pressure case in `test_server_socket.cpp`
-  (own server, `set_thread_pool_size(2)`, on port 6872). It asserts the
-  first connection is kept alive and only the pool-filling one is closed,
-  so a reserve that silently disables keep-alive on small pools (the
-  original fixed-reserve-of-4 design did exactly that) fails it rather than
-  passing the late-client check vacuously.
+- **Idle connections live on the reactor, never on a worker; `thread_pool_size`
+  bounds concurrent REQUESTS** (2026-09-08, issue #234, replaces the #233
+  reserve stopgap). `Server::reactor_loop` (one thread) parks every idle
+  connection on a `poll()` set with a self-pipe for wakeups; when a
+  connection becomes readable it goes to `ready_queue_`, a worker serves
+  exactly one request (`serve_one_request`), keeps going only while it holds
+  carried bytes, then hands the connection back (`park_connection`). A
+  `Connection` (fd, remote address, carried bytes, request count, open time,
+  deadline) has exactly one owner at a time and moves by `unique_ptr`. Rules
+  this earns:
+  - Never block in the reactor. Expired connections are handed to a worker
+    marked `close_only` so the graceful drain happens off the poll thread.
+  - The reactor enforces only the idle gap (`kKeepAliveIdleSeconds`) and the
+    first-request slowloris bound (`kSocketTimeoutSeconds`, so a client that
+    connects and never sends costs no worker). Caps that should end with a
+    `Connection: close` response (request count, lifetime) belong in
+    `serve_one_request`, see the lifetime note above.
+  - `Config::max_connections` (512 default; `RLIMIT_NOFILE` is 1024 on a
+    typical systemd unit and the other half is for SDKs, serial ports and
+    logs) bounds live connections across all owners. At the bound the accept
+    loop pauses and new clients wait in the listen backlog (64) rather than
+    being refused; an idle connection expires within 15 s.
+  - Do not reintroduce a worker-side counter or reserve: the previous design
+    counted busy workers as parked and pushed clients to close-per-request at
+    exactly the busiest moments (review of #233).
+  Tests in `test_server_socket.cpp`: the reactor pool case (2 workers, 4
+  idle keep-alive connections all kept alive and all served again, 3
+  connect-and-never-send clients, a late client still served), the
+  lifetime-cap case (2 s cap, own server), the max-connections case (bound
+  of 2, third client waits in the backlog and is served once one is
+  released), and the idle-parked assertions in the final `stop()` case. On
+  the pre-reactor design the pool case fails at its second keep-alive
+  assertion and the `stop()` case fails on a 14 s stop.
 - **Test-suite hygiene for socket tests** (same review). `peer_closed()` must
   save and restore `SO_RCVTIMEO` — leaving its short budget on the socket made
   every later `read_one_response()` flaky on loaded CI and reported a slow

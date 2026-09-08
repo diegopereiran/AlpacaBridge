@@ -44,6 +44,8 @@ public:
     const std::string& location() const { return location_; }
     const std::string& profile_name() const { return profile_name_; }
     std::size_t thread_pool_size() const { return thread_pool_size_; }
+    std::size_t max_connections() const { return max_connections_; }
+    int keep_alive_lifetime_seconds() const { return keep_alive_lifetime_seconds_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
@@ -65,6 +67,15 @@ public:
         if (size > 256) size = 256;
         thread_pool_size_ = size;
     }
+    void set_max_connections(std::size_t count) {
+        if (count < 1) count = 1;
+        if (count > 4096) count = 4096;
+        max_connections_ = count;
+    }
+    void set_keep_alive_lifetime_seconds(int seconds) {
+        if (seconds < 1) seconds = 1;
+        keep_alive_lifetime_seconds_ = seconds;
+    }
     void set_log_directory(const std::string& dir) { log_directory_ = dir; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
@@ -78,6 +89,19 @@ private:
     std::string location_ = "";
     std::string profile_name_ = "";
     std::size_t thread_pool_size_ = 32;  // Default: 32 concurrent requests (supports multiple devices + clients)
+    // Upper bound on open client connections across all owners (idle on the
+    // reactor, queued, or being served). Idle keep-alive connections cost no
+    // worker, so without this the only limit would be RLIMIT_NOFILE (1024 on
+    // a typical systemd unit); 512 leaves the other half for device SDKs,
+    // serial ports and log files. At the bound the accept loop pauses and new
+    // clients wait in the listen backlog until an idle connection expires.
+    std::size_t max_connections_ = 512;
+    // How long one keep-alive connection may stay persistent, in seconds,
+    // regardless of request count. The next response after this forces a
+    // reconnect (cheap: one handshake every few minutes for a long-lived
+    // client). Settable so the cap can be tested without waiting five
+    // minutes.
+    int keep_alive_lifetime_seconds_ = 300;
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever
