@@ -834,6 +834,32 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the x86 loopback unit test (`test_server_socket.cpp`) had exercised this
   before; this is the first real-network, real-hardware confirmation the
   count-based cap actually fires.
+- **STILL OPEN (2026-09-09): a full ConformU run against the mount, the
+  actual target client this whole PR is about.** Everything above is unit
+  tests plus a synthetic curl-style smoke test; nothing has exercised
+  keep-alive against ConformU itself yet. Needs Diego's explicit go-ahead
+  first, same as always for anything that actuates the mount (see
+  `conformu-actuates-hardware` in memory — ConformU drives MoveAxis/GOTO/
+  PulseGuide for real). What's already in place for whoever picks this up:
+  - The binary is already built and sitting on the Pi — no rebuild needed.
+    `git worktree` at `/home/astro/AlpacaBridge-keepalive` on `astropi`,
+    checked out at this branch's tip, binary at
+    `AlpacaHTTP/build/alpacahttp_server`. The live `alpacabridge.service`
+    checkout (`/home/astro/AlpacaBridge`, currently on
+    `driver/skywatcher-eqm35`) is a separate worktree and was never touched.
+  - To run: stop the live `alpacabridge.service` (`sudo systemctl stop
+    alpacabridge`) so nothing else holds the mount's serial port, then run
+    the keep-alive binary on port 6800 (or point ConformU at whatever port
+    it's started on) so ConformU talks to a build with these fixes. Restart
+    the real service afterward (`sudo systemctl start alpacabridge`) — do
+    not leave the ad-hoc binary as the long-running service.
+  - Expect roughly 10-20 minutes for one run (telescope conformance suites
+    are slower than camera-only ones), or 30-60 minutes for the 2-3
+    consecutive runs the earlier EQM-35 PulseGuide validation used for
+    confidence. What to check: no error/issue-count regression vs. the
+    pre-keep-alive baseline, and ideally `strace`/`tcpdump` on the Pi
+    confirming ConformU's connection is genuinely reused (one `accept()`
+    for the run) rather than reconnecting per call.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging
