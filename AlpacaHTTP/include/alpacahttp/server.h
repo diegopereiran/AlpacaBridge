@@ -12,19 +12,22 @@
 
 #pragma once
 
-#include "config.h"
-#include "router.h"
 #include <alpacacore/managementdriver.h>
 #include <alpacahttp/util/socket_utils.h>
-#include <memory>
-#include <thread>
+
 #include <atomic>
+#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <vector>
-#include <queue>
+#include <memory>
 #include <mutex>
-#include <condition_variable>
+#include <queue>
+#include <thread>
+#include <vector>
+
+#include "config.h"
+#include "router.h"
 
 namespace alpacahttp {
 
@@ -69,6 +72,13 @@ private:
     std::mutex queue_mutex_;
     std::condition_variable queue_condition_;
     bool shutdown_workers_{false};
+
+    // Workers currently parked on a keep-alive connection between requests.
+    // A parked worker is blocked in recv and cannot see connection_queue_
+    // grow, so handle_connection consults this on the way in to decide
+    // whether parking one more is affordable. Stopgap until idle connections
+    // live on a poll set instead of a worker.
+    std::atomic<std::size_t> keepalive_workers_{0};
 
     void run_server();
     void handle_connection(util::SocketHandle socket_fd);

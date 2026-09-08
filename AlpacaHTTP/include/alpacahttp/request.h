@@ -74,7 +74,7 @@ private:
     std::unordered_map<std::string, std::string> query_params_lower_;
     std::unordered_map<std::string, std::string> headers_;
     std::string body_;
-    std::string_view http_version_;
+    std::string http_version_;
 
     void parse_query_string();
     HttpMethod parse_method(std::string_view method_str);

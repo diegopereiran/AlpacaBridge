@@ -74,6 +74,16 @@ inline bool socket_set_timeouts(SocketHandle handle, int seconds) {
     return ok;
 }
 
+// Bound only the receive side. Used between keep-alive requests, where the
+// peer may legitimately go quiet for a while but must not pin a worker
+// thread indefinitely; the send timeout set by socket_set_timeouts is kept.
+inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
+    struct timeval tv {};
+    tv.tv_sec = seconds;
+    tv.tv_usec = 0;
+    return setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
+}
+
 // Send the whole payload, looping over short sends and retrying EINTR.
 // MSG_NOSIGNAL is always passed so a peer drop mid-send returns an error
 // instead of delivering SIGPIPE (which would kill the server). Mirrors
@@ -97,6 +107,46 @@ inline bool socket_send_all(SocketHandle handle, const char* buffer, std::size_t
         total_sent += static_cast<std::size_t>(n);
     }
     return true;
+}
+
+// Close a client connection without destroying data the peer has not read
+// yet. close() on a socket that still has unread bytes queued makes the
+// kernel send RST rather than FIN, and the peer's TCP stack then discards its
+// whole receive buffer -- including a response we sent successfully but it
+// has not read. Keep-alive makes that reachable in normal operation: at the
+// request-count or lifetime cap, and on the stop()/restart path, a polling
+// client has usually already written its next request when we decide to
+// close, so the bytes sitting in our receive queue would turn the clean close
+// we advertised into an ECONNRESET on the client's previous request.
+//
+// Shut down the write side so the peer sees EOF, drain what it already sent,
+// then close.
+//
+// The drain budget is deliberately small. What has to be cleared is the bytes
+// ALREADY queued when we decided to close -- typically the peer's next
+// request, which recv returns immediately -- and after our FIN a well-behaved
+// peer closes, so the loop normally ends on EOF within a millisecond or two.
+// Waiting longer than that would hold a worker for the same reason the
+// keep-alive reserve exists to avoid, so a peer that neither sends nor closes
+// costs one short timeout rather than seconds.
+inline void socket_close_graceful(SocketHandle handle) {
+    if (handle == kInvalidSocket) {
+        return;
+    }
+    shutdown(handle, SHUT_WR);
+
+    struct timeval tv {};
+    tv.tv_usec = 100000;  // 100 ms per recv
+    setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    char sink[2048];
+    for (int i = 0; i < 4; ++i) {
+        // <= 0 is EOF, error, or the timeout: nothing left worth draining.
+        if (socket_recv(handle, sink, static_cast<int>(sizeof(sink))) <= 0) {
+            break;
+        }
+    }
+    socket_close(handle);
 }
 
 inline bool socket_interrupted(int err) {
