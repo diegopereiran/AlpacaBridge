@@ -840,13 +840,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the x86 loopback unit test (`test_server_socket.cpp`) had exercised this
   before; this is the first real-network, real-hardware confirmation the
   count-based cap actually fires.
-- **No ConformU run**, deliberately: this PR touches only `AlpacaHTTP`'s
+- **No ConformU run**, deliberately: this change touches only `AlpacaHTTP`'s
   connection-handling layer, not any device driver, so there is no new
-  device behavior to conformance-check. The build+worktree used for the
-  smoke test above (`/home/astro/AlpacaBridge-keepalive` on `astropi`,
-  binary at `AlpacaHTTP/build/alpacahttp_server`) can be removed whenever;
-  the live `alpacabridge.service` checkout (`/home/astro/AlpacaBridge`, on
-  `driver/skywatcher-eqm35`) is a separate worktree and was never touched.
+  device behavior to conformance-check.
 - **The keep-alive loop checks `running_` and closes on the next response
   once `stop()` has begun** (2026-09-09, final review pass). `stop()` joins
   every worker, and a worker only leaves `handle_connection`'s loop when the
