@@ -881,6 +881,66 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the restore happens up front. Test: the pre-carried-headers case in
   `test_server_socket.cpp` (A complete + B's headers in one write, 16s gap,
   then B's body).
+- **Persistence is opt-in: a connection may only stay open for an exchange we
+  framed correctly** (2026-09-08, PR #233 review). Keep-alive turned every
+  latent framing gap into a stream desync, because leftover or mis-framed
+  bytes are now read as the *next* request instead of dying with the
+  connection. `may_persist(request, response)` in `server.cpp` is the single
+  gate: an unknown method or a response without `Content-Length` is answered
+  normally and then closed. Do not add a per-bug patch for each new framing
+  construct — widen the gate instead, so the failure mode of anything we do
+  not understand is one extra TCP handshake rather than a client reading our
+  bytes as the head of its next response. In particular **do not add `HEAD` to
+  `Request::parse_method`**: it would route, and the router answers with a
+  body that a HEAD client must not receive. Tests: the HEAD and chunked cases
+  in `test_server_socket.cpp`, and the `Content-Length` default case in
+  `test_routing.cpp` (every `Response::to_string()` emits exactly one).
+- **`Transfer-Encoding` is rejected with 501, not ignored** (same review).
+  `read_request` frames bodies from `Content-Length` only, so a chunked body
+  read as zero-length left its chunk framing on the wire to be parsed as the
+  next request — request-smuggling-shaped behind any intermediary that does
+  understand chunked. If chunked support is ever added, it must be added to
+  the body reader *and* the gate above, together. Test: the chunked case in
+  `test_server_socket.cpp`.
+- **Close the write side and drain before `close()`** (same review). On Linux
+  `close()` on a socket with unread bytes queued sends RST, and the peer's
+  stack then discards its receive buffer — including a response we sent that
+  it has not read. Keep-alive makes this ordinary: at the request-count and
+  lifetime caps and on the `stop()`/restart path, a polling client usually has
+  its next request already in flight. Use `util::socket_close_graceful`, never
+  a bare `util::socket_close`, on a **client** socket. The drain budget is
+  deliberately short (100 ms x 4) so it cannot become the worker-pinning
+  problem it sits next to. `Server::worker_thread` is the single client-close
+  site; the listener closed by `stop()` is not a client connection. Test: the
+  graceful-close case in `test_server_socket.cpp` (a `Connection: close`
+  request with 10 KB of trailing bytes the server never reads; on Linux a
+  bare `close()` still delivered the queued response but ended the
+  connection in `ECONNRESET` instead of EOF, and Windows stacks discard the
+  queued response outright).
+- **`thread_pool_size` bounds concurrent REQUESTS, not connections — keep it
+  that way** (same review). A parked keep-alive connection holds a worker for
+  up to `kKeepAliveIdleSeconds`, so without a bound the pool's documented
+  meaning (`config.h`: "32 concurrent requests") silently became a cap on
+  concurrent *connections*; a browser tab alone opens ~6, and a new client
+  then waits in `connection_queue_`, which is unbounded and has no dequeue
+  deadline. `keepalive_worker_reserve()` holds back a proportional slice
+  (floor of 1, since `thread_pool_size` may be 1) and forces a close once the
+  pool nears saturation, degrading to pre-keep-alive close-per-request. This
+  is a **stopgap**: the real fix is to park idle connections on a poll set
+  rather than on a worker, which also removes the `SO_RCVTIMEO` restore
+  dance (`idle_timeout_pending`/`note_recv`) that two separate review rounds
+  found bugs in. Test: the pool-pressure case in `test_server_socket.cpp`
+  (own server, `set_thread_pool_size(2)`, on port 6872). It asserts the
+  first connection is kept alive and only the pool-filling one is closed,
+  so a reserve that silently disables keep-alive on small pools (the
+  original fixed-reserve-of-4 design did exactly that) fails it rather than
+  passing the late-client check vacuously.
+- **Test-suite hygiene for socket tests** (same review). `peer_closed()` must
+  save and restore `SO_RCVTIMEO` — leaving its short budget on the socket made
+  every later `read_one_response()` flaky on loaded CI and reported a slow
+  response as "server closed". The test `send_all` must pass `MSG_NOSIGNAL`,
+  since several cases deliberately provoke a server-side close and the suite
+  installs no SIGPIPE handler.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging

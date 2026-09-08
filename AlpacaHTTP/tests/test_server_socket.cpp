@@ -10,11 +10,13 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Socket-level tests for the Server request-read path (read_request), which the
-// Router-level test_routing.cpp cannot reach because it feeds Router::route
-// directly. Covers the header-size (431) boundary fixed in #128: the cap must
-// be enforced on the recv chunk that contains the \r\n\r\n terminator, not only
-// on earlier chunks. See issue #129.
+// Socket-level tests for the Server request-read path (read_request) and the
+// keep-alive connection loop, which the Router-level test_routing.cpp cannot
+// reach because it feeds Router::route directly. Covers the header-size (431)
+// boundary fixed in #128 (the cap must be enforced on the recv chunk that
+// contains the \r\n\r\n terminator, not only on earlier chunks; see issue
+// #129), HTTP/1.1 persistence and its bounds, the framing gate that decides
+// whether a connection may stay open, and the graceful close path.
 
 #include <alpacahttp/config.h>
 #include <alpacahttp/server.h>
@@ -111,8 +113,12 @@ int connect_local(std::uint16_t port) {
     return fd;
 }
 
+// MSG_NOSIGNAL matters here: several cases below deliberately make the server
+// close first (the request cap, the malformed request, stop() under load), so
+// a send can land on an already-closed socket. Without it the test process
+// takes SIGPIPE and dies instead of failing an EXPECT with a usable message.
 void send_all(int fd, const std::string& data) {
-    EXPECT(::send(fd, data.data(), data.size(), 0) == static_cast<ssize_t>(data.size()));
+    EXPECT(::send(fd, data.data(), data.size(), MSG_NOSIGNAL) == static_cast<ssize_t>(data.size()));
 }
 
 // Read exactly one HTTP response (status line + headers + Content-Length body)
@@ -153,13 +159,28 @@ std::string read_one_response(int fd, std::string& carry) {
 
 // True if the server has closed the connection (EOF within `ms`); false if it
 // is still open (the peek times out).
+//
+// The previous receive timeout is saved and restored. Without that, every
+// read_one_response() after a peer_closed() check inherits this function's
+// short budget (a few hundred ms), and a response that merely arrives slowly
+// on a loaded CI machine comes back as "" -- which the following EXPECT then
+// reports as "server closed", sending the reader after a bug that isn't there.
 bool peer_closed(int fd, int ms) {
+    struct timeval previous {};
+    socklen_t previous_len = sizeof(previous);
+    const bool saved = ::getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &previous, &previous_len) == 0;
+
     struct timeval tv {};
     tv.tv_sec = ms / 1000;
     tv.tv_usec = (ms % 1000) * 1000;
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     char c = 0;
-    return ::recv(fd, &c, 1, MSG_PEEK) == 0;
+    const bool closed = ::recv(fd, &c, 1, MSG_PEEK) == 0;
+
+    if (saved) {
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &previous, previous_len);
+    }
+    return closed;
 }
 
 }  // namespace
@@ -367,6 +388,159 @@ int main() {
         send_all(fd, body);
         std::string rb = read_one_response(fd, carry);
         EXPECT(!rb.empty());
+        ::close(fd);
+    }
+
+    // A chunked request body must not be treated as a zero-length one. This
+    // server frames bodies from Content-Length only, so before the 501 the
+    // chunk framing stayed on the wire and -- now that the connection
+    // survives a request -- was parsed as the NEXT request: the client got
+    // its response followed by a spurious 400, and behind an intermediary
+    // that does understand chunked this is a smuggling-shaped desync.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        send_all(fd,
+                 "PUT /api/v1/telescope/0/connected HTTP/1.1\r\nHost: localhost\r\n"
+                 "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+        std::string r = read_one_response(fd, carry);
+        EXPECT(r.rfind("HTTP/1.1 501 ", 0) == 0);
+        EXPECT(peer_closed(fd, 2000));
+        ::close(fd);
+    }
+
+    // HEAD is not in parse_method, so it routes as UNKNOWN and is answered
+    // with a normal BODIED error. Sending a body to a HEAD client is already
+    // wrong (RFC 7231 4.3.2), but on a persistent connection it desyncs: the
+    // client discards headers, expects no body, and reads ours as the head of
+    // its next response. Browsers, uptime monitors and reverse-proxy health
+    // checks all send HEAD at the web UI, so the connection must close.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        send_all(fd, "HEAD /management/apiversions HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        std::string r = read_one_response(fd, carry);
+        EXPECT(!r.empty());
+        EXPECT(r.find("Connection: close\r\n") != std::string::npos);
+        EXPECT(peer_closed(fd, 2000));
+        ::close(fd);
+    }
+
+    // A stray empty line before the request line must be skipped, not 400'd
+    // (RFC 7230 3.5). Several client stacks leave one on the wire after a
+    // body; before keep-alive those bytes died with the connection, now they
+    // would drop a session the client believes is still good.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        send_all(fd, kGet11);
+        EXPECT(!read_one_response(fd, carry).empty());
+        send_all(fd, "\r\n" + kGet11);
+        std::string r = read_one_response(fd, carry);
+        EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
+        // Same thing pipelined: the CRLF arrives in the bytes carried over
+        // from the previous request, so read_request must strip it before
+        // its first terminator search, not only after a recv.
+        send_all(fd, kGet11 + "\r\n" + kGet11);
+        std::string r3 = read_one_response(fd, carry);
+        std::string r4 = read_one_response(fd, carry);
+        EXPECT(r3.rfind("HTTP/1.1 200 ", 0) == 0);
+        EXPECT(r4.rfind("HTTP/1.1 200 ", 0) == 0);
+        ::close(fd);
+    }
+
+    // A keep-alive connection parks a worker for up to kKeepAliveIdleSeconds
+    // between requests, so without a reserve the pool size stops bounding
+    // concurrent REQUESTS (what config.h documents) and starts bounding
+    // concurrent CONNECTIONS -- and a client with no connection yet waits in
+    // an unbounded queue with no dequeue deadline. With a pool of 2 and no
+    // reserve, two idle keep-alive connections hold every worker and a third
+    // client goes unserved for the full idle timeout.
+    //
+    // Own server on its own port: the shared one above has the default pool
+    // of 32, which would need 32 sockets to put under the same pressure.
+    {
+        alpacahttp::Config small_config;
+        small_config.set_http_port(6872);
+        small_config.set_discovery_enabled(false);
+        small_config.set_server_name("TestServerSmallPool");
+        small_config.set_thread_pool_size(2);
+        alpacahttp::Server small_server(small_config);
+        small_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (small_server.is_running()) {
+            const std::uint16_t small_port = small_config.http_port();
+
+            // Park as many keep-alive connections as the pool would allow.
+            int parked[2] = {-1, -1};
+            std::string parked_response[2];
+            for (int i = 0; i < 2; ++i) {
+                parked[i] = connect_local(small_port);
+                EXPECT(parked[i] >= 0);
+                std::string carry;
+                send_all(parked[i], kGet11);
+                parked_response[i] = read_one_response(parked[i], carry);
+                EXPECT(!parked_response[i].empty());
+            }
+            // The reserve must degrade, not disable: with a pool of 2 and a
+            // reserve of 1, the first connection is parked with keep-alive
+            // and only the second -- which would fill the pool -- is told to
+            // close. A reserve that shut keep-alive off entirely on small
+            // pools would pass the late-client check below vacuously.
+            EXPECT(parked_response[0].find("Connection: keep-alive\r\n") != std::string::npos);
+            EXPECT(parked_response[1].find("Connection: close\r\n") != std::string::npos);
+
+            // A fresh client must still be served promptly. The recv timeout
+            // makes a regression fail in seconds instead of hanging until
+            // ctest's timeout.
+            int late = connect_local(small_port);
+            EXPECT(late >= 0);
+            struct timeval tv {};
+            tv.tv_sec = 5;
+            ::setsockopt(late, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string carry;
+            send_all(late, kGet11);
+            std::string r = read_one_response(late, carry);
+            EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
+
+            ::close(late);
+            for (int slot : parked) {
+                ::close(slot);
+            }
+            small_server.stop();
+        } else {
+            std::cout << "  (skipped pool-pressure case: port 6872 unavailable)\n";
+        }
+    }
+
+    // Closing must not destroy a response the client has not read yet. On
+    // Linux, close() on a socket with unread bytes in its receive queue sends
+    // RST instead of FIN, and the peer's stack then discards its own receive
+    // buffer -- including the response we just sent. With keep-alive that is
+    // ordinary: at the caps and on the stop() path the client usually has its
+    // next request already on the wire. The server now shuts down its write
+    // side and drains before close(). Here the "next request" is 10 KB of
+    // trailing bytes in the same write as a Connection: close request: the
+    // server's 8 KB recv leaves the tail queued in the kernel when it decides
+    // to close, and the client deliberately waits before reading so the close
+    // (FIN or RST) has arrived before it looks at the response.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        const std::string close_request =
+            "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        send_all(fd, close_request + std::string(10 * 1024, 'x'));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::string r = read_one_response(fd, carry);
+        EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
+        EXPECT(r.find("Connection: close\r\n") != std::string::npos);
+        // A clean EOF, not ECONNRESET: peer_closed() is true only on recv == 0.
+        EXPECT(peer_closed(fd, 2000));
         ::close(fd);
     }
 

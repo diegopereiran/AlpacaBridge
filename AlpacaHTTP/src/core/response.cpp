@@ -82,14 +82,29 @@ std::string Response::to_string() const {
     oss << "HTTP/1.1 " << status_code_ << " " << reason_phrase_ << "\r\n";
 
     bool has_connection = false;
+    bool has_content_length = false;
     for (const auto& [key, value] : headers_) {
         if (header_name_equals(key, "Connection")) {
             has_connection = true;
+        }
+        if (header_name_equals(key, "Content-Length")) {
+            has_content_length = true;
         }
         oss << key << ": " << value << "\r\n";
     }
     if (!has_connection) {
         oss << "Connection: close\r\n";
+    }
+    // A response with no Content-Length is framed by connection close, which
+    // cannot work on a persistent connection: the client would keep reading,
+    // waiting for a body that never ends, or take the next response's status
+    // line for this one's body. set_body() sets the header for every response
+    // the router builds today, so this only catches a handler that sets a
+    // status and no body (204, or an early return) -- but that response would
+    // be unframeable, and defaulting it here makes the invariant hold by
+    // construction rather than by the caller remembering.
+    if (!has_content_length) {
+        oss << "Content-Length: " << body_.size() << "\r\n";
     }
 
     oss << "\r\n";
