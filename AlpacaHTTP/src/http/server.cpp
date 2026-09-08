@@ -144,6 +144,12 @@ void Server::wait() {
 
 namespace {
 
+// Pending-connection backlog for the listener. Kept comfortably above the
+// worker pool: with keep-alive a burst of new clients can arrive while every
+// worker is mid-request, and a backlog shorter than that burst turns into
+// refused connections rather than a short wait.
+constexpr int kListenBacklog = 64;
+
 // Create a bound, listening HTTP socket on `port`. Prefers a dual-stack IPv6
 // socket (IPV6_V6ONLY off) so both ::1 and 127.0.0.1 connect directly; falls
 // back to IPv4-only where IPv6 is unavailable.
@@ -175,7 +181,8 @@ util::SocketHandle create_listener(int port) {
         address6.sin6_addr = in6addr_any;
         address6.sin6_port = htons(static_cast<u_short>(port));
         if (fd != util::kInvalidSocket) {
-            if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 && listen(fd, 10) == 0) {
+            if (bind(fd, reinterpret_cast<struct sockaddr*>(&address6), sizeof(address6)) == 0 &&
+                listen(fd, kListenBacklog) == 0) {
                 return fd;
             }
             util::socket_close(fd);
@@ -194,7 +201,7 @@ util::SocketHandle create_listener(int port) {
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(static_cast<u_short>(port));
-    if (bind(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0 || listen(fd, 10) < 0) {
+    if (bind(fd, reinterpret_cast<struct sockaddr*>(&address), sizeof(address)) < 0 || listen(fd, kListenBacklog) < 0) {
         util::socket_close(fd);
         return util::kInvalidSocket;
     }
@@ -368,6 +375,58 @@ constexpr int kSocketTimeoutSeconds = 30;
 // large ImageArray responses are unaffected (this bounds the read side only).
 constexpr int kRequestDeadlineSeconds = 120;
 
+// How long a keep-alive connection may sit idle between requests before the
+// worker gives it up. Persistent connections matter for timing: ConformU's
+// .NET client stalled ~175 ms before opening each new TCP connection on a
+// Raspberry Pi 3B, and with every response marked "Connection: close" that
+// stall landed inside its FAST-target measurements (CameraState, CameraXSize,
+// SensorType on a ZWO camera; DeviceState, AlignmentMode, EquatorialSystem on
+// a mount) while the server itself answered in 2-8 ms. Kept well under the
+// per-request slowloris bound so idle clients cannot pin the pool.
+constexpr int kKeepAliveIdleSeconds = 15;
+
+// Upper bound on requests served over one keep-alive connection. Without
+// this, a small number of clients that simply send a request at least every
+// kKeepAliveIdleSeconds (accidentally -- several long-lived Alpaca clients --
+// or adversarially) can each pin one worker thread indefinitely, since the
+// thread pool is fixed-size and the accept queue has no backpressure of its
+// own (PR #2 review). Closing after N requests bounds how long any single
+// connection can hold a worker, forcing well-behaved clients to reconnect
+// (cheap: this is what keep-alive was added to avoid *per-request*, not
+// forbid outright) and adversarial ones to give up a worker periodically.
+constexpr std::uint64_t kMaxRequestsPerConnection = 1000;
+
+// Upper bound on how long a single connection may stay persistent, regardless
+// of request count. kMaxRequestsPerConnection alone still lets a connection
+// that sends one request every kKeepAliveIdleSeconds legitimately hold a
+// worker for up to ~4 hours (1000 * 15s), and a client that simply reconnects
+// immediately afterward repeats that indefinitely (PR #2 review). This is a
+// second, independent cap on the same failure mode: once a connection has
+// been open this long, the NEXT response forces a reconnect no matter how few
+// requests it has served. Well under the request-count cap's worst case, so
+// it is the tighter bound in practice; a well-behaved long-lived client
+// (autoguiding, ConformU) pays one extra handshake every few minutes, which
+// is negligible next to the per-request handshake keep-alive exists to avoid.
+constexpr int kMaxConnectionLifetimeSeconds = 300;
+
+// How many workers are held back for connections that have not been served
+// yet. A keep-alive connection parks a worker for up to
+// kKeepAliveIdleSeconds between requests, so without a reserve the pool's
+// size stops bounding concurrent REQUESTS (what config.h documents it as)
+// and starts bounding concurrent CONNECTIONS -- a browser tab alone opens
+// ~6, and a rig running NINA, PHD2 and the web UI can hold every worker
+// while a new client waits in an unbounded queue with no dequeue deadline.
+// Past the reserve, connections are answered and closed, which is exactly
+// the pre-keep-alive behaviour, so the degradation is graceful.
+//
+// Proportional rather than fixed, with a floor of one: a fixed reserve of a
+// few workers would disable keep-alive outright on the small pools the
+// config allows (thread_pool_size can be set as low as 1).
+//
+// Stopgap: the reactor removes the tradeoff entirely by parking idle
+// connections on a poll set rather than on a worker.
+constexpr std::size_t keepalive_worker_reserve(std::size_t pool_size) { return pool_size / 8 > 1 ? pool_size / 8 : 1; }
+
 // Upper bound on the request line + headers; larger header blocks are
 // rejected before any body is read.
 constexpr std::size_t kMaxHeaderBytes = std::size_t{64} * 1024;
@@ -380,24 +439,166 @@ void send_error(util::SocketHandle socket_fd, int status, const char* reason, co
     util::socket_send_all(socket_fd, response_str.c_str(), response_str.size());
 }
 
-// Read the full HTTP request: loop until the end-of-headers marker, then read
+// True when the client wants the connection kept open after this request
+// (RFC 7230 §6.3): HTTP/1.1 persists unless it says "Connection: close";
+// anything else (HTTP/1.0, or no version at all) closes unless it says
+// "Connection: keep-alive". The header is a comma-separated token list, so
+// match whole tokens rather than substrings.
+bool wants_keep_alive(const Request& request) {
+    std::string connection = request.get_header("connection");
+    std::transform(connection.begin(), connection.end(), connection.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    bool says_close = false;
+    bool says_keep_alive = false;
+    std::size_t start = 0;
+    while (start <= connection.size()) {
+        std::size_t comma = connection.find(',', start);
+        std::string token = connection.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        token.erase(0, token.find_first_not_of(" \t"));
+        token.erase(token.find_last_not_of(" \t") + 1);
+        if (token == "close") {
+            says_close = true;
+        } else if (token == "keep-alive") {
+            says_keep_alive = true;
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    if (says_close) {
+        return false;
+    }
+    if (request.http_version() != "HTTP/1.1") {
+        return says_keep_alive;
+    }
+    return true;
+}
+
+// Whether this exchange is one we understand well enough to leave the
+// connection open afterwards. Persistence is opt-in: wants_keep_alive says
+// what the client asked for, this says whether honouring it is safe.
+//
+// The distinction matters because the cost of being wrong is asymmetric. A
+// needless close costs one TCP handshake; persisting through an exchange we
+// framed incorrectly desynchronizes the stream, and the client reads our
+// leftover bytes as the head of its next response. Every framing gap this
+// server has (or grows later) should therefore degrade into a reconnect, not
+// a desync.
+//
+// Deliberately not re-checked here: the HTTP version and the Connection
+// tokens (wants_keep_alive owns those, and this is ANDed with it), and
+// Transfer-Encoding (read_request answers 501 and drops the connection
+// before routing, since an undecodable body means we cannot know where the
+// next request starts).
+bool may_persist(const Request& request, const Response& response) {
+    // An unknown method reaches the router as HttpMethod::UNKNOWN and is
+    // answered with a normal bodied error. That is fine for the response
+    // itself but wrong to persist through: HEAD is the common case, and a
+    // HEAD client discards headers, expects no body per RFC 7231 §4.3.2, and
+    // would read ours as its next response. Browsers, uptime monitors and
+    // reverse-proxy health checks all send HEAD at the web UI.
+    if (request.method() == HttpMethod::UNKNOWN) {
+        return false;
+    }
+    // Without Content-Length the response is framed by connection close, so
+    // it cannot share a connection with anything after it. Every router path
+    // sets a body (and therefore a length) today, and Response::to_string()
+    // now defaults the header when a handler does not, but this stays as the
+    // structural guard: a future bodyless response must close, not desync.
+    if (response.get_header("Content-Length").empty()) {
+        return false;
+    }
+    return true;
+}
+
+// Read one full HTTP request: loop until the end-of-headers marker, then read
 // exactly Content-Length body bytes (bounded by Request::kMaxBodyBytes).
+// `raw_request` may arrive holding bytes left over from the previous request
+// on a keep-alive connection (a pipelining client); any bytes past the end of
+// this request are handed back in `surplus` for the next call.
 // Returns false after sending an error response where possible (on a dead or
 // timed-out socket nothing can be sent); the caller closes the connection.
-bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
+//
+// `idle_timeout_pending`, when non-null, means the socket's SO_RCVTIMEO is
+// currently set to the short kKeepAliveIdleSeconds bound (the caller is
+// between requests on a keep-alive connection and does not yet know whether
+// the peer is idle or has already started sending). That short bound must
+// only govern the WAIT for the next request's first byte -- once it arrives,
+// this read is a normal in-progress request like any other and deserves the
+// same kSocketTimeoutSeconds per-recv budget request 1 gets, not a tighter
+// one just because it happens to be request 2+. So the first successful recv
+// below restores the normal timeout and clears the flag. Bytes carried over
+// from a pipelining client mean this request has ALREADY begun arriving, so
+// in that case the restore happens before any recv at all -- otherwise a
+// request whose headers were pre-carried but whose body trickles in later
+// would have its first body recv bound by the idle timeout, the same bug in
+// a different coat.
+bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus,
+                  bool* idle_timeout_pending) {
     char buffer[8192];
-    std::size_t header_end = std::string::npos;
 
     // Total-request wall-clock deadline. SO_RCVTIMEO bounds each individual
     // recv, but a peer trickling one byte per just-under-timeout interval
     // would pass every per-recv check and pin this worker indefinitely.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kRequestDeadlineSeconds);
 
-    // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv
-    while (true) {
+    // Returns false (fail closed, matching every other timeout-setting call
+    // on this connection) if the restore itself fails -- silently leaving the
+    // socket on the tighter idle timeout for the rest of this request would
+    // reintroduce the exact bug this restore exists to fix.
+    auto note_recv = [&]() {
+        if (idle_timeout_pending != nullptr && *idle_timeout_pending) {
+            if (!util::socket_set_recv_timeout(socket_fd, kSocketTimeoutSeconds)) {
+                return false;
+            }
+            *idle_timeout_pending = false;
+        }
+        return true;
+    };
+
+    // Carried-over bytes mean the idle wait is already over: restore the
+    // per-request budget before the first recv, not after it.
+    if (!raw_request.empty() && !note_recv()) {
+        return false;
+    }
+
+    // Skip any empty line(s) before the request line. RFC 7230 §3.5 says a
+    // server SHOULD do this, and on a persistent connection it matters:
+    // several client stacks leave a stray CRLF on the wire after a body, and
+    // Request::parse rejects an empty request line. Before keep-alive those
+    // bytes died with the connection; now they would 400 a session the client
+    // believes is still good. Re-applied after every recv, since a chunk can
+    // be nothing but padding.
+    auto strip_leading_crlf = [&raw_request]() {
+        std::size_t skip = 0;
+        while (raw_request.compare(skip, 2, "\r\n") == 0) {
+            skip += 2;
+        }
+        if (skip > 0) {
+            raw_request.erase(0, skip);
+        }
+    };
+
+    // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv.
+    // Carried-over bytes may already hold the terminator, so look before the
+    // first recv.
+    strip_leading_crlf();
+    std::size_t header_end = raw_request.find("\r\n\r\n");
+    while (header_end == std::string::npos) {
+        // Enforce the header-size cap before reading more: without a
+        // terminator the whole buffer is header so far.
+        if (raw_request.size() > kMaxHeaderBytes) {
+            send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
+            return false;
+        }
         int bytes_read = util::socket_recv(socket_fd, buffer, static_cast<int>(sizeof(buffer)));
         if (bytes_read <= 0) {
-            // Peer closed, error, or receive timeout — drop the connection
+            // Peer closed, error, or receive timeout — drop the connection.
+            // Between keep-alive requests this is the normal way out.
+            return false;
+        }
+        if (!note_recv()) {
             return false;
         }
         if (std::chrono::steady_clock::now() > deadline) {
@@ -405,20 +606,15 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
             return false;
         }
         raw_request.append(buffer, static_cast<std::size_t>(bytes_read));
+        strip_leading_crlf();
         header_end = raw_request.find("\r\n\r\n");
-        // Enforce the header-size cap on every iteration, including the one that
-        // finds the terminator — otherwise the terminating chunk could push the
-        // header block up to one recv buffer past the cap unchecked. When the
-        // terminator is found, only the bytes up to it count as headers (the
-        // rest is body); before that, the whole buffer is header so far.
-        const std::size_t header_bytes = (header_end != std::string::npos) ? header_end : raw_request.size();
-        if (header_bytes > kMaxHeaderBytes) {
-            send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
-            return false;
-        }
-        if (header_end != std::string::npos) {
-            break;
-        }
+    }
+    // The chunk that finds the terminator is size-checked too — otherwise it
+    // could push the header block up to one recv buffer past the cap
+    // unchecked. Only the bytes up to the terminator count as headers.
+    if (header_end > kMaxHeaderBytes) {
+        send_error(socket_fd, 431, "Request Header Fields Too Large", "Request headers too large");
+        return false;
     }
 
     // Parse Content-Length (case-insensitive) out of the header block
@@ -427,6 +623,20 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
         std::string headers = raw_request.substr(0, header_end + 2);
         std::transform(headers.begin(), headers.end(), headers.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        // Reject Transfer-Encoding outright: this server frames request
+        // bodies from Content-Length only, so a chunked body would be read
+        // as a zero-length body and its chunk framing left on the wire. That
+        // was harmless while every connection closed after one request; on a
+        // persistent connection those bytes are parsed as the NEXT request,
+        // which desynchronizes the stream (the client gets its response plus
+        // a spurious 400) and is request-smuggling-shaped behind any
+        // intermediary that does understand chunked. 501 is the honest
+        // answer for a transfer coding we do not implement (RFC 7230 §3.3.1);
+        // the connection closes because we cannot know where the body ended.
+        if (headers.find("\r\ntransfer-encoding:") != std::string::npos) {
+            send_error(socket_fd, 501, "Not Implemented", "Transfer-Encoding is not supported");
+            return false;
+        }
         auto pos = headers.find("\r\ncontent-length:");
         if (pos != std::string::npos) {
             // Reject duplicate Content-Length headers outright (RFC 7230 §3.3.2)
@@ -467,11 +677,21 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request) {
         if (bytes_read <= 0) {
             return false;
         }
+        if (!note_recv()) {
+            return false;
+        }
         if (std::chrono::steady_clock::now() > deadline) {
             send_error(socket_fd, 408, "Request Timeout", "Request took too long to arrive");
             return false;
         }
         raw_request.append(buffer, static_cast<std::size_t>(bytes_read));
+    }
+
+    // The body loop never over-reads, but the header phase can pull in the
+    // start of a pipelined next request; hand those bytes back to the caller.
+    if (raw_request.size() > expected_total) {
+        surplus.assign(raw_request, expected_total, std::string::npos);
+        raw_request.resize(expected_total);
     }
 
     return true;
@@ -489,21 +709,10 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
         return;
     }
 
-    // Read request (headers, then exactly Content-Length body bytes)
-    std::string raw_request;
-    if (!read_request(socket_fd, raw_request)) {
-        return;
-    }
-
-    // Parse request
-    Request request;
-    if (!request.parse(raw_request)) {
-        send_error(socket_fd, 400, "Bad Request", "Invalid request");
-        return;
-    }
-
-    // Stamp the peer address so the router can discriminate clients that
-    // send no ClientID in the per-client Connected registry (issue #163).
+    // Resolve the peer address once per connection so the router can
+    // discriminate clients that send no ClientID in the per-client Connected
+    // registry (issue #163).
+    std::string remote_address;
     {
         struct sockaddr_storage peer {};
         util::SocketLen peer_len = sizeof(peer);
@@ -526,20 +735,152 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
                 }
             }
         }
-        request.set_remote_address(addr_buf);
+        remote_address = addr_buf;
     }
 
-    // Generate transaction ID (thread-safe)
-    static std::atomic<std::uint32_t> transaction_counter{0};
-    std::uint32_t server_tx_id = ++transaction_counter;
+    // Count this worker as parked on a connection for as long as it stays in
+    // the serve loop below, so concurrent connections can be bounded against
+    // the pool size. Scoped so every exit path -- including the early returns
+    // for a malformed request, a failed send and a dropped peer -- decrements
+    // exactly once.
+    struct KeepAliveWorkerGuard {
+        std::atomic<std::size_t>& counter;
+        explicit KeepAliveWorkerGuard(std::atomic<std::size_t>& c) : counter(c) {
+            counter.fetch_add(1, std::memory_order_relaxed);
+        }
+        ~KeepAliveWorkerGuard() { counter.fetch_sub(1, std::memory_order_relaxed); }
+        KeepAliveWorkerGuard(const KeepAliveWorkerGuard&) = delete;
+        KeepAliveWorkerGuard& operator=(const KeepAliveWorkerGuard&) = delete;
+    } keepalive_worker_guard(keepalive_workers_);
 
-    // Route request
-    Response response = router_.route(request, server_tx_id);
+    // Serve requests on this connection until the client asks to close, the
+    // request is malformed, the idle gap runs out, or the send fails. Bytes
+    // read past the end of one request (a pipelining client) seed the next.
+    std::string carried;
+    bool first_request = true;
+    std::uint64_t requests_served = 0;
+    const auto connection_opened_at = std::chrono::steady_clock::now();
+    while (true) {
+        // Whether the socket's SO_RCVTIMEO is currently the short idle bound
+        // rather than the normal per-request one; read_request clears this
+        // (restoring kSocketTimeoutSeconds) the moment the peer's first byte
+        // of the new request actually arrives, so the 15s bound covers only
+        // the wait between requests, never the request itself.
+        bool idle_timeout_pending = false;
+        if (!first_request) {
+            // Between requests the peer may legitimately go quiet; bound how
+            // long an idle keep-alive connection can hold this worker.
+            if (!util::socket_set_recv_timeout(socket_fd, kKeepAliveIdleSeconds)) {
+                return;
+            }
+            idle_timeout_pending = true;
+        }
 
-    // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
-    std::string response_str = response.to_string();
-    if (!util::socket_send_all(socket_fd, response_str.c_str(), response_str.size())) {
-        util::log_warning("Failed to send full response: " + util::socket_error_message(util::socket_get_last_error()));
+        // Read request (headers, then exactly Content-Length body bytes)
+        std::string raw_request = std::move(carried);
+        carried.clear();
+        if (!read_request(socket_fd, raw_request, carried, &idle_timeout_pending)) {
+            return;
+        }
+
+        // Parse request
+        Request request;
+        if (!request.parse(raw_request)) {
+            send_error(socket_fd, 400, "Bad Request", "Invalid request");
+            return;
+        }
+        request.set_remote_address(remote_address);
+
+        bool keep_alive = wants_keep_alive(request);
+        ++requests_served;
+        const auto connection_age = std::chrono::steady_clock::now() - connection_opened_at;
+        if (requests_served >= kMaxRequestsPerConnection ||
+            connection_age >= std::chrono::seconds(kMaxConnectionLifetimeSeconds)) {
+            // Force a reconnect so this connection can't hold the worker
+            // forever -- by request count or by wall clock, whichever comes
+            // first. A fresh TCP handshake at either bound is negligible next
+            // to the per-request handshake this feature exists to avoid.
+            keep_alive = false;
+        }
+        const std::size_t pool_size = config_.thread_pool_size();
+        if (keep_alive &&
+            keepalive_workers_.load(std::memory_order_relaxed) + keepalive_worker_reserve(pool_size) > pool_size) {
+            // Parking this connection would hold a worker for up to
+            // kKeepAliveIdleSeconds while a client that has no connection yet
+            // waits in connection_queue_, which is unbounded and has no
+            // dequeue deadline. The caps above bound how long ONE connection
+            // lives; they do not bound how many workers are parked at once.
+            //
+            // A parked worker is blocked in recv and cannot notice the queue
+            // growing, so the decision has to be made here, on the way in.
+            // Under pressure the server degrades to close-per-request -- its
+            // behaviour before keep-alive existed -- instead of leaving new
+            // clients unserved for minutes.
+            //
+            // Stopgap. The reactor (see the connection-ownership notes in
+            // AGENTS.md) parks idle connections on a poll set instead of a
+            // worker, which removes the tradeoff and this check with it.
+            keep_alive = false;
+        }
+        if (!running_) {
+            // stop() joins every worker, and a worker only leaves this loop
+            // when the connection ends. Without this check a client that
+            // keeps sending (NINA/PHD2 polling) holds the worker -- and so
+            // stop() -- until the lifetime cap, long past systemd's 90s
+            // TimeoutStopSec. Measured: stop() blocked 26s behind a client
+            // sending every 2s, serving every one of its requests. Answer
+            // this request, tell the client to reconnect, and get out.
+            keep_alive = false;
+        }
+
+        // Generate transaction ID (thread-safe)
+        static std::atomic<std::uint32_t> transaction_counter{0};
+        std::uint32_t server_tx_id = ++transaction_counter;
+
+        // Route request
+        Response response = router_.route(request, server_tx_id);
+
+        // Persistence is opt-in: whatever the client asked for, only keep the
+        // connection open if this exchange is one we framed correctly.
+        keep_alive = keep_alive && may_persist(request, response);
+
+        // A handler that set its own Connection header can only narrow
+        // keep_alive to false, never widen it back to true past the count/
+        // lifetime caps above. Matched case-insensitively for consistency
+        // with how the request-side Connection header is parsed in
+        // wants_keep_alive -- no handler sets this today, but a
+        // differently-cased "Keep-Alive" would otherwise be silently treated
+        // as a close.
+        const std::string& connection_header = response.get_header("Connection");
+        if (!connection_header.empty()) {
+            std::string lower_connection_header = connection_header;
+            std::transform(lower_connection_header.begin(), lower_connection_header.end(),
+                           lower_connection_header.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            keep_alive = keep_alive && lower_connection_header == "keep-alive";
+        }
+        // Always rewrite the header to match the final decision (rather than
+        // only setting it when absent) -- otherwise a handler that had set
+        // "Connection: keep-alive" before the count/lifetime caps forced
+        // keep_alive to false would leave that stale header on the wire: the
+        // client would read "keep-alive" while the server closes the socket
+        // right after sending, a protocol-violating response (review round
+        // 3). Explicitly writing "close" here is identical to leaving the
+        // header unset, since Response::to_string() defaults to "close".
+        response.set_header("Connection", keep_alive ? "keep-alive" : "close");
+
+        // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
+        std::string response_str = response.to_string();
+        if (!util::socket_send_all(socket_fd, response_str.c_str(), response_str.size())) {
+            util::log_warning("Failed to send full response: " +
+                              util::socket_error_message(util::socket_get_last_error()));
+            return;
+        }
+
+        if (!keep_alive) {
+            return;
+        }
+        first_request = false;
     }
 }
 
@@ -568,7 +909,13 @@ void Server::worker_thread() {
         if (client_fd != util::kInvalidSocket) {
             // Handle the connection
             handle_connection(client_fd);
-            util::socket_close(client_fd);
+            // Every exit path in handle_connection lands here, so this is the
+            // single place a client socket is closed. Close gracefully: with
+            // keep-alive the peer often has its next request already in our
+            // receive queue when we decide to stop, and a plain close() on a
+            // socket with unread bytes sends RST, which makes the peer
+            // discard the response we just sent it.
+            util::socket_close_graceful(client_fd);
         }
     }
 }

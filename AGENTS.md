@@ -761,6 +761,186 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   back an ephemeral mutex). If you add any new
   endpoint that connects or disconnects a device, route the decision
   through this registry and take the op mutex.
+- **Connections are persistent (HTTP keep-alive) — never emit
+  `Connection: close` on a normal response** (2026-09-07). `Response::to_string()`
+  defaulted to `Connection: close`, and `Server::handle_connection` served one
+  request per TCP connection — real non-compliance with the README's existing
+  keep-alive claim, and unnecessary overhead for every long-lived Alpaca
+  client (NINA, PHD2, ConformU). `handle_connection` now loops over requests
+  on one connection (RFC 7230 §6.3: HTTP/1.1 persists unless the client sends
+  `Connection: close`, HTTP/1.0 closes unless it sends `Connection: keep-alive`),
+  carries pipelined surplus bytes into the next `read_request`, marks the
+  response `Connection: keep-alive`, respects a handler-set `Connection`
+  header, and drops an idle connection after `kKeepAliveIdleSeconds` (15 s,
+  well under the per-request slowloris bound) so idle clients cannot pin the
+  worker pool. Error responses (`send_error`) still close. Regression tests:
+  the keep-alive cases in `AlpacaHTTP/tests/test_server_socket.cpp`.
+  **Not a fix for ConformU FAST-target misses** (Raspberry Pi 3B, ZWO
+  ASI533MC Pro and Sky-Watcher EQM-35): three properties per device
+  (`CameraState`/`CameraXSize`/`SensorType`; `DeviceState`/`AlignmentMode`/
+  `EquatorialSystem`) deterministically miss the 0.1 s FAST target by
+  ~150-200 ms across every run, while the server itself answers in 2-8 ms and
+  ~50 other FAST members on the same run are within 20 ms — so it looked like
+  a transport cost, and an initial `strace` on both processes (server, and
+  ConformU under strace) showed the gap followed by a `socket()`/`connect()`
+  pair, which read as ConformU stalling before opening its next connection.
+  That reading was wrong: re-run after this fix, with `strace` confirming a
+  single `accept()` for the entire 274-request run (one TCP connection, real
+  keep-alive), reproduced the identical three misses at the identical
+  magnitudes. Correlated tracing during a live miss showed the server idle in
+  `recvfrom` the whole gap while ConformU's only activity was
+  `futex`/`epoll_pwait` — a stall entirely inside ConformU's own .NET process,
+  unrelated to sockets. Diagnostic rule this earns: a FAST miss on a constant
+  getter that curl answers in ~2 ms is not driver latency, but don't assume
+  transport either — the `socket()`/`connect()` adjacency in the first trace
+  was coincidental, not causal; correlate both processes on one clock and
+  confirm before writing up the mechanism. Unresolved and outside
+  AlpacaBridge's control; a Pi 5 (faster cores) is the next thing worth
+  trying, not another transport change.
+- **Persistent connections are capped at `kMaxRequestsPerConnection` (1000
+  requests)** (2026-09-08). Making connections persistent removed the
+  per-request handshake cost, but also removed the only thing that used to
+  free a worker automatically: with a fixed 32-thread pool and no
+  backpressure on `connection_queue_`, a handful of clients that simply keep
+  a connection alive (sending a request at least every `kKeepAliveIdleSeconds`)
+  — accidentally, from several long-lived Alpaca clients, or adversarially —
+  could each pin one worker indefinitely. `handle_connection` now forces
+  `keep_alive = false` once a connection has served this many requests,
+  which cannot be overridden back to keep-alive by the client or a handler's
+  own `Connection` header. The reconnect this costs a well-behaved long-lived
+  client (PHD2 autoguiding, ConformU) is negligible next to the per-request
+  handshake this whole feature exists to avoid. **Also capped by wall clock**:
+  `kMaxConnectionLifetimeSeconds` (300s) forces the same reconnect regardless
+  of request count, since the count cap alone still lets a connection that
+  sends one request every `kKeepAliveIdleSeconds` hold a worker for up to
+  ~4 hours (1000 × 15s) and simply reconnect afterward (PR #2 review, round
+  2). The handler-set `Connection` header comparison (`server.cpp`) is
+  case-insensitive for the same reason `wants_keep_alive` is on the request
+  side. `note_recv()`'s restore of the normal per-request timeout after the
+  idle wait fails closed (drops the connection) like every other
+  timeout-setting call in this path, rather than silently continuing on the
+  tighter 15s budget if the `setsockopt` call itself fails. The outgoing
+  `Connection` header is now always rewritten to match the final `keep_alive`
+  decision, rather than only set when absent -- a handler that had set
+  `Connection: keep-alive` before the count/lifetime caps forced closure
+  would otherwise leave that stale header on the wire, telling the client
+  keep-alive while the server closes right after (review round 3). Not
+  reachable via any handler today, fixed defensively.
+- **`kMaxRequestsPerConnection` hardware-validated** (2026-09-09, EQM-35 rig
+  Pi 3B, `astropi`): a standalone build of this branch was run on a spare
+  port (6900, discovery off, no vendor devices attached — the live
+  `alpacabridge.service` on 6800 and the mount's serial port were untouched
+  throughout) and driven with a script sending 1000 requests down one TCP
+  connection. Requests 1-999 each answered `Connection: keep-alive`; request
+  1000 answered `Connection: close` and the server actually closed the
+  socket (confirmed via a follow-up `recv` returning EOF, not just the
+  header). All 1000 requests completed in 0.33s with no dropped or stuck
+  connection, and a fresh reconnect immediately after got `keep-alive`
+  again, confirming the server isn't left in a bad state post-cap. Only
+  the x86 loopback unit test (`test_server_socket.cpp`) had exercised this
+  before; this is the first real-network, real-hardware confirmation the
+  count-based cap actually fires.
+- **No ConformU run**, deliberately: this change touches only `AlpacaHTTP`'s
+  connection-handling layer, not any device driver, so there is no new
+  device behavior to conformance-check.
+- **The keep-alive loop checks `running_` and closes on the next response
+  once `stop()` has begun** (2026-09-09, final review pass). `stop()` joins
+  every worker, and a worker only leaves `handle_connection`'s loop when the
+  connection ends — so an ACTIVE client (NINA/PHD2 polling every second)
+  held its worker, and therefore `stop()`, until the 300s lifetime cap.
+  systemd's default 90s `TimeoutStopSec` would SIGKILL the service first,
+  and the same applies to the management restart/shutdown endpoints, which
+  go through `stop()` on the main thread. Before keep-alive a worker only
+  ever held one request, so this was a genuine regression the caps did not
+  cover: they bound how long a connection may live, not whether it outlives
+  the server. Measured with a client sending every 2s: `stop()` blocked
+  26,006 ms and served 13 further requests before the check, 1 ms after.
+  Worst case now is one idle gap (`kKeepAliveIdleSeconds`, 15s) for a
+  worker blocked in `recv` — the same order as the pre-existing 30s
+  per-request bound. Regression test: the last case in
+  `AlpacaHTTP/tests/test_server_socket.cpp` (it has to be last; it stops
+  the server).
+- **`Response` header names compare case-insensitively** (2026-09-09, review
+  round 5). `Response::headers_` was a plain case-sensitive map while
+  `Request` lowercases its keys on parse, so the keep-alive override's
+  `get_header("Connection")` / `set_header("Connection", ...)` would have
+  missed a handler's `connection: keep-alive` and emitted BOTH lines — the
+  stale-keep-alive-on-a-closing-socket bug (round 3) back through a different
+  door. `set_header` now replaces any other spelling of the field (keeping
+  the caller's casing for the wire), `get_header` and `to_string()`'s
+  default-`close` check match case-insensitively. No handler sets a
+  `Connection` header today; the override exists precisely for the day one
+  does. Test: the `Response` case at the end of `test_routing.cpp`.
+- **Pre-carried (pipelined) headers restore the per-request timeout before
+  the first recv** (same review round). `read_request` restored the 30s
+  budget only *after* a successful recv, so when request B's headers had
+  arrived in the same write as request A (carried over, terminator already
+  present, header loop does no recv) B's first *body* recv still ran under
+  the 15s idle bound — the slow-body bug fixed earlier, reached through
+  carry-over. Now non-empty carried bytes mean "this request has begun" and
+  the restore happens up front. Test: the pre-carried-headers case in
+  `test_server_socket.cpp` (A complete + B's headers in one write, 16s gap,
+  then B's body).
+- **Persistence is opt-in: a connection may only stay open for an exchange we
+  framed correctly** (2026-09-08, PR #233 review). Keep-alive turned every
+  latent framing gap into a stream desync, because leftover or mis-framed
+  bytes are now read as the *next* request instead of dying with the
+  connection. `may_persist(request, response)` in `server.cpp` is the single
+  gate: an unknown method or a response without `Content-Length` is answered
+  normally and then closed. Do not add a per-bug patch for each new framing
+  construct — widen the gate instead, so the failure mode of anything we do
+  not understand is one extra TCP handshake rather than a client reading our
+  bytes as the head of its next response. In particular **do not add `HEAD` to
+  `Request::parse_method`**: it would route, and the router answers with a
+  body that a HEAD client must not receive. Tests: the HEAD and chunked cases
+  in `test_server_socket.cpp`, and the `Content-Length` default case in
+  `test_routing.cpp` (every `Response::to_string()` emits exactly one).
+- **`Transfer-Encoding` is rejected with 501, not ignored** (same review).
+  `read_request` frames bodies from `Content-Length` only, so a chunked body
+  read as zero-length left its chunk framing on the wire to be parsed as the
+  next request — request-smuggling-shaped behind any intermediary that does
+  understand chunked. If chunked support is ever added, it must be added to
+  the body reader *and* the gate above, together. Test: the chunked case in
+  `test_server_socket.cpp`.
+- **Close the write side and drain before `close()`** (same review). On Linux
+  `close()` on a socket with unread bytes queued sends RST, and the peer's
+  stack then discards its receive buffer — including a response we sent that
+  it has not read. Keep-alive makes this ordinary: at the request-count and
+  lifetime caps and on the `stop()`/restart path, a polling client usually has
+  its next request already in flight. Use `util::socket_close_graceful`, never
+  a bare `util::socket_close`, on a **client** socket. The drain budget is
+  deliberately short (100 ms x 4) so it cannot become the worker-pinning
+  problem it sits next to. `Server::worker_thread` is the single client-close
+  site; the listener closed by `stop()` is not a client connection. Test: the
+  graceful-close case in `test_server_socket.cpp` (a `Connection: close`
+  request with 10 KB of trailing bytes the server never reads; on Linux a
+  bare `close()` still delivered the queued response but ended the
+  connection in `ECONNRESET` instead of EOF, and Windows stacks discard the
+  queued response outright).
+- **`thread_pool_size` bounds concurrent REQUESTS, not connections — keep it
+  that way** (same review). A parked keep-alive connection holds a worker for
+  up to `kKeepAliveIdleSeconds`, so without a bound the pool's documented
+  meaning (`config.h`: "32 concurrent requests") silently became a cap on
+  concurrent *connections*; a browser tab alone opens ~6, and a new client
+  then waits in `connection_queue_`, which is unbounded and has no dequeue
+  deadline. `keepalive_worker_reserve()` holds back a proportional slice
+  (floor of 1, since `thread_pool_size` may be 1) and forces a close once the
+  pool nears saturation, degrading to pre-keep-alive close-per-request. This
+  is a **stopgap**: the real fix is to park idle connections on a poll set
+  rather than on a worker, which also removes the `SO_RCVTIMEO` restore
+  dance (`idle_timeout_pending`/`note_recv`) that two separate review rounds
+  found bugs in. Test: the pool-pressure case in `test_server_socket.cpp`
+  (own server, `set_thread_pool_size(2)`, on port 6872). It asserts the
+  first connection is kept alive and only the pool-filling one is closed,
+  so a reserve that silently disables keep-alive on small pools (the
+  original fixed-reserve-of-4 design did exactly that) fails it rather than
+  passing the late-client check vacuously.
+- **Test-suite hygiene for socket tests** (same review). `peer_closed()` must
+  save and restore `SO_RCVTIMEO` — leaving its short budget on the socket made
+  every later `read_one_response()` flaky on loaded CI and reported a slow
+  response as "server closed". The test `send_all` must pass `MSG_NOSIGNAL`,
+  since several cases deliberately provoke a server-side close and the suite
+  installs no SIGPIPE handler.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging

@@ -16,6 +16,8 @@
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -2071,6 +2073,57 @@ int main() {
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         }
+    }
+
+    // Response header names are case-insensitive (RFC 7230 §3.2). The server's
+    // keep-alive override does get_header("Connection") then set_header(
+    // "Connection", ...) on top of whatever a handler set; with a
+    // case-sensitive map a handler's "connection: keep-alive" would survive
+    // beside the server's "Connection: close" and BOTH would go on the wire,
+    // contradicting each other on a socket the server is about to close.
+    {
+        alpacahttp::Response response;
+        response.set_header("connection", "keep-alive");
+        EXPECT(response.get_header("Connection") == "keep-alive");
+        response.set_header("Connection", "close");
+        EXPECT(response.get_header("connection") == "close");
+        const std::string wire = response.to_string();
+        std::size_t occurrences = 0;
+        std::string lower = wire;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        for (std::size_t pos = lower.find("\r\nconnection:"); pos != std::string::npos;
+             pos = lower.find("\r\nconnection:", pos + 1)) {
+            ++occurrences;
+        }
+        EXPECT(occurrences == 1);
+        EXPECT(wire.find("Connection: close\r\n") != std::string::npos);
+        // And the default still applies when nothing set it, under any casing.
+        alpacahttp::Response bare;
+        EXPECT(bare.to_string().find("Connection: close\r\n") != std::string::npos);
+    }
+
+    // Every response carries a Content-Length, so none is framed by
+    // connection close (unframeable on a persistent connection). A response
+    // with no body gets "Content-Length: 0"; set_body() already sets the
+    // header, and to_string() must not emit a second one beside it.
+    {
+        alpacahttp::Response bare;
+        EXPECT(bare.to_string().find("Content-Length: 0\r\n") != std::string::npos);
+
+        alpacahttp::Response with_body;
+        with_body.set_body("{}");
+        const std::string wire = with_body.to_string();
+        std::string lower = wire;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::size_t occurrences = 0;
+        for (std::size_t pos = lower.find("\r\ncontent-length:"); pos != std::string::npos;
+             pos = lower.find("\r\ncontent-length:", pos + 1)) {
+            ++occurrences;
+        }
+        EXPECT(occurrences == 1);
+        EXPECT(wire.find("Content-Length: 2\r\n") != std::string::npos);
     }
 
     std::cout << "All routing tests passed!\n";
