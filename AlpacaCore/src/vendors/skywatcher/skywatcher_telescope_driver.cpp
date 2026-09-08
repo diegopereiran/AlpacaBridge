@@ -1502,9 +1502,11 @@ public:
             // hence the same same_axis_owner idiom already used by the duty-
             // cycle worker above (same rationale, same comment there: "the
             // global generation cannot tell a same-axis supersession from an
-            // unrelated other-axis command").
+            // unrelated other-axis command"). manual_axis_slewing_[axis] is
+            // NOT part of this check (unlike the duty-cycle worker's copy):
+            // it was just unconditionally cleared under this same lock a few
+            // lines above, so it can never be true here (PR #1 review).
             const bool same_axis_owner = goto_in_progress_ || parking_ || homing_ || slewing_cached_ ||
-                                         manual_axis_slewing_[axis] ||
                                          (pulse_guiding_active_ && pulse_axis_ == channel);
             const bool generation_ok = motion_generation_ == stop_task_generation || !same_axis_owner;
             if (channel == kAxisRa && tracking_ && generation_ok) {
