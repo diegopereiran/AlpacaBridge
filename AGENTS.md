@@ -820,6 +820,20 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   idle wait fails closed (drops the connection) like every other
   timeout-setting call in this path, rather than silently continuing on the
   tighter 15s budget if the `setsockopt` call itself fails.
+- **`kMaxRequestsPerConnection` hardware-validated** (2026-09-09, EQM-35 rig
+  Pi 3B, `astropi`): a standalone build of this branch was run on a spare
+  port (6900, discovery off, no vendor devices attached — the live
+  `alpacabridge.service` on 6800 and the mount's serial port were untouched
+  throughout) and driven with a script sending 1000 requests down one TCP
+  connection. Requests 1-999 each answered `Connection: keep-alive`; request
+  1000 answered `Connection: close` and the server actually closed the
+  socket (confirmed via a follow-up `recv` returning EOF, not just the
+  header). All 1000 requests completed in 0.33s with no dropped or stuck
+  connection, and a fresh reconnect immediately after got `keep-alive`
+  again, confirming the server isn't left in a bad state post-cap. Only
+  the x86 loopback unit test (`test_server_socket.cpp`) had exercised this
+  before; this is the first real-network, real-hardware confirmation the
+  count-based cap actually fires.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging
