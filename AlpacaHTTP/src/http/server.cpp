@@ -692,12 +692,13 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
         // Route request
         Response response = router_.route(request, server_tx_id);
 
-        // A handler that set its own Connection header wins; otherwise mark
-        // the connection persistent (Response defaults to "close"). Matched
-        // case-insensitively for consistency with how the request-side
-        // Connection header is parsed in wants_keep_alive -- no handler sets
-        // this today, but a differently-cased "Keep-Alive" would otherwise be
-        // silently treated as a close.
+        // A handler that set its own Connection header can only narrow
+        // keep_alive to false, never widen it back to true past the count/
+        // lifetime caps above. Matched case-insensitively for consistency
+        // with how the request-side Connection header is parsed in
+        // wants_keep_alive -- no handler sets this today, but a
+        // differently-cased "Keep-Alive" would otherwise be silently treated
+        // as a close.
         const std::string& connection_header = response.get_header("Connection");
         if (!connection_header.empty()) {
             std::string lower_connection_header = connection_header;
@@ -705,9 +706,16 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
                            lower_connection_header.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             keep_alive = keep_alive && lower_connection_header == "keep-alive";
-        } else if (keep_alive) {
-            response.set_header("Connection", "keep-alive");
         }
+        // Always rewrite the header to match the final decision (rather than
+        // only setting it when absent) -- otherwise a handler that had set
+        // "Connection: keep-alive" before the count/lifetime caps forced
+        // keep_alive to false would leave that stale header on the wire: the
+        // client would read "keep-alive" while the server closes the socket
+        // right after sending, a protocol-violating response (review round
+        // 3). Explicitly writing "close" here is identical to leaving the
+        // header unset, since Response::to_string() defaults to "close".
+        response.set_header("Connection", keep_alive ? "keep-alive" : "close");
 
         // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
         std::string response_str = response.to_string();

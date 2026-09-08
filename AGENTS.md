@@ -819,7 +819,13 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   side. `note_recv()`'s restore of the normal per-request timeout after the
   idle wait fails closed (drops the connection) like every other
   timeout-setting call in this path, rather than silently continuing on the
-  tighter 15s budget if the `setsockopt` call itself fails.
+  tighter 15s budget if the `setsockopt` call itself fails. The outgoing
+  `Connection` header is now always rewritten to match the final `keep_alive`
+  decision, rather than only set when absent -- a handler that had set
+  `Connection: keep-alive` before the count/lifetime caps forced closure
+  would otherwise leave that stale header on the wire, telling the client
+  keep-alive while the server closes right after (review round 3). Not
+  reachable via any handler today, fixed defensively.
 - **`kMaxRequestsPerConnection` hardware-validated** (2026-09-09, EQM-35 rig
   Pi 3B, `astropi`): a standalone build of this branch was run on a spare
   port (6900, discovery off, no vendor devices attached — the live
