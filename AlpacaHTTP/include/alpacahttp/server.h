@@ -126,6 +126,7 @@ private:
     void close_connection(ConnectionPtr conn, bool graceful);
     void wake_reactor();
     void close_wake_pipe();
+    void reset_queues_for_start();
     void handle_shutdown_request();
     void handle_restart_request();
 

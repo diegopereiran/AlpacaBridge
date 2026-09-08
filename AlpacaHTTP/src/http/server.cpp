@@ -59,17 +59,41 @@ Server::~Server() {
     close_wake_pipe();
 }
 
+// Prepare the queues for a (re)start. Both are expected to be empty: stop()
+// joins the reactor, which closes what it held, and the workers, which drain
+// ready_queue_. Anything still here is a connection nobody owns, so it is
+// closed through close_connection rather than dropped, which is also what
+// keeps live_connections_ exact. The counter itself is never reset: every
+// connection is counted once at accept and once at close, whichever server
+// generation each happens in, so a connection that outlives a restart (a
+// worker detached because stop() was called on it) still balances.
+void Server::reset_queues_for_start() {
+    std::deque<ConnectionPtr> leftover_ready;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        shutdown_workers_ = false;
+        leftover_ready.swap(ready_queue_);
+    }
+    std::vector<ConnectionPtr> leftover_incoming;
+    {
+        std::lock_guard<std::mutex> lock(reactor_mutex_);
+        leftover_incoming.swap(reactor_incoming_);
+    }
+    for (auto& conn : leftover_ready) {
+        close_connection(std::move(conn), true);
+    }
+    for (auto& conn : leftover_incoming) {
+        close_connection(std::move(conn), true);
+    }
+}
+
 void Server::start() {
     if (running_) {
         return;
     }
 
     shutdown_requested_ = false;
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        shutdown_workers_ = false;
-        ready_queue_.clear();
-    }
+    reset_queues_for_start();
     running_ = true;
     run_server();
 }
@@ -80,11 +104,7 @@ void Server::start_async() {
     }
 
     shutdown_requested_ = false;
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        shutdown_workers_ = false;
-        ready_queue_.clear();
-    }
+    reset_queues_for_start();
     running_ = true;
     server_thread_ = std::thread(&Server::run_server, this);
 }
@@ -349,9 +369,7 @@ void Server::run_server() {
     {
         std::lock_guard<std::mutex> lock(reactor_mutex_);
         reactor_accepting_ = true;
-        reactor_incoming_.clear();
     }
-    live_connections_ = 0;
     reactor_thread_ = std::thread(&Server::reactor_loop, this);
 
     // Start worker thread pool for handling concurrent requests

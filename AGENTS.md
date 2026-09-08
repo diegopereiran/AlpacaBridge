@@ -954,12 +954,35 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - Do not reintroduce a worker-side counter or reserve: the previous design
     counted busy workers as parked and pushed clients to close-per-request at
     exactly the busiest moments (review of #233).
+  - `live_connections_` is exact by construction (one increment at accept,
+    one decrement in `close_connection`) and is **never reset**; a
+    connection that straddles a management restart balances in whichever
+    generation it closes. `reset_queues_for_start()` closes anything left in
+    `ready_queue_`/`reactor_incoming_` through `close_connection` rather than
+    clearing it. (PR #235 review flagged a start-time reset as an underflow
+    that would gate `accept()` forever; the restart endpoint runs `stop()` on
+    the router's detached thread, so every connection is already closed and
+    the count already zero before the reset ran, but the reset was wrong on
+    principle and is gone.)
+  - Restart-path tests must not poll `is_running()` right after the restart
+    response: the router fires the callback 100 ms later on a detached
+    thread, so a true seen before `stop()` begins is the OLD generation, and
+    a client connecting then lands in a listener about to close and reads a
+    reset. Wait for a parked bystander to see EOF (proof `stop()` ran), then
+    for `is_running()`, then retry `connect()` (it goes true before the new
+    listener is bound). And lines "missing" from a test log after an
+    `EXPECT` abort are usually buffered stdout lost at `abort()`, not a hang;
+    confirm with a backtrace (`pidof test_server_socket`, never `pgrep -f`
+    with a pattern that matches your own shell) before chasing one.
   Tests in `test_server_socket.cpp`: the reactor pool case (2 workers, 4
   idle keep-alive connections all kept alive and all served again, 3
   connect-and-never-send clients, a late client still served), the
   lifetime-cap case (2 s cap, own server), the max-connections case (bound
   of 2, third client waits in the backlog and is served once one is
-  released), and the idle-parked assertions in the final `stop()` case. On
+  released), the restart case (two management restarts back to back on a
+  bounded server, each with a parked bystander closed and three fresh
+  clients served afterwards), and the idle-parked assertions in the final
+  `stop()` case. On
   the pre-reactor design the pool case fails at its second keep-alive
   assertion and the `stop()` case fails on a 14 s stop.
 - **Test-suite hygiene for socket tests** (same review). `peer_closed()` must

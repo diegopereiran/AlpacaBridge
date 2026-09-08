@@ -651,6 +651,92 @@ int main() {
         }
     }
 
+    // The management restart endpoint tears the server down and brings it
+    // back on a detached thread while the requesting client's connection is
+    // still alive. Connection accounting (live_connections_, which gates
+    // accept()) must survive that: a counter reset on start, or a queue
+    // cleared without closing what it held, would let a connection that
+    // straddles the restart drive the count below zero and block every
+    // later accept. Two restarts back to back, each followed by a fresh
+    // client that must be served, and a keep-alive client that lived
+    // through the restart and is closed rather than leaked.
+    {
+        alpacahttp::Config restart_config;
+        restart_config.set_http_port(6875);
+        restart_config.set_discovery_enabled(false);
+        restart_config.set_server_name("TestServerRestart");
+        restart_config.set_max_connections(3);
+        alpacahttp::Server restart_server(restart_config);
+        restart_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (restart_server.is_running()) {
+            const std::uint16_t restart_port = restart_config.http_port();
+            const std::string restart_request =
+                "PUT /management/restart HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+            struct timeval tv {};
+            tv.tv_sec = 5;
+
+            for (int round = 0; round < 2; ++round) {
+                // A bystander parked on the reactor across the restart.
+                int bystander = connect_local(restart_port);
+                EXPECT(bystander >= 0);
+                std::string bystander_carry;
+                send_all(bystander, kGet11);
+                EXPECT(read_one_response(bystander, bystander_carry).find("Connection: keep-alive\r\n") !=
+                       std::string::npos);
+
+                int fd = connect_local(restart_port);
+                EXPECT(fd >= 0);
+                ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                std::string carry;
+                send_all(fd, restart_request);
+                std::string r = read_one_response(fd, carry);
+                EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
+                ::close(fd);
+
+                // The restart runs on a detached thread 100 ms after the
+                // response, so polling is_running() here would race it (a
+                // true seen before stop() begins is the OLD generation, and
+                // a client connecting then lands in a listener about to be
+                // closed and gets a reset). Wait for proof the restart
+                // happened instead: stop() closes the parked bystander.
+                EXPECT(peer_closed(bystander, 5000));
+                ::close(bystander);
+                // Then for the new generation to be up. is_running() goes
+                // true before the new listener is bound, so retry connect.
+                bool back = false;
+                for (int i = 0; i < 50 && !back; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    back = restart_server.is_running();
+                }
+                EXPECT(back);
+
+                // New generation accepts and serves, as many times as the
+                // bound allows: a drifted counter would refuse all of them.
+                for (int i = 0; i < 3; ++i) {
+                    int after = -1;
+                    for (int attempt = 0; attempt < 50 && after < 0; ++attempt) {
+                        after = connect_local(restart_port);
+                        if (after < 0) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
+                    }
+                    EXPECT(after >= 0);
+                    ::setsockopt(after, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                    std::string after_carry;
+                    send_all(after, kGet11);
+                    std::string ra = read_one_response(after, after_carry);
+                    EXPECT(ra.rfind("HTTP/1.1 200 ", 0) == 0);
+                    ::close(after);
+                }
+            }
+            restart_server.stop();
+        } else {
+            std::cout << "  (skipped restart case: port 6875 unavailable)\n";
+        }
+    }
+
     // Closing must not destroy a response the client has not read yet. On
     // Linux, close() on a socket with unread bytes in its receive queue sends
     // RST instead of FIN, and the peer's stack then discards its own receive
