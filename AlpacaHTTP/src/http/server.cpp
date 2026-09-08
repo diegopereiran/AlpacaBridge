@@ -389,6 +389,19 @@ constexpr int kKeepAliveIdleSeconds = 15;
 // forbid outright) and adversarial ones to give up a worker periodically.
 constexpr std::uint64_t kMaxRequestsPerConnection = 1000;
 
+// Upper bound on how long a single connection may stay persistent, regardless
+// of request count. kMaxRequestsPerConnection alone still lets a connection
+// that sends one request every kKeepAliveIdleSeconds legitimately hold a
+// worker for up to ~4 hours (1000 * 15s), and a client that simply reconnects
+// immediately afterward repeats that indefinitely (PR #2 review). This is a
+// second, independent cap on the same failure mode: once a connection has
+// been open this long, the NEXT response forces a reconnect no matter how few
+// requests it has served. Well under the request-count cap's worst case, so
+// it is the tighter bound in practice; a well-behaved long-lived client
+// (autoguiding, ConformU) pays one extra handshake every few minutes, which
+// is negligible next to the per-request handshake keep-alive exists to avoid.
+constexpr int kMaxConnectionLifetimeSeconds = 300;
+
 // Upper bound on the request line + headers; larger header blocks are
 // rejected before any body is read.
 constexpr std::size_t kMaxHeaderBytes = std::size_t{64} * 1024;
@@ -458,7 +471,7 @@ bool wants_keep_alive(const Request& request) {
 // here at all and the flag is left for the caller to resolve on its own next
 // read (nothing was ever idle-timed against this request).
 bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus,
-                   bool* idle_timeout_pending) {
+                  bool* idle_timeout_pending) {
     char buffer[8192];
 
     // Total-request wall-clock deadline. SO_RCVTIMEO bounds each individual
@@ -466,11 +479,18 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
     // would pass every per-recv check and pin this worker indefinitely.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kRequestDeadlineSeconds);
 
+    // Returns false (fail closed, matching every other timeout-setting call
+    // on this connection) if the restore itself fails -- silently leaving the
+    // socket on the tighter idle timeout for the rest of this request would
+    // reintroduce the exact bug this restore exists to fix.
     auto note_recv = [&]() {
         if (idle_timeout_pending != nullptr && *idle_timeout_pending) {
-            util::socket_set_recv_timeout(socket_fd, kSocketTimeoutSeconds);
+            if (!util::socket_set_recv_timeout(socket_fd, kSocketTimeoutSeconds)) {
+                return false;
+            }
             *idle_timeout_pending = false;
         }
+        return true;
     };
 
     // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv.
@@ -490,7 +510,9 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
             // Between keep-alive requests this is the normal way out.
             return false;
         }
-        note_recv();
+        if (!note_recv()) {
+            return false;
+        }
         if (std::chrono::steady_clock::now() > deadline) {
             send_error(socket_fd, 408, "Request Timeout", "Request took too long to arrive");
             return false;
@@ -552,7 +574,9 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
         if (bytes_read <= 0) {
             return false;
         }
-        note_recv();
+        if (!note_recv()) {
+            return false;
+        }
         if (std::chrono::steady_clock::now() > deadline) {
             send_error(socket_fd, 408, "Request Timeout", "Request took too long to arrive");
             return false;
@@ -617,6 +641,7 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
     std::string carried;
     bool first_request = true;
     std::uint64_t requests_served = 0;
+    const auto connection_opened_at = std::chrono::steady_clock::now();
     while (true) {
         // Whether the socket's SO_RCVTIMEO is currently the short idle bound
         // rather than the normal per-request one; read_request clears this
@@ -650,11 +675,13 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
 
         bool keep_alive = wants_keep_alive(request);
         ++requests_served;
-        if (requests_served >= kMaxRequestsPerConnection) {
+        const auto connection_age = std::chrono::steady_clock::now() - connection_opened_at;
+        if (requests_served >= kMaxRequestsPerConnection ||
+            connection_age >= std::chrono::seconds(kMaxConnectionLifetimeSeconds)) {
             // Force a reconnect so this connection can't hold the worker
-            // forever; a fresh TCP handshake per kMaxRequestsPerConnection
-            // requests is negligible next to the per-request handshake this
-            // feature exists to avoid.
+            // forever -- by request count or by wall clock, whichever comes
+            // first. A fresh TCP handshake at either bound is negligible next
+            // to the per-request handshake this feature exists to avoid.
             keep_alive = false;
         }
 
@@ -666,10 +693,18 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
         Response response = router_.route(request, server_tx_id);
 
         // A handler that set its own Connection header wins; otherwise mark
-        // the connection persistent (Response defaults to "close").
+        // the connection persistent (Response defaults to "close"). Matched
+        // case-insensitively for consistency with how the request-side
+        // Connection header is parsed in wants_keep_alive -- no handler sets
+        // this today, but a differently-cased "Keep-Alive" would otherwise be
+        // silently treated as a close.
         const std::string& connection_header = response.get_header("Connection");
         if (!connection_header.empty()) {
-            keep_alive = keep_alive && connection_header == "keep-alive";
+            std::string lower_connection_header = connection_header;
+            std::transform(lower_connection_header.begin(), lower_connection_header.end(),
+                           lower_connection_header.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            keep_alive = keep_alive && lower_connection_header == "keep-alive";
         } else if (keep_alive) {
             response.set_header("Connection", "keep-alive");
         }

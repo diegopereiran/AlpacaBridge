@@ -809,7 +809,17 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   which cannot be overridden back to keep-alive by the client or a handler's
   own `Connection` header. The reconnect this costs a well-behaved long-lived
   client (PHD2 autoguiding, ConformU) is negligible next to the per-request
-  handshake this whole feature exists to avoid.
+  handshake this whole feature exists to avoid. **Also capped by wall clock**:
+  `kMaxConnectionLifetimeSeconds` (300s) forces the same reconnect regardless
+  of request count, since the count cap alone still lets a connection that
+  sends one request every `kKeepAliveIdleSeconds` hold a worker for up to
+  ~4 hours (1000 × 15s) and simply reconnect afterward (PR #2 review, round
+  2). The handler-set `Connection` header comparison (`server.cpp`) is
+  case-insensitive for the same reason `wants_keep_alive` is on the request
+  side. `note_recv()`'s restore of the normal per-request timeout after the
+  idle wait fails closed (drops the connection) like every other
+  timeout-setting call in this path, rather than silently continuing on the
+  tighter 15s budget if the `setsockopt` call itself fails.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging

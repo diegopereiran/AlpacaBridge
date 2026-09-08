@@ -39,6 +39,9 @@ namespace {
 // Must match kMaxHeaderBytes in AlpacaHTTP/src/http/server.cpp (not exported).
 constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
 
+// Must match kMaxRequestsPerConnection in AlpacaHTTP/src/http/server.cpp (not exported).
+constexpr std::uint64_t kMaxRequestsPerConnection = 1000;
+
 // Send `data` to 127.0.0.1:port in two writes — the terminator-bearing tail
 // goes in the second write so we exercise the fixed path (the chunk that finds
 // \r\n\r\n must itself be size-checked). Returns the first line of the response,
@@ -272,6 +275,27 @@ int main() {
         ::close(fd);
     }
 
+    // A connection is force-closed after kMaxRequestsPerConnection requests,
+    // even though every one of them individually asked to keep the
+    // connection alive -- the worker-pinning mitigation added in response to
+    // the PR #2 review must actually fire, not just exist as an unused cap.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        for (std::uint64_t i = 1; i < kMaxRequestsPerConnection; ++i) {
+            send_all(fd, kGet11);
+            std::string r = read_one_response(fd, carry);
+            EXPECT(r.find("Connection: keep-alive\r\n") != std::string::npos);
+        }
+        EXPECT(!peer_closed(fd, 200));
+        send_all(fd, kGet11);
+        std::string last = read_one_response(fd, carry);
+        EXPECT(last.find("Connection: close\r\n") != std::string::npos);
+        EXPECT(peer_closed(fd, 2000));
+        ::close(fd);
+    }
+
     // A malformed request on a persistent connection gets 400 and a close.
     {
         int fd = connect_local(port);
@@ -306,8 +330,9 @@ int main() {
         EXPECT(r1.find("Connection: keep-alive\r\n") != std::string::npos);
 
         const std::string body = "{}";
-        std::string headers = "POST /nonexistent HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
-                               std::to_string(body.size()) + "\r\n\r\n";
+        std::string headers =
+            "POST /nonexistent HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + std::to_string(body.size()) +
+            "\r\n\r\n";
         send_all(fd, headers + body.substr(0, 1));
         // Longer than the 15s idle bound, shorter than the 30s per-request one.
         std::this_thread::sleep_for(std::chrono::seconds(16));
