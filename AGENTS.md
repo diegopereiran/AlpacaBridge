@@ -864,8 +864,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   waits out an idle gap at all: a request in flight is answered with
   `Connection: close`, a request already on the wire at the reactor's final
   zero-timeout poll is handed to the draining workers and answered the same
-  way, and an idle connection is closed at once (measured: 7 ms with three
-  parked clients; 14 s on the pre-reactor design with two). Regression test:
+  way, and idle connections are all sent FIN at once, given one shared
+  100 ms window, drained and closed (measured: 114 ms with three parked
+  clients; 14 s on the pre-reactor design with two). Regression test:
   the last case in `AlpacaHTTP/tests/test_server_socket.cpp` (it has to be
   last; it stops the server).
 - **`Response` header names compare case-insensitively** (2026-09-09, review
@@ -941,6 +942,20 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   this earns:
   - Never block in the reactor. Expired connections are handed to a worker
     marked `close_only` so the graceful drain happens off the poll thread.
+    The one exception is the final pass at `stop()`: after a zero-timeout
+    poll hands already-arrived requests to the draining workers, every
+    remaining idle socket gets `shutdown(SHUT_WR)`, one shared 100 ms
+    `poll()` so peers can react to the FIN and in-flight bytes can land,
+    then a non-blocking drain and `close()`. That is `socket_close_graceful`
+    applied to all of them in parallel; a plain `close()` straight after the
+    zero-timeout poll left a microsecond window for an RST (PR #235 review).
+  - Workers carry a generation number (`worker_generation_`, bumped by every
+    `run_server()`, waits notified). A worker that detached itself because
+    `stop()` was called on it (no current handler does; the management
+    endpoints restart on a detached thread) exits on the generation check
+    instead of surviving as an extra thread once `start()` clears
+    `shutdown_workers_`. The reactor keeps a self-detach branch too, but it
+    runs no handler code and cannot be the caller.
   - The reactor enforces only the idle gap (`kKeepAliveIdleSeconds`) and the
     first-request slowloris bound (`kSocketTimeoutSeconds`, so a client that
     connects and never sends costs no worker). Caps that should end with a

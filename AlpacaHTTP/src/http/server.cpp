@@ -129,6 +129,8 @@ void Server::stop() {
     }
     wake_reactor();
     if (reactor_thread_.joinable()) {
+        // The reactor runs no handler code, so it cannot be the caller;
+        // the self-detach is kept only so a future bug cannot deadlock here.
         if (reactor_thread_.get_id() == current_id) {
             reactor_thread_.detach();
         } else {
@@ -142,12 +144,18 @@ void Server::stop() {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         shutdown_workers_ = true;
     }
-    queue_condition_.notify_all();
+    ready_signal_.release(static_cast<std::ptrdiff_t>(worker_threads_.size()));
     for (auto& thread : worker_threads_) {
         if (!thread.joinable()) {
             continue;
         }
         if (thread.get_id() == current_id) {
+            // stop() was called from inside a request handler on this
+            // worker (not a path any current handler takes: the management
+            // restart/shutdown endpoints run it on a detached thread). It
+            // cannot join itself; it finishes its request, then exits on
+            // the generation check in worker_thread once the next
+            // run_server() bumps worker_generation_.
             thread.detach();
             continue;
         }
@@ -372,11 +380,22 @@ void Server::run_server() {
     }
     reactor_thread_ = std::thread(&Server::reactor_loop, this);
 
-    // Start worker thread pool for handling concurrent requests
+    // Start worker thread pool for handling concurrent requests. A new
+    // generation: any worker left over from the previous one (detached
+    // because stop() was called on it) wakes, sees its generation is stale,
+    // and exits instead of serving alongside these.
     std::size_t pool_size = config_.thread_pool_size();
+    std::uint64_t generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        generation = ++worker_generation_;
+    }
+    // Enough permits for a stale worker or two to wake and exit; the new
+    // workers absorb the rest as one empty wake each.
+    ready_signal_.release(static_cast<std::ptrdiff_t>(pool_size));
     worker_threads_.reserve(pool_size);
     for (size_t i = 0; i < pool_size; ++i) {
-        worker_threads_.emplace_back(&Server::worker_thread, this);
+        worker_threads_.emplace_back(&Server::worker_thread, this, generation);
     }
     util::log_info("Started " + std::to_string(pool_size) + " worker threads for concurrent request handling");
 
@@ -852,15 +871,22 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
     return keep_alive ? ServeResult::KeepOpen : ServeResult::Close;
 }
 
-void Server::worker_thread() {
+void Server::worker_thread(std::uint64_t generation) {
     while (true) {
         ConnectionPtr conn;
 
-        // Wait for a connection with a request to serve (or one to close)
+        // Wait for a permit: a queued connection, a stop, or a generation
+        // change. The critical section below is only the pop.
+        ready_signal_.acquire();
         {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            queue_condition_.wait(lock, [this] { return !ready_queue_.empty() || shutdown_workers_; });
-
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (worker_generation_ != generation) {
+                // A newer generation of workers owns the queue now. This
+                // thread was detached by a stop() it called itself (a
+                // request handler that restarted the server synchronously);
+                // whatever is queued belongs to the new pool.
+                break;
+            }
             if (shutdown_workers_ && ready_queue_.empty()) {
                 // Shutdown requested and no more work
                 break;
@@ -949,7 +975,7 @@ void Server::enqueue_ready(ConnectionPtr conn) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         ready_queue_.push_back(std::move(conn));
     }
-    queue_condition_.notify_one();
+    ready_signal_.release();
 }
 
 // The single place a client socket is closed, so live_connections_ can never
@@ -1059,25 +1085,50 @@ void Server::reactor_loop() {
     // stop(). One last look, without waiting: a request that is already on
     // the wire goes to the workers, which are still draining their queue and
     // will answer it with Connection: close (serve_one_request sees
-    // running_ false). Everything else is idle and is closed here with a
-    // plain close(): nothing is queued on it, so that is a FIN, and doing it
-    // on this thread rather than through the exiting workers is what makes
-    // stop() fast no matter how many clients were parked. A client that
-    // sends after this point meets EOF and reconnects, which is the normal
-    // outcome of a server going away and is the same order of disruption as
-    // the idle-gap close it already has to handle.
+    // running_ false).
     pfds.clear();
     for (const auto& conn : idle) {
         pfds.push_back({conn->fd, POLLIN, 0});
     }
+    std::vector<ConnectionPtr> quiet;
+    quiet.reserve(idle.size());
     const int last_ready = idle.empty() ? 0 : ::poll(pfds.data(), pfds.size(), 0);
     for (std::size_t i = 0; i < idle.size(); ++i) {
         ConnectionPtr& conn = idle[i];
         if (last_ready > 0 && (pfds[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
             enqueue_ready(std::move(conn));
         } else {
-            close_connection(std::move(conn), false);
+            quiet.push_back(std::move(conn));
         }
+    }
+
+    // The rest were silent at that poll, but a request could land in the
+    // microseconds between it and a close(), and close() with unread bytes
+    // is an RST that makes the peer discard what it has not read. So close
+    // them the way socket_close_graceful does, in parallel rather than one
+    // 400 ms drain at a time: send FIN to all of them at once, give every
+    // peer one shared window to react (a well-behaved client closes on FIN
+    // and sends nothing after it), then drain without blocking and close.
+    // This is what keeps stop() at ~100 ms no matter how many clients were
+    // parked, instead of a per-connection wait through the exiting workers.
+    for (const auto& conn : quiet) {
+        ::shutdown(conn->fd, SHUT_WR);
+    }
+    if (!quiet.empty()) {
+        pfds.clear();
+        for (const auto& conn : quiet) {
+            pfds.push_back({conn->fd, POLLIN, 0});
+        }
+        ::poll(pfds.data(), pfds.size(), 100);
+    }
+    for (auto& conn : quiet) {
+        char sink[2048];
+        for (int i = 0; i < 4; ++i) {
+            if (::recv(conn->fd, sink, sizeof(sink), MSG_DONTWAIT) <= 0) {
+                break;
+            }
+        }
+        close_connection(std::move(conn), false);
     }
 }
 

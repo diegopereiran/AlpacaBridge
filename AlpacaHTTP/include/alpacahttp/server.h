@@ -24,6 +24,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <semaphore>
 #include <thread>
 #include <vector>
 
@@ -98,8 +99,23 @@ private:
     std::vector<std::thread> worker_threads_;
     std::deque<ConnectionPtr> ready_queue_;
     std::mutex queue_mutex_;
-    std::condition_variable queue_condition_;
+    // One permit per queued connection, plus one per worker when they are
+    // told to stop or a new generation starts. A worker blocks on the
+    // semaphore, not on a condition variable, so the critical section is
+    // confined to the pop and never spans the socket I/O that follows: the
+    // static analyzer (unix.BlockInCriticalSection) cannot see a condition
+    // variable's wait release its lock and would report every recv() the
+    // worker does afterwards as blocking under queue_mutex_. Spurious
+    // permits (a wake that finds the queue empty) are harmless; the worker
+    // loops and acquires again.
+    std::counting_semaphore<> ready_signal_{0};
     bool shutdown_workers_{false};
+    // Bumped by every run_server(). A worker exits when the generation it
+    // was spawned in is no longer current, so a worker that detached itself
+    // (stop() called from inside a request handler on that worker) cannot
+    // survive into the next generation as an extra thread once start()
+    // clears shutdown_workers_ again. Guarded by queue_mutex_.
+    std::uint64_t worker_generation_{0};
 
     // Reactor: one thread parks idle connections on a poll set and hands them
     // to the ready queue when their next request arrives. Woken through a
@@ -118,7 +134,7 @@ private:
 
     void run_server();
     void reactor_loop();
-    void worker_thread();
+    void worker_thread(std::uint64_t generation);
     enum class ServeResult : std::uint8_t { KeepOpen, Close };
     ServeResult serve_one_request(Connection& conn);
     void park_connection(ConnectionPtr conn);

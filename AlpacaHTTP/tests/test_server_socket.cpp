@@ -770,10 +770,10 @@ int main() {
     // would SIGKILL the service at its 90s TimeoutStopSec first. Measured
     // 26s of stop() latency behind a client sending every 2s. Now a request
     // in flight when stop() begins is answered with "Connection: close", and
-    // a connection idle on the reactor at that moment is closed at once (its
-    // next request meets EOF), so the client sees one or the other and
-    // stop() never waits on it. This must be the last test: it stops the
-    // server.
+    // a connection idle on the reactor at that moment gets FIN, a shared
+    // 100 ms window and a drain (its next request meets EOF), so the client
+    // sees one or the other and stop() never waits on it. This must be the
+    // last test: it stops the server.
     //
     // Also: idle connections parked on the reactor are closed by stop()
     // immediately. Before the reactor each one held a worker in recv, and
