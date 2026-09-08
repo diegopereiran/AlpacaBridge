@@ -444,13 +444,34 @@ bool wants_keep_alive(const Request& request) {
 // this request are handed back in `surplus` for the next call.
 // Returns false after sending an error response where possible (on a dead or
 // timed-out socket nothing can be sent); the caller closes the connection.
-bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus) {
+//
+// `idle_timeout_pending`, when non-null, means the socket's SO_RCVTIMEO is
+// currently set to the short kKeepAliveIdleSeconds bound (the caller is
+// between requests on a keep-alive connection and does not yet know whether
+// the peer is idle or has already started sending). That short bound must
+// only govern the WAIT for the next request's first byte -- once it arrives,
+// this read is a normal in-progress request like any other and deserves the
+// same kSocketTimeoutSeconds per-recv budget request 1 gets, not a tighter
+// one just because it happens to be request 2+. So the first successful recv
+// below restores the normal timeout and clears the flag; if `raw_request`
+// already holds a complete request from pipelined carry-over, no recv occurs
+// here at all and the flag is left for the caller to resolve on its own next
+// read (nothing was ever idle-timed against this request).
+bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus,
+                   bool* idle_timeout_pending) {
     char buffer[8192];
 
     // Total-request wall-clock deadline. SO_RCVTIMEO bounds each individual
     // recv, but a peer trickling one byte per just-under-timeout interval
     // would pass every per-recv check and pin this worker indefinitely.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kRequestDeadlineSeconds);
+
+    auto note_recv = [&]() {
+        if (idle_timeout_pending != nullptr && *idle_timeout_pending) {
+            util::socket_set_recv_timeout(socket_fd, kSocketTimeoutSeconds);
+            *idle_timeout_pending = false;
+        }
+    };
 
     // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv.
     // Carried-over bytes may already hold the terminator, so look before the
@@ -469,6 +490,7 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
             // Between keep-alive requests this is the normal way out.
             return false;
         }
+        note_recv();
         if (std::chrono::steady_clock::now() > deadline) {
             send_error(socket_fd, 408, "Request Timeout", "Request took too long to arrive");
             return false;
@@ -530,6 +552,7 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
         if (bytes_read <= 0) {
             return false;
         }
+        note_recv();
         if (std::chrono::steady_clock::now() > deadline) {
             send_error(socket_fd, 408, "Request Timeout", "Request took too long to arrive");
             return false;
@@ -595,18 +618,25 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
     bool first_request = true;
     std::uint64_t requests_served = 0;
     while (true) {
+        // Whether the socket's SO_RCVTIMEO is currently the short idle bound
+        // rather than the normal per-request one; read_request clears this
+        // (restoring kSocketTimeoutSeconds) the moment the peer's first byte
+        // of the new request actually arrives, so the 15s bound covers only
+        // the wait between requests, never the request itself.
+        bool idle_timeout_pending = false;
         if (!first_request) {
             // Between requests the peer may legitimately go quiet; bound how
             // long an idle keep-alive connection can hold this worker.
             if (!util::socket_set_recv_timeout(socket_fd, kKeepAliveIdleSeconds)) {
                 return;
             }
+            idle_timeout_pending = true;
         }
 
         // Read request (headers, then exactly Content-Length body bytes)
         std::string raw_request = std::move(carried);
         carried.clear();
-        if (!read_request(socket_fd, raw_request, carried)) {
+        if (!read_request(socket_fd, raw_request, carried, &idle_timeout_pending)) {
             return;
         }
 

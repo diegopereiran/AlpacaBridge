@@ -288,6 +288,35 @@ int main() {
         ::close(fd);
     }
 
+    // A slow-but-legitimate request body on a keep-alive connection's SECOND
+    // request must not be held to the short idle-wait bound. Before the fix,
+    // SO_RCVTIMEO was set to kKeepAliveIdleSeconds (15s) for the whole of
+    // request 2+ and never restored once the peer started sending, so a body
+    // arriving in two writes >15s apart -- fine on request 1, which gets the
+    // full 30s kSocketTimeoutSeconds per recv -- would time out and drop the
+    // connection purely because it happened to be request 2. The timeout is
+    // now restored the moment the peer's first byte of the new request
+    // arrives, so only the true gap BETWEEN requests is 15s-limited.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        send_all(fd, kGet11);
+        std::string r1 = read_one_response(fd, carry);
+        EXPECT(r1.find("Connection: keep-alive\r\n") != std::string::npos);
+
+        const std::string body = "{}";
+        std::string headers = "POST /nonexistent HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
+                               std::to_string(body.size()) + "\r\n\r\n";
+        send_all(fd, headers + body.substr(0, 1));
+        // Longer than the 15s idle bound, shorter than the 30s per-request one.
+        std::this_thread::sleep_for(std::chrono::seconds(16));
+        send_all(fd, body.substr(1));
+        std::string r2 = read_one_response(fd, carry);
+        EXPECT(!r2.empty());
+        ::close(fd);
+    }
+
     server.stop();
     EXPECT(!server.is_running());
 
