@@ -14,6 +14,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
 #ifndef _WIN32
@@ -180,6 +181,18 @@ namespace {
 // Open a serial port at 9600 8N1 and probe it with ":e1\r". Returns the motor
 // board version string on success, empty on failure.
 std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
+    // A SynScan hand controller shares the adapter classes this scan targets
+    // and speaks its own protocol at 9600. Ask for its echo first and leave
+    // the port alone if it answers: a SynScan V4 handset (fw 04.40.00) stops
+    // answering serial entirely after receiving bytes at the wrong rate and
+    // only a power-cycle brings it back, so a motor-controller probe at any
+    // other baud would silently disable the handset for the whole session
+    // (EQM-35 Pro rig, 2026-09 - the "hand-controller commands time out"
+    // report). See util/synscan_handset_probe.h.
+    if (util::port_answers_synscan_echo(port_path)) {
+        ALPACA_LOG_INFO("SkyWatcher", "Skipping " + port_path + ": a SynScan hand controller answered the echo test");
+        return "";
+    }
     int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
         return "";
