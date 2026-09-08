@@ -378,6 +378,17 @@ constexpr int kRequestDeadlineSeconds = 120;
 // per-request slowloris bound so idle clients cannot pin the pool.
 constexpr int kKeepAliveIdleSeconds = 15;
 
+// Upper bound on requests served over one keep-alive connection. Without
+// this, a small number of clients that simply send a request at least every
+// kKeepAliveIdleSeconds (accidentally -- several long-lived Alpaca clients --
+// or adversarially) can each pin one worker thread indefinitely, since the
+// thread pool is fixed-size and the accept queue has no backpressure of its
+// own (PR #2 review). Closing after N requests bounds how long any single
+// connection can hold a worker, forcing well-behaved clients to reconnect
+// (cheap: this is what keep-alive was added to avoid *per-request*, not
+// forbid outright) and adversarial ones to give up a worker periodically.
+constexpr std::uint64_t kMaxRequestsPerConnection = 1000;
+
 // Upper bound on the request line + headers; larger header blocks are
 // rejected before any body is read.
 constexpr std::size_t kMaxHeaderBytes = std::size_t{64} * 1024;
@@ -582,6 +593,7 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
     // read past the end of one request (a pipelining client) seed the next.
     std::string carried;
     bool first_request = true;
+    std::uint64_t requests_served = 0;
     while (true) {
         if (!first_request) {
             // Between requests the peer may legitimately go quiet; bound how
@@ -607,6 +619,14 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
         request.set_remote_address(remote_address);
 
         bool keep_alive = wants_keep_alive(request);
+        ++requests_served;
+        if (requests_served >= kMaxRequestsPerConnection) {
+            // Force a reconnect so this connection can't hold the worker
+            // forever; a fresh TCP handshake per kMaxRequestsPerConnection
+            // requests is negligible next to the per-request handshake this
+            // feature exists to avoid.
+            keep_alive = false;
+        }
 
         // Generate transaction ID (thread-safe)
         static std::atomic<std::uint32_t> transaction_counter{0};
