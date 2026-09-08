@@ -295,6 +295,24 @@ std::vector<SynScanPortInfo> enumerate_synscan_ports() {
 
 namespace {
 
+// Wire bytes for the TRACE log: the protocol mixes ASCII commands with raw
+// binary bytes (model id, echo payload), so escape anything non-printable.
+std::string printable(const std::string& bytes) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(bytes.size());
+    for (const unsigned char c : bytes) {
+        if (c >= 0x20 && c < 0x7f) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out += "\\x";
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
 int parse_hex_pair(std::string_view value, std::size_t offset) {
     if (offset + 2 > value.size()) {
         return 0;
@@ -462,7 +480,18 @@ public:
         if (timeout_ms <= 0) {
             timeout_ms = connection_info_.response_timeout_ms;
         }
-        return read_response(require_hash_terminator, timeout_ms, binary_bytes);
+        // TRACE-only wire log: every handset command and its reply (or the
+        // timeout). Cheap below TRACE (the macro gates on level before
+        // formatting); without it a "commands time out" report cannot show
+        // which command stalled or what the handset actually said.
+        try {
+            std::string response = read_response(require_hash_terminator, timeout_ms, binary_bytes);
+            ALPACA_LOG_TRACE("SynScan", "HC " + printable(command) + " -> " + printable(response));
+            return response;
+        } catch (const AlpacaException& e) {
+            ALPACA_LOG_TRACE("SynScan", "HC " + printable(command) + " -> " + e.what());
+            throw;
+        }
     }
 
     void send_command_blind(const std::string& command) {
@@ -479,6 +508,25 @@ public:
             (void)read_response(false, 40);
         } catch (...) {
             // Ignore optional response drain errors for fire-and-forget commands.
+        }
+    }
+
+    bool echo_test() {
+        // "K" + chr(x) -> chr(x) + "#". Only silence is fatal: connect_serial()
+        // succeeds on any open port, so this is the one check that tells a
+        // handset apart from a port with nothing listening - every later
+        // query would otherwise burn its full response timeout and be
+        // swallowed by the driver's connect sequence.
+        constexpr char kEchoByte = 'B';
+        try {
+            const std::string reply = send_command(std::string("K") + kEchoByte, true, 0);
+            if (reply != std::string(1, kEchoByte)) {
+                ALPACA_LOG_WARN("SynScan",
+                                "Echo test answered '" + printable(reply) + "' instead of the echoed byte; continuing");
+            }
+            return true;
+        } catch (const AlpacaException&) {
+            return false;
         }
     }
 
@@ -1252,6 +1300,8 @@ std::string SynScanProtocolWrapper::send_raw_command(const std::string& bytes,
 void SynScanProtocolWrapper::send_command_blind(const std::string& command) {
     pimpl_->send_command_blind(command);
 }
+
+bool SynScanProtocolWrapper::echo_test() { return pimpl_->echo_test(); }
 
 std::string SynScanProtocolWrapper::get_handset_firmware_version() {
     return pimpl_->get_handset_firmware_version();

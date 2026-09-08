@@ -12,20 +12,24 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/alpacadriver.h>
+#include <alpacacore/async_connectable.h>
 #include <alpacacore/device_registry.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "test_assert.h"
@@ -171,6 +175,65 @@ public:
 
 private:
     int number_;
+    bool connected_ = false;
+};
+
+// Mirrors the SynScan / Celestron / OnStep / Bisque / iOptron / Sky-Watcher
+// telescopes: an AsyncConnectable driver whose get_connected() takes the
+// state mutex that set_connected() holds for the whole (slow) connect. The
+// router must never read it while a connection task is in flight, or its
+// own connect-wait deadline cannot fire and a polling GET connected stalls
+// for the entire handshake (issue #130).
+class LockedSlowConnectStubDriver final : public alpacacore::AlpacaDriver, public alpacacore::AsyncConnectable {
+public:
+    LockedSlowConnectStubDriver(int number, std::chrono::milliseconds connect_delay)
+        : AsyncConnectable("LockedSlowStub"), number_(number), connect_delay_(connect_delay) {}
+    ~LockedSlowConnectStubDriver() override { shutdown_connection(); }
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Locked Slow Connect Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
+    std::string get_unique_id() const override { return "locked-slow-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake device"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 1; }
+    bool get_connected() const override {
+        std::lock_guard<std::mutex> lock(mutex_);  // blocks for the whole connect, like the real drivers
+        return connected_;
+    }
+    bool get_connecting() const override { return connection_task_active(); }
+    void connect() override { start_connection_task(true); }
+    void disconnect() override { start_connection_task(false); }
+    void set_connected(bool connected) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected) {
+            if (record_disconnect_if_connect_in_flight(connected_)) {
+                return;
+            }
+            connected_ = false;
+            return;
+        }
+        if (consume_pending_disconnect(connected_)) {
+            return;
+        }
+        if (connected_) {
+            return;
+        }
+        std::this_thread::sleep_for(connect_delay_);  // the "handshake", mutex held throughout
+        connected_ = true;
+    }
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+
+private:
+    int number_;
+    std::chrono::milliseconds connect_delay_;
+    mutable std::mutex mutex_;
     bool connected_ = false;
 };
 
@@ -2211,6 +2274,66 @@ int main() {
         }
         EXPECT(occurrences == 1);
         EXPECT(wire.find("Content-Length: 2\r\n") != std::string::npos);
+    }
+
+    // Issue #130: a driver whose get_connected() blocks behind an in-flight
+    // connect (SynScan hand controller). The router must poll
+    // get_connecting(), the non-blocking signal, so GET connected/connecting
+    // answer at once mid-connect and the PUT connected wait honours its 8 s
+    // deadline instead of stalling for the whole handshake.
+    {
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        using Ms = std::chrono::milliseconds;
+        const auto elapsed_ms = [](std::chrono::steady_clock::time_point since) {
+            return std::chrono::duration_cast<Ms>(std::chrono::steady_clock::now() - since).count();
+        };
+
+        // Platform 7 Connect returns immediately; the task then holds the
+        // mutex for 700 ms. GET connected / connecting inside that window
+        // must answer at once (false / true), not after the handshake.
+        auto stub = std::make_shared<LockedSlowConnectStubDriver>(9702, Ms(700));
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9702";
+        {
+            const auto resp = route_request(router, "PUT", base + "/connect", "ClientID=1");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        }
+        std::this_thread::sleep_for(Ms(100));  // the task is inside the "handshake"
+        EXPECT(stub->get_connecting());
+        const auto get_started = std::chrono::steady_clock::now();
+        EXPECT(!get_connected_value(router, base, "1"));
+        {
+            const auto resp = route_request(router, "GET", base + "/connecting");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("Value", false));
+        }
+        EXPECT(elapsed_ms(get_started) < 200);
+        // Once the task finishes the same client reads true.
+        std::this_thread::sleep_for(Ms(900));
+        EXPECT(!stub->get_connecting());
+        EXPECT(get_connected_value(router, base, "1"));
+        put_connected(router, base, "1", false);
+        EXPECT(!stub->get_connected());
+
+        // The PUT connected wait: its first get_connected() call used to block
+        // on the driver mutex for the entire connect, so the 8 s deadline
+        // never fired. With a 9.5 s handshake the reply must come back at the
+        // deadline with Connecting still true, and the link comes up after.
+        // (Deliberately ~10 s of wall clock: the deadline is the thing under
+        // test.)
+        auto slow = std::make_shared<LockedSlowConnectStubDriver>(9703, Ms(9500));
+        EXPECT(registry.register_device(slow));
+        const std::string slow_base = "/api/v1/covercalibrator/9703";
+        const auto put_started = std::chrono::steady_clock::now();
+        put_connected(router, slow_base, "1", true);
+        EXPECT(elapsed_ms(put_started) < 9000);
+        EXPECT(slow->get_connecting());
+        std::this_thread::sleep_for(Ms(2000));
+        EXPECT(!slow->get_connecting());
+        EXPECT(get_connected_value(router, slow_base, "1"));
+        put_connected(router, slow_base, "1", false);
+        EXPECT(!slow->get_connected());
     }
 
     std::cout << "All routing tests passed!\n";

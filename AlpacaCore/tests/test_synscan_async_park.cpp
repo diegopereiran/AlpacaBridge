@@ -99,6 +99,81 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
 
 }  // namespace
 
+TEST_CASE("SynScan - get_connected() answers at once while a connect is in flight", "[synscan][telescope][async]") {
+    // set_connected(true) holds the driver mutex across every handshake round
+    // trip, and the router polls get_connected() throughout (the PUT connected
+    // wait, every GET connected). With a mutex-taking getter those calls
+    // blocked for the whole connect and the router's deadline never fired
+    // (issue #130). Stall the firmware query so the mutex is held for a while
+    // and prove the getter still returns immediately.
+    static constexpr int kStallMs = 400;  // static: odr-used inside the lambda below
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk.empty()) return "0#";
+        switch (chunk[0]) {
+            case 'K':  // protocol echo: "K" + byte -> byte + "#"
+                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
+            case 'V':
+                std::this_thread::sleep_for(std::chrono::milliseconds(kStallMs));
+                return "042A00#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return "12AB0500,20000500#";
+            default:
+                return "0#";
+        }
+    });
+    REQUIRE(server.ok());
+    auto info = endpoint(server.port());
+    info.response_timeout_ms = 1000;  // longer than the stall: the firmware query must succeed, not time out
+    auto driver =
+        alpacacore::vendor::synscan::create_synscan_telescope(0, info, alpacacore::vendor::synscan::SynScanVersion::V4);
+
+    driver->connect();
+    REQUIRE(wait_until([&] { return driver->get_connecting(); }, 1000));
+    // Past the port open and the echo, inside the stalled firmware query:
+    // the connect task holds mutex_ for the next few hundred milliseconds.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // The flag's value mid-task is driver-specific (SynScan raises it before
+    // the warm-up queries, see AGENTS.md on why get_connected() is not a
+    // completion signal); the contract under test is that the read returns
+    // at once while Connecting is still true.
+    const auto t0 = Clock::now();
+    static_cast<void>(driver->get_connected());
+    const auto read_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+    CHECK(read_ms < 100);
+    CHECK(driver->get_connecting());
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan - a silent handset fails the connect instead of reporting a phantom link",
+          "[synscan][telescope][async]") {
+    // connect() only opens the port. Before the echo gate a link with nothing
+    // listening came up as Connected=true once every handshake query had
+    // burnt its full response timeout (all swallowed), and every command then
+    // timed out too. Now the echo is the first thing on the wire and its
+    // silence fails the connect within a single timeout.
+    auto queries = std::make_shared<std::atomic<int>>(0);
+    alpacacore::test::FakeMountServer server([queries](const std::string&) -> std::string {
+        queries->fetch_add(1);
+        return "";  // nothing is ever sent back
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);  // 200 ms response timeout
+
+    const auto t0 = Clock::now();
+    driver->connect();
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 5000));
+    const auto connect_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+    CHECK_FALSE(driver->get_connected());
+    CHECK(connect_ms < 1000);     // one echo timeout, not five swallowed query timeouts
+    CHECK(queries->load() == 1);  // only the echo went out
+}
+
 TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew ends", "[synscan][telescope][async]") {
     auto st = std::make_shared<FakeSynScanState>();
     alpacacore::test::FakeMountServer server(synscan_responder(st));

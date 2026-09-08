@@ -80,6 +80,12 @@ public:
                                  int timeout_ms_override = 0);
     void send_command_blind(const std::string& command);
 
+    /// Protocol echo ("K" + byte -> byte + "#"), the handset's own link check.
+    /// True when the handset answered at all (a mismatched echo is logged, not
+    /// fatal: a live but quirky handset still takes commands); false when the
+    /// reply timed out, i.e. nothing is listening on the port.
+    bool echo_test();
+
     std::string get_handset_firmware_version();
     int get_model_id();
     bool is_aligned();

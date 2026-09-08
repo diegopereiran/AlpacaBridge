@@ -756,6 +756,23 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `test_async_connectable.cpp` for the regression test. This is a router bug,
   not a driver bug: no per-driver fix can work around a caller that trusts
   the wrong flag.
+- **The router must never call `get_connected()` while `get_connecting()` is
+  true — the connect side of the rule above** (SynScan hand controller,
+  2026-09, issue #130). Six telescope drivers (SynScan, Celestron, OnStep,
+  Bisque, iOptron, Sky-Watcher) answer `get_connected()` under the state
+  mutex that their `set_connected(true)` holds for the entire handshake, so
+  a `get_connected()` call from the `PUT connected` wait or from a `GET
+  connected` blocked for the whole connect and the wait's 8 s deadline never
+  fired (25 s on a silent handset: five 5 s query timeouts). Every router
+  site now reads `get_connecting()` first and short-circuits; while a task
+  is in flight `Connected` reports false. A connect request that arrives
+  mid-task is still passed to `device->connect()` so `AsyncConnectable` can
+  queue it against an in-flight disconnect or drop it against an in-flight
+  connect. Driver side, prefer an atomic `connected_` with a lock-free
+  getter (30 drivers already do; SynScan now does) — the other five still
+  take the mutex and rely on the router rule. Regression tests:
+  `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
+  `AlpacaCore/tests/test_synscan_async_park.cpp`.
 - **`Connected` is per-client, refcounted in the router — never wire an
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +
@@ -1371,6 +1388,7 @@ Protocol documentation: `AlpacaCore/external/SynScan/`. No external SDK required
 Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol versions V3 (older) and V4 (current).
 
 - Auto-detection scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for SynScan hand controllers, probes each port with a firmware version query, and connects to the first responding mount.
+- **Connect verifies the link with the protocol echo (`K` + byte → byte + `#`)** (issue #130): `connect()` only opens the port, so before this gate a port with nothing listening came up as `Connected=true` once every handshake query (firmware, model, site, time, RA/Dec, Alt/Az) had burnt its 5 s response timeout inside `catch (...)`, and every command then timed out too. Silence on the echo fails the connect within one timeout with a message naming the port. A mismatched echo reply is only logged — a live handset that answers oddly still takes commands. `connected_` is atomic and `get_connected()` lock-free (the connect sequence holds `mutex_` throughout). Every handset command and reply is logged at TRACE (`HC <cmd> -> <reply>`; non-printable bytes as `\xNN`).
 - **Pulse guiding**: SynScan V3/V4 protocol has no hardware pulse guide command. Driver implements software-timed variable-rate slew: issues a variable-rate axis slew at the guide rate, sleeps for the requested duration, then stops the axis and restores sidereal tracking. `IsPulseGuiding` tracks completion via time-based end time plus delay.
 - **GEM pier-side DEC direction flip**: DEC motor direction is inverted when the mount's pointing state is 'W' (west), matching the physical axis reversal on German equatorial mounts. This affects pulse guide and MoveAxis DEC commands.
 - **Position override accumulation**: Instead of reading back noisy mount positions after tiny guide pulses, the driver accumulates expected `rate × duration` deltas directly into the target coordinate frame. All consecutive pulse guide directions (N/S/E/W) operate in the same coordinate baseline, eliminating drift between reads.

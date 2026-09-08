@@ -2116,19 +2116,30 @@ Response Router::dispatch_device_method(
                 const auto op_mutex = device_connection_op_mutex(device);
                 if (op_mutex->try_lock()) {
                     std::lock_guard<std::mutex> op_lock(*op_mutex, std::adopt_lock);
-                    if (!device->get_connected() && !device->get_connecting()) {
+                    if (!device->get_connecting() && !device->get_connected()) {
                         clear_client_connections(device.get());
                     }
                 }
+                // get_connecting() first, and short-circuit: it is the one
+                // non-blocking signal the driver base guarantees, while a
+                // driver's get_connected() may take the state mutex that its
+                // connect sequence holds for the whole handshake (SynScan:
+                // 25 s on a silent handset, issue #130). Reading it
+                // mid-transition stalled this poll for the entire connect,
+                // the very client timeout the PUT wait below exists to
+                // prevent. While a task is in flight the answer is false: a
+                // connect is not connected yet, and a disconnect is on its way
+                // down (the drivers clear the flag at the start of teardown).
+                const bool device_connected = !device->get_connecting() && device->get_connected();
                 const ClientKey client = extract_client_key(request);
                 bool value;
                 if (!client.has_client_id) {
                     // No ClientID → can't answer per-client; report device state.
-                    value = device->get_connected();
+                    value = device_connected;
                 } else {
                     // Per-client semantics: a client only reads true if IT
                     // connected, not merely because another client did.
-                    value = device->get_connected() && client_connection_registered(device.get(), client.key);
+                    value = device_connected && client_connection_registered(device.get(), client.key);
                 }
                 AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, value);
                 response.set_body(alpaca_response);
@@ -2190,7 +2201,7 @@ Response Router::dispatch_device_method(
                 const std::string client_key = extract_client_key(request).key;
                 const auto op_mutex = device_connection_op_mutex(device);
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
-                if (!device->get_connected() && !device->get_connecting()) {
+                if (!device->get_connecting() && !device->get_connected()) {
                     clear_client_connections(device.get());
                 }
 
@@ -2205,31 +2216,40 @@ Response Router::dispatch_device_method(
                     register_client_connection(device.get(), client_key);
                 }
 
-                if (connected && !device->get_connected()) {
+                // get_connecting() is read first at every step here: a
+                // driver's get_connected() may block on the state mutex its
+                // connect sequence holds for the whole handshake (SynScan hand
+                // controller, issue #130), and calling it while a task is in
+                // flight stalled this handler for the entire connect, so the
+                // 8 s deadline below never fired. A connect requested while a
+                // task is in flight is still handed to the driver: the base
+                // class queues it against an in-flight disconnect and drops
+                // it against an in-flight connect (AGENTS.md).
+                if (connected && (device->get_connecting() || !device->get_connected())) {
                     // Use async connect then poll for completion.
                     // Slow-connecting devices (serial focusers etc.) can exceed
                     // ASCOM Alpaca client timeouts if set_connected() blocks
                     // synchronously.  The async path + poll lets us return as
-                    // soon as the handshake succeeds without hard-blocking the
+                    // soon as the handshake finishes without hard-blocking the
                     // full worst-case duration.
                     device->connect();
                     auto deadline = std::chrono::steady_clock::now()
                                   + std::chrono::seconds(8);
-                    while (!device->get_connected()
-                           && device->get_connecting()
-                           && std::chrono::steady_clock::now() < deadline) {
+                    while (device->get_connecting() && std::chrono::steady_clock::now() < deadline) {
                         std::this_thread::sleep_for(
                             std::chrono::milliseconds(100));
                     }
-                    if (!device->get_connected() && !device->get_connecting()) {
+                    if (!device->get_connecting() && !device->get_connected()) {
                         // Failed connect: this client holds no live link.
                         unregister_client_connection(device.get(), client_key);
                         throw alpacacore::AlpacaException(
                             "Connection failed",
                             alpacacore::AlpacaError::NotConnected);
                     }
+                    // Still connecting at the deadline: reply now, the client
+                    // observes completion through Connecting/Connected.
                 } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
-                           device->get_connected()) {
+                           (device->get_connecting() || device->get_connected())) {
                     // Last client out: tear down the upstream link. While other
                     // clients remain registered the device stays connected —
                     // one client's disconnect must not take the mount away
@@ -2448,7 +2468,7 @@ Response Router::dispatch_device_method(
                 // connected ANDs the registration with real device state.
                 const auto op_mutex = device_connection_op_mutex(device);
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
-                if (!device->get_connected() && !device->get_connecting()) {
+                if (!device->get_connecting() && !device->get_connected()) {
                     clear_client_connections(device.get());
                 }
                 if (!device_is_current(device)) {
@@ -2457,7 +2477,9 @@ Response Router::dispatch_device_method(
                                                       alpacacore::AlpacaError::InvalidOperation);
                 }
                 register_client_connection(device.get(), extract_client_key(request).key);
-                if (!device->get_connected()) {
+                // get_connecting() first (see PUT connected): a mid-task
+                // connect goes to the driver, whose base class reconciles it.
+                if (device->get_connecting() || !device->get_connected()) {
                     device->connect();
                 }
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
@@ -2469,7 +2491,7 @@ Response Router::dispatch_device_method(
             if (request.method() == HttpMethod::PUT) {
                 const auto op_mutex = device_connection_op_mutex(device);
                 std::lock_guard<std::mutex> op_lock(*op_mutex);
-                if (!device->get_connected() && !device->get_connecting()) {
+                if (!device->get_connecting() && !device->get_connected()) {
                     clear_client_connections(device.get());
                 }
                 // Last client out tears down the link; otherwise only this
