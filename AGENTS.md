@@ -797,6 +797,19 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   confirm before writing up the mechanism. Unresolved and outside
   AlpacaBridge's control; a Pi 5 (faster cores) is the next thing worth
   trying, not another transport change.
+- **Persistent connections are capped at `kMaxRequestsPerConnection` (1000
+  requests)** (2026-09-08). Making connections persistent removed the
+  per-request handshake cost, but also removed the only thing that used to
+  free a worker automatically: with a fixed 32-thread pool and no
+  backpressure on `connection_queue_`, a handful of clients that simply keep
+  a connection alive (sending a request at least every `kKeepAliveIdleSeconds`)
+  — accidentally, from several long-lived Alpaca clients, or adversarially —
+  could each pin one worker indefinitely. `handle_connection` now forces
+  `keep_alive = false` once a connection has served this many requests,
+  which cannot be overridden back to keep-alive by the client or a handler's
+  own `Connection` header. The reconnect this costs a well-behaved long-lived
+  client (PHD2 autoguiding, ConformU) is negligible next to the per-request
+  handshake this whole feature exists to avoid.
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging
