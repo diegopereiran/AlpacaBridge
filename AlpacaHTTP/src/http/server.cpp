@@ -684,6 +684,16 @@ void Server::handle_connection(util::SocketHandle socket_fd) {
             // to the per-request handshake this feature exists to avoid.
             keep_alive = false;
         }
+        if (!running_) {
+            // stop() joins every worker, and a worker only leaves this loop
+            // when the connection ends. Without this check a client that
+            // keeps sending (NINA/PHD2 polling) holds the worker -- and so
+            // stop() -- until the lifetime cap, long past systemd's 90s
+            // TimeoutStopSec. Measured: stop() blocked 26s behind a client
+            // sending every 2s, serving every one of its requests. Answer
+            // this request, tell the client to reconnect, and get out.
+            keep_alive = false;
+        }
 
         // Generate transaction ID (thread-safe)
         static std::atomic<std::uint32_t> transaction_counter{0};

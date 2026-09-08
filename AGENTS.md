@@ -847,6 +847,23 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   binary at `AlpacaHTTP/build/alpacahttp_server`) can be removed whenever;
   the live `alpacabridge.service` checkout (`/home/astro/AlpacaBridge`, on
   `driver/skywatcher-eqm35`) is a separate worktree and was never touched.
+- **The keep-alive loop checks `running_` and closes on the next response
+  once `stop()` has begun** (2026-09-09, final review pass). `stop()` joins
+  every worker, and a worker only leaves `handle_connection`'s loop when the
+  connection ends — so an ACTIVE client (NINA/PHD2 polling every second)
+  held its worker, and therefore `stop()`, until the 300s lifetime cap.
+  systemd's default 90s `TimeoutStopSec` would SIGKILL the service first,
+  and the same applies to the management restart/shutdown endpoints, which
+  go through `stop()` on the main thread. Before keep-alive a worker only
+  ever held one request, so this was a genuine regression the caps did not
+  cover: they bound how long a connection may live, not whether it outlives
+  the server. Measured with a client sending every 2s: `stop()` blocked
+  26,006 ms and served 13 further requests before the check, 1 ms after.
+  Worst case now is one idle gap (`kKeepAliveIdleSeconds`, 15s) for a
+  worker blocked in `recv` — the same order as the pre-existing 30s
+  per-request bound. Regression test: the last case in
+  `AlpacaHTTP/tests/test_server_socket.cpp` (it has to be last; it stops
+  the server).
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging

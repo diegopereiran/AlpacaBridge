@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -342,8 +343,56 @@ int main() {
         ::close(fd);
     }
 
-    server.stop();
-    EXPECT(!server.is_running());
+    // stop() must not wait out an ACTIVE keep-alive client. stop() joins every
+    // worker, and a worker only leaves handle_connection's loop when the
+    // connection ends -- so before the running_ check in that loop, a client
+    // that kept sending (NINA/PHD2 polling) held its worker, and therefore
+    // stop(), until the 300s lifetime cap; systemd would SIGKILL the service
+    // at its 90s TimeoutStopSec first. Measured 26s of stop() latency behind
+    // a client sending every 2s. Now the first response after stop() carries
+    // "Connection: close" and the worker exits. This must be the last test:
+    // it stops the server.
+    {
+        std::atomic<bool> got_close{false};
+        std::atomic<int> served{0};
+        std::thread client([&] {
+            int fd = connect_local(port);
+            EXPECT(fd >= 0);
+            std::string carry;
+            for (int i = 0; i < 40; ++i) {  // up to ~20s of activity, every 500 ms
+                send_all(fd, kGet11);
+                std::string r = read_one_response(fd, carry);
+                if (r.empty()) {
+                    break;  // server closed the socket
+                }
+                ++served;
+                if (r.find("Connection: close\r\n") != std::string::npos) {
+                    got_close = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+            ::close(fd);
+        });
+        // Let the client get a couple of keep-alive responses in first.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        const int served_before_stop = served.load();
+        EXPECT(served_before_stop >= 2);
+
+        const auto t0 = std::chrono::steady_clock::now();
+        server.stop();
+        const auto stop_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        client.join();
+
+        EXPECT(!server.is_running());
+        // One in-flight idle gap (<= 500 ms here) plus scheduling slack, not
+        // the ~19 s the client was prepared to keep going.
+        EXPECT(stop_ms < 5000);
+        EXPECT(got_close.load());
+        // stop() answered at most one more request after being called.
+        EXPECT(served.load() <= served_before_stop + 1);
+    }
 
     std::cout << "All server socket tests passed!\n";
     return 0;
