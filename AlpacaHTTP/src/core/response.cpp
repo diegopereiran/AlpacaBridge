@@ -10,12 +10,30 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacahttp/response.h>
 #include <alpacahttp/json_utils.h>
+#include <alpacahttp/response.h>
+
+#include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <unordered_map>
 
 namespace alpacahttp {
+
+namespace {
+
+// Header field names are case-insensitive (RFC 7230 §3.2). Request already
+// normalizes its keys to lowercase on parse; Response keeps the caller's
+// spelling for the wire, so it must compare names case-insensitively instead
+// -- otherwise a handler's "connection" and the server's "Connection" would
+// coexist and both be emitted.
+bool header_name_equals(const std::string& a, const std::string& b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](unsigned char x, unsigned char y) {
+               return std::tolower(x) == std::tolower(y);
+           });
+}
+
+}  // namespace
 
 void Response::set_status(std::uint16_t status_code, const std::string& reason_phrase) {
     status_code_ = status_code;
@@ -27,6 +45,15 @@ void Response::set_status(std::uint16_t status_code, const std::string& reason_p
 }
 
 void Response::set_header(const std::string& key, const std::string& value) {
+    // Replace any other spelling of this field first, so exactly one
+    // instance of it is ever emitted, under the caller's casing.
+    for (auto it = headers_.begin(); it != headers_.end();) {
+        if (it->first != key && header_name_equals(it->first, key)) {
+            it = headers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
     headers_[key] = value;
 }
 
@@ -56,7 +83,7 @@ std::string Response::to_string() const {
 
     bool has_connection = false;
     for (const auto& [key, value] : headers_) {
-        if (key == "Connection") {
+        if (header_name_equals(key, "Connection")) {
             has_connection = true;
         }
         oss << key << ": " << value << "\r\n";
@@ -72,9 +99,10 @@ std::string Response::to_string() const {
 }
 
 const std::string& Response::get_header(const std::string& key) const {
-    auto it = headers_.find(key);
-    if (it != headers_.end()) {
-        return it->second;
+    for (const auto& [name, value] : headers_) {
+        if (header_name_equals(name, key)) {
+            return value;
+        }
     }
     static const std::string empty_string;
     return empty_string;

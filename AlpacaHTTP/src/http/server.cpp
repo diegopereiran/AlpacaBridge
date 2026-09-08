@@ -466,10 +466,12 @@ bool wants_keep_alive(const Request& request) {
 // this read is a normal in-progress request like any other and deserves the
 // same kSocketTimeoutSeconds per-recv budget request 1 gets, not a tighter
 // one just because it happens to be request 2+. So the first successful recv
-// below restores the normal timeout and clears the flag; if `raw_request`
-// already holds a complete request from pipelined carry-over, no recv occurs
-// here at all and the flag is left for the caller to resolve on its own next
-// read (nothing was ever idle-timed against this request).
+// below restores the normal timeout and clears the flag. Bytes carried over
+// from a pipelining client mean this request has ALREADY begun arriving, so
+// in that case the restore happens before any recv at all -- otherwise a
+// request whose headers were pre-carried but whose body trickles in later
+// would have its first body recv bound by the idle timeout, the same bug in
+// a different coat.
 bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus,
                   bool* idle_timeout_pending) {
     char buffer[8192];
@@ -492,6 +494,12 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
         }
         return true;
     };
+
+    // Carried-over bytes mean the idle wait is already over: restore the
+    // per-request budget before the first recv, not after it.
+    if (!raw_request.empty() && !note_recv()) {
+        return false;
+    }
 
     // Read until \r\n\r\n (end of headers); SO_RCVTIMEO bounds each recv.
     // Carried-over bytes may already hold the terminator, so look before the

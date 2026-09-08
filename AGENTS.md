@@ -864,6 +864,27 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   per-request bound. Regression test: the last case in
   `AlpacaHTTP/tests/test_server_socket.cpp` (it has to be last; it stops
   the server).
+- **`Response` header names compare case-insensitively** (2026-09-09, review
+  round 5). `Response::headers_` was a plain case-sensitive map while
+  `Request` lowercases its keys on parse, so the keep-alive override's
+  `get_header("Connection")` / `set_header("Connection", ...)` would have
+  missed a handler's `connection: keep-alive` and emitted BOTH lines — the
+  stale-keep-alive-on-a-closing-socket bug (round 3) back through a different
+  door. `set_header` now replaces any other spelling of the field (keeping
+  the caller's casing for the wire), `get_header` and `to_string()`'s
+  default-`close` check match case-insensitively. No handler sets a
+  `Connection` header today; the override exists precisely for the day one
+  does. Test: the `Response` case at the end of `test_routing.cpp`.
+- **Pre-carried (pipelined) headers restore the per-request timeout before
+  the first recv** (same review round). `read_request` restored the 30s
+  budget only *after* a successful recv, so when request B's headers had
+  arrived in the same write as request A (carried over, terminator already
+  present, header loop does no recv) B's first *body* recv still ran under
+  the 15s idle bound — the slow-body bug fixed earlier, reached through
+  carry-over. Now non-empty carried bytes mean "this request has begun" and
+  the restore happens up front. Test: the pre-carried-headers case in
+  `test_server_socket.cpp` (A complete + B's headers in one write, 16s gap,
+  then B's body).
 - Regression tests for the above live in `AlpacaHTTP/tests/test_routing.cpp` and run vendor-free.
 
 ## Debian Packaging

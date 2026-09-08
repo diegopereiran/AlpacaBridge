@@ -343,6 +343,33 @@ int main() {
         ::close(fd);
     }
 
+    // Pre-carried headers must not leave the body under the idle timeout. A
+    // pipelining client can deliver request B's headers in the same write as
+    // request A; read_request then finds B's terminator in the carried bytes
+    // and does no recv in its header loop -- and the idle-timeout restore
+    // used to run only on a recv, so it was skipped and B's first body recv
+    // ran under the 15s idle bound instead of the 30s per-request one. Same
+    // bug as the slow-body case above, reached through carry-over instead.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        std::string carry;
+        const std::string body = "{}";
+        std::string b_headers =
+            "POST /nonexistent HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + std::to_string(body.size()) +
+            "\r\n\r\n";
+        // A complete, plus B's headers only, in ONE write.
+        send_all(fd, kGet11 + b_headers);
+        std::string ra = read_one_response(fd, carry);
+        EXPECT(ra.find("Connection: keep-alive\r\n") != std::string::npos);
+        // Longer than the 15s idle bound, shorter than the 30s per-request one.
+        std::this_thread::sleep_for(std::chrono::seconds(16));
+        send_all(fd, body);
+        std::string rb = read_one_response(fd, carry);
+        EXPECT(!rb.empty());
+        ::close(fd);
+    }
+
     // stop() must not wait out an ACTIVE keep-alive client. stop() joins every
     // worker, and a worker only leaves handle_connection's loop when the
     // connection ends -- so before the running_ check in that loop, a client
