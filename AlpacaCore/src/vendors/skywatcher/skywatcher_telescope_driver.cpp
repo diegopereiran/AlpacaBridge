@@ -2123,7 +2123,7 @@ private:
     // full fix: MoveAxis, which applies no sign transform at all, is the
     // hardware-observed reference for which way a raw axis rate moves
     // reported Dec (AGENTS.md, EQM-35 Pro at latitude -37.2).
-    // TODO(#214 follow-up): the sign is evaluated at (re)apply time and held;
+    // TODO(open-astro#255, deferred from #214): the sign is evaluated at (re)apply time and held;
     // a session whose dec axis crosses the branch boundary (a2 through 0)
     // between apply events keeps the stale sign until the next goto, pulse,
     // tracking toggle, or rate write re-applies it. Long unattended sessions
