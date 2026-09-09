@@ -1185,4 +1185,47 @@ TEST_CASE("SkyWatcher async - a sub-resolution TrackingRate change is not spurio
     driver->set_connected(false);
 }
 
+TEST_CASE(
+    "SkyWatcher async - a pulse whose rate delta is unresolvable within its own duration "
+    "does not overshoot the commanded on-time",
+    "[skywatcher][async]") {
+    // Bot review round 1 on open-astro/AlpacaBridge#248: the pulse dispatch's
+    // rate-applied check samples the axis WHILE it is already running at the
+    // pulse rate, and the pulse's remaining hold is duration MINUS the time
+    // the check took -- clamped at zero, never extended. Before this fix,
+    // a low guide rate (small pulse-vs-tracking delta) at a duration right at
+    // kMinPulseForRateVerifyMs could stretch the adaptive window toward its
+    // 3 s ceiling, well past the 1.5 s commanded duration: the pulse would
+    // physically hold the guide rate for however long the check took, over
+    // 2x its commanded on-time. The dispatch call now caps its window at
+    // (duration - settle), so an unresolvable delta is skipped immediately
+    // (an INFO log, not a wait) instead of stretching past the pulse itself.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    // 0.02x sidereal: on this fake's counts-per-revolution, resolving this
+    // delta to kMinResolvableDeltaCounts needs several seconds -- more than
+    // (kMinPulseForRateVerifyMs - settle) leaves room for.
+    driver->set_guide_rate(
+        {0.02 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.02 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    constexpr int kPulseMs = 1500;  // exactly kMinPulseForRateVerifyMs: the check DOES run
+    driver->pulse_guide(2, kPulseMs);
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+    auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 5000));
+    double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    // Must land close to the commanded 1500 ms, nowhere near the ~3150 ms an
+    // unbounded window would have produced.
+    REQUIRE(elapsed_ms >= 1300.0);
+    REQUIRE(elapsed_ms < 2000.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
