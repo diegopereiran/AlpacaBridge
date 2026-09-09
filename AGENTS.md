@@ -756,6 +756,41 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `test_async_connectable.cpp` for the regression test. This is a router bug,
   not a driver bug: no per-driver fix can work around a caller that trusts
   the wrong flag.
+- **The router must never call `get_connected()` while `get_connecting()` is
+  true — the connect side of the rule above** (SynScan hand controller,
+  2026-09, issue #130). Six telescope drivers (SynScan, Celestron, OnStep,
+  Bisque, iOptron, Sky-Watcher) answer `get_connected()` under the state
+  mutex that their `set_connected(true)` holds for the entire handshake, so
+  a `get_connected()` call from the `PUT connected` wait or from a `GET
+  connected` blocked for the whole connect and the wait's 8 s deadline never
+  fired (25 s on a silent handset: five 5 s query timeouts). Every router
+  site now reads `get_connecting()` first and short-circuits; while a task
+  is in flight `Connected` reports false. A connect request that arrives
+  mid-task is still passed to `device->connect()` so `AsyncConnectable` can
+  queue it against an in-flight disconnect or drop it against an in-flight
+  connect. Driver side, prefer an atomic `connected_` with a lock-free
+  getter (30 drivers already do; SynScan now does) — the other five still
+  take the mutex and rely on the router rule. Regression tests:
+  `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
+  `AlpacaCore/tests/test_synscan_async_park.cpp`.
+  **Known trade-off:** while a task is in flight, `Connected` reports false
+  for every client, including one whose `PUT connected` reply already came
+  back at the 8 s deadline with the connect still proceeding — a Platform 6
+  client that treats that combination as a hard failure gives up on a
+  connect that may still succeed moments later. Accepted because the
+  alternative (reading `get_connected()` directly) is the phantom-link bug
+  this rule fixes; there is no per-driver signal yet for which
+  `get_connected()` implementations are safe to read mid-task (the 30
+  lock-free ones) versus which aren't (the six above).
+  **Known gap (narrow, code review on PR #3):** `get_connecting()` and
+  `get_connected()` are two separate calls, not one atomic snapshot — if a
+  connect task starts in the gap between them, the `get_connected()` call
+  can still block on a mutex-holding driver's handshake for the six above.
+  Far narrower than the bug this rule fixes (needs a second request to land
+  in a specific few-instruction window, not just a slow connect), and not
+  worth a structural fix here: closing it means every driver exposing one
+  atomic "get state" call instead of two, a bigger change than this PR's
+  scope. Left as a known risk rather than solved.
 - **`Connected` is per-client, refcounted in the router — never wire an
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +
@@ -1371,6 +1406,8 @@ Protocol documentation: `AlpacaCore/external/SynScan/`. No external SDK required
 Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol versions V3 (older) and V4 (current).
 
 - Auto-detection scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for SynScan hand controllers, probes each port with a firmware version query, and connects to the first responding mount.
+- **Connect verifies the link with the protocol echo (`K` + byte → byte + `#`)** (issue #130): `connect()` only opens the port, so before this gate a port with nothing listening came up as `Connected=true` once every handshake query (firmware, model, site, time, RA/Dec, Alt/Az) had burnt its 5 s response timeout inside `catch (...)`, and every command then timed out too. Silence on the echo fails the connect within one timeout with a message naming the port. A mismatched reply is NOT accepted (PR #3 review: a port that merely answers something framed like the protocol would otherwise proceed into the swallowed handshake queries and reproduce the phantom link) — `echo_test()` first reads past it for the rest of one response timeout, because right after `connect_serial()` opens the port the first token can be a stale reply from the previous session (`connect_serial()` flushes the tty buffer, but a USB adapter's own FIFO can still deliver one), then resends the echo once for a handset that garbled a byte, and fails after a second mismatch. Regression tests for silence, garbled-once, garbled-twice and stale-token-ahead-of-echo are in `test_synscan_async_park.cpp`; the shared `FakeMountServer::default_responder()` answers the echo so the concurrency stress tests still connect (they assert it). `connected_` is atomic and `get_connected()` lock-free (the connect sequence holds `mutex_` throughout). Every handset command and reply is logged at TRACE (`HC <cmd> -> <reply>`; non-printable bytes as `\xNN`).
+- **A silent handset is usually a wedged handset, not wiring** (EQM-35 Pro rig, SynScan V4 fw 04.40.00, 2026-09): after ANY bytes at the wrong baud (115200 from the Sky-Watcher direct-USB probe or a manual test) the handset answers nothing — both protocols, every baud, every DTR/RTS state — until power-cycled, and a mount restart does not reboot a handset that is USB-powered from the SBC (no re-enumeration in `dmesg` is the tell). Recovery: unplug USB from the SBC → power-cycle the mount → handset to its main screen → plug USB back in. Healthy, it answers `K`+byte with byte+`#` at 9600, auto-detect finds it (`HC firmware 04.40.00`), connect takes 0.6 s and reads 2–35 ms. Never send non-9600 traffic to a port that may be a handset; see `util/synscan_handset_probe.h`.
 - **Pulse guiding**: SynScan V3/V4 protocol has no hardware pulse guide command. Driver implements software-timed variable-rate slew: issues a variable-rate axis slew at the guide rate, sleeps for the requested duration, then stops the axis and restores sidereal tracking. `IsPulseGuiding` tracks completion via time-based end time plus delay.
 - **GEM pier-side DEC direction flip**: DEC motor direction is inverted when the mount's pointing state is 'W' (west), matching the physical axis reversal on German equatorial mounts. This affects pulse guide and MoveAxis DEC commands.
 - **Position override accumulation**: Instead of reading back noisy mount positions after tiny guide pulses, the driver accumulates expected `rate × duration` deltas directly into the target coordinate frame. All consecutive pulse guide directions (N/S/E/W) operate in the same coordinate baseline, eliminating drift between reads.
@@ -1392,6 +1429,7 @@ Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi 
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
 
+- **The serial probe asks for a SynScan handset echo first and skips the port if one answers** (`util/synscan_handset_probe.h`, 2026-09): a SynScan V4 hand controller (fw 04.40.00, built-in PL2303 `067b:23a3`) shares the Prolific adapter class this scan targets, and it stops answering serial ENTIRELY after receiving bytes at the wrong rate — one motor-controller probe at 115200 is enough — until it is power-cycled (unplugging the mount is not enough when the handset runs on USB power from the SBC). On the EQM-35 Pro rig this was the whole "hand-controller commands time out" report: the handset had been wedged by this probe at service start. The guard is at the top of `probe_skywatcher_port()`, gated on the caller's baud not being 9600 (the rate that is safe for a handset to receive) so it costs nothing on the only baud any caller currently probes at while still covering every future non-9600 caller; the same hazard applies to any other scan that sends non-9600 traffic to Prolific-class ports (the iOptron iEAF/iAFS2/3 and iEFW handshakes at 115200 are the known ones — not yet guarded). The SynScan driver's serial connect additionally claims the port with `TIOCEXCL`, an independent layer that blocks a concurrent same-process open regardless of baud. Hardware-verified 2026-09-09 (EQM-35 Pro rig): the exact-echo path connects cleanly, a manual open of the port while connected fails with `EBUSY` and succeeds again immediately after disconnect (no lock leak), and an abrupt `systemctl restart` mid-poll still re-detects the handset on the very first probe after restart (the closest this rig can reproduce of the stale-reply race the tolerant read loop targets). **Not exercised by this pass:** the baud gate itself — `fix/eqm35-hand-controller-timeout` only ever calls `probe_skywatcher_port()` at 9600, so the guard structurally cannot fire on this branch alone; its actual trigger (`kProbeBauds` including 115200) lives on `driver/skywatcher-eqm35` and needs its own hardware pass once combined with this fix. **Reverse direction (review on open-astro#242):** the guard sends the 9600 echo to a port that may be a Sky-Watcher motor board expecting 115200 — could a board be wedged by wrong-rate bytes the way the handset is? Empirically no, and the guard adds no new class of traffic: on `main` the probe has always sent `:e1` at 9600 to every candidate port, and `driver/skywatcher-eqm35`'s `kProbeBauds` tries 9600 first, so the real EQM-35 board received 9600 traffic before every successful 115200 detection during that branch's hardware bring-up (build a014531). The guard only runs on the non-9600 pass, i.e. after that same port has just been probed at 9600. Still, when the branches are combined, the combined pass should confirm both directions on the same rig: handset not wedged by the scan, board still detected at 115200 after the 9600 echo.
 - **All pointing math lives in the driver.** The MC protocol only counts steps: the driver
   owns RA/Dec <-> axis-angle conversion (CPR read at connect via `:a`, timer frequency
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
@@ -1521,6 +1559,219 @@ datagrams before each send so replies cannot get off-by-one.
   `alpacahttp_server` there (NOT `/usr/local/bin/`), and verify with
   `md5sum /usr/bin/alpacabridge` after restart; a wedged park/slew thread can hang
   `systemctl stop` (use `systemctl kill -s SIGKILL`).
+
+#### EQ-class Synta boards (EQM-35 Pro and relatives) — 2026-09-06
+
+The `:` command set is identical on classic Synta EQ mounts, so the Wave driver drives
+them unchanged. What differs is the transport and the identity, and both bit us:
+
+- **Baud is NOT irrelevant off the Wave.** The Wave's USB port is STM32 CDC-ACM, where
+  the baud setting is ignored. Synta EQ boards reached over the mount's own USB port or
+  an EQDIR cable are real UART bridges: the **EQM-35 Pro's built-in port is a soldered
+  Prolific PL2303 (067b:23a3, "ATEN Serial Bridge") at 115200**, and a 9600-only scan
+  finds nothing at all. Enumeration probes 9600 then 115200; the probe's winning baud
+  MUST be carried into `ConnectionInfo` (auto-detect used to drop it, so a board found
+  at 115200 was reopened at 9600 and every command timed out).
+- **`":e"` byte 3 is the MOUNT CODE, not a firmware patch level.** Layout is
+  `<fw major><fw minor><mount code>`, matching INDI `skywatcherAPI.cpp`. The Wave's
+  `=033A44` is firmware 3.58 + code 0x44 (WAVE_100I), never "3.58.68". EQM-35 Pro:
+  `=032732` -> firmware 3.39, code **0x32**, a code in neither INDI's `MountType` enum
+  nor Sky-Watcher's published SynScan model list. Cross-confirmed: the SynScan handset
+  on the same mount reports model id 50 (= 0x32) from its own `m` command, so
+  `synscan_model_id_to_name` gained `case 50` too.
+- **Feature word tells you which mount you are on.** `":q"` with data 0x000001 succeeds
+  on EQ boards — it does not throw — the home-index bit is simply absent. EQM-35 Pro
+  returns **0x7000** (POLAR_LED | COMMON_SLEW_START | HALF_CURRENT_TRACKING); the Wave
+  returns 0x100C (POLAR_LED | IS_AZEQ | HOME_INDEXER). Flags follow EQMod's set. Gate
+  AutoHome on the 0x04 bit, never on `":q"` failing: an EQM-35 takes the count-frame
+  `FindHome` fallback, and running the sensor hunt on a mount with no index sensors
+  would drive the axes looking for an edge that never arrives.
+- Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
+  `eqm35_pro()`, so loopback tests run against real captured geometry.
+- **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
+  Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain): auto-detect found
+  it unaided -- `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0 (MC firmware 3.39, 115200
+  baud)` -- and `Name` reported "Sky-Watcher EQM-35 Pro", firmware "3.39". CCDciel
+  connected over Alpaca with zero driver warnings. Further bring-up notes (pointing math,
+  MoveAxis semantics, tracking-rate measurement, the southern-hemisphere fixes) are
+  recorded against those fixes elsewhere in this section.
+
+#### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
+
+open-astro/AlpacaBridge#230, filed by the maintainer, asks for exactly the work in this
+section: generalizing the Wave driver to classic Sky-Watcher/Orion EQ mounts (HEQ5, EQ6,
+EQ6-R, AZ-EQ6, EQ5 Pro, etc.) via EQDIR cable, with no hand controller in the loop. Status
+against its checklist, 2026-09-06:
+
+- [x] Model/feature detection via `:e`/`:q` — done (mount-code table, feature-word gating).
+- [ ] Board-capability gating for PPEC, dual-encoder, WiFi, and the polar-scope LED per the
+  issue's list — only the home-index bit (`0x04`) is actually consulted so far.
+- [x] CPR/high-speed-ratio/timer-freq read from the board, not hardcoded for Wave —
+  confirmed: EQM-35 Pro geometry (CPR 9,216,000, timer 16 MHz) differs from the Wave
+  (4,147,200 / 14 MHz) and the SAME driver code tracked correctly on it (0.99995x
+  sidereal), so this was already correct, just unverified until now.
+- [x] High/low speed mode switch threshold — already board-generic:
+  `kFastModeThresholdDegPerSec = 128.0 * kSiderealDegPerSec`, derived from the MC
+  protocol's universal 128x switchover, not a Wave-specific constant.
+- [x] AutoHome/FindHome gracefully disabled without home-index sensors — hardware
+  verified: the EQM-35's `0x7000` feature word has no `HOME_INDEXER` bit, and `FindHome`
+  correctly takes the count-frame goto fallback rather than hunting a sensor that
+  doesn't exist.
+- [x] Naming/config: model auto-detected under the existing `vendor: skywatcher` key
+  (no separate `eqmod` alias needed) — done, `get_name()` reports the real model.
+- [x] **Auto-detect distinguishing an EQDIR cable from other vendors' PL2303/CH340/FTDI
+  devices** — was a real gap: the enumeration scan and `connect_serial()` did not use
+  `alpacacore/util/serial_port_registry.h` (the cross-vendor in-use registry originally
+  built for WandererAstro, explicitly designed to generalize "across wrappers"). Fixed:
+  both scan loops skip a port another connected device holds open, `probe_skywatcher_port`
+  re-checks after `open()` for the TOCTOU window, and `connect_serial()` claims the port
+  in the registry BEFORE opening it and releases it in `disconnect_locked()`. This is a
+  project-wide gap outside WandererAstro (synscan, ioptron, gemini, celestron, onstep none
+  use the registry either) — only `skywatcher` was closed here, in scope for this issue.
+- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open; see the
+  hemisphere fixes and pending bench test elsewhere in this section.
+- [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session
+  (no plate solve performed).
+- [ ] Park/unpark weights-down convention — not specifically re-verified on a classic
+  board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
+- [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
+  EQM-35 specifically, but the issue's ask applies equally.
+- [ ] Fake mount test double extended with a classic-board profile (9600 baud, no home
+  index, older firmware string) — deliberately NOT added with invented numbers. This
+  branch's `FakeMountProfile::eqm35_pro()` is a REAL hardware capture; fabricating a
+  plausible HEQ5/EQ6 profile without hardware to source it from would misrepresent
+  guessed values as measured ones. The issue notes HEQ5 PRO and EQ6 hardware is already
+  on hand via the `synscan` (hand-controller) driver validation (#7, #29) — reuse an
+  actual reading from that hardware over an EQDIR cable when available, rather than
+  inventing one.
+- **Not yet done, intentionally: adding the EQM-35 Pro to `SUPPORTED-DRIVERS.md` and the
+  architecture table, and renaming the "Sky-Watcher Wave" section to "Sky-Watcher Direct
+  Motor Controller" per the issue's suggestion.** This PR's code and tests are ready for
+  review now; the "supported"/Production claim is deliberately withheld until a ConformU
+  pass is run on the EQM-35 Pro (blocked on Pi 5 hardware, per this repo's own documented
+  bar in `AlpacaCore/conformu/README.md` and `SUPPORTED-DRIVERS.md`). A follow-up
+  docs-only PR adds those lines once that report exists.
+#### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
+
+Found on an EQM-35 Pro 2026-09-06, but **not hemisphere- or model-specific — the Wave
+100i is equally affected.** Not caused by the southern-hemisphere RA fix; that change
+only altered a rate sign and does not touch this machinery.
+
+**Symptom.** After a sequence of `MoveAxis` presses, the driver reports `Slewing = true`
+indefinitely while the axis is demonstrably stopped (`":f1"` running bit clear, `":j1"`
+counts frozen), AND tracking is never restarted even though `Tracking` still reports
+true. The mount sits motionless claiming to be both tracking and slewing. Reported RA
+then drifts at 1.0x sidereal — the signature of a stationary mount — instead of holding.
+
+This is the dangerous shape: a sequencer that waits for `Slewing` to clear before
+exposing hangs forever, and one that does not wait images on an untracked mount.
+
+**Mechanism.** `move_axis()` uses a SINGLE shared `stop_task_thread_` for both axes.
+When a new stop supersedes a pending one, the old task is cancelled
+(`stop_task_cancel_.store(true)`) and returns early from `task_wait_for()` — before
+reaching `manual_axis_slewing_[axis] = false` and the restore-tracking tail. Its axis's
+flag is stranded set, and `get_hardware_slewing_locked()` returns true forever because
+it ORs both `manual_axis_slewing_` entries.
+
+**Reproduction.** Drive MoveAxis on alternating axes with stops close together — CCDciel
+issues MoveAxis pairs ~44 ms apart on button release (observed in the journal), which is
+enough for the second stop to cancel the first axis's task. N, S, E, W in sequence
+reproduced it reliably.
+
+**Recovery (user-level).** `PUT moveaxis Axis=<n> Rate=0` on the stranded axis clears the
+flag and restores tracking, because a stop on an axis whose flag is set spawns a fresh
+task that runs to completion.
+
+**Fix (done).** `stop_task_thread_` and `stop_task_cancel_` are now per-axis arrays;
+`reap_stop_task(axis)` and the spawn/retry-join block only ever race with a prior task
+for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
+dispatched, Dec stop dispatched while RA's stop task is still mid-ramp) and asserts
+`Slewing` clears promptly. The generation guard
+(`motion_generation_ == stop_task_generation`) is unchanged and still gates the
+tracking-restore tail — which is exactly what exposed the SECOND bug below.
+
+#### KNOWN BUG (FIXED): cross-axis `motion_generation_` can block a same-axis tracking restore
+
+Found while writing the regression test for the bug above, on the SAME night
+(2026-09-06) — the per-axis stop-task fix is necessary but not sufficient. Not
+hemisphere- or model-specific.
+
+**Symptom.** With the per-axis fix in place, `Slewing` now clears correctly after
+stopping both axes close together — but the RA axis can still fail to resume tracking
+after a `MoveAxis(0, 0)` stop, even though `Tracking` reports true throughout. Caught by
+a loopback test asserting `mount.axis_running(1)` becomes true again after the stop
+settles: it does not, reliably, when a Dec-axis stop is dispatched while the RA stop
+task is still polling.
+
+**Mechanism.** The restore-tracking tail guards itself with
+`motion_generation_ == stop_task_generation` — "only restore if nothing newer
+superseded this stop." But `motion_generation_` is ONE counter bumped by every motion
+command on EITHER axis (see its declaration: "bumped by every motion command"). A Dec
+stop dispatched while RA's stop task is polling bumps the shared counter for a reason
+that has nothing to do with RA, so the RA task's tail reads a mismatch and silently
+skips restoring RA's tracking — even though nothing actually superseded the RA stop
+itself (which is correctly detected via the now-per-axis `stop_task_cancel_[0]`, a
+separate and correctly-scoped check).
+
+The codebase already has the right idiom for this elsewhere: the duty-cycle worker
+(`apply_ra_drive_locked`'s burst path, guarding sub-floor rate duty-cycling) computes a
+`same_axis_owner` flag from `goto_in_progress_ || parking_ || homing_ || slewing_cached_
+|| manual_axis_slewing_[i] || (pulse_guiding_active_ && pulse_axis_ == channel)` before
+trusting a generation mismatch as a real supersession, specifically BECAUSE "the global
+generation cannot tell a same-axis supersession from an unrelated other-axis command"
+(exact wording from that code's own comment). The MoveAxis stop-task tail does not apply
+this idiom and should.
+
+**Fix (done).** Applied option (a): the stop-task restore tail now computes a
+channel-scoped `same_axis_owner` (`goto_in_progress_ || parking_ || homing_ ||
+slewing_cached_ || manual_axis_slewing_[axis] || (pulse_guiding_active_ &&
+pulse_axis_ == channel)`), the exact idiom the duty-cycle worker already uses, and only
+treats a `motion_generation_` mismatch as a real supersession when `same_axis_owner`
+is true. Verified the historical regression this guards against (PR #216 round-5:
+`SetTracking(false)` racing the restore) is still covered independently: that path sets
+`tracking_ = false` under the SAME `mutex_` this task also holds, so there is no
+interleaving where the restore reads `tracking_ == true` while a completed
+`SetTracking(false)` meant otherwise -- the `tracking_ &&`/`dec_rate_arcsec_per_sec_ !=
+0.0 &&` guards already ahead of the generation check cover that case on their own.
+Extended the regression test from the first bug to assert the RA axis actually resumes
+running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
+with the fix reverted to the raw equality check, and passes with it restored.
+
+- **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
+  Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
+  - Pointing math is hemisphere-correct at latitude -37.2 with no changes: home
+    points at the SOUTH celestial pole, so `dec = -90 + a2`. Verified against raw
+    counts — reported HA matched axis 1 to 0.0004 deg, and alt/az recomputed
+    independently from the reported RA/Dec matched the driver to 4 decimal places.
+  - `MoveAxis` verified semantically in all four directions, not just for motion:
+    each button was checked against the change in REPORTED RA/Dec. N: Dec +15.59
+    deg, S: Dec -16.96 deg, E: RA +15.47 deg, W: RA -15.28 deg, zero cross-axis
+    coupling in every case. `move_axis()` applies NO branch or hemisphere sign
+    transform (the rate goes straight to `start_speed_motion_locked`), so this is
+    also the hardware reference for which way a raw Dec-axis rate moves reported
+    Dec below the equator -- the fact the DeclinationRate/PulseGuide fix (a later
+    commit on this branch) rests on. Reported coordinates come from the driver's
+    own pointing model; an independent sky check (plate solve) is still on the
+    list below. Do NOT "fix" MoveAxis to follow sky Dec: the ASCOM spec says the
+    sign of the Rate parameter "is purposely left undefined" and the motion is
+    about the MECHANICAL axis, so the no-transform behaviour is correct in both
+    hemispheres (checked against
+    ascom-standards.org/newdocs/telescope.html#Telescope.MoveAxis, 2026-09-06).
+  - **Tracking rate measured at 0.99995x sidereal over 5 minutes** (-46 ppm,
+    -2.5 arcsec/hour, against a +/-31 ppm encoder-quantisation floor), Dec drift
+    exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1.
+  - **Technique worth reusing:** the protocol wrapper does NOT log individual
+    commands, so do not plan to read step periods out of the journal. Sample
+    `":j1"`/`":j2"` through the Alpaca `commandstring` passthrough instead and
+    differentiate — that measures what the mount ACTUALLY does rather than what it
+    was told, and needs no rebuild. Expected sidereal counts/s = `CPR * 360.98564736629
+    / 86400 / 360` (106.959 on this mount). Make sure nothing else is driving the
+    mount while sampling; a manual slew mid-run silently corrupts the result.
+  - Note this validates driver -> board -> encoder counts. It validates counts -> SKY
+    only if the gear ratio matches what the firmware's `":a"` assumes; a belt/pulley
+    mod that changes the reduction would track perfectly in counts and still drift on
+    sky. (Confirmed ratio-preserving on this unit.)
+
 
 ### iOptron
 

@@ -14,6 +14,8 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
 #ifndef _WIN32
@@ -63,12 +65,16 @@ int hex_nibble(char c) {
 
 char nibble_hex(uint32_t v) { return static_cast<char>(v < 10 ? '0' + v : 'A' + (v - 10)); }
 
-std::string format_mc_version(const std::string& data) {
-    // ":e" replies with 6 hex chars. TODO: validate the byte order of the
-    // version fields against Wave 100i hardware (INDI swaps the first and
-    // third bytes of the straight-parsed value).
+// Decode the 6 hex chars of a ":e" reply. Byte layout is
+// <fw major><fw minor><mount code>: the third byte identifies the MODEL, it is
+// not a firmware patch level. Verified two ways on an EQM-35 Pro: ":e1" returns
+// "=032732" (0x32 = 50) while the SynScan handset on the same mount reports
+// model ID 50 from its own "m" command. Matches INDI skywatcherAPI.cpp, whose
+// MountType enum lists 0x44/0x45 for the Wave 100i/150i -- the Wave's
+// "=033A44" third byte 0x44 is likewise an identity, not a ".68" patch.
+bool decode_mc_version(const std::string& data, int& fw_major, int& fw_minor, std::uint8_t& mount_code) {
     if (data.size() < 6) {
-        return "";
+        return false;
     }
     auto byte_at = [&data](std::size_t i) {
         int hi = hex_nibble(data[i]);
@@ -80,10 +86,24 @@ std::string format_mc_version(const std::string& data) {
     int b1 = byte_at(2);
     int b2 = byte_at(4);
     if (b0 < 0 || b1 < 0 || b2 < 0) {
+        return false;
+    }
+    fw_major = b0;
+    fw_minor = b1;
+    mount_code = static_cast<std::uint8_t>(b2);
+    return true;
+}
+
+// Firmware string only, e.g. "3.39". Empty on a malformed reply.
+std::string format_mc_version(const std::string& data) {
+    int major = 0;
+    int minor = 0;
+    std::uint8_t code = 0;
+    if (!decode_mc_version(data, major, minor, code)) {
         return "";
     }
     std::ostringstream oss;
-    oss << b0 << "." << b1 << "." << b2;
+    oss << major << "." << (minor < 10 ? "0" : "") << minor;
     return oss.str();
 }
 
@@ -139,7 +159,86 @@ std::string mc_error_message(const std::string& code) {
     return "Motor controller error code " + code;
 }
 
+// A "!<code>" reply: the board received the command and refused it. Kept
+// distinct from transport failures (timeout, mis-paired or malformed reply,
+// not connected) so a caller can tell "this board does not know the command"
+// from "this exchange did not complete".
+class MotorControllerRejected : public AlpacaException {
+public:
+    MotorControllerRejected(const std::string& what, std::string code)
+        : AlpacaException(what), code_(std::move(code)) {}
+    const std::string& code() const { return code_; }
+    bool unknown_command() const { return code_ == "0"; }
+
+private:
+    std::string code_;
+};
+
+// Build the TRACE wire-log line only when TRACE is actually enabled: the
+// macro checks the level inside log(), after the caller has already
+// concatenated the string, so the gate has to be here.
+bool trace_enabled() { return alpacacore::logging::get_log_level() <= alpacacore::logging::LogLevel::Trace; }
+
 }  // namespace
+
+// Mount-code byte of the ":e" reply. Values follow INDI's skywatcherAPI.cpp
+// MountType enum, plus 0x32 for the EQM-35 Pro, which appears in neither INDI's
+// table nor Sky-Watcher's published SynScan model list but is what the hardware
+// reports on both protocols.
+std::string mount_code_to_name(std::uint8_t mount_code) {
+    switch (mount_code) {
+        case 0x00:
+            return "EQ6";
+        case 0x01:
+            return "HEQ5";
+        case 0x02:
+            return "EQ5";
+        case 0x03:
+            return "EQ3";
+        case 0x04:
+            return "EQ8";
+        case 0x05:
+            return "AZ-EQ6";
+        case 0x06:
+            return "AZ-EQ5";
+        case 0x0A:
+            return "Star Adventurer";
+        case 0x0C:
+            return "Star Adventurer GTi";
+        case 0x20:
+            return "EQ8-R Pro";
+        case 0x22:
+            return "AZ-EQ6 Pro";
+        case 0x23:
+            return "EQ6-R Pro";
+        case 0x24:
+            return "EQ6 Pro";
+        case 0x25:
+            return "CQ350 Pro";
+        case 0x31:
+            return "EQ5 Pro";
+        case 0x32:
+            return "EQM-35 Pro";
+        case 0x44:
+            return "Wave 100i";
+        case 0x45:
+            return "Wave 150i";
+        case 0xA2:
+            return "AZ-GTe";
+        case 0xA5:
+            return "AZ-GTi";
+        default: {
+            // Unknown board: surface the raw code so a new model can be
+            // identified from the logs and added above.
+            static constexpr char kHex[] = "0123456789ABCDEF";
+            std::string out = "Mount (code 0x";
+            out += kHex[(mount_code >> 4) & 0xF];
+            out += kHex[mount_code & 0xF];
+            out += ")";
+            return out;
+        }
+    }
+}
 
 std::string SkyWatcherProtocolWrapper::encode_u24(uint32_t value) {
     // 0x123456 -> "563412": low byte first, each byte high-nibble-first.
@@ -174,14 +273,44 @@ uint32_t SkyWatcherProtocolWrapper::decode_u24(const std::string& data) {
 
 // ── Serial probe / enumeration ──────────────────────────────────────────────
 
-namespace {
-
 #ifndef _WIN32
-// Open a serial port at 9600 8N1 and probe it with ":e1\r". Returns the motor
-// board version string on success, empty on failure.
+// Open a serial port at @p baud_rate 8N1 and probe it with ":e1\r". Returns
+// the motor board version payload on success, empty on failure. Declared in
+// the public header (with probe_skywatcher_port_any_baud) for the pty tests.
 std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
+    // A SynScan hand controller shares the adapter classes this scan targets
+    // and speaks its own protocol at 9600. It is only put at risk by a probe
+    // at some OTHER rate: one motor-controller probe at 115200 is enough to
+    // stop it answering serial entirely, and only a power-cycle brings it
+    // back (EQM-35 Pro rig, 2026-09 - the "hand-controller commands time
+    // out" report). Gate on the baud actually being used rather than paying
+    // the guard's full timeout on every port for a hazard that baud does
+    // not create: the 9600 attempt of probe_skywatcher_port_any_baud() below
+    // never trips it, the 115200 attempt (Synta EQ boards over their own USB
+    // port) always runs it first. See util/synscan_handset_probe.h.
+    // The echo guard below opens the port itself, before the open()/re-check
+    // pair further down, so it needs its own look at the cross-vendor
+    // registry: the caller's check happened before the 9600 attempt, and
+    // another vendor's connect may have claimed the port since.
+    if (alpacacore::util::is_serial_port_in_use(port_path)) {
+        return "";
+    }
+    if (baud_rate != 9600 && util::port_answers_synscan_echo(port_path)) {
+        ALPACA_LOG_INFO("SkyWatcher", "Skipping " + port_path + ": a SynScan hand controller answered the echo test");
+        return "";
+    }
     int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
+        return "";
+    }
+    // Re-check after opening: another vendor's driver may have claimed this
+    // port (its connect marks it before opening) in the window between the
+    // caller's is_serial_port_in_use() check and this open(). Bail rather
+    // than reading for up to 1.5s and stealing bytes from that device's
+    // stream (issue #230: EQDIR cables share PL2303/CH340/FTDI chips with
+    // other vendor probes, e.g. iOptron, ZWO EAF, Gemini).
+    if (alpacacore::util::is_serial_port_in_use(port_path)) {
+        close(fd);
         return "";
     }
 
@@ -246,8 +375,45 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     if (reply.size() < 7 || reply[0] != kReplyOk) {
         return "";
     }
-    std::string version = format_mc_version(reply.substr(1));
-    return version.empty() ? "unknown" : version;
+    // Raw 6-hex-char payload: the caller decodes firmware AND mount code.
+    return reply.substr(1, 6);
+}
+
+// Probe a port at each baud a Sky-Watcher board is known to use, returning the
+// first that answers ":e1". The Wave's STM32 CDC-ACM port ignores baud, so 9600
+// succeeds there on the first try; Synta EQ boards reached over the mount's
+// built-in USB port or an EQDIR cable are real UART bridges -- the EQM-35 Pro's
+// onboard PL2303 runs at 115200, so a 9600-only scan silently misses it.
+constexpr int kProbeBauds[] = {9600, 115200};
+
+bool probe_skywatcher_port_any_baud(const std::string& port_path, MotorBoardInfo& info_out, int& baud_out) {
+    for (int baud : kProbeBauds) {
+        std::string payload = probe_skywatcher_port(port_path, baud);
+        if (payload.empty()) {
+            continue;
+        }
+        int major = 0;
+        int minor = 0;
+        MotorBoardInfo info;
+        if (!decode_mc_version(payload, major, minor, info.mount_code)) {
+            // Answered on the frame level but the payload is not a version;
+            // treat as a non-match rather than adopting a bogus identity.
+            continue;
+        }
+        info.firmware_version = format_mc_version(payload);
+        info.model_name = mount_code_to_name(info.mount_code);
+        info_out = std::move(info);
+        baud_out = baud;
+        return true;
+    }
+    return false;
+}
+
+namespace {
+
+std::string describe_found_port(const SkyWatcherPortInfo& port) {
+    return "Found Sky-Watcher " + port.model_name + " on " + port.port_path + " (MC firmware " + port.firmware_version +
+           ", " + std::to_string(port.baud_rate) + " baud)";
 }
 
 bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
@@ -259,9 +425,8 @@ bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
         *descriptor, {"STM32", "STMicroelectronics", "0483", "Prolific", "PL2303", "067b", "FTDI", "CP210", "CH340",
                       "CH341", "1a86", "Silicon_Labs", "USB_Serial", "USB-Serial"});
 }
-#endif  // _WIN32
-
 }  // namespace
+#endif  // _WIN32
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
     std::vector<SkyWatcherPortInfo> results;
@@ -286,6 +451,10 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
+            // issue #230: don't steal bytes from a port another connected
+            // vendor's device (iOptron, ZWO EAF, Gemini, ...) is streaming on
+            // -- several share the same PL2303/CH340/FTDI chip families.
+            if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
             {
                 std::string msg = "Probing ";
                 msg += resolved;
@@ -294,15 +463,13 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
                 msg += ")...";
                 ALPACA_LOG_INFO("SkyWatcher", msg);
             }
-            std::string fw = probe_skywatcher_port(resolved, 9600);
-            if (!fw.empty()) {
-                std::string msg = "Found Sky-Watcher motor controller on ";
-                msg += resolved;
-                msg += " (MC firmware ";
-                msg += fw;
-                msg += ")";
-                ALPACA_LOG_INFO("SkyWatcher", msg);
-                results.push_back({resolved, name, fw});
+            int baud = 9600;
+            MotorBoardInfo board;
+            if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
+                SkyWatcherPortInfo found{resolved,        name, board.firmware_version, baud, board.mount_code,
+                                         board.model_name};
+                ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
+                results.push_back(std::move(found));
             }
         }
     }
@@ -325,16 +492,14 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_skywatcher_candidate(resolved)) continue;
         probed.insert(resolved);
+        if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
         ALPACA_LOG_INFO("SkyWatcher", "Probing " + resolved + "...");
-        std::string fw = probe_skywatcher_port(resolved, 9600);
-        if (!fw.empty()) {
-            std::string msg = "Found Sky-Watcher motor controller on ";
-            msg += resolved;
-            msg += " (MC firmware ";
-            msg += fw;
-            msg += ")";
-            ALPACA_LOG_INFO("SkyWatcher", msg);
-            results.push_back({resolved, "", fw});
+        int baud = 9600;
+        MotorBoardInfo board;
+        if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
+            SkyWatcherPortInfo found{resolved, "", board.firmware_version, baud, board.mount_code, board.model_name};
+            ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
+            results.push_back(std::move(found));
         }
     }
 #endif
@@ -498,6 +663,7 @@ public:
             return false;
         }
         info_ = info;
+        step_period_readback_.store(true, std::memory_order_relaxed);
         response_timeout_ms_.store(info.response_timeout_ms > 0 ? info.response_timeout_ms : 1000,
                                    std::memory_order_relaxed);
         bool ok = info.type == ConnectionType::Serial ? connect_serial(info) : connect_udp(info);
@@ -509,6 +675,11 @@ public:
         std::lock_guard<std::mutex> lock(io_mutex_);
         disconnect_locked();
     }
+
+    // ":i" step-period readback diagnostic: on for each new connection, off
+    // for the rest of it once the board fails to answer ":i".
+    bool step_period_readback() const { return step_period_readback_.load(std::memory_order_relaxed); }
+    void disable_step_period_readback() { step_period_readback_.store(false, std::memory_order_relaxed); }
 
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(io_mutex_);
@@ -529,6 +700,21 @@ public:
     // Read lock-free from send paths; published in connect() under io_mutex_.
     int default_timeout() const { return response_timeout_ms_.load(std::memory_order_relaxed); }
 
+    // After a mis-paired reply: absorb whatever else is in flight so the
+    // resend starts from a quiet link.
+    void settle_after_mispair() {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        if (!connected_) {
+            return;
+        }
+        if (info_.type == ConnectionType::Serial) {
+            settle_serial(200);
+        } else {
+            settle_drain(300);
+            link_dirty_ = true;  // force the ":e1" resync probe on the next UDP exchange
+        }
+    }
+
 private:
     void disconnect_locked() {
 #ifndef _WIN32
@@ -540,21 +726,46 @@ private:
             close(socket_fd_);
             socket_fd_ = -1;
         }
+        if (!registered_port_.empty()) {
+            alpacacore::util::mark_serial_port_closed(registered_port_);
+            registered_port_.clear();
+        }
 #endif
         connected_ = false;
     }
 
     bool connect_serial(const ConnectionInfo& info) {
 #ifndef _WIN32
+        // Canonicalize so this matches whatever form enumerate_skywatcher_ports()
+        // or a user-typed config path resolves to (issue #230: a by-id symlink
+        // and its /dev/ttyUSBn target must compare equal in the registry).
+        std::error_code path_ec;
+        std::string canonical_path = std::filesystem::canonical(info.port_path, path_ec).string();
+        std::string registry_key = path_ec ? info.port_path : canonical_path;
+
+        // Claim BEFORE opening: a concurrent auto-detect scan (this vendor's
+        // own, or another's) checks is_serial_port_in_use() then opens -- claiming
+        // first closes the window where it could slip in between our check and
+        // our open() and start reading this mount's replies. The check and the
+        // claim are one atomic step so two racing connects cannot both pass a
+        // separate check and both claim the port (PR #251 review).
+        if (!alpacacore::util::try_mark_serial_port_open(registry_key)) {
+            ALPACA_LOG_ERROR("SkyWatcher",
+                             "Port " + registry_key + " is already held open by another connected device");
+            return false;
+        }
+
         serial_fd_ = open(info.port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
             ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + util::errno_string(errno));
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         speed_t speed = info.baud_rate == 115200 ? B115200 : B9600;
@@ -577,14 +788,17 @@ private:
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         if (!util::clear_nonblocking(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         tcflush(serial_fd_, TCIOFLUSH);
+        registered_port_ = registry_key;
         return true;
 #else
         (void)info;
@@ -643,11 +857,48 @@ private:
 #endif
     }
 
+    // Absorb a late reply on the serial link: read and discard everything
+    // for the whole window. Used after a timeout (the reply may still be in
+    // flight) and after a mis-paired reply, so the NEXT command cannot
+    // consume a stale frame as its own answer. The window is not cut short
+    // when the line is quiet: a reply that has not STARTED arriving when
+    // the settle begins would otherwise slip through, and if it has the same
+    // shape as the next command's reply (":j" after a timed-out ":j") the
+    // shape check in send_command cannot tell it apart either (pty-backed
+    // regression in test_skywatcher_serial.cpp). Replies later than the
+    // window are only caught when their shape differs.
+    void settle_serial(int window_ms) {
+#ifndef _WIN32
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(window_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            char ch = 0;
+            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            if (r != 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+        tcflush(serial_fd_, TCIFLUSH);
+#else
+        (void)window_ms;
+#endif
+    }
+
     std::string exchange_serial(const std::string& frame, int timeout_ms) {
 #ifndef _WIN32
         // Leftover bytes from a timed-out earlier exchange would be parsed as
-        // this command's reply — drain them first.
-        tcflush(serial_fd_, TCIFLUSH);
+        // this command's reply — drain them first. A plain flush only catches
+        // bytes that have ALREADY arrived; after a timeout the reply may still
+        // be in flight, so settle (wait for the line to go quiet) before the
+        // write. Otherwise the stale frame lands after the flush and is read
+        // as this command's reply: a bare "=" ack command (":I") would then be
+        // "acknowledged" by the previous command's data while its own frame
+        // was never applied.
+        if (serial_dirty_) {
+            settle_serial(200);  // ends with its own tcflush
+            serial_dirty_ = false;
+        } else {
+            tcflush(serial_fd_, TCIFLUSH);
+        }
         if (!util::write_all(serial_fd_, frame.data(), frame.size())) {
             throw AlpacaException("Serial write failed: " + util::errno_string(errno));
         }
@@ -663,12 +914,16 @@ private:
                 }
                 reply.push_back(ch);
                 if (reply.size() > 32) {
+                    serial_dirty_ = true;
                     throw AlpacaException("Motor controller reply overflow");
                 }
             } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
                 throw AlpacaException("Serial read failed: " + util::errno_string(errno));
             }
         }
+        serial_dirty_ = true;
+        ALPACA_LOG_WARN("SkyWatcher", "Timeout (" + std::to_string(timeout_ms) + " ms) waiting for the reply to '" +
+                                          frame.substr(0, frame.size() - 1) + "'; link marked dirty");
         throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "'");
 #else
         (void)frame;
@@ -878,12 +1133,15 @@ private:
     mutable std::mutex io_mutex_;
     bool connected_ = false;
     ConnectionInfo info_{};
+    std::atomic<bool> step_period_readback_{true};  // see step_period_readback()
 #ifndef _WIN32
     int serial_fd_ = -1;
     int socket_fd_ = -1;
+    std::string registered_port_;  // canonical path marked open in the cross-vendor registry
     // Set after a UDP timeout/error: the next exchange runs a settle drain
     // before sending so a late reply cannot be mis-paired. Guarded by io_mutex_.
     bool link_dirty_ = false;
+    bool serial_dirty_ = false;  // a serial exchange timed out; settle before the next write
     std::string fw_reply_;
 #endif
     // Outside the platform guard: connect()/default_timeout() touch it on
@@ -921,13 +1179,49 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
     frame.push_back(kFrameEnd);
 
     int timeout = timeout_ms_override > 0 ? timeout_ms_override : pimpl_->default_timeout();
-    std::string reply = pimpl_->exchange(frame, timeout, expected_reply_data_len(command));
+    const int expected_len = expected_reply_data_len(command);
+    std::string reply;
+    for (int attempt = 0;; ++attempt) {
+        reply = pimpl_->exchange(frame, timeout, expected_len);
+        // TRACE-only wire log: every motor-controller frame and its reply,
+        // the only way to see what the board was actually told when a
+        // driver-level symptom (e.g. a pulse that produced no motion) has no
+        // other trace. Gated on the level here so the string is not built
+        // for every exchange below TRACE.
+        if (trace_enabled()) {
+            ALPACA_LOG_TRACE("SkyWatcher", "MC " + frame.substr(0, frame.size() - 1) + " -> " + reply);
+        }
+        // Shape check: an OK reply whose data length does not match the
+        // command is a reply to SOMETHING ELSE (a late frame from a timed-out
+        // exchange). Accepting it would report success for a command the
+        // board may never have applied. Settle the link and resend once.
+        const bool mispaired = expected_len >= 0 && !reply.empty() && reply[0] == kReplyOk &&
+                               static_cast<int>(reply.size()) - 1 != expected_len;
+        if (!mispaired) {
+            break;
+        }
+        ALPACA_LOG_WARN("SkyWatcher", "Mis-paired reply to '" + frame.substr(0, frame.size() - 1) + "': got '" + reply +
+                                          "' (expected " + std::to_string(expected_len) +
+                                          " data chars); settling the link and " +
+                                          (attempt == 0 ? "resending" : "giving up"));
+        // Settle before the resend AND before giving up: a mis-pair means a
+        // stale frame is (or was just) in flight, and a caller that catches
+        // the exception and carries on would otherwise have its next
+        // exchange answered by the straggler -- a same-shaped one passes
+        // the shape check (PR #245 review).
+        pimpl_->settle_after_mispair();
+        if (attempt > 0) {
+            throw AlpacaException("Mis-paired motor controller reply to '" + std::string(1, command) +
+                                  std::to_string(axis) + "': '" + reply + "'");
+        }
+    }
     if (!reply.empty() && reply[0] == kReplyOk) {
         return reply.substr(1);
     }
     if (!reply.empty() && reply[0] == kReplyError) {
-        throw AlpacaException("Motor controller rejected '" + std::string(1, command) + std::to_string(axis) +
-                              "': " + mc_error_message(reply.substr(1)));
+        throw MotorControllerRejected("Motor controller rejected '" + std::string(1, command) + std::to_string(axis) +
+                                          "': " + mc_error_message(reply.substr(1)),
+                                      reply.substr(1));
     }
     throw AlpacaException("Malformed motor controller reply to '" + std::string(1, command) + std::to_string(axis) +
                           "': '" + reply + "'");
@@ -935,16 +1229,27 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
 
 std::string SkyWatcherProtocolWrapper::send_raw_command(const std::string& frame, int timeout_ms_override) {
     int timeout = timeout_ms_override > 0 ? timeout_ms_override : pimpl_->default_timeout();
-    return pimpl_->exchange(frame, timeout);
+    std::string reply = pimpl_->exchange(frame, timeout);
+    if (trace_enabled()) {
+        ALPACA_LOG_TRACE("SkyWatcher",
+                         "MC raw " + frame.substr(0, frame.empty() ? 0 : frame.size() - 1) + " -> " + reply);
+    }
+    return reply;
 }
 
-std::string SkyWatcherProtocolWrapper::get_motor_board_version() {
+std::string SkyWatcherProtocolWrapper::get_motor_board_version() { return get_motor_board_info().firmware_version; }
+
+MotorBoardInfo SkyWatcherProtocolWrapper::get_motor_board_info() {
     std::string data = send_command('e', kAxisRa);
-    std::string version = format_mc_version(data);
-    if (version.empty()) {
+    int major = 0;
+    int minor = 0;
+    MotorBoardInfo info;
+    if (!decode_mc_version(data, major, minor, info.mount_code)) {
         throw AlpacaException("Unparseable motor board version reply: '" + data + "'");
     }
-    return version;
+    info.firmware_version = format_mc_version(data);
+    info.model_name = mount_code_to_name(info.mount_code);
+    return info;
 }
 
 AxisParameters SkyWatcherProtocolWrapper::get_axis_parameters(int axis) {
@@ -997,8 +1302,67 @@ void SkyWatcherProtocolWrapper::set_goto_target(int axis, uint32_t counts) {
     send_command('S', axis, encode_u24(counts));
 }
 
-void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset) {
+void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset, bool with_readback) {
+    // A plain ":I" write, the way INDI's skywatcherAPI.cpp and indi-eqmod do
+    // it: a transport failure (no, garbled or rejected reply) throws from
+    // send_command; what the board STORED is never a failure condition.
     send_command('I', axis, encode_u24(t1_preset));
+
+    // The ":i" readback is a diagnostic only -- compare the stored preset and
+    // WARN on a mismatch, never resend, never throw. Two reasons. On an
+    // EQM-35 Pro the readback matched exactly while the axis kept its old
+    // speed (the board stores a live preset without applying it; the driver
+    // checks the change in MOTION instead, see verify_live_rate_or_rekick),
+    // so a matching readback proves nothing. And the rounding tolerated
+    // below was measured on ONE board (MC fw 3.39); failing the write on a
+    // Synta board that rounds differently would turn a harmless imprecision
+    // into a hard MoveAxis/PulseGuide error (PR #1 review).
+    // Callers on a timing-critical path (the pulse-guide dispatch and its
+    // end-of-pulse restore: the axis is already moving at the new rate while
+    // this runs, so a second round-trip would stretch the pulse) opt out.
+    if (!with_readback || !pimpl_->step_period_readback()) {
+        return;
+    }
+    // An EQM-35 Pro (MC fw 3.39) rounds the preset to a multiple of 4,
+    // clamps below 168 to 168, and reads the all-ones "stopped" preset back
+    // as 0: only compare presets inside the range it stores near-verbatim.
+    constexpr uint32_t kReadbackFloor = 168;
+    constexpr uint32_t kReadbackCeiling = 0xFFFFF0;
+    constexpr uint32_t kReadbackTolerance = 4;
+    if (t1_preset <= kReadbackFloor || t1_preset >= kReadbackCeiling) {
+        return;
+    }
+    uint32_t readback = 0;
+    try {
+        readback = decode_u24(send_command('i', axis));
+    } catch (const MotorControllerRejected& e) {
+        if (!e.unknown_command()) {
+            // Refused for some other reason (busy, not initialised): the
+            // board does know ":i"; skip this readback only.
+            ALPACA_LOG_WARN("SkyWatcher", std::string("Step-period readback (':i') refused this time: ") + e.what());
+            return;
+        }
+        // "!0" Unknown command: this board has no ":i" -- off until the
+        // next connect.
+        pimpl_->disable_step_period_readback();
+        ALPACA_LOG_WARN("SkyWatcher", std::string("Step-period readback (':i') unavailable on this board; diagnostic "
+                                                  "disabled until reconnect: ") +
+                                          e.what());
+        return;
+    } catch (const std::exception& e) {
+        // Transport failure on the diagnostic itself (timeout, mis-paired or
+        // malformed reply): the ":I" write already succeeded, and a busy link
+        // is exactly when this readback matters, so keep it enabled and
+        // just skip this one.
+        ALPACA_LOG_WARN("SkyWatcher", std::string("Step-period readback (':i') skipped, exchange failed: ") + e.what());
+        return;
+    }
+    const uint32_t diff = readback > t1_preset ? readback - t1_preset : t1_preset - readback;
+    if (diff > kReadbackTolerance) {
+        ALPACA_LOG_WARN("SkyWatcher", "Axis " + std::to_string(axis) + " step period readback " +
+                                          std::to_string(readback) + " != written " + std::to_string(t1_preset) +
+                                          " (diagnostic only; not resent)");
+    }
 }
 
 void SkyWatcherProtocolWrapper::start_motion(int axis) { send_command('J', axis); }

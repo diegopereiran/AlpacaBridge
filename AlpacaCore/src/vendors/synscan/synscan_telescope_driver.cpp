@@ -125,6 +125,11 @@ std::string synscan_model_id_to_name(int model_id) {
         case 4:  return "EQ8";
         case 5:  return "AZ-EQ6";
         case 6:  return "AZ-EQ5";
+        // 50 (0x32) is absent from the published V3/V4 table but is what an
+        // EQM-35 Pro reports; cross-confirmed against the same mount's motor
+        // controller, whose ":e" mount-code byte is also 0x32.
+        case 50:
+            return "EQM-35 Pro";
         case 56: return "HEQ5 Pro";
         case 160: return "AllView";
         default:
@@ -234,10 +239,16 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return connected_;
-    }
+    // Lock-free on purpose: set_connected(true) holds mutex_ for the whole
+    // handset handshake (echo, firmware, model, site, time, position warm-up,
+    // each a serial round trip with its own response timeout), and the router
+    // polls this getter from the PUT connected wait and from every GET
+    // connected in between. Taking mutex_ here made those calls block for the
+    // entire connect (25 s measured against a silent hand controller: five
+    // 5 s timeouts), so the router's 8 s deadline never fired and clients
+    // reported "Dynamic client timeout for method Connected" (issue #130).
+    // Same atomic-flag pattern as the other 30 drivers.
+    bool get_connected() const override { return connected_.load(); }
 
     void connect() override {
         start_connection_task(true);
@@ -276,6 +287,20 @@ public:
         if (connected) {
             if (!protocol.connect(connection_info_)) {
                 throw AlpacaException("Failed to connect to SynScan mount");
+            }
+            if (!protocol.echo_test()) {
+                // connect() only opens the port. Without this gate a link
+                // with nothing listening came up as Connected=true once every
+                // query below had burnt its full response timeout (all of
+                // them swallowed), and the client then saw each command time
+                // out in turn. Fail within one timeout, and say where to look.
+                protocol.disconnect();
+                const std::string where = connection_info_.type == alpacacore::vendor::synscan::ConnectionType::Serial
+                                              ? connection_info_.port_path
+                                              : connection_info_.host + ":" + std::to_string(connection_info_.tcp_port);
+                throw AlpacaException("SynScan hand controller did not answer the echo test on " + where +
+                                      " - check that the cable is on the handset's PC port, the handset is "
+                                      "powered and past its start-up prompts, and the baud rate is 9600");
             }
             connected_ = true;
             mount_firmware_version_ = "";
@@ -1786,7 +1811,7 @@ private:
     ConnectionInfo connection_info_;
     SynScanVersion version_;
     mutable std::mutex mutex_;
-    bool connected_;
+    std::atomic<bool> connected_;  // written under mutex_, read lock-free by get_connected()
 
     double target_ra_hours_;
     double target_dec_degrees_;

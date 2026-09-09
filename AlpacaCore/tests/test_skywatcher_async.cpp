@@ -184,6 +184,55 @@ TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tra
     driver->set_connected(false);
 }
 
+TEST_CASE(
+    "SkyWatcher async - independent MoveAxis stops on both axes do not strand Slewing "
+    "or block the RA tracking restore",
+    "[skywatcher][async]") {
+    // Regression (found during EQM-35 Pro hardware bring-up, 2026-09-06), fixed in two
+    // steps:
+    //
+    // (1) reap_stop_task() used to cancel+join a SINGLE stop-completion thread shared by
+    //     both axes. Stopping axis 1 while axis 0's stop task was still polling a
+    //     ramping mount (CCDciel issues MoveAxis stop pairs ~44ms apart on button
+    //     release -- see AGENTS.md) cancelled the RA task before it reached
+    //     manual_axis_slewing_[0] = false, stranding Slewing true FOREVER
+    //     (get_hardware_slewing_locked() ORs both axes' flags) -- exactly the hardware
+    //     symptom. Fixed: each axis now has its own stop-task thread and cancel flag.
+    //
+    // (2) That fix alone was not sufficient: the RA stop task's tracking-restore tail
+    //     guarded itself with `motion_generation_ == stop_task_generation`, a counter
+    //     bumped by EVERY motion command on EITHER axis. Dispatching the Dec stop
+    //     bumped it for a reason unrelated to RA, so the RA tail read a mismatch and
+    //     silently skipped restoring RA's tracking, even though Slewing correctly
+    //     cleared. Fixed by applying the same `same_axis_owner` idiom already used by
+    //     the duty-cycle worker: only treat a generation mismatch as a real
+    //     supersession when something that can actually own THIS axis (goto/park/home/
+    //     pulse-guide on this channel) is responsible for it.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);  // long enough for the second stop to race it
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    driver->move_axis(1, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+
+    driver->move_axis(0, 0.0);  // RA stop task starts polling; ramp takes 800ms
+    driver->move_axis(1, 0.0);  // Dec stop dispatched almost immediately after
+
+    // Under the old shared-thread bug this hung until the wait_until timeout
+    // (Slewing stuck true forever); it must now clear promptly.
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    // Under the (now-fixed) generation-counter bug, Slewing cleared correctly but
+    // the RA axis stayed stopped on the mount despite Tracking still reading true.
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));
+    CHECK(driver->get_tracking());
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - AbortSlew cancels the slew task without a refinement re-goto", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
@@ -672,6 +721,328 @@ TEST_CASE("SkyWatcher async - rate offset entry keeps the reported RA continuous
     REQUIRE(std::abs(after - before) < 3e-5);  // ~1.6 arcsec: model motion only
 
     driver->set_right_ascension_rate(0.0);
+    driver->set_connected(false);
+}
+
+// ── EQM-35 Pro (Synta EQ board) ─────────────────────────────────────────
+// The driver was written against the Wave 100i. These cases pin the behaviour
+// that differs on a classic Synta board, using the geometry captured from real
+// EQM-35 Pro hardware (see FakeMountProfile::eqm35_pro).
+
+TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher][telescope][eqm35]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    // ":e" -> "=032732": firmware 3.39, mount code 0x32. The third byte is an
+    // identity, NOT a patch level, so the version must read "3.39" and never
+    // "3.39.50".
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    auto firmware = driver->get_device_firmware();
+    REQUIRE(firmware.has_value());
+    CHECK(*firmware == "3.39");
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher EQM-35 - FindHome uses the count-frame fallback", "[skywatcher][telescope][eqm35]") {
+    // ":q" 0x000001 answers 0x7000 on this board: POLAR_LED |
+    // COMMON_SLEW_START | HALF_CURRENT_TRACKING, with NO HOME_INDEXER (0x04).
+    // The inquiry succeeds -- the bit is simply absent -- so the driver must
+    // take the count-frame branch. This is the safety-relevant case: running
+    // the AutoHome sensor hunt on a mount with no index sensors would drive
+    // the axes looking for an edge that never arrives.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    // CanFindHome is unconditionally true by design (AGENTS.md): boards
+    // without the sensor fall back to a goto of the power-on count frame.
+    CHECK(driver->get_can_find_home() == true);
+
+    // Move both axes away from the count home, then home them.
+    mount.jump_axis_degrees(1, 5.0);
+    mount.jump_axis_degrees(2, -4.0);
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return !driver->get_slewing() && driver->get_at_home(); }, 20000));
+
+    // Landed on the count frame origin, not wherever a sensor hunt drifted to.
+    CHECK(std::fabs(mount.axis_degrees(1)) < 0.2);
+    CHECK(std::fabs(mount.axis_degrees(2)) < 0.2);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher Wave - home indexer still enables FindHome", "[skywatcher][telescope][eqm35]") {
+    // Guard against the EQM-35 work regressing the Wave: same code path, the
+    // 0x100C feature word, and FindHome must stay available.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    CHECK(driver->get_name() == "Sky-Watcher Wave 100i");
+    CHECK(driver->get_can_find_home() == true);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period", "[skywatcher][telescope][eqm35]") {
+    // The EQM-35's motor board reports its sidereal step period via ":D" as
+    // 149592. The driver derives it independently as
+    //   T1 = timer_freq * 360 / rate / CPR
+    //      = 16e6 * 360 / 9216000 / (360.98564736629/86400 deg/s)
+    // Agreement to ~1e-5 is what makes the Wave-derived rate math correct on
+    // this mount unchanged, so assert the driver actually tracks at that rate.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    const double before = mount.physical_degrees(1);
+    driver->set_tracking(true);
+    CHECK(driver->get_tracking());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    const double after = mount.physical_degrees(1);
+
+    // Sidereal is ~0.004178 deg/s; over 0.6 s that is ~2.5e-3 deg. Assert the
+    // axis moved in the tracking direction at roughly the sidereal rate rather
+    // than pinning an exact figure (the loopback clock is not real-time).
+    const double moved = std::fabs(after - before);
+    const double expected = FakeSkyWatcherMount::kSiderealDegPerSec * 0.6;
+    CHECK(moved > expected * 0.3);
+    CHECK(moved < expected * 3.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// ── Southern hemisphere tracking direction ──────────────────────────────────
+
+TEST_CASE("SkyWatcher southern hemisphere - tracking turns RA the right way",
+          "[skywatcher][telescope][eqm35][hemisphere]") {
+    // Regression for the hardware bug found on an EQM-35 Pro at latitude -37.2
+    // (2026-09-06). start_speed_motion_locked() negated the RA rate below the
+    // equator, so tracking drove axis 1 counts DOWN when holding a star needs
+    // them UP -- doubling the sky's apparent motion instead of cancelling it.
+    //
+    // Crucially, the RATE was correct the whole time (0.99995x sidereal on
+    // hardware). Only the DIRECTION was wrong, so any test that measures the
+    // magnitude of axis motion passes. This asserts the sign.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
+    driver->set_connected(true);
+
+    const double before = mount.axis_degrees(1);
+    driver->set_tracking(true);
+    REQUIRE(driver->get_tracking());
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double after = mount.axis_degrees(1);
+
+    // Hour angle is a1/15 in BOTH hemispheres, and tracking must make HA
+    // increase with sidereal time -- so the axis angle must INCREASE.
+    INFO("axis1 moved from " << before << " to " << after << " deg");
+    CHECK(after > before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[skywatcher][telescope][hemisphere]") {
+    // The fix removed a hemisphere conditional; guard that the northern
+    // behaviour (which was correct, and is what the Wave 100i was validated
+    // on) is untouched -- both hemispheres now drive RA the same way.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    driver->set_connected(true);
+
+    const double before = mount.axis_degrees(1);
+    driver->set_tracking(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double after = mount.axis_degrees(1);
+
+    INFO("axis1 moved from " << before << " to " << after << " deg");
+    CHECK(after > before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not resent and not thrown",
+          "[skywatcher][async]") {
+    // 6b4988b read every ":I" preset back with ":i" and resent, then threw,
+    // on a mismatch. Reverted to the contract INDI's skywatcherAPI.cpp and
+    // indi-eqmod use (PR #1 review): a transport failure throws, what the
+    // board STORED never does -- the rounding tolerance was measured on one
+    // board, and on the real EQM-35 a matching readback proved nothing anyway
+    // (the board stores a live preset without applying it; a follow-up commit
+    // handles that). The fake acks and drops one write: the rate change must
+    // return normally, the dropped write must not be resent, and the axis
+    // must not be stopped.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.drop_step_period_writes(1, 1);
+    REQUIRE_NOTHROW(driver->set_right_ascension_rate(0.5));  // live ":I" on the tracking axis
+
+    REQUIRE(mount.step_period(1) == sidereal_preset);  // logged, not resent
+    REQUIRE(mount.stop_count(1) == stops_before);      // and the axis was left running
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a live step-period change the board stores but never spins up is re-kicked",
+          "[skywatcher][async]") {
+    // Same hardware failure as above, but the ":i" readback DID match what
+    // was written (6b4988b's fix saw nothing to resend) -- ConformU still
+    // failed, and count-sampling on the mount showed the axis holding
+    // exactly its old rate through the whole pulse. The wrapper now follows
+    // every live in-place ":I" with a ":J" (matching INDI's skywatcherAPI.cpp
+    // recipe), and the driver double-checks by sampling the position across
+    // a short window and re-kicking if the axis didn't actually change speed.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // Baseline sidereal physical rate, measured the same way the assertion
+    // below re-measures it.
+    auto measure_rate = [&] {
+        double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        double p1 = mount.physical_degrees(1);
+        return (p1 - p0) / 0.3;
+    };
+    const double sidereal_rate = measure_rate();
+    const int stops_before = mount.stop_count(1);
+    const int starts_before = mount.start_count(1);
+
+    // Stall exactly one live write: the fake mount stores it (":i" agrees,
+    // matching the real board's behavior) but the fake's own ":J" re-latch
+    // (added for this fix) is what actually moves the axis at the new rate
+    // -- proving the driver's ":J" kick reached the board.
+    mount.stall_live_rate_writes(1, 1);
+    driver->set_right_ascension_rate(0.5);  // continuous, same direction: live ":I" on the tracking axis
+
+    REQUIRE(mount.start_count(1) > starts_before);  // the ":J" kick reached the board
+    REQUIRE(mount.stop_count(1) == stops_before);   // never a stop/restart, only a kick
+    // The axis is ACTUALLY running at the new, non-sidereal rate now --
+    // not silently stuck at the old one (a matching ":i" readback is not
+    // enough, per the real hardware failure this models).
+    const double new_rate = measure_rate();
+    REQUIRE(std::abs(new_rate - sidereal_rate) > std::abs(sidereal_rate) * 0.1);
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a ':J' failure after the pulse-rate ':I' restores the drive rate",
+          "[skywatcher][async]") {
+    // The live-rate pulse dispatch writes ":I" (pulse rate) then ":J". If the
+    // ":J" throws, the ":I" has already gone out and the board may well have
+    // applied it, so the axis is running at the guide rate with the pulse
+    // aborted and nothing scheduled to bring it back (#249 review). The
+    // dispatch failure path must restore the drive rate.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.reject_start_motion(1, 1);  // the ":J" after the pulse-rate ":I" is refused
+    driver->pulse_guide(3, 5000);     // West: sidereal + guide rate, same direction -> live ":I"
+    // The dispatch fails, the pulse is abandoned...
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 3000));
+    // ...and the axis is back on the drive rate, never stopped.
+    REQUIRE(mount.step_period(1) == sidereal_preset);
+    REQUIRE(mount.axis_running(1));
+    REQUIRE(mount.stop_count(1) == stops_before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - the rate-applied check still catches a stall at a small guide rate",
+          "[skywatcher][async]") {
+    // Fork PR #6 review: the check used a fixed 25% tolerance on the expected
+    // pulse rate, so at guide rates below ~0.33x sidereal (East) / ~0.2x
+    // (West) an axis still stuck at sidereal read as "rate applied" and the
+    // re-kick never fired -- and 0.1-0.3x is a common autoguider setting. The
+    // check now classifies the observed rate by which commanded rate it is
+    // nearer to. Model a stall that survives the dispatch's own ":I"+":J"
+    // (the fake stores the preset, ignores one kick) at 0.1x sidereal and
+    // assert the sampled check re-kicks within the pulse.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_guide_rate(
+        {0.1 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.1 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->pulse_guide(2, 3000);  // East, long enough for the ~450 ms sampled check
+    REQUIRE(driver->get_is_pulse_guiding());
+
+    // Dispatch sends one ":J"; only the re-kick sends a second one before the
+    // end-of-pulse restore (which cannot arrive before the 3 s hold expires).
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 1500));
+    REQUIRE(mount.stop_count(1) == stops_before);  // a kick, never a stop/restart
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    REQUIRE(mount.axis_running(1));  // tracking restored after the pulse
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rate-applied check",
+          "[skywatcher][async]") {
+    // The rate-applied check (verify_live_rate_or_rekick) samples the axis
+    // for ~450 ms DURING the pulse. On real hardware (EQM-35 Pro,
+    // 2026-09-07) counting that window twice overshot a 5 s ConformU pulse
+    // by ~9% (RA change 2.74s vs 2.51s expected). A real autoguider sends
+    // 50-500 ms pulses, where the check would BE the pulse and no deduction
+    // could give the time back -- so short pulses must skip it entirely and
+    // keep the requested ON time.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    constexpr int kPulseMs = 150;      // typical autoguider correction
+    driver->pulse_guide(2, kPulseMs);  // East: live in-place rate change
+    // Time the ON window itself: from the pulse step period landing on the
+    // axis to the sidereal preset being restored. pulse_guide() is
+    // asynchronous, so the change appears only once the task dispatches.
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+    auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 5000));
+    double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    // Upper bound sits well below the ~450 ms sample window: if the check
+    // ever runs on a pulse this short, the ON time jumps to ~450 ms and this
+    // fails. Lower bound is loose (poll granularity only).
+    REQUIRE(elapsed_ms >= 30.0);
+    REQUIRE(elapsed_ms < 300.0);
+
+    driver->set_tracking(false);
     driver->set_connected(false);
 }
 

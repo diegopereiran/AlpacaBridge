@@ -41,18 +41,56 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace alpacacore::test {
 
+// A simulated board's identity and geometry. Both presets are REAL hardware
+// captures, so the loopback tests exercise the same numbers the driver sees on
+// the bench rather than idealised ones.
+struct FakeMountProfile {
+    uint32_t cpr = 4147200;
+    uint32_t timer_freq = 14000000;
+    std::string version_reply = "033A44";  // ":e" payload: fw 3.58, mount code 0x44
+    std::string high_speed_ratio_reply = "01";
+    uint32_t features = 0x100C;  // ":q" 0x000001: POLAR_LED | IS_AZEQ | HOME_INDEXER
+    uint32_t steps_per_worm = 0;
+
+    // Wave 100i, MC firmware 3.58, mount code 0x44 (AGENTS.md capture).
+    static FakeMountProfile wave_100i() { return FakeMountProfile{}; }
+
+    // Sky-Watcher EQM-35 Pro, MC firmware 3.39, mount code 0x32. Captured over
+    // the mount's built-in USB port (onboard PL2303 @ 115200) on 2026-09-06:
+    //   :e -> =032732   :a -> 9216000   :b -> 16000000   :g -> 01
+    //   :s -> 68266 (9216000/68266 = 135 worm teeth)
+    //   :q 0x000001 -> 0x7000  POLAR_LED | COMMON_SLEW_START | HALF_CURRENT_TRACKING
+    // No HOME_INDEXER bit (0x04) -> CanFindHome must be false on this board.
+    static FakeMountProfile eqm35_pro() {
+        FakeMountProfile p;
+        p.cpr = 9216000;
+        p.timer_freq = 16000000;
+        p.version_reply = "032732";
+        p.high_speed_ratio_reply = "01";
+        p.features = 0x7000;
+        p.steps_per_worm = 68266;
+        return p;
+    }
+};
+
 class FakeSkyWatcherMount {
 public:
-    static constexpr uint32_t kCpr = 4147200;
-    static constexpr uint32_t kTimerFreq = 14000000;
     static constexpr uint32_t kHome = 0x800000;
     static constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
     static constexpr double kGotoDegPerSec = 800.0 * kSiderealDegPerSec;
 
-    FakeSkyWatcherMount() {
+    const uint32_t kCpr;
+    const uint32_t kTimerFreq;
+
+    explicit FakeSkyWatcherMount(FakeMountProfile profile = FakeMountProfile::wave_100i())
+        : kCpr(profile.cpr), kTimerFreq(profile.timer_freq), profile_(std::move(profile)) {
+        for (Axis& a : axes_) {
+            a.cpr = kCpr;
+        }
         fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (fd_ < 0) {
             return;
@@ -85,6 +123,8 @@ public:
             ::close(fd_);
         }
     }
+
+    const FakeMountProfile& profile() const { return profile_; }
 
     bool ok() const { return fd_ >= 0; }
     int port() const { return port_; }
@@ -143,6 +183,51 @@ public:
         stop_ramp_ms_ = ms;
     }
 
+    /// Acknowledge but silently DROP the next @p n ":I" step-period writes on
+    /// an axis (regression: the ":i" readback logs the mismatch but the write
+    /// is NOT resent and the call does NOT throw -- the INDI/EQMod contract).
+    void drop_step_period_writes(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).drop_step_period_writes = n;
+    }
+
+    /// Acknowledge and STORE (":i" will read it back correctly) the next @p n
+    /// ":I" writes to a RUNNING axis, but do NOT apply them to the spinning
+    /// motor until a fresh ":J" arrives. Models the EQM-35 Pro ConformU
+    /// failure (2026-09-06): a live step-period change during PulseGuide
+    /// East whose ":i" readback matched what was written, yet the axis held
+    /// its old rate for the whole pulse. Root cause on the real board is
+    /// unconfirmed (~22% of live East/West pulses, never in isolation); this
+    /// models the failure shape closely enough to prove the ":J" re-kick works.
+    void stall_live_rate_writes(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).stall_live_rate_writes = n;
+    }
+
+    /// Swallow the re-latch of the next @p n ":J" on a RUNNING axis: the kick
+    /// is acknowledged but the stored preset still is not applied. Combined
+    /// with stall_live_rate_writes this is a stall that survives the driver's
+    /// unconditional ":I"+":J" and can only be recovered by the sampled
+    /// rate-applied check re-kicking (verify_live_rate_or_rekick).
+    void ignore_start_relatches(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).ignore_start_relatches = n;
+    }
+
+    /// Refuse the next @p n ":J" on an axis with "!2" (Motor not stopped):
+    /// the start/re-latch throws in the wrapper. Models a transport-level
+    /// failure of the ":J" kick that follows a live ":I" (#249 review).
+    void reject_start_motion(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).reject_starts = n;
+    }
+
+    /// The T1 step period the axis is actually running with (last APPLIED ":I").
+    uint32_t step_period(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<uint32_t>(ax(axis).t1);
+    }
+
     /// Move the simulated axes instantly (test setup).
     void jump_axis_degrees(int axis, double deg) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -153,6 +238,9 @@ public:
 
 private:
     struct Axis {
+        // Copy of the profile CPR: the goto ramp below needs it, and a nested
+        // type cannot reach the enclosing object's non-static members.
+        uint32_t cpr = 4147200;
         int64_t counts = kHome;
         double rate_counts = 0.0;  // signed counts/sec while running
         bool running = false;
@@ -161,7 +249,7 @@ private:
         char dir = '0';
         uint32_t t1 = 0;
         int64_t goto_target = kHome;
-        int64_t frame_shift = 0;  // physical = counts + frame_shift
+        int64_t frame_shift = 0;                          // physical = counts + frame_shift
         std::chrono::steady_clock::time_point stop_at{};  // ramped ":K" deadline
         bool stopping = false;
         bool in_goto = false;
@@ -171,6 +259,10 @@ private:
         uint32_t indexer = 0;
         int start_count = 0;
         int stop_count = 0;
+        int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
+        int stall_live_rate_writes = 0;   // ":I" writes on a running axis to store but not apply (test knob)
+        int ignore_start_relatches = 0;   // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
+        int reject_starts = 0;            // ":J" to refuse with "!2" (test knob)
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
@@ -188,7 +280,7 @@ private:
             int64_t before = counts;
             if (in_goto) {
                 double dir_sign = goto_target >= counts ? 1.0 : -1.0;
-                double step = kGotoDegPerSec * kCpr / 360.0 * dt;
+                double step = kGotoDegPerSec * cpr / 360.0 * dt;
                 double remaining = std::abs(static_cast<double>(goto_target - counts));
                 if (step >= remaining) {
                     counts = goto_target;
@@ -255,13 +347,16 @@ private:
         a.advance(now());
         switch (cmd) {
             case 'e':
-                return "=033A44";  // MC firmware 3.58.68 (real Wave 100i reply)
+                return "=" + profile_.version_reply;
             case 'a':
                 return "=" + u24(kCpr);
             case 'b':
                 return "=" + u24(kTimerFreq);
             case 'g':
-                return "=01";  // high-speed ratio 1 (as the real Wave reports)
+                return "=" + profile_.high_speed_ratio_reply;
+            case 's':
+                if (profile_.steps_per_worm == 0) return "!0";
+                return "=" + u24(profile_.steps_per_worm);
             case 'j':
                 return "=" + u24(static_cast<uint32_t>(a.counts & 0xFFFFFF));
             case 'f': {
@@ -297,16 +392,40 @@ private:
                 a.goto_target = static_cast<int64_t>(parse_u24(data));
                 return "=";
             case 'I': {
+                if (a.drop_step_period_writes > 0) {
+                    --a.drop_step_period_writes;
+                    return "=";  // acked, not stored -- ":i" will disagree
+                }
                 a.t1 = parse_u24(data);
+                if (a.running && a.stall_live_rate_writes > 0) {
+                    --a.stall_live_rate_writes;
+                    // Stored (":i" readback matches) but NOT applied to the
+                    // spinning motor -- only a fresh ":J" latches it.
+                    return "=";
+                }
                 double cps = a.t1 > 0 ? static_cast<double>(kTimerFreq) / a.t1 : 0.0;
                 a.rate_counts = a.dir == '1' ? -cps : cps;
                 return "=";
             }
+            case 'i':  // inquire the T1 step period last written with ":I"
+                return "=" + u24(static_cast<uint32_t>(a.t1 & 0xFFFFFF));
             case 'J':
+                if (a.reject_starts > 0) {
+                    --a.reject_starts;
+                    return "!2";  // refused: nothing applied
+                }
                 ++a.start_count;
                 a.running = true;
                 if (a.in_goto) {
                     a.goto_target &= 0xFFFFFF;
+                } else if (a.ignore_start_relatches > 0) {
+                    --a.ignore_start_relatches;  // acked, preset still not applied
+                } else {
+                    // Re-latch the current T1 preset into the running rate --
+                    // this is what makes a ":J" kick after a stalled live
+                    // ":I" actually take effect.
+                    double cps = a.t1 > 0 ? static_cast<double>(kTimerFreq) / a.t1 : 0.0;
+                    a.rate_counts = a.dir == '1' ? -cps : cps;
                 }
                 return "=";
             case 'K':  // ramped stop: keeps running for stop_ramp_ms_ first
@@ -327,7 +446,7 @@ private:
                 return "=";
             case 'q': {
                 uint32_t inquiry = parse_u24(data);
-                if (inquiry == 0x000001) return "=0C1000";  // features 0x100C
+                if (inquiry == 0x000001) return "=" + u24(profile_.features);
                 if (inquiry == 0x000000) return "=" + u24(a.indexer);
                 return "!0";
             }
@@ -368,6 +487,7 @@ private:
 
     int fd_ = -1;
     int port_ = 0;
+    FakeMountProfile profile_;
     std::atomic<bool> stop_{false};
     std::thread thread_;
     std::mutex mutex_;
