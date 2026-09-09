@@ -153,8 +153,25 @@ public:
     /** @brief Check if connected. */
     bool is_connected() const;
 
-    /** @brief Get the most recent box state (never blocks on serial I/O). */
+    /**
+     * @brief Get the most recent box state (never blocks on serial I/O).
+     *
+     * `valid` is cleared while the link is faulted (see link_fault()).
+     */
     BoxState get_state() const;
+
+    /**
+     * @brief Why the serial link is currently considered dead, if it is.
+     *
+     * The controller streams its frame unprompted, so silence is the fault
+     * signal: after 10 s without a frame (issue #237 -- USB re-enumeration,
+     * unplugged cable, port stolen) the link is latched faulted, the cache is
+     * invalidated and this returns the reason (naming the last read error if
+     * there was one); the driver turns that into a DriverException on every
+     * value read and write. Clears on its own when frames resume. Connected
+     * stays true: the client decides whether to reconnect.
+     */
+    std::optional<std::string> link_fault() const;
 
     /**
      * @brief Get the device firmware date (YYYY-MM-DD), if known.

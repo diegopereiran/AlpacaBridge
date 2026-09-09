@@ -113,6 +113,28 @@ public:
     void set_stream_interval(std::chrono::milliseconds interval) {
         stream_ms_.store(static_cast<int>(interval.count()));
     }
+    /// Muted: commands are still recorded but nothing is ever sent back
+    /// (a hung MCU / broken RX line). Writes keep succeeding at the fd level.
+    void set_muted(bool muted) { muted_.store(muted); }
+
+    /// Tear the pty down underneath the driver: the master side closes, so
+    /// the driver's reads and writes on the slave fail with EIO from here on
+    /// (what a USB re-enumeration / unplug looks like, issue #237). Not
+    /// reversible; the fake only records commands received before the cut.
+    void sever_link() {
+        stop_.store(true);
+        if (reader_.joinable()) {
+            reader_.join();
+        }
+        if (keepalive_fd_ >= 0) {
+            close(keepalive_fd_);
+            keepalive_fd_ = -1;
+        }
+        if (master_fd_ >= 0) {
+            close(master_fd_);
+            master_fd_ = -1;
+        }
+    }
 
     bool output(int channel) const {  // 1..11 wire channel
         std::lock_guard<std::mutex> lock(mutex_);
@@ -166,7 +188,10 @@ private:
         }
     }
 
-    void send(const std::string& reply) { (void)!write(master_fd_, reply.data(), reply.size()); }
+    void send(const std::string& reply) {
+        if (muted_.load()) return;
+        (void)!write(master_fd_, reply.data(), reply.size());
+    }
 
     // Vendor layout: "*G" + DC2..5 digits + 'U' + USB A..F digits + 'A' aht +
     // 'T' ds18 + 'D' dew6 enabled + 'M' dew6 mode + 'D' dew7 enabled + 'M'
@@ -229,6 +254,7 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<int> firmware_{308};
     std::atomic<int> stream_ms_{0};
+    std::atomic<bool> muted_{false};
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;

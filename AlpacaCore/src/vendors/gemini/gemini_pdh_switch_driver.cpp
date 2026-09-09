@@ -282,12 +282,14 @@ public:
     bool get_switch(int id) const override {
         validate_switch_id(id);
         ensure_connected();
+        ensure_link_up();
         return get_switch_value(id) > kSwitches[static_cast<std::size_t>(id)].min;
     }
 
     void set_switch(int id, bool state) override {
         validate_switch_id(id);
         ensure_connected();
+        ensure_link_up();
         // Resolve the (mode-dependent) max under the write lock so the value
         // is computed, validated and sent against one mode.
         std::lock_guard<std::mutex> write_lock(write_mutex_);
@@ -303,6 +305,9 @@ public:
     double get_switch_value(int id) const override {
         validate_switch_id(id);
         ensure_connected();
+        // Commanded values are gated too: with the hub unreachable, "what we
+        // last asked for" is no more trustworthy than the stale frame (#237).
+        ensure_link_up();
         if (kSwitches[static_cast<std::size_t>(id)].writable) {
             std::lock_guard<std::mutex> lock(state_mutex_);
             const auto& commanded = commanded_[static_cast<std::size_t>(id)];
@@ -316,6 +321,7 @@ public:
     void set_switch_value(int id, double value) override {
         validate_switch_id(id);
         ensure_connected();
+        ensure_link_up();
         std::lock_guard<std::mutex> write_lock(write_mutex_);
         set_switch_value_locked(id, value);
     }
@@ -365,6 +371,7 @@ public:
         validate_switch_id(id);
         ensure_connected();
         if (id == kDew6Output || id == kDew7Output) {
+            ensure_link_up();  // mode-dependent: needs a trustworthy frame
             return effective_dew_mode(id == kDew6Output ? kDew6Mode : kDew7Mode) == PdhDewMode::Manual
                        ? static_cast<double>(kPdhDewPwmMax)
                        : 1.0;
@@ -382,6 +389,20 @@ private:
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Gemini power hub not connected", AlpacaError::NotConnected);
+        }
+    }
+
+    // Issue #237: reads are served from the reader thread's cache, so a dead
+    // serial link would otherwise be invisible to every reader while writes
+    // fail with EIO. Once the wrapper latches a link fault, every value read
+    // and write throws (iOptron "communications compromised" convention,
+    // DriverException rather than NotConnected because Connected is still
+    // true) until status frames resume. Static metadata (names, descriptions,
+    // ranges, CanWrite) keeps answering: it does not depend on the hub.
+    void ensure_link_up() const {
+        if (const auto fault = protocol_.link_fault()) {
+            throw AlpacaException("Gemini power hub communications compromised: " + *fault,
+                                  AlpacaError::DriverException);
         }
     }
 

@@ -435,6 +435,39 @@ it at disconnect (both under `firmware_mutex_`), and read only it from the gette
 a `firmware_mutex_`). Do NOT consult `connected_` in the getter — rely on the
 cache being empty while disconnected, so there is no atomic-vs-mutex ordering bug.
 
+### Cache-backed reads must track link health (issue #237)
+
+A driver whose reads are served from a cache that a background reader fills (streamed status
+frames, or a reader thread that re-polls on staleness) has a failure mode ConformU never sees:
+the serial link dies (USB re-enumeration, unplugged cable, port stolen) and the cache is served
+unchanged forever. The PDH ADV3 served byte-identical voltage/humidity for 30 minutes with
+`Connected` true, and only a write surfaced the truth as `EIO`; the failed poll was a DEBUG log.
+Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cover/SFW):
+
+- **Tie cache validity to the link.** A status-frame cache is only as good as the link that
+  fills it. Latch a *link fault* after a small threshold of silence (PDH: 3 consecutive `>G#`
+  polls with no frame, ~6 s; streaming Wanderer devices: 10 s without a frame via
+  `util::StreamLinkHealth`), clear `valid` on the cached state, log the latch at ERROR (with
+  the last `read()` errno when there was one) and the recovery at INFO. Never leave the only
+  reaction to a failed poll write at DEBUG.
+- **Refuse to serve a faulted cache.** Value reads AND writes throw `DriverException`
+  ("<device> communications compromised: <reason>", the iOptron `device_faulted_` vocabulary),
+  *commanded values included*: "what we last asked for" is no more trustworthy than the stale
+  frame once the device is unreachable. Use `DriverException`, not `NotConnected`: `Connected`
+  stays true (the client decides whether to reconnect) so `NotConnected` would contradict it.
+  Where ASCOM has a word for "unknown" (`CoverState`/`CalibratorState::Unknown`) return it
+  instead of throwing on the read; commands still throw.
+- **Static metadata keeps answering** (names, descriptions, ranges, `CanWrite`, driver-side
+  filter names/offsets) — it does not depend on the device. `DeviceState` then degrades to
+  `TimeStamp` only through the base class's per-id try/catch.
+- **Recovery is automatic**: keep polling/reading at the normal cadence while faulted so the
+  first frame clears the latch without a reconnect (a re-plugged hub on the same node).
+- **Test it hardware-free** with the pty fakes: `set_muted(true)` (hung MCU, healthy fd) and
+  `sever_link()` (master closed, reads/writes EIO) — `tests/fake_serial_streamer.h` for any
+  streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
+  threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
+  and the next frame restores service.
+
 ### Reconnect must not self-deadlock: `disconnect_locked()`
 
 A protocol wrapper's `connect()` that re-uses an existing connection typically
@@ -1700,6 +1733,7 @@ Protocol: **no docs, no INDI/INDIGO driver, no vendor app capture** -- everythin
 - Commanded-value semantics for every writable switch (WandererBox/ETA lesson): set commands are blind and the frame lags by a poll period, ConformU reads back immediately. A post-write `>G#` request refreshes the cache sooner than the periodic poll.
 - Read-only telemetry as switches (V/A/W, ambient temp/humidity/dew point, lens temp, two "sensor attached" flags): the vendor only shows these in a pop-up window; exposing them is what makes them usable in NINA. Absent-sensor convention -127 degC / 0 % (WandererBox).
 - **ConformU 4.5.0 validated on real hardware (firmware 3.0.9, 2026-09-08): 0 errors, 0 issues, 0 timing issues** on the Raspberry Pi rig (`openastro.lan`, ConformU on the Pi against localhost; DeviceState 43 ms, everything else under 20 ms) -- that log is the one in `AlpacaCore/conformu/Gemini/Power & Data Hubs Advanced 3/`. An earlier run on the dev VM against localhost (hub on VMware USB passthrough) was equally clean (slowest 20 ms), so this driver is fine to smoke-test on the VM before a Pi deploy.
+- **Link health (issue #237, 2026-09-09)**: reads are cache-only by design, so the reader thread latches a link fault after 3 consecutive unanswered `>G#` polls (~6 s; a failed poll write counts too), clears `PdhState::valid`, and the driver throws `DriverException` on every value read/write (commanded values included) until a frame arrives again. Found on the VM rig: USB passthrough re-enumerated, the hub served byte-identical telemetry for 30 min while `SetSwitchValue` failed with EIO. See "Cache-backed reads must track link health" above.
 - **Hardware findings (confirmed 2026-09-08)**: `>H#` -> `*HGeminiPowerBoxPlusAdv3#` verbatim; `>V#` -> `*V309#`. The `>G#` frame uses **suffix** tags with fixed-width, space-padded numbers: `*G1111D111111U1A1T1A1M1B1M100C100C 24.06S 23.39T 42.04H  9.76D12.6V 0.11C  1.38P#` -- the split-on-tag-letters parser handles it because `strtod`/`strtol` skip leading spaces (a stricter "all digits" parse of the numeric fields would have broken). **The firmware streams `*G` frames at ~3 s only after the first `>G#`** (nothing unsolicited for the first ~5 s after open, then continuous once queried) -- so the reader-thread design was necessary: a request/response wrapper would have read a streamed frame as the `>V#` reply. Set commands produce no ack. Both dew channels came up Manual at 100 % on power-up.
 - **All writable-switch writes are serialized under `write_mutex_`** (validate + send + record as one step; readers never take it). PR #236's bot review spotted that a DEW output's mode-dependent max was read in one lock and the commanded value recorded in another, so a concurrent mode write could let a value be validated against a stale max. A concurrent mode/value writer stress case covers it.
 - 17 hardware-free Catch2 cases: 11 driver-contract/frame-parsing/handshake cases (incl. the real captured frame above) plus 6 over a pty-backed fake hub (`tests/fake_gemini_pdh.h`: replies to `>H#`/`>V#`/`>G#`, never acks set commands, optionally streams `*G` frames) covering connect + first frame, every write path incl. the mode-dependent DEW range, streamed frames routed past the handshake, the 2 s stale re-poll, the firmware gate, and concurrent DEW mode/value writers. Plus routing/config round-trip.
@@ -1758,6 +1792,7 @@ Connection types: USB serial (CH340 adapter, vendor `1a86`) only. No WiFi. Fixed
 - **Step-quantisation FP accumulation** (ConformU round 1): `min + round((v-min)/step)*step` at v=Max produced 13.200000000000001 > 13.2 and failed the wrapper's range check exactly at the boundary ConformU tests. Clamp the quantised value into [min, max].
 - ConformU 4.4.0 validated on real hardware (WandererBox Pro V3, firmware 20250410, Debian 13 arm64): **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/WandererAstro/WandererBox Pro V3/Linux-arm64.txt`. Round 1 had the two issues above; round 2 was clean.
 - **`switchType` discriminator** (`wandererbox-pro-v3`) in the router config from day one — the parked ETA tilt adjuster branch will add `eta` as a second backend under (wandererastro, switch); dew-heater auto modes (dew-point/constant-temp) stay device-side per the runtime-only thermal policy (the vendor's own ASCOM driver also only writes Manual Mode).
+- **Link health for the whole streaming family (issue #237, 2026-09-09)**: the cover, SFW and box wrappers all latch a link fault after 10 s without a frame (`util::StreamLinkHealth`, the last `read()` errno named in the reason) and clear `valid`; the box throws `DriverException` on value reads/writes, the cover reads `CoverState`/`CalibratorState::Unknown` and refuses commands, the wheel throws on `Position`/moves. Same rule as the Gemini PDH; see "Cache-backed reads must track link health".
 
 ### WeeWX
 

@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
@@ -46,6 +47,12 @@ constexpr int MAX_TOKEN_LEN = 64;
 // Fields following the identity token in one status frame (firmware + 21
 // values, per the INDI reference field order documented on BoxState).
 constexpr int kBoxFrameFieldCount = 22;
+
+// The controller streams unprompted (a frame every few seconds); this much
+// silence means the link is dead, not slow (issue #237). Generous against the
+// ~3.5 s frame period connect() already allows for, so a single dropped frame
+// never trips it.
+constexpr int kBoxLinkSilenceMs = 10000;
 
 using util::is_serial_port_in_use;
 using util::mark_serial_port_closed;
@@ -102,7 +109,9 @@ bool configure_serial_fd(int fd) {
 //
 // @p carry holds partial token bytes across calls (a token straddling a poll
 // window must not lose its leading characters — the rotator wrapper lesson).
-std::optional<std::string> read_token(int fd, int timeout_ms, std::string& carry) {
+// @p read_errno, when non-null, receives the errno of the last persistent
+// read failure so the caller can name it in a link-fault reason (issue #237).
+std::optional<std::string> read_token(int fd, int timeout_ms, std::string& carry, int* read_errno = nullptr) {
     std::string token = std::move(carry);
     carry.clear();
     auto start = std::chrono::steady_clock::now();
@@ -126,6 +135,7 @@ std::optional<std::string> read_token(int fd, int timeout_ms, std::string& carry
         } else if (r < 0 && errno != EINTR) {
             // Persistent read error (e.g. unplugged): VTIME rate-limits only the
             // no-data path, so back off to avoid spinning for the whole window.
+            if (read_errno != nullptr) *read_errno = errno;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
@@ -403,6 +413,7 @@ public:
             std::lock_guard<std::mutex> state_lock(state_mutex_);
             state_ = *state;
             firmware_date_ = format_firmware_date(state->firmware_version);
+            link_.reset(std::chrono::steady_clock::now());
         }
         connected_ = true;
         reader_running_.store(true);
@@ -428,6 +439,7 @@ public:
             std::lock_guard<std::mutex> state_lock(state_mutex_);
             state_ = BoxState{};
             firmware_date_.clear();
+            link_.reset(std::chrono::steady_clock::now());
         }
 #ifndef _WIN32
         close_serial_locked();
@@ -437,6 +449,14 @@ public:
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(io_mutex_);
         return connected_;
+    }
+
+    std::optional<std::string> link_fault() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!link_.faulted()) {
+            return std::nullopt;
+        }
+        return link_.fault();
     }
 
     BoxState get_state() const {
@@ -548,7 +568,13 @@ private:
             if (fd < 0) {
                 return;  // disconnected under us
             }
-            auto token = read_token(fd, 600, carry);
+            int read_errno = 0;
+            auto token = read_token(fd, 600, carry, &read_errno);
+            if (read_errno != 0) {
+                std::lock_guard<std::mutex> state_lock(state_mutex_);
+                link_.note_read_error(read_errno);
+            }
+            check_link_silence();
             if (!token.has_value()) {
                 continue;
             }
@@ -566,11 +592,39 @@ private:
                 in_frame = false;
                 fields.clear();
                 if (state.has_value()) {
-                    std::lock_guard<std::mutex> state_lock(state_mutex_);
-                    state_ = *state;
-                    firmware_date_ = format_firmware_date(state->firmware_version);
+                    bool restored = false;
+                    {
+                        std::lock_guard<std::mutex> state_lock(state_mutex_);
+                        state_ = *state;
+                        firmware_date_ = format_firmware_date(state->firmware_version);
+                        restored = link_.on_frame(std::chrono::steady_clock::now());
+                    }
+                    if (restored) {
+                        ALPACA_LOG_INFO("WandererAstro",
+                                        "WandererBox: serial link restored, status frames are flowing again");
+                    }
                 }
             }
+        }
+    }
+
+    // Issue #237: latch a link fault after kBoxLinkSilenceMs without a frame.
+    // The cache is invalidated (valid=false) and the driver refuses to serve
+    // it until the next frame clears the latch in reader_loop().
+    void check_link_silence() {
+        std::optional<std::string> latched;
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            latched =
+                link_.check_silence(std::chrono::steady_clock::now(), std::chrono::milliseconds(kBoxLinkSilenceMs));
+            if (latched.has_value()) {
+                state_.valid = false;
+            }
+        }
+        if (latched.has_value()) {
+            ALPACA_LOG_ERROR("WandererAstro",
+                             "WandererBox: serial link faulted (" + *latched +
+                                 "); cached status is invalid and reads will fail until frames resume");
         }
     }
 #endif
@@ -626,7 +680,8 @@ private:
     std::string opened_port_;  // path registered in the in-use registry while open
 
     BoxState state_;
-    std::string firmware_date_;  // YYYY-MM-DD, from the status stream
+    std::string firmware_date_;    // YYYY-MM-DD, from the status stream
+    util::StreamLinkHealth link_;  // issue #237; guarded by state_mutex_
 
     std::atomic<bool> reader_running_{false};
     std::thread reader_thread_;
@@ -651,6 +706,8 @@ bool WandererBoxProtocolWrapper::is_connected() const { return impl_->is_connect
 BoxState WandererBoxProtocolWrapper::get_state() const { return impl_->get_state(); }
 
 std::optional<std::string> WandererBoxProtocolWrapper::get_firmware_date() const { return impl_->get_firmware_date(); }
+
+std::optional<std::string> WandererBoxProtocolWrapper::link_fault() const { return impl_->link_fault(); }
 
 void WandererBoxProtocolWrapper::set_dc3_4(bool on) { impl_->set_dc3_4(on); }
 
