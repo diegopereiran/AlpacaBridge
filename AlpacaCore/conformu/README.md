@@ -17,6 +17,7 @@ Test results are organized by vendor/driver:
 ## Current Test Results
 
 - **iOptron** - Telescope/Mount driver test results
+- **SynScan** - Sky-Watcher EQM-35 Pro via SynScan V4 hand controller (serial), telescope driver test results; site coordinates rounded to whole degrees
 - **ZWO** - Camera driver test results (ASI174MM Mini, ASI290MM Mini, ASI462MM, ASI662MC, ASI2600MC Pro, ASI2600MM Pro) and Switch driver test results (Dew Heater for ASI2600MC Pro, ASI2600MM Pro)
 
 ## Notes
