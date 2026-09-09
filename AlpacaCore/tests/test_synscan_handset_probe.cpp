@@ -54,7 +54,7 @@ public:
         // Keep a slave handle open so the master never sees EIO between the
         // probe's close and a later open (same trick as FakeGeminiFlatPanel).
         keepalive_fd_ = open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
-        struct termios tty{};
+        struct termios tty {};
         if (keepalive_fd_ >= 0 && tcgetattr(keepalive_fd_, &tty) == 0) {
             cfmakeraw(&tty);
             tcsetattr(keepalive_fd_, TCSANOW, &tty);
@@ -107,7 +107,11 @@ private:
             }
             const std::string reply = responder_(chunk);
             if (!reply.empty()) {
-                static_cast<void>(write(master_fd_, reply.data(), reply.size()));
+                // Test double: a short/failed write just means the probe sees
+                // less than the full reply, which is exercised deliberately
+                // by the silent/non-echo test cases anyway.
+                const ssize_t written = write(master_fd_, reply.data(), reply.size());
+                (void)written;
             }
         }
     }

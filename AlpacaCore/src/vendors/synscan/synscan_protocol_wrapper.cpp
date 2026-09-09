@@ -481,15 +481,26 @@ public:
             timeout_ms = connection_info_.response_timeout_ms;
         }
         // TRACE-only wire log: every handset command and its reply (or the
-        // timeout). Cheap below TRACE (the macro gates on level before
-        // formatting); without it a "commands time out" report cannot show
-        // which command stalled or what the handset actually said.
+        // timeout). Without it a "commands time out" report cannot show
+        // which command stalled or what the handset actually said. Unlike
+        // ALPACA_LOG_INFO/WARN/etc., this call site gates on the level
+        // itself: ALPACA_LOG_TRACE(component, message) is a bare
+        // ::alpacacore::logging::log(...) call, so `message` - here two
+        // printable() passes plus concatenation, each a heap allocation - is
+        // built by the caller before log() gets a chance to drop it, on
+        // every single wire round trip (position reads, GOTOs, pulse-guide,
+        // tracking - dozens of calls per second while a client polls). Only
+        // pay that cost when TRACE is actually active.
         try {
             std::string response = read_response(require_hash_terminator, timeout_ms, binary_bytes);
-            ALPACA_LOG_TRACE("SynScan", "HC " + printable(command) + " -> " + printable(response));
+            if (alpacacore::logging::get_log_level() == alpacacore::logging::LogLevel::Trace) {
+                ALPACA_LOG_TRACE("SynScan", "HC " + printable(command) + " -> " + printable(response));
+            }
             return response;
         } catch (const AlpacaException& e) {
-            ALPACA_LOG_TRACE("SynScan", "HC " + printable(command) + " -> " + e.what());
+            if (alpacacore::logging::get_log_level() == alpacacore::logging::LogLevel::Trace) {
+                ALPACA_LOG_TRACE("SynScan", "HC " + printable(command) + " -> " + e.what());
+            }
             throw;
         }
     }

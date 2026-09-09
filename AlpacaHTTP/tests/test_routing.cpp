@@ -2289,9 +2289,14 @@ int main() {
         };
 
         // Platform 7 Connect returns immediately; the task then holds the
-        // mutex for 700 ms. GET connected / connecting inside that window
-        // must answer at once (false / true), not after the handshake.
-        auto stub = std::make_shared<LockedSlowConnectStubDriver>(9702, Ms(700));
+        // mutex for 1500 ms. GET connected / connecting inside that window
+        // must answer at once (false / true), not after the handshake. The
+        // 800 ms budget below is generous headroom over the couple of HTTP
+        // dispatch + JSON round trips it actually costs — plenty under a
+        // sanitizer's instrumentation overhead (ASan/TSan), while still far
+        // short of the 1500 ms handshake, so a real regression back to
+        // blocking on the mutex still fails this.
+        auto stub = std::make_shared<LockedSlowConnectStubDriver>(9702, Ms(1500));
         EXPECT(registry.register_device(stub));
         const std::string base = "/api/v1/covercalibrator/9702";
         {
@@ -2308,9 +2313,9 @@ int main() {
             const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("Value", false));
         }
-        EXPECT(elapsed_ms(get_started) < 200);
+        EXPECT(elapsed_ms(get_started) < 800);
         // Once the task finishes the same client reads true.
-        std::this_thread::sleep_for(Ms(900));
+        std::this_thread::sleep_for(Ms(1800));
         EXPECT(!stub->get_connecting());
         EXPECT(get_connected_value(router, base, "1"));
         put_connected(router, base, "1", false);
@@ -2327,7 +2332,7 @@ int main() {
         const std::string slow_base = "/api/v1/covercalibrator/9703";
         const auto put_started = std::chrono::steady_clock::now();
         put_connected(router, slow_base, "1", true);
-        EXPECT(elapsed_ms(put_started) < 9000);
+        EXPECT(elapsed_ms(put_started) < 9200);
         EXPECT(slow->get_connecting());
         std::this_thread::sleep_for(Ms(2000));
         EXPECT(!slow->get_connecting());

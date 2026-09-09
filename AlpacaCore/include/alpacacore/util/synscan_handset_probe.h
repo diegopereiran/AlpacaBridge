@@ -26,7 +26,13 @@
 // Every scan that may send non-9600 traffic to a Prolific-class port should
 // therefore ask for the handset's echo first and leave the port alone when it
 // answers. The echo ("K" + byte -> byte + "#") is the protocol's own link
-// check, costs ~20 ms on a live handset, and is harmless to everything else.
+// check and costs ~20-135 ms on a live handset (measured on hardware) - but a
+// port that is NOT a handset (a real motor controller, or an unrelated
+// device) can only be ruled out by waiting out the full timeout, since
+// silence is the only signal absence gives. Every non-handset candidate a
+// caller's scan probes therefore pays the whole `timeout_ms` before its own
+// probe even starts; callers on a latency-sensitive path should size
+// `timeout_ms` accordingly rather than assume this is always cheap.
 //
 // POSIX-only, like the serial scans it serves.
 
@@ -52,13 +58,19 @@ namespace alpacacore::util {
  * port returns false after the timeout - a wedged handset therefore looks
  * like no handset, which is the honest answer (it will not respond to
  * anything until it is power-cycled).
+ *
+ * @param timeout_ms How long to wait for the echo before concluding "not a
+ *        handset". A live handset answers in well under 200 ms (16-135 ms
+ *        measured on hardware); the default leaves headroom for a slower
+ *        adapter/USB hub without unduly penalising the (far more common)
+ *        non-handset port, which always pays this full wait.
  */
-inline bool port_answers_synscan_echo(const std::string& port_path, int timeout_ms = 500) {
+inline bool port_answers_synscan_echo(const std::string& port_path, int timeout_ms = 300) {
     const int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
         return false;
     }
-    struct termios tty{};
+    struct termios tty {};
     if (tcgetattr(fd, &tty) != 0) {
         close(fd);
         return false;
