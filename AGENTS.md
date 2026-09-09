@@ -1545,6 +1545,42 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   `eqm35_pro()`, so loopback tests run against real captured geometry.
 
 
+- **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
+  Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
+  - Pointing math is hemisphere-correct at latitude -37.2 with no changes: home
+    points at the SOUTH celestial pole, so `dec = -90 + a2`. Verified against raw
+    counts — reported HA matched axis 1 to 0.0004 deg, and alt/az recomputed
+    independently from the reported RA/Dec matched the driver to 4 decimal places.
+  - `MoveAxis` verified semantically in all four directions, not just for motion:
+    each button was checked against the change in REPORTED RA/Dec. N: Dec +15.59
+    deg, S: Dec -16.96 deg, E: RA +15.47 deg, W: RA -15.28 deg, zero cross-axis
+    coupling in every case. `move_axis()` applies NO branch or hemisphere sign
+    transform (the rate goes straight to `start_speed_motion_locked`), so this is
+    also the hardware reference for which way a raw Dec-axis rate moves reported
+    Dec below the equator -- the fact the DeclinationRate/PulseGuide fix (a later
+    commit on this branch) rests on. Reported coordinates come from the driver's
+    own pointing model; an independent sky check (plate solve) is still on the
+    list below. Do NOT "fix" MoveAxis to follow sky Dec: the ASCOM spec says the
+    sign of the Rate parameter "is purposely left undefined" and the motion is
+    about the MECHANICAL axis, so the no-transform behaviour is correct in both
+    hemispheres (checked against
+    ascom-standards.org/newdocs/telescope.html#Telescope.MoveAxis, 2026-09-06).
+  - **Tracking rate measured at 0.99995x sidereal over 5 minutes** (-46 ppm,
+    -2.5 arcsec/hour, against a +/-31 ppm encoder-quantisation floor), Dec drift
+    exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1.
+  - **Technique worth reusing:** the protocol wrapper does NOT log individual
+    commands, so do not plan to read step periods out of the journal. Sample
+    `":j1"`/`":j2"` through the Alpaca `commandstring` passthrough instead and
+    differentiate — that measures what the mount ACTUALLY does rather than what it
+    was told, and needs no rebuild. Expected sidereal counts/s = `CPR * 360.98564736629
+    / 86400 / 360` (106.959 on this mount). Make sure nothing else is driving the
+    mount while sampling; a manual slew mid-run silently corrupts the result.
+  - Note this validates driver -> board -> encoder counts. It validates counts -> SKY
+    only if the gear ratio matches what the firmware's `":a"` assumes; a belt/pulley
+    mod that changes the reduction would track perfectly in counts and still drift on
+    sky. (Confirmed ratio-preserving on this unit.)
+
+
 ### iOptron
 
 Devices: Telescope (mount), Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, via Player One SDK).
