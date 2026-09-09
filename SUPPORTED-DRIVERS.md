@@ -699,7 +699,6 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | Sky-Watcher HEQ5 PRO | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20HEQ5%20PRO/) |
-| Sky-Watcher EQM-35 Pro | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20EQM-35%20Pro/) (1 SideOfPier issue, see notes) |
 
 <details>
 <summary><strong>SynScan Driver Notes</strong></summary>
@@ -708,10 +707,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB/Serial via hand controller (tested). Auto-detection supported — `connectionType: "auto"` scans serial ports for SynScan hand controllers and connects to the first responding mount.
 - **Auto-detection**: Scans `/dev/serial/by-id/` for Prolific, FTDI, CP210x, and generic USB-serial devices and probes each with a SynScan firmware version query. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
 - **Sky-Watcher HEQ5 PRO Firmware**: Hand controller firmware 4.42.00, motor controller firmware 3.46
-- **Sky-Watcher EQM-35 Pro Firmware**: Hand controller firmware 04.40.00 (SynScan V4, model id 50), motor controller firmware 3.39 (mount code 0x32). Tested by a contributor on a Raspberry Pi 3B.
 - **Pulse guiding**: Software-timed variable-rate slew (SynScan has no hardware pulse guide command). Driver issues a variable-rate axis slew at the configured guide rate, times the pulse duration in a background thread, then stops the axis and restores sidereal tracking. GEM pier-side DEC direction flip applied automatically. Position reporting uses accumulated `rate × duration` deltas in the target coordinate frame for ConformU tolerance compliance.
 - **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues (pulse guide tested across N/S/E/W at declinations -9, +9, -3, +3).
-- **EQM-35 Pro ConformU**: 4.5.0 — 0 errors, 1 issue. ConformU's SideOfPier model test reported `pierWest` at hour angles between 0 and +6 (reporting model "HA-3: ThroughThePole, HA+3: ThroughThePole"). Slew, sync, tracking, MoveAxis, and pulse-guide tests all passed. The SideOfPier mapping for this handset/model has not yet been investigated; treat the pier-side report as unverified on the EQM-35 until it is.
 
 </details>
 
