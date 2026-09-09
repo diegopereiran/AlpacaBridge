@@ -1134,4 +1134,55 @@ TEST_CASE("SkyWatcher async - a pending RightAscensionRate check is reaped by Tr
     REQUIRE_FALSE(driver->get_connected());
 }
 
+TEST_CASE("SkyWatcher async - the rate-applied check stretches its window to resolve a Lunar TrackingRate stall",
+          "[skywatcher][async]") {
+    // Hardware 2026-09-10 (EQM-35 Pro): a TrackingRate=Lunar write produced a
+    // spurious "did not take" + resend. Lunar is 3.5% off sidereal -- about
+    // one count over the fixed 300 ms window, inside the two-read truncation
+    // error, so the nearest-rate verdict was a coin flip. The window now
+    // stretches until the two candidate rates are >= 4 counts apart (this
+    // fake: ~2.4 s), so a REAL Lunar stall is still caught...
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_tracking_rate(1);                      // Lunar: live in-place ":I", 3.5% slower
+    REQUIRE(mount.step_period(1) != sidereal_preset);  // stored...
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 4500));  // ...and re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a sub-resolution TrackingRate change is not spuriously re-kicked",
+          "[skywatcher][async]") {
+    // ...while Solar (0.27% off sidereal: 0.09 counts over 300 ms, ~30 s to
+    // resolve) is below anything the check can see inside its 3 s cap, so it
+    // must NOT sample-and-guess: exactly one ":J" (the setter's own kick),
+    // never a resend, on a healthy board.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+
+    driver->set_tracking_rate(2);                                  // Solar
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));  // well past settle + min window
+    REQUIRE(mount.start_count(1) == starts_before + 1);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

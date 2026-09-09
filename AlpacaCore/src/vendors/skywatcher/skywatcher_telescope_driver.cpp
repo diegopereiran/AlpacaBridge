@@ -65,9 +65,11 @@ constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
 // non-positive rate needs a direction change ":I" cannot deliver).
 constexpr double kMinInPlacePulseRateDegPerSec = 0.05 * kSiderealDegPerSec;
 // Shortest RA pulse that still gets the sample-based "did the rate actually
-// apply" check (see verify_live_rate_or_rekick). The check costs ~450 ms of
-// wall time DURING the pulse; on a typical 50-500 ms autoguider pulse that
-// would dominate the pulse itself, so those rely on the ":J" kick alone.
+// apply" check (see verify_live_rate_or_rekick). The check costs >= ~450 ms
+// of wall time DURING the pulse (more at small rate deltas, where the sample
+// window stretches to stay resolvable); on a typical 50-500 ms autoguider
+// pulse that would dominate the pulse itself, so those rely on the ":J" kick
+// alone.
 constexpr int kMinPulseForRateVerifyMs = 1500;
 // AutoHome (home index sensor) constants — SynScan/EQMod ":q"/":W" extended
 // commands. Indexer reads: 0 = armed below the index, 0xFFFFFF = armed above,
@@ -1204,8 +1206,8 @@ public:
             }
             // Same duration guard as the dispatch check: this one runs after
             // the motion, so it costs no pulse distance, but it does hold the
-            // pulse task ~450 ms longer, which the next command's reap must
-            // join. Not worth that latency on short guide pulses.
+            // pulse task ~450 ms (or more) longer, which the next command's
+            // reap must join. Not worth that latency on short guide pulses.
             if (stopped && restore_tracking && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
                 verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, ra_restore_rate_deg_per_sec, pulse_task_cancel_);
             }
@@ -1930,8 +1932,37 @@ private:
             return;  // nothing changed, nothing to verify
         }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
+        const AxisParameters& params = axis_params_[static_cast<std::size_t>(channel - 1)];
+        const double expected_counts_per_sec =
+            std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
+        const double previous_counts_per_sec =
+            std::abs(previous_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
+        // ":j" is whole counts, and each of the two reads truncates, so the
+        // sampled delta carries up to ~2 counts of error. The window must be
+        // long enough for the two candidate rates to sit at least
+        // kMinResolvableDeltaCounts apart, or the nearest-rate verdict is a
+        // coin flip: on the EQM-35 Pro (~107 counts/s sidereal) a 300 ms
+        // window resolves a 0.5 s/s RA offset (16 counts) fine, but Lunar is
+        // 3.5% off sidereal (1.1 counts) and Solar 0.27% (0.09) -- seen on
+        // hardware 2026-09-10 as a spurious "did not take" + resend on a
+        // TrackingRate=Lunar write. Stretch the window as far as needed, up
+        // to kMaxWindow; past that (Solar) the change is below what this
+        // check can see, so leave it to the ":J" kick alone.
         constexpr auto kSettle = std::chrono::milliseconds(150);
-        constexpr auto kWindow = std::chrono::milliseconds(300);
+        constexpr auto kMinWindow = std::chrono::milliseconds(300);
+        constexpr auto kMaxWindow = std::chrono::milliseconds(3000);
+        constexpr double kMinResolvableDeltaCounts = 4.0;
+        const double delta_counts_per_sec = std::abs(expected_counts_per_sec - previous_counts_per_sec);
+        const double needed_s = delta_counts_per_sec > 0.0 ? kMinResolvableDeltaCounts / delta_counts_per_sec : 1e9;
+        if (needed_s > std::chrono::duration<double>(kMaxWindow).count()) {
+            ALPACA_LOG_INFO("SkyWatcher", "Axis " + std::to_string(channel) + " rate change of " +
+                                              std::to_string(delta_counts_per_sec) +
+                                              " counts/s is below the rate-applied check's resolution; relying "
+                                              "on the :J re-latch alone");
+            return;
+        }
+        const auto window = std::max(
+            kMinWindow, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<double>(needed_s)));
         uint32_t before = 0;
         uint32_t after = 0;
         try {
@@ -1939,7 +1970,7 @@ private:
                 return;  // cancelled by a reaper — it owns the axis now
             }
             before = protocol.inquire_position(channel);
-            if (!task_wait_for(kWindow, cancel)) {
+            if (!task_wait_for(window, cancel)) {
                 return;
             }
             after = protocol.inquire_position(channel);
@@ -1948,8 +1979,7 @@ private:
                                               " could not read position: " + e.what());
             return;
         }
-        const AxisParameters& params = axis_params_[static_cast<std::size_t>(channel - 1)];
-        const double window_s = std::chrono::duration<double>(kWindow).count();
+        const double window_s = std::chrono::duration<double>(window).count();
         // ":j" is a 24-bit counter: take the delta modulo 2^24 and re-sign it
         // so a wrap inside the sample window reads as the few hundred counts
         // it was, not as +/-16 million (fork PR #6 review).
@@ -1958,10 +1988,6 @@ private:
             delta -= static_cast<int32_t>(kCountsMask) + 1;
         }
         const double observed_counts_per_sec = static_cast<double>(delta) / window_s;
-        const double expected_counts_per_sec =
-            std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
-        const double previous_counts_per_sec =
-            std::abs(previous_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
         // Not a rate measurement: this only has to tell "changed speed" from
         // "still at the old rate". Nearest-of-the-two keeps that distinction
         // sharp at small guide rates, where a fixed fraction of the expected
