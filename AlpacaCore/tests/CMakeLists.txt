@@ -58,7 +58,7 @@ if(TARGET alpacacore_synscan)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
-        test_skywatcher_async.cpp)
+        test_skywatcher_async.cpp test_skywatcher_serial.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp
