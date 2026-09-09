@@ -39,30 +39,25 @@ git log @{u}..HEAD --oneline 2>/dev/null || echo "NO_UPSTREAM"
 
 If this branch adds or modifies any ConformU files under `AlpacaCore/conformu/**`, every report must pass before the PR can be submitted. Merging a failing report misleads downstream consumers of `SUPPORTED-DRIVERS.md` into thinking a driver is validated on arm64.
 
-Find the reports on this branch:
+This is checked here so a bad report never reaches CI in the first place, but it is **not** only a prompt-level rule anymore: the `conformu-reports` CI job runs the identical check (`scripts/check_conformu_reports.py`) on every PR and blocks the merge regardless of how the PR was opened. Run it directly instead of doing this by hand:
 
 ```bash
-git diff --name-only main..HEAD | grep -E '^AlpacaCore/conformu/.*\.(json|txt)$'
+python3 scripts/check_conformu_reports.py main
 ```
 
-If the list is empty, skip the rest of this subsection.
+If it reports "nothing to check", skip the rest of this subsection. Otherwise it prints exactly which file and which counts/lines failed — the pass criteria are:
 
-For each file in the list:
+- **JSON reports** (`*.json`) — fail if any of `ErrorCount`, `IssueCount`, `TimingIssuesCount` is non-zero.
+- **Text logs** (`*.txt`) — fail if any of these are true:
+  - a line matches `OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET`
+  - a line matches `took longer than its target response time`
+  - the file does NOT contain `Congratulations, no errors, warnings or issues found`
 
-- **JSON reports** (`*.json`) — **fail** if any of `ErrorCount`, `IssueCount`, `TimingIssuesCount` is non-zero:
-  ```bash
-  jq -r '{ErrorCount, IssueCount, TimingIssuesCount}' <file>
-  ```
-- **Text logs** (`*.txt`) — **fail** if any of these are true:
-  - `grep -E "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET" <file>` matches
-  - `grep "took longer than its target response time" <file>` matches
-  - The file does NOT contain `Congratulations, no errors, warnings or issues found`
+If it fails, **STOP**. Do NOT push. Do NOT open the PR. Tell the user exactly which file and which counts/lines failed:
 
-If any file fails, **STOP**. Do NOT push. Do NOT open the PR. Tell the user exactly which file and which counts/lines failed:
+> "ConformU report `<file>` shows Errors=N, Issues=N, TimingIssues=N (or matching lines). The driver is not validated. Fix the driver, re-run ConformU until clean, replace the report on this branch, and try again. PR is blocked until every ConformU report on this branch passes. See `/driver-build` Step 10 for the full pass criteria."
 
-> "ConformU report `<file>` shows Errors=N, Issues=N, TimingIssues=N (or matching grep lines). The driver is not validated. Fix the driver, re-run ConformU until clean, replace the report on this branch, and try again. PR is blocked until every ConformU report on this branch passes. See `/driver-build` Step 10 for the full pass criteria."
-
-Do NOT offer to open the PR "anyway", as a draft, or with a TODO. This block exists because a green-looking PR with a failing ConformU report is the worst-case outcome — it gets merged and misadvertises the driver as validated.
+Do NOT offer to open the PR "anyway", as a draft, or with a TODO. This block exists because a green-looking PR with a failing ConformU report is the worst-case outcome — it gets merged and misadvertises the driver as validated. Catching it here just saves a CI cycle; the CI job is now the actual backstop.
 
 ## Step 2 — Detect repository setup
 
