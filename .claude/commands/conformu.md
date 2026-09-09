@@ -368,20 +368,26 @@ replace them with a rounded location in the same region (keeping the hemisphere 
 longitude so the report stays internally coherent):
 
 ```bash
-# Round to the nearest degree. Replace the <...> values with what the report actually
-# contains, and mind that ConformU also writes DERIVED "Test value" coordinates
-# (the real value ±10 degrees) — those leak the original too.
+# Round to the nearest degree. The values below are an EXAMPLE (latitude -37:12:13.0,
+# longitude +174:52:57.0): substitute the ones the report actually contains. Mind that
+# ConformU also writes DERIVED "Test value" coordinates (the real value ±10 degrees) —
+# those leak the original too, so scrub them as well.
 sed -i \
   -e 's/-37:12:13\.0/-37:00:00.0/g'  -e 's/-47:12:13\.0/-47:00:00.0/g' \
   -e 's/+174:52:57\.0/+175:00:00.0/g' -e 's/+164:52:57\.0/+165:00:00.0/g' \
   "$TMPDIR/conformu.txt"
 ```
 
-Then confirm nothing survived before saving:
+Then confirm nothing survived before saving. This looks for any site value whose minutes
+or seconds are not zero, i.e. an un-rounded coordinate; a correct scrub prints NOTHING:
 
 ```bash
-grep -nE "SiteLatitude|SiteLongitude|SiteElevation" "$TMPDIR/conformu.txt"
+grep -nE "Site(Latitude|Longitude).*[-+][0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]" "$TMPDIR/conformu.txt" \
+  | grep -vE "[-+][0-9]+:00:00\.0"
 ```
+
+Any output line is an unscrubbed value. Also grep for the raw original strings you used
+in the `sed` above; they must return nothing.
 
 Note the limit of this: `SiderealTime` values elsewhere in the log still correlate with
 longitude given the run's timestamps, so this reduces precision rather than making the
