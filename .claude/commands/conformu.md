@@ -351,6 +351,70 @@ grep -nE "WARN|ERROR|CRITICAL|exception|retry|timeout|reconnect" "$TMPDIR/ab.log
 
 If matches appear, show them to the user. A passing ConformU with a stack trace in the AB log is still a yellow flag — ask the user whether to proceed with saving or to investigate first. Default to proceeding only after the user confirms the matches are benign (e.g. expected NotConnected errors during a controlled disconnect test).
 
+### 6b0. Scrub site coordinates from the report (MANDATORY before saving)
+
+`AlpacaCore/conformu/` is committed and published upstream. A telescope ConformU run
+records the observing site read straight off the mount, at **house-level precision** — the
+`SiteLatitude` / `SiteLongitude` / `SiteElevation` tests print the real values several
+times each, including in the "restored original" lines:
+
+```
+SiteLatitude Read       OK   -37:12:13.0
+SiteLongitude Read      OK   +174:52:57.0
+```
+
+Do not commit a contributor's home coordinates. Before copying the log into the repo,
+replace them with a rounded location in the same region (keeping the hemisphere and rough
+longitude so the report stays internally coherent):
+
+```bash
+# Round to the nearest degree. The values below are an EXAMPLE (latitude -37:12:13.0,
+# longitude +174:52:57.0): substitute the ones the report actually contains. Mind that
+# ConformU also writes DERIVED "Test value" coordinates (the real value ±10 degrees) —
+# those leak the original too, so scrub them as well. The `[.,]` matches either decimal
+# separator: ConformU formats with the SBC's locale, and a comma ("+48:03:00,0") is
+# already in this repo's OnStep report, so a pattern hard-coded to "." would silently
+# miss every value in such a log.
+sed -i \
+  -e 's/-37:12:13\([.,]\)0/-37:00:00\10/g'  -e 's/-47:12:13\([.,]\)0/-47:00:00\10/g' \
+  -e 's/+174:52:57\([.,]\)0/+175:00:00\10/g' -e 's/+164:52:57\([.,]\)0/+165:00:00\10/g' \
+  "$TMPDIR/conformu.txt"
+```
+
+`SiteElevation` leaks too, in three lines per run (`SiteElevation Read OK 80`,
+`Current value 80m written successfully`, `Successfully restored original site elevation:
+80.`). Round it to the nearest 100 m (the fixed `Test value 2385` is ConformU's own
+constant, not derived from the site, and can stay):
+
+```bash
+# EXAMPLE: the report says 80 m; substitute the value it actually contains.
+sed -i -E \
+  -e 's/(SiteElevation Read +OK +)80$/\1100/' \
+  -e 's/(Current value )80m/\1100m/' \
+  -e 's/(original site elevation: )80\./\1100./' \
+  "$TMPDIR/conformu.txt"
+```
+
+Then confirm nothing survived before saving. The first check looks for any site
+coordinate whose minutes or seconds are not zero (either decimal separator), the second
+for an elevation that is not a multiple of 100 m (negative sites, down to ConformU's -300 m
+limit, included); a correct scrub prints NOTHING from
+either:
+
+```bash
+grep -nE "Site(Latitude|Longitude).*[-+][0-9]+:[0-9]{2}:[0-9]{2}[.,][0-9]" "$TMPDIR/conformu.txt" \
+  | grep -vE "[-+][0-9]+:00:00[.,]0"
+grep -nE "SiteElevation.*(OK +|Current value |elevation: )-?[0-9]+(m|\.|$)" "$TMPDIR/conformu.txt" \
+  | grep -vE "(OK +|Current value |elevation: )-?(0|[0-9]*00)(m|\.|$)"
+```
+
+Any output line is an unscrubbed value. Also grep for the raw original strings you used
+in the `sed` commands above; they must return nothing.
+
+Note the limit of this: `SiderealTime` values elsewhere in the log still correlate with
+longitude given the run's timestamps, so this reduces precision rather than making the
+report truly anonymous. Rounding off the house is the goal, not perfect anonymity.
+
 ### 6b. Save logs
 
 Compute the destination directory:

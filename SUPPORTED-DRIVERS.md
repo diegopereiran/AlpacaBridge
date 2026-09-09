@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-09-08
+## Updated 2026-09-09
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -140,26 +140,6 @@ This document lists all hardware vendors and device types that are verified to w
 - **Dew heater / fan / tail LED**: cooled cameras expose an anti-fog dew heater, radiator fan, and the tail indicator LED through the **ToupTek Thermal Switch** device (see Switch Drivers) — `switchType: thermal`, bound by `cameraIndex`, sharing the camera's SDK handle so it runs alongside the camera. Elements are capability-probed per model.
 - **Binning**: 1×/2×/3×/4×. Odd bin factors need an even sensor-ROI span, which the driver handles by padding the ROI to even (the SDK floor-bins it back to the requested pixel count).
 - **FullWellCapacity**: reported as the ADU saturation value; the true electron full well is a sensor-datasheet figure the SDK does not expose (see readout modes above for the ~51 ke⁻ / ~100 ke⁻ IMX571 modes).
-
-</details>
-
-### Sky-Watcher Wave (Direct Motor Controller)
-
-| Model Series | Connection | Linux<br>(arm64) | Status |
-|--------------|------------|------------------|--------|
-| Wave 100i | USB, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/SkyWatcher/Wave%20100i/) |
-
-<details>
-<summary><strong>Sky-Watcher Wave Driver Notes</strong></summary>
-
-- **Protocol**: Sky-Watcher Motor Controller Command Set (see `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`) — talks directly to the mount's motor board, no hand controller or SynScan app required. Distinct from the `synscan` hand-controller driver.
-- **Connection**: USB (the mount's own USB port, an STM32 CDC-ACM virtual COM port at `/dev/ttyACM*`) or the mount's built-in Wi-Fi (UDP port 11880, AP address 192.168.4.1). `connectionType: "auto"` scans serial ports first (including `/dev/ttyACM0`–`9`), then runs Wi-Fi discovery (AP probe + UDP broadcast).
-- **Site required**: The motor controller stores no site or time. Set Site Latitude/Longitude in the device config (or via the Alpaca setters) — with the site unset ConformU aborts its slew tests with "highest elevation available is below the horizon".
-- **Pointing math**: All in the driver — axis counts to RA/Dec via CPR read at connect, LST computed host-side, GEM-style pier-side branches, sidereal tracking via computed step periods. Sync uses the controller's native set-position command. Pulse guiding adjusts the RA step period in place while tracking (the axis never stops); Dec pulses are software-timed speed-mode nudges. Park and MoveAxis(0) are asynchronous initiators.
-- **Tested model**: Wave 100i, motor board firmware 3.58.68, on Linux arm64 (USB).
-- **AutoHome**: FindHome runs the SynScan-style AutoHome procedure using the mount's home index sensors, re-anchoring the position counters to the physical home mark regardless of the power-on position. Requires the home-index feature bit (Wave 100i reports it on both axes).
-- **Tracking**: Sidereal, Lunar, and Solar drive rates, plus RA/Dec tracking rate offsets (comet/satellite tracking) at the Sidereal drive rate. Declination rates below the motor controller's ~0.26 arcsec/s slow-mode floor are produced by duty-cycling. The linked ConformU reports predate the rate-offset feature; a re-run including ConformU's measured-rate offset tests is the merge gate for that feature and the reports will be refreshed with it.
-- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. The RA/Dec tracking-rate offsets were validated afterwards on the Wave 100i over USB (ConformU 4.5.0, 2026-08-25): 0 errors, 0 issues, all 32 measured offset-rate checks within tolerance; that run's only marks were two 0.10x s FAST readings on constant `Can*` getters caused by the dev-VM network path (ConformU now runs on the SBC over localhost, see `/conformu`), so the linked logs remain the earlier full-suite reports. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
 
 </details>
 
@@ -694,11 +674,32 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
+### Sky-Watcher Wave (Direct Motor Controller)
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Wave 100i | USB, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/SkyWatcher/Wave%20100i/) |
+
+<details>
+<summary><strong>Sky-Watcher Wave Driver Notes</strong></summary>
+
+- **Protocol**: Sky-Watcher Motor Controller Command Set (see `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`) — talks directly to the mount's motor board, no hand controller or SynScan app required. Distinct from the `synscan` hand-controller driver.
+- **Connection**: USB (the mount's own USB port, an STM32 CDC-ACM virtual COM port at `/dev/ttyACM*`) or the mount's built-in Wi-Fi (UDP port 11880, AP address 192.168.4.1). `connectionType: "auto"` scans serial ports first (including `/dev/ttyACM0`–`9`), then runs Wi-Fi discovery (AP probe + UDP broadcast).
+- **Site required**: The motor controller stores no site or time. Set Site Latitude/Longitude in the device config (or via the Alpaca setters) — with the site unset ConformU aborts its slew tests with "highest elevation available is below the horizon".
+- **Pointing math**: All in the driver — axis counts to RA/Dec via CPR read at connect, LST computed host-side, GEM-style pier-side branches, sidereal tracking via computed step periods. Sync uses the controller's native set-position command. Pulse guiding adjusts the RA step period in place while tracking (the axis never stops); Dec pulses are software-timed speed-mode nudges. Park and MoveAxis(0) are asynchronous initiators.
+- **Tested model**: Wave 100i, motor board firmware 3.58 (mount code 0x44; the board reports `=033A44`, which is firmware major/minor plus the mount identity byte, not a three-part version), on Linux arm64 (USB).
+- **AutoHome**: FindHome runs the SynScan-style AutoHome procedure using the mount's home index sensors, re-anchoring the position counters to the physical home mark regardless of the power-on position. Requires the home-index feature bit (Wave 100i reports it on both axes).
+- **Tracking**: Sidereal, Lunar, and Solar drive rates, plus RA/Dec tracking rate offsets (comet/satellite tracking) at the Sidereal drive rate. Declination rates below the motor controller's ~0.26 arcsec/s slow-mode floor are produced by duty-cycling. The linked ConformU reports predate the rate-offset feature; a re-run including ConformU's measured-rate offset tests is the merge gate for that feature and the reports will be refreshed with it.
+- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. The RA/Dec tracking-rate offsets were validated afterwards on the Wave 100i over USB (ConformU 4.5.0, 2026-08-25): 0 errors, 0 issues, all 32 measured offset-rate checks within tolerance; that run's only marks were two 0.10x s FAST readings on constant `Can*` getters caused by the dev-VM network path (ConformU now runs on the SBC over localhost, see `/conformu`), so the linked logs remain the earlier full-suite reports. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
+
+</details>
+
 ### SynScan V3/V4
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | Sky-Watcher HEQ5 PRO | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20HEQ5%20PRO/) |
+| Sky-Watcher EQM-35 Pro | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/SynScan/Sky-Watcher%20EQM-35%20Pro/) (1 SideOfPier issue, see notes) |
 
 <details>
 <summary><strong>SynScan Driver Notes</strong></summary>
@@ -707,8 +708,10 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB/Serial via hand controller (tested). Auto-detection supported — `connectionType: "auto"` scans serial ports for SynScan hand controllers and connects to the first responding mount.
 - **Auto-detection**: Scans `/dev/serial/by-id/` for Prolific, FTDI, CP210x, and generic USB-serial devices and probes each with a SynScan firmware version query. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`.
 - **Sky-Watcher HEQ5 PRO Firmware**: Hand controller firmware 4.42.00, motor controller firmware 3.46
+- **Sky-Watcher EQM-35 Pro Firmware**: Hand controller firmware 04.40.00 (SynScan V4, model id 50), motor controller firmware 3.39 (mount code 0x32). Tested by a contributor on a Raspberry Pi 3B.
 - **Pulse guiding**: Software-timed variable-rate slew (SynScan has no hardware pulse guide command). Driver issues a variable-rate axis slew at the configured guide rate, times the pulse duration in a background thread, then stops the axis and restores sidereal tracking. GEM pier-side DEC direction flip applied automatically. Position reporting uses accumulated `rate × duration` deltas in the target coordinate frame for ConformU tolerance compliance.
 - **ConformU**: Validated with ConformU 4.3.0 — 0 errors, 0 issues (pulse guide tested across N/S/E/W at declinations -9, +9, -3, +3).
+- **EQM-35 Pro ConformU**: 4.5.0 — 0 errors, 1 issue. ConformU's SideOfPier model test reported `pierWest` at hour angles between 0 and +6 (reporting model "HA-3: ThroughThePole, HA+3: ThroughThePole"). Slew, sync, tracking, MoveAxis, and pulse-guide tests all passed. The SideOfPier mapping for this handset/model has not yet been investigated; treat the pier-side report as unverified on the EQM-35 until it is.
 
 </details>
 
