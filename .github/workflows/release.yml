@@ -1,0 +1,68 @@
+# Publish a GitHub Release for every version tag.
+#
+# Binaries are NOT attached here. The install channel is the OpenAstro APT
+# repository (https://apt.openastro.net); a Release exists so a shipped build
+# has a name, a source archive (GitHub attaches the zip/tarball itself), and
+# its CHANGELOG section as notes. Nothing is compiled, so this runs in seconds.
+#
+# Flow: cut the release on a PR (VERSION, README badge, dated CHANGELOG
+# heading), merge, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release from CHANGELOG
+    runs-on: ubuntu-24.04-arm   # text-only; kept on arm64 for a single-arch fleet
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Verify tag matches VERSION
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [ "${tag_version}" != "${file_version}" ]; then
+            echo "ERROR: tag ${GITHUB_REF_NAME} does not match VERSION file (${file_version})." >&2
+            echo "Cut the release on a PR first (VERSION, README badge, dated CHANGELOG), then tag the merge." >&2
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches VERSION ${file_version}."
+
+      - name: Extract CHANGELOG section
+        run: |
+          set -euo pipefail
+          python3 scripts/changelog_section.py "${GITHUB_REF_NAME#v}" > release-notes.md
+          {
+            echo ""
+            echo "---"
+            echo "Install or upgrade via the OpenAstro APT repository: https://apt.openastro.net"
+          } >> release-notes.md
+          echo "::group::Release notes"
+          cat release-notes.md
+          echo "::endgroup::"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; updating notes."
+            gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" --notes-file release-notes.md
+          else
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" --notes-file release-notes.md --verify-tag
+          fi

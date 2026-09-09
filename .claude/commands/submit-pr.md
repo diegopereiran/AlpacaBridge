@@ -158,6 +158,10 @@ skip or assume the answer:
   4. These are now uncommitted changes (Step 1 required a clean tree). Show the user the diff and
      a commit message (e.g. `Release <version>`) for approval, commit them on this branch
      following the project's commit conventions, then continue to the Step 4 pre-flight and push.
+  5. Remind the user that after the PR merges they tag the merge commit
+     (`git tag -a v<version> -m "Release <version>" && git push origin v<version>`); the
+     `Release` workflow then creates the GitHub Release from the CHANGELOG section. See
+     "Releases" in `docs/development.md`.
 
 ## Step 4 — Local CI pre-flight (HARD BLOCK)
 
