@@ -1045,11 +1045,16 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
                                           "' (expected " + std::to_string(expected_len) +
                                           " data chars); settling the link and " +
                                           (attempt == 0 ? "resending" : "giving up"));
+        // Settle before the resend AND before giving up: a mis-pair means a
+        // stale frame is (or was just) in flight, and a caller that catches
+        // the exception and carries on would otherwise have its next
+        // exchange answered by the straggler -- a same-shaped one passes
+        // the shape check (PR #245 review).
+        pimpl_->settle_after_mispair();
         if (attempt > 0) {
             throw AlpacaException("Mis-paired motor controller reply to '" + std::string(1, command) +
                                   std::to_string(axis) + "': '" + reply + "'");
         }
-        pimpl_->settle_after_mispair();
     }
     if (!reply.empty() && reply[0] == kReplyOk) {
         return reply.substr(1);
