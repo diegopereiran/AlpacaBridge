@@ -2709,11 +2709,14 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_num
                                   std::to_string(ports.size()) + " mount(s))");
         }
         const auto& port = ports[static_cast<std::size_t>(mount_index)];
-        ALPACA_LOG_INFO("SkyWatcher",
-                        "Auto-detected mount on " + port.port_path + " (MC fw " + port.firmware_version + ")");
+        ALPACA_LOG_INFO("SkyWatcher", "Auto-detected " + port.model_name + " on " + port.port_path + " (MC fw " +
+                                          port.firmware_version + ", " + std::to_string(port.baud_rate) + " baud)");
         ConnectionInfo conn;
         conn.type = ConnectionType::Serial;
         conn.port_path = port.port_path;
+        // The probe already proved which baud this board answers at; dropping
+        // it here would reopen an EQM-35 Pro's 115200 port at the 9600 default.
+        conn.baud_rate = port.baud_rate;
         return create_skywatcher_telescope(device_number, conn, site_latitude_deg, site_longitude_deg,
                                            site_elevation_m);
     }

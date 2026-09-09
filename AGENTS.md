@@ -1527,6 +1527,13 @@ datagrams before each send so replies cannot get off-by-one.
 The `:` command set is identical on classic Synta EQ mounts, so the Wave driver drives
 them unchanged. What differs is the transport and the identity, and both bit us:
 
+- **Baud is NOT irrelevant off the Wave.** The Wave's USB port is STM32 CDC-ACM, where
+  the baud setting is ignored. Synta EQ boards reached over the mount's own USB port or
+  an EQDIR cable are real UART bridges: the **EQM-35 Pro's built-in port is a soldered
+  Prolific PL2303 (067b:23a3, "ATEN Serial Bridge") at 115200**, and a 9600-only scan
+  finds nothing at all. Enumeration probes 9600 then 115200; the probe's winning baud
+  MUST be carried into `ConnectionInfo` (auto-detect used to drop it, so a board found
+  at 115200 was reopened at 9600 and every command timed out).
 - **`":e"` byte 3 is the MOUNT CODE, not a firmware patch level.** Layout is
   `<fw major><fw minor><mount code>`, matching INDI `skywatcherAPI.cpp`. The Wave's
   `=033A44` is firmware 3.58 + code 0x44 (WAVE_100I), never "3.58.68". EQM-35 Pro:
@@ -1543,7 +1550,69 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   would drive the axes looking for an edge that never arrives.
 - Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
   `eqm35_pro()`, so loopback tests run against real captured geometry.
+- **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
+  Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain): auto-detect found
+  it unaided -- `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0 (MC firmware 3.39, 115200
+  baud)` -- and `Name` reported "Sky-Watcher EQM-35 Pro", firmware "3.39". CCDciel
+  connected over Alpaca with zero driver warnings. Further bring-up notes (pointing math,
+  MoveAxis semantics, tracking-rate measurement, the southern-hemisphere fixes) are
+  recorded against those fixes elsewhere in this section.
 
+#### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
+
+open-astro/AlpacaBridge#230, filed by the maintainer, asks for exactly the work in this
+section: generalizing the Wave driver to classic Sky-Watcher/Orion EQ mounts (HEQ5, EQ6,
+EQ6-R, AZ-EQ6, EQ5 Pro, etc.) via EQDIR cable, with no hand controller in the loop. Status
+against its checklist, 2026-09-06:
+
+- [x] Model/feature detection via `:e`/`:q` — done (mount-code table, feature-word gating).
+- [ ] Board-capability gating for PPEC, dual-encoder, WiFi, and the polar-scope LED per the
+  issue's list — only the home-index bit (`0x04`) is actually consulted so far.
+- [x] CPR/high-speed-ratio/timer-freq read from the board, not hardcoded for Wave —
+  confirmed: EQM-35 Pro geometry (CPR 9,216,000, timer 16 MHz) differs from the Wave
+  (4,147,200 / 14 MHz) and the SAME driver code tracked correctly on it (0.99995x
+  sidereal), so this was already correct, just unverified until now.
+- [x] High/low speed mode switch threshold — already board-generic:
+  `kFastModeThresholdDegPerSec = 128.0 * kSiderealDegPerSec`, derived from the MC
+  protocol's universal 128x switchover, not a Wave-specific constant.
+- [x] AutoHome/FindHome gracefully disabled without home-index sensors — hardware
+  verified: the EQM-35's `0x7000` feature word has no `HOME_INDEXER` bit, and `FindHome`
+  correctly takes the count-frame goto fallback rather than hunting a sensor that
+  doesn't exist.
+- [x] Naming/config: model auto-detected under the existing `vendor: skywatcher` key
+  (no separate `eqmod` alias needed) — done, `get_name()` reports the real model.
+- [x] **Auto-detect distinguishing an EQDIR cable from other vendors' PL2303/CH340/FTDI
+  devices** — was a real gap: the enumeration scan and `connect_serial()` did not use
+  `alpacacore/util/serial_port_registry.h` (the cross-vendor in-use registry originally
+  built for WandererAstro, explicitly designed to generalize "across wrappers"). Fixed:
+  both scan loops skip a port another connected device holds open, `probe_skywatcher_port`
+  re-checks after `open()` for the TOCTOU window, and `connect_serial()` claims the port
+  in the registry BEFORE opening it and releases it in `disconnect_locked()`. This is a
+  project-wide gap outside WandererAstro (synscan, ioptron, gemini, celestron, onstep none
+  use the registry either) — only `skywatcher` was closed here, in scope for this issue.
+- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open; see the
+  hemisphere fixes and pending bench test elsewhere in this section.
+- [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session
+  (no plate solve performed).
+- [ ] Park/unpark weights-down convention — not specifically re-verified on a classic
+  board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
+- [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
+  EQM-35 specifically, but the issue's ask applies equally.
+- [ ] Fake mount test double extended with a classic-board profile (9600 baud, no home
+  index, older firmware string) — deliberately NOT added with invented numbers. This
+  branch's `FakeMountProfile::eqm35_pro()` is a REAL hardware capture; fabricating a
+  plausible HEQ5/EQ6 profile without hardware to source it from would misrepresent
+  guessed values as measured ones. The issue notes HEQ5 PRO and EQ6 hardware is already
+  on hand via the `synscan` (hand-controller) driver validation (#7, #29) — reuse an
+  actual reading from that hardware over an EQDIR cable when available, rather than
+  inventing one.
+- **Not yet done, intentionally: adding the EQM-35 Pro to `SUPPORTED-DRIVERS.md` and the
+  architecture table, and renaming the "Sky-Watcher Wave" section to "Sky-Watcher Direct
+  Motor Controller" per the issue's suggestion.** This PR's code and tests are ready for
+  review now; the "supported"/Production claim is deliberately withheld until a ConformU
+  pass is run on the EQM-35 Pro (blocked on Pi 5 hardware, per this repo's own documented
+  bar in `AlpacaCore/conformu/README.md` and `SUPPORTED-DRIVERS.md`). A follow-up
+  docs-only PR adds those lines once that report exists.
 
 ### iOptron
 

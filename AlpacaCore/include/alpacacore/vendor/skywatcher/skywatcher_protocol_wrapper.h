@@ -41,6 +41,13 @@ struct SkyWatcherPortInfo {
     std::string port_path;
     std::string device_id;
     std::string firmware_version;  // motor board version, e.g. "3.39"
+    // Baud the probe actually succeeded at. Synta EQ boards reached over the
+    // mount's built-in USB port or an EQDIR cable are real UART bridges and
+    // answer at 115200 (EQM-35 Pro) or 9600; the Wave's STM32 CDC-ACM port
+    // ignores baud entirely. Auto-detect MUST carry this into ConnectionInfo.
+    int baud_rate = 9600;
+    std::uint8_t mount_code = 0;
+    std::string model_name;
 };
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports();
