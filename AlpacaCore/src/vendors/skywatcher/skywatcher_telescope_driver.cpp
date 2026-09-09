@@ -1875,11 +1875,10 @@ private:
                             std::to_string(expected_counts_per_sec) + " (was " +
                             std::to_string(previous_counts_per_sec) + "; " + board_state + "); resending :I and :J");
         try {
-            const AxisParameters& p = axis_params_[static_cast<std::size_t>(channel - 1)];
-            double counts_per_sec = std::abs(expected_rate_deg_per_sec) * p.counts_per_revolution / 360.0;
-            double preset = static_cast<double>(p.timer_frequency) / counts_per_sec;
-            preset = std::clamp(preset, 1.0, static_cast<double>(kCountsMask));
-            protocol.set_step_period(channel, static_cast<uint32_t>(std::lround(preset)));
+            // Same preset the dispatch computed (slow mode: a live change never
+            // switches speed mode). step_period_for_locked only reads
+            // axis_params_, immutable after connect, so it is safe unlocked.
+            protocol.set_step_period(channel, step_period_for_locked(channel, expected_rate_deg_per_sec, false));
             protocol.start_motion(channel);
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("SkyWatcher", "Resend after rate-applied check failed on axis " + std::to_string(channel) +
@@ -2202,7 +2201,14 @@ private:
             // place — the axis never stops. ":J" kick for the same reason
             // as the PulseGuide live-rate change (see
             // verify_live_rate_or_rekick): a bare ":I" here is not always
-            // enough on this firmware.
+            // enough on this firmware. Deliberately NOT followed by the
+            // sampled rate-applied check: this runs synchronously under
+            // mutex_ from the RightAscensionRate setter, and the check needs
+            // an unlocked ~450 ms sample window, which would blow the
+            // property's response target. A stall here has no natural end
+            // point (a standing property, not a bounded pulse), so a
+            // background one-shot verify is the right follow-up; the
+            // ConformU failure this fix targets was on the pulse path only.
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             protocol.start_motion(kAxisRa);
