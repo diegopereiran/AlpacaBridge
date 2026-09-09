@@ -151,6 +151,19 @@ public:
         ax(axis).drop_step_period_writes = n;
     }
 
+    /// Acknowledge and STORE (":i" will read it back correctly) the next @p n
+    /// ":I" writes to a RUNNING axis, but do NOT apply them to the spinning
+    /// motor until a fresh ":J" arrives. Models the EQM-35 Pro ConformU
+    /// failure (2026-09-06): a live step-period change during PulseGuide
+    /// East whose ":i" readback matched what was written, yet the axis held
+    /// its old rate for the whole pulse. Root cause on the real board is
+    /// unconfirmed (~22% of live East/West pulses, never in isolation); this
+    /// models the failure shape closely enough to prove the ":J" re-kick works.
+    void stall_live_rate_writes(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).stall_live_rate_writes = n;
+    }
+
     /// The T1 step period the axis is actually running with (last APPLIED ":I").
     uint32_t step_period(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -186,6 +199,7 @@ private:
         int start_count = 0;
         int stop_count = 0;
         int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
+        int stall_live_rate_writes = 0;   // ":I" writes on a running axis to store but not apply (test knob)
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
@@ -314,9 +328,15 @@ private:
             case 'I': {
                 if (a.drop_step_period_writes > 0) {
                     --a.drop_step_period_writes;
-                    return "=";  // acked, not applied
+                    return "=";  // acked, not stored -- ":i" will disagree
                 }
                 a.t1 = parse_u24(data);
+                if (a.running && a.stall_live_rate_writes > 0) {
+                    --a.stall_live_rate_writes;
+                    // Stored (":i" readback matches) but NOT applied to the
+                    // spinning motor -- only a fresh ":J" latches it.
+                    return "=";
+                }
                 double cps = a.t1 > 0 ? static_cast<double>(kTimerFreq) / a.t1 : 0.0;
                 a.rate_counts = a.dir == '1' ? -cps : cps;
                 return "=";
@@ -328,6 +348,12 @@ private:
                 a.running = true;
                 if (a.in_goto) {
                     a.goto_target &= 0xFFFFFF;
+                } else {
+                    // Re-latch the current T1 preset into the running rate --
+                    // this is what makes a ":J" kick after a stalled live
+                    // ":I" actually take effect.
+                    double cps = a.t1 > 0 ? static_cast<double>(kTimerFreq) / a.t1 : 0.0;
+                    a.rate_counts = a.dir == '1' ? -cps : cps;
                 }
                 return "=";
             case 'K':  // ramped stop: keeps running for stop_ramp_ms_ first

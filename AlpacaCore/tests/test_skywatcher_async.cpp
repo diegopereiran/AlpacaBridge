@@ -704,4 +704,87 @@ TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not res
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a live step-period change the board stores but never spins up is re-kicked",
+          "[skywatcher][async]") {
+    // Same hardware failure as above, but the ":i" readback DID match what
+    // was written (6b4988b's fix saw nothing to resend) -- ConformU still
+    // failed, and count-sampling on the mount showed the axis holding
+    // exactly its old rate through the whole pulse. The wrapper now follows
+    // every live in-place ":I" with a ":J" (matching INDI's skywatcherAPI.cpp
+    // recipe), and the driver double-checks by sampling the position across
+    // a short window and re-kicking if the axis didn't actually change speed.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // Baseline sidereal physical rate, measured the same way the assertion
+    // below re-measures it.
+    auto measure_rate = [&] {
+        double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        double p1 = mount.physical_degrees(1);
+        return (p1 - p0) / 0.3;
+    };
+    const double sidereal_rate = measure_rate();
+    const int stops_before = mount.stop_count(1);
+    const int starts_before = mount.start_count(1);
+
+    // Stall exactly one live write: the fake mount stores it (":i" agrees,
+    // matching the real board's behavior) but the fake's own ":J" re-latch
+    // (added for this fix) is what actually moves the axis at the new rate
+    // -- proving the driver's ":J" kick reached the board.
+    mount.stall_live_rate_writes(1, 1);
+    driver->set_right_ascension_rate(0.5);  // continuous, same direction: live ":I" on the tracking axis
+
+    REQUIRE(mount.start_count(1) > starts_before);  // the ":J" kick reached the board
+    REQUIRE(mount.stop_count(1) == stops_before);   // never a stop/restart, only a kick
+    // The axis is ACTUALLY running at the new, non-sidereal rate now --
+    // not silently stuck at the old one (a matching ":i" readback is not
+    // enough, per the real hardware failure this models).
+    const double new_rate = measure_rate();
+    REQUIRE(std::abs(new_rate - sidereal_rate) > std::abs(sidereal_rate) * 0.1);
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rate-applied check",
+          "[skywatcher][async]") {
+    // The rate-applied check (verify_live_rate_or_rekick) samples the axis
+    // for ~450 ms DURING the pulse. On real hardware (EQM-35 Pro,
+    // 2026-09-07) counting that window twice overshot a 5 s ConformU pulse
+    // by ~9% (RA change 2.74s vs 2.51s expected). A real autoguider sends
+    // 50-500 ms pulses, where the check would BE the pulse and no deduction
+    // could give the time back -- so short pulses must skip it entirely and
+    // keep the requested ON time.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    constexpr int kPulseMs = 150;      // typical autoguider correction
+    driver->pulse_guide(2, kPulseMs);  // East: live in-place rate change
+    // Time the ON window itself: from the pulse step period landing on the
+    // axis to the sidereal preset being restored. pulse_guide() is
+    // asynchronous, so the change appears only once the task dispatches.
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+    auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 5000));
+    double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    // Upper bound sits well below the ~450 ms sample window: if the check
+    // ever runs on a pulse this short, the ON time jumps to ~450 ms and this
+    // fails. Lower bound is loose (poll granularity only).
+    REQUIRE(elapsed_ms >= 30.0);
+    REQUIRE(elapsed_ms < 300.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
