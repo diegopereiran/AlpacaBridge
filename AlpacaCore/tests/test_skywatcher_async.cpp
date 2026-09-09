@@ -184,6 +184,55 @@ TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tra
     driver->set_connected(false);
 }
 
+TEST_CASE(
+    "SkyWatcher async - independent MoveAxis stops on both axes do not strand Slewing "
+    "or block the RA tracking restore",
+    "[skywatcher][async]") {
+    // Regression (found during EQM-35 Pro hardware bring-up, 2026-09-06), fixed in two
+    // steps:
+    //
+    // (1) reap_stop_task() used to cancel+join a SINGLE stop-completion thread shared by
+    //     both axes. Stopping axis 1 while axis 0's stop task was still polling a
+    //     ramping mount (CCDciel issues MoveAxis stop pairs ~44ms apart on button
+    //     release -- see AGENTS.md) cancelled the RA task before it reached
+    //     manual_axis_slewing_[0] = false, stranding Slewing true FOREVER
+    //     (get_hardware_slewing_locked() ORs both axes' flags) -- exactly the hardware
+    //     symptom. Fixed: each axis now has its own stop-task thread and cancel flag.
+    //
+    // (2) That fix alone was not sufficient: the RA stop task's tracking-restore tail
+    //     guarded itself with `motion_generation_ == stop_task_generation`, a counter
+    //     bumped by EVERY motion command on EITHER axis. Dispatching the Dec stop
+    //     bumped it for a reason unrelated to RA, so the RA tail read a mismatch and
+    //     silently skipped restoring RA's tracking, even though Slewing correctly
+    //     cleared. Fixed by applying the same `same_axis_owner` idiom already used by
+    //     the duty-cycle worker: only treat a generation mismatch as a real
+    //     supersession when something that can actually own THIS axis (goto/park/home/
+    //     pulse-guide on this channel) is responsible for it.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);  // long enough for the second stop to race it
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    driver->move_axis(1, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+
+    driver->move_axis(0, 0.0);  // RA stop task starts polling; ramp takes 800ms
+    driver->move_axis(1, 0.0);  // Dec stop dispatched almost immediately after
+
+    // Under the old shared-thread bug this hung until the wait_until timeout
+    // (Slewing stuck true forever); it must now clear promptly.
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    // Under the (now-fixed) generation-counter bug, Slewing cleared correctly but
+    // the RA axis stayed stopped on the mount despite Tracking still reading true.
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));
+    CHECK(driver->get_tracking());
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - AbortSlew cancels the slew task without a refinement re-goto", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
