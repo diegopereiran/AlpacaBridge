@@ -12,8 +12,9 @@
 
 #pragma once
 
+#include <alpacacore/util/serial_io.h>
+
 #include <chrono>
-#include <cstring>
 #include <optional>
 #include <string>
 
@@ -63,7 +64,7 @@ public:
         return restored;
     }
 
-    void note_read_error(int err) { read_error_ = std::strerror(err); }
+    void note_read_error(int err) { read_error_ = errno_string(err); }
 
     std::optional<std::string> check_silence(clock::time_point now, std::chrono::milliseconds limit) {
         if (!fault_.empty() || (now - last_frame_) <= limit) {
@@ -83,7 +84,7 @@ public:
 private:
     clock::time_point last_frame_{};
     std::string fault_;       // non-empty while latched
-    std::string read_error_;  // strerror of the last persistent read failure, if any
+    std::string read_error_;  // errno_string() of the last persistent read failure, if any
 };
 
 }  // namespace alpacacore::util

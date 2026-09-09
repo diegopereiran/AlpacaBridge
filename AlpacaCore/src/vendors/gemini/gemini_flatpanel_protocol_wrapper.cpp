@@ -683,7 +683,7 @@ private:
         serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
             throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + std::strerror(errno) + ")",
+                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
                 AlpacaError::NotConnected);
         }
 
@@ -787,7 +787,7 @@ private:
         }
 #else
         if (!util::write_all(serial_fd_, data.c_str(), data.length())) {
-            throw AlpacaException("Write failed: " + std::string(std::strerror(errno)), AlpacaError::DriverException);
+            throw AlpacaException("Write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
 #endif
     }

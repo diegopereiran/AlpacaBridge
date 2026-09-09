@@ -527,8 +527,7 @@ private:
         const std::string payload = code + "\n";
         ALPACA_LOG_TRACE("WandererAstro", "Box command: " + code);
         if (!util::write_all(serial_fd_, payload.data(), payload.size())) {
-            throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)),
-                                  AlpacaError::DriverException);
+            throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
 #else
         (void)code;
@@ -651,7 +650,7 @@ private:
             mark_serial_port_closed(opened_port_);
             opened_port_.clear();
             throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + std::strerror(errno) + ")",
+                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
                 AlpacaError::NotConnected);
         }
         if (!configure_serial_fd(serial_fd_)) {

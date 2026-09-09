@@ -1220,4 +1220,251 @@ TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rat
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a RightAscensionRate stall that survives the :J kick is caught in the background",
+          "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#248: the RightAscensionRate / TrackingRate
+    // setters (apply_ra_tracking_rate_locked) got the ":J" kick but not the
+    // sampled rate-applied check -- they run under mutex_ inside a property
+    // call and the check needs an unlocked ~450 ms window. A stall there has
+    // no natural end point: RA would track at the wrong rate until the next
+    // rate change. The setter now spawns a one-shot background check that
+    // re-kicks the axis, without the property call itself waiting for it.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    auto measure_rate = [&] {
+        double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        double p1 = mount.physical_degrees(1);
+        return (p1 - p0) / 0.3;
+    };
+    const double sidereal_rate = measure_rate();
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    // A stall that survives the setter's own ":I"+":J": the preset is stored
+    // (":i" agrees) and the kick is acknowledged but swallowed. Only the
+    // sampled check can recover this.
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_right_ascension_rate(0.5);  // continuous, same direction: live ":I" on the tracking axis
+    const double setter_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // The property call must not absorb the ~450 ms sample window.
+    REQUIRE(setter_ms < 200.0);
+
+    // The setter's kick, then the background check's re-kick -- and never a
+    // stop/restart, the axis keeps running throughout.
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 1500));
+    REQUIRE(mount.stop_count(1) == stops_before);
+    const double new_rate = measure_rate();
+    REQUIRE(std::abs(new_rate - sidereal_rate) > std::abs(sidereal_rate) * 0.1);
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a pending RightAscensionRate check is reaped by Tracking off and by disconnect",
+          "[skywatcher][async]") {
+    // The background check is owned like the pulse task: whatever takes the
+    // RA axis while its sample window is open reaps it, so its ":I"+":J"
+    // resend can never land on an axis someone else just stopped (which
+    // would silently restart tracking), and a disconnect joins it instead of
+    // leaking a thread into the destructor.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.5);
+    driver->set_tracking(false);  // lands inside the check's ~450 ms sample window
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 3000));
+    // Give a leaked check its whole window and then some: nothing may
+    // restart the axis, and no second ":J" may reach the board.
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    REQUIRE_FALSE(mount.axis_running(1));
+    REQUIRE(mount.start_count(1) == starts_before + 1);  // the setter's own kick only
+
+    // Disconnect racing a fresh check: set_connected(false) must return
+    // promptly (the check is cancelled, not waited out) and cleanly.
+    driver->set_tracking(true);  // offset 0.5 still stored: restarts at the offset rate
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.0);  // live change back to sidereal: spawns a check
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    const double disconnect_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    REQUIRE(disconnect_ms < 2000.0);
+    REQUIRE_FALSE(driver->get_connected());
+}
+
+TEST_CASE("SkyWatcher async - the rate-applied check stretches its window to resolve a Lunar TrackingRate stall",
+          "[skywatcher][async]") {
+    // Hardware 2026-09-10 (EQM-35 Pro): a TrackingRate=Lunar write produced a
+    // spurious "did not take" + resend. Lunar is 3.5% off sidereal -- about
+    // one count over the fixed 300 ms window, inside the two-read truncation
+    // error, so the nearest-rate verdict was a coin flip. The window now
+    // stretches until the two candidate rates are >= 4 counts apart (this
+    // fake: ~2.4 s), so a REAL Lunar stall is still caught...
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_tracking_rate(1);                      // Lunar: live in-place ":I", 3.5% slower
+    REQUIRE(mount.step_period(1) != sidereal_preset);  // stored...
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 4500));  // ...and re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a sub-resolution TrackingRate change is not spuriously re-kicked",
+          "[skywatcher][async]") {
+    // ...while Solar (0.27% off sidereal: 0.09 counts over 300 ms, ~30 s to
+    // resolve) is below anything the check can see inside its 3 s cap, so it
+    // must NOT sample-and-guess: exactly one ":J" (the setter's own kick),
+    // never a resend, on a healthy board.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+
+    driver->set_tracking_rate(2);                                  // Solar
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));  // well past settle + min window
+    REQUIRE(mount.start_count(1) == starts_before + 1);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE(
+    "SkyWatcher async - a pulse whose rate delta is unresolvable within its own duration "
+    "does not overshoot the commanded on-time",
+    "[skywatcher][async]") {
+    // Bot review round 1 on open-astro/AlpacaBridge#248: the pulse dispatch's
+    // rate-applied check samples the axis WHILE it is already running at the
+    // pulse rate, and the pulse's remaining hold is duration MINUS the time
+    // the check took -- clamped at zero, never extended. Before this fix,
+    // a low guide rate (small pulse-vs-tracking delta) at a duration right at
+    // kMinPulseForRateVerifyMs could stretch the adaptive window toward its
+    // 3 s ceiling, well past the 1.5 s commanded duration: the pulse would
+    // physically hold the guide rate for however long the check took, over
+    // 2x its commanded on-time. The dispatch call now caps its window at
+    // (duration - settle), so an unresolvable delta is skipped immediately
+    // (an INFO log, not a wait) instead of stretching past the pulse itself.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    // 0.02x sidereal: on this fake's counts-per-revolution, resolving this
+    // delta to kMinResolvableDeltaCounts needs several seconds -- more than
+    // (kMinPulseForRateVerifyMs - settle) leaves room for.
+    driver->set_guide_rate(
+        {0.02 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.02 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    constexpr int kPulseMs = 1500;  // exactly kMinPulseForRateVerifyMs: the check DOES run
+    driver->pulse_guide(2, kPulseMs);
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+    auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 5000));
+    double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    // Must land close to the commanded 1500 ms, nowhere near the ~3150 ms an
+    // unbounded window would have produced.
+    REQUIRE(elapsed_ms >= 1300.0);
+    REQUIRE(elapsed_ms < 2000.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - re-asserting the same TrackingRate leaves a pending rate check running",
+          "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#258 review: apply_ra_tracking_rate_locked()
+    // reaped any pending check unconditionally, BEFORE its own "nothing
+    // changed" early return. set_tracking_rate() has no idempotent-rewrite
+    // guard (unlike set_right_ascension_rate), so a client re-asserting the
+    // same TrackingRate mid-check cancelled it and spawned no replacement:
+    // a stalled ":I" from the first write was then never caught -- the
+    // exact unbounded-stall failure the background check exists for.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    // Lunar stall that survives the setter's own ":I"+":J" (fake's lower
+    // CPR needs ~2.4 s of window to resolve, so the check is still in
+    // flight when the rewrite lands).
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_tracking_rate(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // inside the sample window
+    driver->set_tracking_rate(1);                                 // same value: must NOT drop the check
+    REQUIRE(mount.start_count(1) == starts_before + 1);           // and must not write/kick again itself
+
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 4500));  // check re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a Dec pulse leaves a pending RA rate check running", "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#258 review: the pulse dispatch reaped a pending
+    // RA rate-verify check unconditionally, so a North/South pulse (Dec axis
+    // only) cancelled it with nothing to replace it. Dec corrections landing
+    // inside the check's window are routine while autoguiding; a stalled
+    // ":I" from a RightAscensionRate write would then never be caught.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.5);                        // spawns the check
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // inside its settle/window
+    driver->pulse_guide(0, 200);                                  // North: Dec axis only
+    REQUIRE(mount.start_count(1) == starts_before + 1);           // the pulse itself touched no RA
+
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 1500));  // check re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
