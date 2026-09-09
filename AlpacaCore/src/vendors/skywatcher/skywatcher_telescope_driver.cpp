@@ -983,8 +983,12 @@ public:
                 // dec = 90 - a2 on the east-pointing branch (a2 >= 0): guide
                 // North (+Dec) is NEGATIVE axis motion there (same sign rule
                 // as the DeclinationRate offset, confirmed by ConformU 4.5
-                // measured-rate tests).
-                if (cached_dec_axis_deg_ >= 0.0) {
+                // measured-rate tests) -- in the NORTHERN hemisphere. See the
+                // XOR derivation in apply_dec_rate_offset_locked()'s comment;
+                // this call site carried the identical bug, and an autoguider
+                // below the equator would have pushed every Dec correction the
+                // wrong way.
+                if ((cached_dec_axis_deg_ >= 0.0) != hemisphere_south_locked()) {
                     dec_rate_deg_per_sec = -dec_rate_deg_per_sec;
                 }
             } else {
@@ -2207,8 +2211,22 @@ private:
 
     // Start/stop/duty the Dec-axis offset motion for DeclinationRate. Sign:
     // dec = 90 - a2 on the east-pointing branch (a2 >= 0) -> +Dec is NEGATIVE
-    // axis motion there (ConformU 4.5 measured-rate confirmed).
-    // TODO(#214 follow-up): the sign is evaluated at (re)apply time and held;
+    // axis motion there (ConformU 4.5 measured-rate confirmed). That is the
+    // NORTHERN-hemisphere formula: compute_ra_dec_locked() negates dec below
+    // the equator (dec_sky = -(90 - a2) = a2 - 90 on the same branch), which
+    // flips the sign of d(dec_sky)/d(a2) as well. The plain `a2 >= 0` rule
+    // never consulted hemisphere_south_locked(), so south of the equator it
+    // drove the axis backwards on BOTH branches -- the same class of bug
+    // already found and fixed for RA tracking (48afe0d,
+    // start_speed_motion_locked). Found by static review 2026-09-06 and
+    // pinned by a loopback regression that asserts the driver's own reported
+    // Dec rises under +DeclinationRate / a North pulse; not yet measured on
+    // hardware below the equator (a guiding session or plate-solved drift
+    // run would do it). XOR-ing the branch test with the hemisphere is the
+    // full fix: MoveAxis, which applies no sign transform at all, is the
+    // hardware-observed reference for which way a raw axis rate moves
+    // reported Dec (AGENTS.md, EQM-35 Pro at latitude -37.2).
+    // TODO(open-astro#255, deferred from #214): the sign is evaluated at (re)apply time and held;
     // a session whose dec axis crosses the branch boundary (a2 through 0)
     // between apply events keeps the stale sign until the next goto, pulse,
     // tracking toggle, or rate write re-applies it. Long unattended sessions
@@ -2225,7 +2243,7 @@ private:
             return;
         }
         refresh_position_cache_locked(false);
-        if (cached_dec_axis_deg_ >= 0.0) {
+        if ((cached_dec_axis_deg_ >= 0.0) != hemisphere_south_locked()) {
             rate = -rate;
         }
         // Rates within kSlowModeFloorPad of the floor still duty-cycle: an

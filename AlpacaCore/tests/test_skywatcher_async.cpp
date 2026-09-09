@@ -870,6 +870,94 @@ TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[sky
     driver->set_connected(false);
 }
 
+// ── Southern hemisphere Dec-rate sign (DeclinationRate / PulseGuide) ────────
+//
+// Found by static review, not on hardware: apply_dec_rate_offset_locked() and
+// pulse_guide()'s North/South branch both flip axis direction with the plain
+// rule "a2 >= 0 -> negate", derived from the NORTHERN pointing formula
+// dec = 90 - a2 (d(dec)/d(a2) = -1 there). compute_ra_dec_locked() negates
+// the whole dec value below the equator (dec_sky = -(90 - a2) = a2 - 90 on
+// the same branch), which flips the SIGN of that derivative
+// (d(dec_sky)/d(a2) = +1 south of the equator on the a2 >= 0 branch). Neither
+// call site consulted hemisphere_south_locked(), so both carry the exact
+// class of bug already found and fixed for RA tracking in
+// start_speed_motion_locked() (see 48afe0d) -- just for Dec, and for
+// DeclinationRate/PulseGuide instead of plain tracking.
+//
+// The hardware-validated MoveAxis data point (AGENTS.md, EQM-35 Pro at
+// latitude -37.2: pressing N increased reported Dec, i.e. a POSITIVE a1/a2
+// axis rate on the a2 >= 0 branch increases sky Dec below the equator) is
+// the independent check that the south-of-equator direction asserted here
+// is the physically correct one, not just internally consistent.
+
+TEST_CASE("SkyWatcher southern hemisphere - DeclinationRate drives Dec the right way",
+          "[skywatcher][telescope][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    // Power-on position: Dec axis angle 0 (east branch, a2 >= 0). South of
+    // the equator that branch has dec_sky = a2 - 90, so +DeclinationRate
+    // (increasing sky Dec) requires the axis to move POSITIVE -- the mirror
+    // image of the northern-hemisphere assertion in the sibling test above.
+    driver->set_declination_rate(10.0);  // arcsec/s, well above the ~0.26 floor
+    REQUIRE(driver->get_declination_rate() == 10.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    double start = mount.physical_degrees(2);
+    const double reported_dec_start = driver->get_declination();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    double moved_arcsec = (mount.physical_degrees(2) - start) * 3600.0;
+    INFO("axis2 moved " << moved_arcsec << " arcsec");
+    CHECK(moved_arcsec > 10.0);
+    CHECK(moved_arcsec < 40.0);
+    // The ASCOM contract, asserted against the driver's OWN pointing model:
+    // a positive DeclinationRate must make the reported Declination rise.
+    // Before the fix this read as Dec FALLING at 10 arcsec/s below the equator.
+    const double reported_dec_end = driver->get_declination();
+    INFO("reported Dec " << reported_dec_start << " -> " << reported_dec_end);
+    CHECK(reported_dec_end > reported_dec_start);
+
+    driver->set_declination_rate(0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the right way",
+          "[skywatcher][telescope][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch (a2 > 0)
+
+    double dec_before = mount.axis_degrees(2);
+    const double reported_dec_before = driver->get_declination();
+    driver->pulse_guide(0, 1500);  // North, 1.5 s at the 0.5x default rate
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    // ~0.5x sidereal x 1.5 s ~ 11 arcsec; south of the equator the
+    // east-branch sign rule makes +Dec (guide North) POSITIVE axis motion --
+    // the mirror image of the northern-hemisphere test above.
+    double moved_arcsec = (mount.axis_degrees(2) - dec_before) * 3600.0;
+    INFO("axis2 moved " << moved_arcsec << " arcsec");
+    CHECK(moved_arcsec > 6.0);
+    CHECK(moved_arcsec < 20.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 3000));
+    // The ASCOM contract, asserted against the driver's OWN pointing model: a
+    // North pulse must leave the reported Declination higher than it started.
+    // This is what an autoguider relies on -- before the fix a North
+    // correction below the equator pushed the star further south.
+    const double reported_dec_after = driver->get_declination();
+    INFO("reported Dec " << reported_dec_before << " -> " << reported_dec_after);
+    CHECK(reported_dec_after > reported_dec_before);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not resent and not thrown",
           "[skywatcher][async]") {
     // 6b4988b read every ":I" preset back with ":i" and resent, then threw,
