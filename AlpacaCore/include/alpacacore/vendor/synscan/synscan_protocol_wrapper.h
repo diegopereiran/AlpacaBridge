@@ -80,6 +80,18 @@ public:
                                  int timeout_ms_override = 0);
     void send_command_blind(const std::string& command);
 
+    /// Protocol echo ("K" + byte -> byte + "#"), the handset's own link check.
+    /// True on an exact match. A mismatched token is first read past: tokens
+    /// keep being read for the rest of one response timeout, since right
+    /// after the port opens the first token can be a stale reply from the
+    /// previous session with the real echo queued behind it. If none matches,
+    /// the echo is sent once more (a real handset can garble a single byte).
+    /// False if that also yields no match or either attempt times out: a port
+    /// that only ever answers something other than the echo is not
+    /// trustworthy enough to proceed into the handshake that follows, since
+    /// those queries are individually caught and swallowed.
+    bool echo_test();
+
     std::string get_handset_firmware_version();
     int get_model_id();
     bool is_aligned();
