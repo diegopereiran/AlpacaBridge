@@ -38,6 +38,19 @@ Server::Server(const Config& config)
     router_.set_server_info(config_.server_name(), config_.manufacturer(), alpacahttp::kVersion, config_.location(),
                             config_.profile_name());
     router_.set_config_path(config_.config_path());
+
+    // The reactor's wake pipe lives as long as the Server. Non-blocking on
+    // both ends: a wake is one byte, and a full pipe already means a wake is
+    // pending.
+    if (::pipe(reactor_wake_fds_) == 0) {
+        for (int pipe_fd : reactor_wake_fds_) {
+            ::fcntl(pipe_fd, F_SETFL, ::fcntl(pipe_fd, F_GETFL) | O_NONBLOCK);
+        }
+    } else {
+        util::log_error("Failed to create reactor wake pipe: " + util::socket_error_message(errno));
+        reactor_wake_fds_[0] = -1;
+        reactor_wake_fds_[1] = -1;
+    }
 }
 
 void Server::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {
@@ -144,7 +157,9 @@ void Server::stop() {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         shutdown_workers_ = true;
     }
-    ready_signal_.release(static_cast<std::ptrdiff_t>(worker_threads_.size()));
+    // One permit per live worker, including any detached one that is no
+    // longer in worker_threads_, so none stays blocked on the semaphore.
+    ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
     for (auto& thread : worker_threads_) {
         if (!thread.joinable()) {
             continue;
@@ -180,11 +195,11 @@ void Server::stop() {
     util::log_info("HTTP server stopped");
 }
 
-// The wake pipe outlives stop(): with a blocking start() the accept loop is
-// still unwinding on the caller's thread when stop() returns (it is what set
-// running_ false from, say, the shutdown endpoint on a worker), and closing
-// the pipe under it would let a late wake write into a recycled descriptor.
-// run_server() replaces the pair on the next start; the destructor closes it.
+// Destructor only. The pipe is never closed or replaced while the Server is
+// alive: stop() may return with the accept loop still unwinding (blocking
+// start() stopped from a handler) and a detached worker may still call
+// wake_reactor() after a restart, and either would otherwise write into a
+// recycled descriptor.
 void Server::close_wake_pipe() {
     for (int& pipe_fd : reactor_wake_fds_) {
         if (pipe_fd >= 0) {
@@ -359,20 +374,15 @@ void Server::run_server() {
 
     // Self-pipe the reactor sleeps on alongside its idle connections, so a
     // worker parking a connection (or stop()) can wake it without a timeout
-    // spin. Non-blocking on both ends: a wake is one byte, and a full pipe
-    // already means a wake is pending.
-    close_wake_pipe();
-    if (::pipe(reactor_wake_fds_) != 0) {
-        util::log_error("Failed to create reactor wake pipe: " + util::socket_error_message(errno));
+    // spin. Created by the constructor; refuse to run without it.
+    if (reactor_wake_fds_[0] < 0 || reactor_wake_fds_[1] < 0) {
+        util::log_error("Reactor wake pipe unavailable; cannot start HTTP server");
         running_ = false;
         auto listener = server_fd_.exchange(util::kInvalidSocket);
         if (listener != util::kInvalidSocket) {
             util::socket_close(listener);
         }
         return;
-    }
-    for (int pipe_fd : reactor_wake_fds_) {
-        ::fcntl(pipe_fd, F_SETFL, ::fcntl(pipe_fd, F_GETFL) | O_NONBLOCK);
     }
     {
         std::lock_guard<std::mutex> lock(reactor_mutex_);
@@ -390,9 +400,10 @@ void Server::run_server() {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         generation = ++worker_generation_;
     }
-    // Enough permits for a stale worker or two to wake and exit; the new
-    // workers absorb the rest as one empty wake each.
-    ready_signal_.release(static_cast<std::ptrdiff_t>(pool_size));
+    // One permit per worker still alive from a previous generation (detached
+    // across a restart), so each wakes, sees its generation is stale, and
+    // exits, however many there are. The new pool has not started yet.
+    ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
     worker_threads_.reserve(pool_size);
     for (size_t i = 0; i < pool_size; ++i) {
         worker_threads_.emplace_back(&Server::worker_thread, this, generation);
@@ -872,6 +883,7 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
 }
 
 void Server::worker_thread(std::uint64_t generation) {
+    worker_count_.fetch_add(1, std::memory_order_relaxed);
     while (true) {
         ConnectionPtr conn;
 
@@ -947,6 +959,7 @@ void Server::worker_thread(std::uint64_t generation) {
         conn->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kKeepAliveIdleSeconds);
         park_connection(std::move(conn));
     }
+    worker_count_.fetch_sub(1, std::memory_order_relaxed);
 }
 
 // Hand an idle connection to the reactor. After stop() has begun the reactor

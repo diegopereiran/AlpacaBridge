@@ -110,6 +110,11 @@ private:
     // loops and acquires again.
     std::counting_semaphore<> ready_signal_{0};
     bool shutdown_workers_{false};
+    // Worker threads currently alive, including any that detached themselves
+    // across a restart. stop() and each generation bump release this many
+    // permits, so every live worker, not just the current pool, gets its
+    // wake-and-exit.
+    std::atomic<std::size_t> worker_count_{0};
     // Bumped by every run_server(). A worker exits when the generation it
     // was spawned in is no longer current, so a worker that detached itself
     // (stop() called from inside a request handler on that worker) cannot
@@ -121,6 +126,12 @@ private:
     // to the ready queue when their next request arrives. Woken through a
     // self-pipe when a worker parks a connection or stop() begins.
     std::thread reactor_thread_;
+    // Created once in the constructor and closed in the destructor, never
+    // replaced: wake_reactor() reads the write end from any thread with no
+    // lock, and a worker detached across a restart could still call it while
+    // a per-start recreation was in progress. Immutable descriptors have no
+    // such race. Leftover wake bytes from a previous run cost one spurious
+    // poll() return.
     int reactor_wake_fds_[2]{-1, -1};
     std::mutex reactor_mutex_;
     std::vector<ConnectionPtr> reactor_incoming_;

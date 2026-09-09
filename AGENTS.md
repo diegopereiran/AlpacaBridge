@@ -954,8 +954,16 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     `stop()` was called on it (no current handler does; the management
     endpoints restart on a detached thread) exits on the generation check
     instead of surviving as an extra thread once `start()` clears
-    `shutdown_workers_`. The reactor keeps a self-detach branch too, but it
-    runs no handler code and cannot be the caller.
+    `shutdown_workers_`. Wake permits are released per live worker
+    (`worker_count_`, incremented on entry and decremented on exit), not per
+    `thread_pool_size`, so any number of detached stale workers get their
+    wake-and-exit. The reactor keeps a self-detach branch too, but it runs
+    no handler code and cannot be the caller.
+  - The reactor's wake pipe is created once in the constructor and closed
+    only in the destructor. It is read lock-free by `wake_reactor()` from
+    any thread, and a worker detached across a restart could still call
+    that while a per-start recreation was in flight (PR #235 review round
+    3); immutable descriptors have no such race.
   - The reactor enforces only the idle gap (`kKeepAliveIdleSeconds`) and the
     first-request slowloris bound (`kSocketTimeoutSeconds`, so a client that
     connects and never sends costs no worker). Caps that should end with a
