@@ -331,6 +331,29 @@ The Debian package is built from the `debian/` directory. It installs:
 - Configuration under `/etc/alpacabridge`
 - Systemd unit `alpacabridge.service` running as the `alpacabridge` system user
 
+## Releases
+
+The only install channel is the OpenAstro APT repository ([apt.openastro.net](https://apt.openastro.net)): install once, then `apt upgrade`. Every version published there is also marked in this repository so a shipped build has a name:
+
+- A git tag `vX.Y.Z` on the merge commit that carried the release (the `VERSION` file, the README badge, and the dated CHANGELOG heading all agree at that commit).
+- A GitHub Release for that tag, created automatically by `.github/workflows/release.yml`. Its notes are the version's CHANGELOG section and its only assets are the source archives GitHub attaches itself. No `.deb` is attached; use apt.
+
+To cut a release:
+
+1. Run `/submit-pr` and answer yes to "is this PR cutting the release". It writes `VERSION`, updates the README badge, and dates the CHANGELOG heading.
+2. Merge the PR.
+3. Tag the merge commit and push the tag:
+
+```bash
+git checkout main && git pull
+git tag -a v3.6.0 -m "Release 3.6.0"
+git push origin v3.6.0
+```
+
+The workflow refuses a tag whose version does not match `VERSION`, or whose CHANGELOG section is still `UNRELEASED`, so a tag can never publish notes for an uncut release. Preview the notes locally with `scripts/changelog_section.py 3.6.0`.
+
+Testers who need an unreleased build still build from source or use `/deploy-remote-test`; commits between tags report the last released version.
+
 ## Further reading
 
 - [Architecture](architecture.md) — system design, three-layer pattern, component overview
