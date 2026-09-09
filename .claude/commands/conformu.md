@@ -397,14 +397,15 @@ sed -i -E \
 
 Then confirm nothing survived before saving. The first check looks for any site
 coordinate whose minutes or seconds are not zero (either decimal separator), the second
-for an elevation that is not a multiple of 100 m; a correct scrub prints NOTHING from
+for an elevation that is not a multiple of 100 m (negative sites, down to ConformU's -300 m
+limit, included); a correct scrub prints NOTHING from
 either:
 
 ```bash
 grep -nE "Site(Latitude|Longitude).*[-+][0-9]+:[0-9]{2}:[0-9]{2}[.,][0-9]" "$TMPDIR/conformu.txt" \
   | grep -vE "[-+][0-9]+:00:00[.,]0"
-grep -nE "SiteElevation.*(OK +|Current value |elevation: )[0-9]+(m|\.|$)" "$TMPDIR/conformu.txt" \
-  | grep -vE "(OK +|Current value |elevation: )(0|[0-9]*00)(m|\.|$)"
+grep -nE "SiteElevation.*(OK +|Current value |elevation: )-?[0-9]+(m|\.|$)" "$TMPDIR/conformu.txt" \
+  | grep -vE "(OK +|Current value |elevation: )-?(0|[0-9]*00)(m|\.|$)"
 ```
 
 Any output line is an unscrubbed value. Also grep for the raw original strings you used
