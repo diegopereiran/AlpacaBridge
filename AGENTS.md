@@ -955,9 +955,18 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     endpoints restart on a detached thread) exits on the generation check
     instead of surviving as an extra thread once `start()` clears
     `shutdown_workers_`. Wake permits are released per live worker
-    (`worker_count_`, incremented on entry and decremented on exit), not per
-    `thread_pool_size`, so any number of detached stale workers get their
-    wake-and-exit. The reactor keeps a self-detach branch too, but it runs
+    (`worker_count_`), not per `thread_pool_size`, so any number of detached
+    stale workers get their wake-and-exit. **Count at spawn, not in the
+    thread body**: a `stop()` landing before a new thread executes its first
+    instruction would otherwise undercount, leave that thread with no permit,
+    and hang the join (PR #235 review round 4). `run_server()`'s spawn phase
+    and `stop()`'s reactor/worker teardown are serialized by
+    `lifecycle_mutex_`; `stop()` releases it before joining the server
+    thread (which may be about to take it), and the spawn phase bails out
+    under it when `running_` is already false, so `start_async()` followed
+    at once by `stop()` is safe. Test: the churn case in
+    `test_server_socket.cpp` (20 start/stop pairs with no settle time, then
+    a served request). The reactor keeps a self-detach branch too, but it runs
     no handler code and cannot be the caller.
   - The reactor's wake pipe is created once in the constructor and closed
     only in the destructor. It is read lock-free by `wake_reactor()` from
@@ -971,7 +980,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     `serve_one_request`, see the lifetime note above.
   - `Config::max_connections` (512 default; `RLIMIT_NOFILE` is 1024 on a
     typical systemd unit and the other half is for SDKs, serial ports and
-    logs) bounds live connections across all owners. At the bound the accept
+    logs) bounds live connections across all owners. Both it and
+    `keep_alive_lifetime_seconds` are settable from the config file
+    (`http:` section keys of the same name) and the environment
+    (`ALPACAHTTP_MAX_CONNECTIONS`, `ALPACAHTTP_KEEP_ALIVE_LIFETIME_SECONDS`),
+    routed through the clamping setters so every path clamps alike; tested
+    in `test_config.cpp`. At the bound the accept
     loop pauses and new clients wait in the listen backlog (64) rather than
     being refused; an idle connection expires within 15 s.
   - Do not reintroduce a worker-side counter or reserve: the previous design

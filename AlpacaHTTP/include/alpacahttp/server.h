@@ -111,10 +111,19 @@ private:
     std::counting_semaphore<> ready_signal_{0};
     bool shutdown_workers_{false};
     // Worker threads currently alive, including any that detached themselves
-    // across a restart. stop() and each generation bump release this many
-    // permits, so every live worker, not just the current pool, gets its
-    // wake-and-exit.
+    // across a restart. Counted at SPAWN (before the thread has executed an
+    // instruction), decremented by the thread on exit. stop() and each
+    // generation bump release this many permits, so every live worker, not
+    // just the current pool, gets its wake-and-exit; counting inside the
+    // thread body instead would let a stop() that lands before a new thread
+    // reaches its first instruction undercount, leave that thread with no
+    // permit, and hang the join.
     std::atomic<std::size_t> worker_count_{0};
+    // Held by run_server() while it spawns the reactor and the workers, and
+    // by stop() for its whole teardown, so a stop() (a second restart on the
+    // heels of a first, or start_async() followed at once by stop()) cannot
+    // walk worker_threads_ while it is still being filled.
+    std::mutex lifecycle_mutex_;
     // Bumped by every run_server(). A worker exits when the generation it
     // was spawned in is no longer current, so a worker that detached itself
     // (stop() called from inside a request handler on that worker) cannot

@@ -174,6 +174,19 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 parse_uint16_value(value, http_port_);
             } else if (key == "thread_pool_size") {
                 parse_size_value(value, thread_pool_size_);
+            } else if (key == "max_connections") {
+                // Through the setter so the file and the environment clamp
+                // the same way.
+                std::size_t parsed = 0;
+                if (parse_size_value(value, parsed)) {
+                    set_max_connections(parsed);
+                }
+            } else if (key == "keep_alive_lifetime_seconds") {
+                std::size_t parsed = 0;
+                if (parse_size_value(value, parsed) &&
+                    parsed <= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+                    set_keep_alive_lifetime_seconds(static_cast<int>(parsed));
+                }
             }
         } else if (current_section == "discovery") {
             if (key == "enabled") {
@@ -318,6 +331,25 @@ void Config::apply_environment_overrides() {
             if (thread_pool_size_ > 256) thread_pool_size_ = 256;
         } catch (...) {
             // Invalid value, use default
+        }
+    }
+
+    // An unparseable value leaves the default in place (parse_size_value
+    // reports failure instead of throwing).
+    const char* max_connections_env = std::getenv("ALPACAHTTP_MAX_CONNECTIONS");
+    if (max_connections_env) {
+        std::size_t parsed = 0;
+        if (parse_size_value(max_connections_env, parsed)) {
+            set_max_connections(parsed);
+        }
+    }
+
+    const char* lifetime_env = std::getenv("ALPACAHTTP_KEEP_ALIVE_LIFETIME_SECONDS");
+    if (lifetime_env) {
+        std::size_t parsed = 0;
+        if (parse_size_value(lifetime_env, parsed) &&
+            parsed <= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            set_keep_alive_lifetime_seconds(static_cast<int>(parsed));
         }
     }
 

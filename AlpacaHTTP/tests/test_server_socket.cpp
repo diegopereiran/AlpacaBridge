@@ -737,6 +737,45 @@ int main() {
         }
     }
 
+    // stop() straight after start_async(), with no settle time, repeatedly.
+    // The spawn phase and stop() are serialized by a lifecycle mutex and
+    // workers are counted at spawn, so a stop() that lands before a new
+    // worker has executed an instruction still releases its wake permit
+    // and the join completes. Before that, stop() could undercount and hang
+    // on the uncounted thread. Ends with a normal start and a served request
+    // to prove the object is still usable.
+    {
+        alpacahttp::Config churn_config;
+        churn_config.set_http_port(6876);
+        churn_config.set_discovery_enabled(false);
+        churn_config.set_server_name("TestServerChurn");
+        churn_config.set_thread_pool_size(4);
+        alpacahttp::Server churn_server(churn_config);
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 20; ++i) {
+            churn_server.start_async();
+            churn_server.stop();
+            EXPECT(!churn_server.is_running());
+        }
+        const auto churn_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        EXPECT(churn_ms < 10000);  // a hung join would sit here for good
+
+        churn_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        if (churn_server.is_running()) {
+            int fd = connect_local(churn_config.http_port());
+            EXPECT(fd >= 0);
+            std::string carry;
+            send_all(fd, kGet11);
+            EXPECT(read_one_response(fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(fd);
+            churn_server.stop();
+        } else {
+            std::cout << "  (skipped churn case's final request: port 6876 unavailable)\n";
+        }
+    }
+
     // Closing must not destroy a response the client has not read yet. On
     // Linux, close() on a socket with unread bytes in its receive queue sends
     // RST instead of FIN, and the peer's stack then discards its own receive

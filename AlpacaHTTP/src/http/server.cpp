@@ -130,53 +130,62 @@ void Server::stop() {
     util::log_info("Stopping HTTP server...");
     running_ = false;
     const auto current_id = std::this_thread::get_id();
-
-    // 1. Reactor first. Once it stops accepting handoffs, a worker that
-    //    finishes a request closes the connection instead of parking it, and
-    //    the reactor closes every connection it was holding on its way out.
-    //    Nothing is ever parked past this point, so stop() no longer has to
-    //    wait out an idle gap: an idle client costs nothing here.
+    // Phases 1 and 2 run under lifecycle_mutex_, serialized against
+    // run_server()'s spawn phase: either that phase ran first and every
+    // thread it made is in worker_threads_ and counted in worker_count_, or
+    // it runs after this and sees running_ false and spawns nothing. The
+    // mutex is released before phase 3 joins the server thread, which may be
+    // about to take it for exactly that check.
     {
-        std::lock_guard<std::mutex> lock(reactor_mutex_);
-        reactor_accepting_ = false;
-    }
-    wake_reactor();
-    if (reactor_thread_.joinable()) {
-        // The reactor runs no handler code, so it cannot be the caller;
-        // the self-detach is kept only so a future bug cannot deadlock here.
-        if (reactor_thread_.get_id() == current_id) {
-            reactor_thread_.detach();
-        } else {
-            reactor_thread_.join();
-        }
-    }
+        std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
 
-    // 2. Workers. Each finishes what is queued (every response from now on
-    //    carries Connection: close, since running_ is false) and exits.
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        shutdown_workers_ = true;
-    }
-    // One permit per live worker, including any detached one that is no
-    // longer in worker_threads_, so none stays blocked on the semaphore.
-    ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
-    for (auto& thread : worker_threads_) {
-        if (!thread.joinable()) {
-            continue;
+        // 1. Reactor first. Once it stops accepting handoffs, a worker that
+        //    finishes a request closes the connection instead of parking it, and
+        //    the reactor closes every connection it was holding on its way out.
+        //    Nothing is ever parked past this point, so stop() no longer has to
+        //    wait out an idle gap: an idle client costs nothing here.
+        {
+            std::lock_guard<std::mutex> lock(reactor_mutex_);
+            reactor_accepting_ = false;
         }
-        if (thread.get_id() == current_id) {
-            // stop() was called from inside a request handler on this
-            // worker (not a path any current handler takes: the management
-            // restart/shutdown endpoints run it on a detached thread). It
-            // cannot join itself; it finishes its request, then exits on
-            // the generation check in worker_thread once the next
-            // run_server() bumps worker_generation_.
-            thread.detach();
-            continue;
+        wake_reactor();
+        if (reactor_thread_.joinable()) {
+            // The reactor runs no handler code, so it cannot be the caller;
+            // the self-detach is kept only so a future bug cannot deadlock here.
+            if (reactor_thread_.get_id() == current_id) {
+                reactor_thread_.detach();
+            } else {
+                reactor_thread_.join();
+            }
         }
-        thread.join();
+
+        // 2. Workers. Each finishes what is queued (every response from now on
+        //    carries Connection: close, since running_ is false) and exits.
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            shutdown_workers_ = true;
+        }
+        // One permit per live worker, including any detached one that is no
+        // longer in worker_threads_, so none stays blocked on the semaphore.
+        ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
+        for (auto& thread : worker_threads_) {
+            if (!thread.joinable()) {
+                continue;
+            }
+            if (thread.get_id() == current_id) {
+                // stop() was called from inside a request handler on this
+                // worker (not a path any current handler takes: the management
+                // restart/shutdown endpoints run it on a detached thread). It
+                // cannot join itself; it finishes its request, then exits on
+                // the generation check in worker_thread once the next
+                // run_server() bumps worker_generation_.
+                thread.detach();
+                continue;
+            }
+            thread.join();
+        }
+        worker_threads_.clear();
     }
-    worker_threads_.clear();
 
     // 3. Listener: shutdown before close so a blocked accept() wakes up.
     auto fd = server_fd_.exchange(util::kInvalidSocket);
@@ -384,29 +393,49 @@ void Server::run_server() {
         }
         return;
     }
-    {
-        std::lock_guard<std::mutex> lock(reactor_mutex_);
-        reactor_accepting_ = true;
-    }
-    reactor_thread_ = std::thread(&Server::reactor_loop, this);
-
-    // Start worker thread pool for handling concurrent requests. A new
-    // generation: any worker left over from the previous one (detached
-    // because stop() was called on it) wakes, sees its generation is stale,
-    // and exits instead of serving alongside these.
     std::size_t pool_size = config_.thread_pool_size();
-    std::uint64_t generation = 0;
     {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        generation = ++worker_generation_;
-    }
-    // One permit per worker still alive from a previous generation (detached
-    // across a restart), so each wakes, sees its generation is stale, and
-    // exits, however many there are. The new pool has not started yet.
-    ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
-    worker_threads_.reserve(pool_size);
-    for (size_t i = 0; i < pool_size; ++i) {
-        worker_threads_.emplace_back(&Server::worker_thread, this, generation);
+        // Spawn phase, serialized against stop(): either stop() has not run
+        // yet and will find every thread made here in worker_threads_ and
+        // counted, or it already ran (start_async() followed at once by
+        // stop()) and there is nothing to spawn for.
+        std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+        if (!running_) {
+            auto listener = server_fd_.exchange(util::kInvalidSocket);
+            if (listener != util::kInvalidSocket) {
+                util::socket_close(listener);
+            }
+            util::log_info("Server stopped");
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(reactor_mutex_);
+            reactor_accepting_ = true;
+        }
+        reactor_thread_ = std::thread(&Server::reactor_loop, this);
+
+        // Start worker thread pool for handling concurrent requests. A new
+        // generation: any worker left over from the previous one (detached
+        // because stop() was called on it) wakes, sees its generation is
+        // stale, and exits instead of serving alongside these.
+        std::uint64_t generation = 0;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            generation = ++worker_generation_;
+        }
+        // One permit per worker still alive from a previous generation
+        // (detached across a restart), so each wakes, sees its generation is
+        // stale, and exits, however many there are. The new pool is counted
+        // below, after this, so none of these permits are consumed by it.
+        ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
+        worker_threads_.reserve(pool_size);
+        for (size_t i = 0; i < pool_size; ++i) {
+            // Counted before the thread exists, so a stop() that follows
+            // this phase releases a permit for it even if it has not yet
+            // executed an instruction.
+            worker_count_.fetch_add(1, std::memory_order_relaxed);
+            worker_threads_.emplace_back(&Server::worker_thread, this, generation);
+        }
     }
     util::log_info("Started " + std::to_string(pool_size) + " worker threads for concurrent request handling");
 
@@ -883,7 +912,7 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
 }
 
 void Server::worker_thread(std::uint64_t generation) {
-    worker_count_.fetch_add(1, std::memory_order_relaxed);
+    // Counted by run_server() at spawn; this thread only ever decrements.
     while (true) {
         ConnectionPtr conn;
 
