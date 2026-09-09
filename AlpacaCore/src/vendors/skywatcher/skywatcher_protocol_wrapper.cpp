@@ -14,6 +14,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
@@ -272,28 +273,44 @@ uint32_t SkyWatcherProtocolWrapper::decode_u24(const std::string& data) {
 
 // ── Serial probe / enumeration ──────────────────────────────────────────────
 
-namespace {
-
 #ifndef _WIN32
-// Open a serial port at 9600 8N1 and probe it with ":e1\r". Returns the motor
-// board version string on success, empty on failure.
+// Open a serial port at @p baud_rate 8N1 and probe it with ":e1\r". Returns
+// the motor board version payload on success, empty on failure. Declared in
+// the public header (with probe_skywatcher_port_any_baud) for the pty tests.
 std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     // A SynScan hand controller shares the adapter classes this scan targets
     // and speaks its own protocol at 9600. It is only put at risk by a probe
     // at some OTHER rate: one motor-controller probe at 115200 is enough to
     // stop it answering serial entirely, and only a power-cycle brings it
     // back (EQM-35 Pro rig, 2026-09 - the "hand-controller commands time
-    // out" report). No caller currently probes at anything but 9600, so
-    // gate on the baud actually being used rather than paying the guard's
-    // full timeout on every port for a hazard that baud does not create; a
-    // future 115200 (or other) caller is still covered. See
-    // util/synscan_handset_probe.h.
+    // out" report). Gate on the baud actually being used rather than paying
+    // the guard's full timeout on every port for a hazard that baud does
+    // not create: the 9600 attempt of probe_skywatcher_port_any_baud() below
+    // never trips it, the 115200 attempt (Synta EQ boards over their own USB
+    // port) always runs it first. See util/synscan_handset_probe.h.
+    // The echo guard below opens the port itself, before the open()/re-check
+    // pair further down, so it needs its own look at the cross-vendor
+    // registry: the caller's check happened before the 9600 attempt, and
+    // another vendor's connect may have claimed the port since.
+    if (alpacacore::util::is_serial_port_in_use(port_path)) {
+        return "";
+    }
     if (baud_rate != 9600 && util::port_answers_synscan_echo(port_path)) {
         ALPACA_LOG_INFO("SkyWatcher", "Skipping " + port_path + ": a SynScan hand controller answered the echo test");
         return "";
     }
     int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
+        return "";
+    }
+    // Re-check after opening: another vendor's driver may have claimed this
+    // port (its connect marks it before opening) in the window between the
+    // caller's is_serial_port_in_use() check and this open(). Bail rather
+    // than reading for up to 1.5s and stealing bytes from that device's
+    // stream (issue #230: EQDIR cables share PL2303/CH340/FTDI chips with
+    // other vendor probes, e.g. iOptron, ZWO EAF, Gemini).
+    if (alpacacore::util::is_serial_port_in_use(port_path)) {
+        close(fd);
         return "";
     }
 
@@ -358,8 +375,45 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     if (reply.size() < 7 || reply[0] != kReplyOk) {
         return "";
     }
-    std::string version = format_mc_version(reply.substr(1));
-    return version.empty() ? "unknown" : version;
+    // Raw 6-hex-char payload: the caller decodes firmware AND mount code.
+    return reply.substr(1, 6);
+}
+
+// Probe a port at each baud a Sky-Watcher board is known to use, returning the
+// first that answers ":e1". The Wave's STM32 CDC-ACM port ignores baud, so 9600
+// succeeds there on the first try; Synta EQ boards reached over the mount's
+// built-in USB port or an EQDIR cable are real UART bridges -- the EQM-35 Pro's
+// onboard PL2303 runs at 115200, so a 9600-only scan silently misses it.
+constexpr int kProbeBauds[] = {9600, 115200};
+
+bool probe_skywatcher_port_any_baud(const std::string& port_path, MotorBoardInfo& info_out, int& baud_out) {
+    for (int baud : kProbeBauds) {
+        std::string payload = probe_skywatcher_port(port_path, baud);
+        if (payload.empty()) {
+            continue;
+        }
+        int major = 0;
+        int minor = 0;
+        MotorBoardInfo info;
+        if (!decode_mc_version(payload, major, minor, info.mount_code)) {
+            // Answered on the frame level but the payload is not a version;
+            // treat as a non-match rather than adopting a bogus identity.
+            continue;
+        }
+        info.firmware_version = format_mc_version(payload);
+        info.model_name = mount_code_to_name(info.mount_code);
+        info_out = std::move(info);
+        baud_out = baud;
+        return true;
+    }
+    return false;
+}
+
+namespace {
+
+std::string describe_found_port(const SkyWatcherPortInfo& port) {
+    return "Found Sky-Watcher " + port.model_name + " on " + port.port_path + " (MC firmware " + port.firmware_version +
+           ", " + std::to_string(port.baud_rate) + " baud)";
 }
 
 bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
@@ -371,9 +425,8 @@ bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
         *descriptor, {"STM32", "STMicroelectronics", "0483", "Prolific", "PL2303", "067b", "FTDI", "CP210", "CH340",
                       "CH341", "1a86", "Silicon_Labs", "USB_Serial", "USB-Serial"});
 }
-#endif  // _WIN32
-
 }  // namespace
+#endif  // _WIN32
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
     std::vector<SkyWatcherPortInfo> results;
@@ -398,6 +451,10 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
+            // issue #230: don't steal bytes from a port another connected
+            // vendor's device (iOptron, ZWO EAF, Gemini, ...) is streaming on
+            // -- several share the same PL2303/CH340/FTDI chip families.
+            if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
             {
                 std::string msg = "Probing ";
                 msg += resolved;
@@ -406,15 +463,13 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
                 msg += ")...";
                 ALPACA_LOG_INFO("SkyWatcher", msg);
             }
-            std::string fw = probe_skywatcher_port(resolved, 9600);
-            if (!fw.empty()) {
-                std::string msg = "Found Sky-Watcher motor controller on ";
-                msg += resolved;
-                msg += " (MC firmware ";
-                msg += fw;
-                msg += ")";
-                ALPACA_LOG_INFO("SkyWatcher", msg);
-                results.push_back({resolved, name, fw});
+            int baud = 9600;
+            MotorBoardInfo board;
+            if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
+                SkyWatcherPortInfo found{resolved,        name, board.firmware_version, baud, board.mount_code,
+                                         board.model_name};
+                ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
+                results.push_back(std::move(found));
             }
         }
     }
@@ -437,16 +492,14 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_skywatcher_candidate(resolved)) continue;
         probed.insert(resolved);
+        if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
         ALPACA_LOG_INFO("SkyWatcher", "Probing " + resolved + "...");
-        std::string fw = probe_skywatcher_port(resolved, 9600);
-        if (!fw.empty()) {
-            std::string msg = "Found Sky-Watcher motor controller on ";
-            msg += resolved;
-            msg += " (MC firmware ";
-            msg += fw;
-            msg += ")";
-            ALPACA_LOG_INFO("SkyWatcher", msg);
-            results.push_back({resolved, "", fw});
+        int baud = 9600;
+        MotorBoardInfo board;
+        if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
+            SkyWatcherPortInfo found{resolved, "", board.firmware_version, baud, board.mount_code, board.model_name};
+            ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
+            results.push_back(std::move(found));
         }
     }
 #endif
@@ -673,21 +726,46 @@ private:
             close(socket_fd_);
             socket_fd_ = -1;
         }
+        if (!registered_port_.empty()) {
+            alpacacore::util::mark_serial_port_closed(registered_port_);
+            registered_port_.clear();
+        }
 #endif
         connected_ = false;
     }
 
     bool connect_serial(const ConnectionInfo& info) {
 #ifndef _WIN32
+        // Canonicalize so this matches whatever form enumerate_skywatcher_ports()
+        // or a user-typed config path resolves to (issue #230: a by-id symlink
+        // and its /dev/ttyUSBn target must compare equal in the registry).
+        std::error_code path_ec;
+        std::string canonical_path = std::filesystem::canonical(info.port_path, path_ec).string();
+        std::string registry_key = path_ec ? info.port_path : canonical_path;
+
+        // Claim BEFORE opening: a concurrent auto-detect scan (this vendor's
+        // own, or another's) checks is_serial_port_in_use() then opens -- claiming
+        // first closes the window where it could slip in between our check and
+        // our open() and start reading this mount's replies. The check and the
+        // claim are one atomic step so two racing connects cannot both pass a
+        // separate check and both claim the port (PR #251 review).
+        if (!alpacacore::util::try_mark_serial_port_open(registry_key)) {
+            ALPACA_LOG_ERROR("SkyWatcher",
+                             "Port " + registry_key + " is already held open by another connected device");
+            return false;
+        }
+
         serial_fd_ = open(info.port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
             ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + std::strerror(errno));
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         speed_t speed = info.baud_rate == 115200 ? B115200 : B9600;
@@ -710,14 +788,17 @@ private:
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         if (!util::clear_nonblocking(serial_fd_)) {
             close(serial_fd_);
             serial_fd_ = -1;
+            alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
         tcflush(serial_fd_, TCIOFLUSH);
+        registered_port_ = registry_key;
         return true;
 #else
         (void)info;
@@ -1056,6 +1137,7 @@ private:
 #ifndef _WIN32
     int serial_fd_ = -1;
     int socket_fd_ = -1;
+    std::string registered_port_;  // canonical path marked open in the cross-vendor registry
     // Set after a UDP timeout/error: the next exchange runs a settle drain
     // before sending so a late reply cannot be mis-paired. Guarded by io_mutex_.
     bool link_dirty_ = false;
