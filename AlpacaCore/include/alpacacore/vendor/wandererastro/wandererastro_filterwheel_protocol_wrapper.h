@@ -127,6 +127,19 @@ public:
     FilterWheelStatus get_status() const;
 
     /**
+     * @brief Why the serial link is currently considered dead, if it is.
+     *
+     * The wheel streams its status frame unprompted, so silence is the
+     * fault signal: after 10 s without a frame (issue #237 -- USB
+     * re-enumeration, unplugged cable, port stolen) the link is latched
+     * faulted, the cache is invalidated (`valid` cleared) and this returns
+     * the reason; the driver turns that into a DriverException on Position
+     * reads and moves rather than reporting a slot the wheel may no longer
+     * be at. Clears on its own when frames resume. Connected stays true.
+     */
+    std::optional<std::string> link_fault() const;
+
+    /**
      * @brief Get the device firmware date (YYYY-MM-DD), if known.
      *
      * Captured once from the first valid status frame and cleared on

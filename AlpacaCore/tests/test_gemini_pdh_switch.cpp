@@ -473,6 +473,76 @@ TEST_CASE("Gemini PDH Switch Driver - Stale cache is re-polled when the hub does
     CHECK(hub.count(">G#") > polls_before);
 }
 
+// Issue #237: a hub that stops answering must not be served from the cache
+// forever. Three silent polls (~6 s) latch a link fault: value reads and
+// writes throw DriverException while Connected stays true, and the first
+// frame to arrive again clears it without a reconnect.
+TEST_CASE("Gemini PDH Switch Driver - Silent hub faults the link, and frames restore it",
+          "[gemini][switch][unit][fake]") {
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+    CHECK(driver->get_switch_value(15) == 13.1);
+
+    hub.set_muted(true);
+    // Reads keep answering (from cache) until the fault latches, then throw.
+    auto value_read_throws = [&] {
+        try {
+            (void)driver->get_switch_value(19);
+            return false;
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+    };
+    CHECK(wait_until(value_read_throws, std::chrono::milliseconds(12000)));
+    CHECK(driver->get_connected());  // the client decides whether to reconnect
+    require_alpaca_error([&]() { (void)driver->get_switch_value(19); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_switch(0); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->set_switch_value(0, 0.0); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_max_switch_value(11); }, alpacacore::AlpacaError::DriverException);
+    // Static metadata does not depend on the hub and keeps answering.
+    CHECK(driver->get_switch_name(0) == "USB A");
+    CHECK(driver->get_can_write(0));
+    CHECK(driver->get_max_switch_value(15) == 30.0);
+    // DeviceState omits the unavailable members rather than failing outright.
+    const auto state = driver->get_device_state();
+    REQUIRE(state.size() == 1);
+    CHECK(state.front().name == "TimeStamp");
+
+    // The reader keeps polling; the next answered poll restores the link.
+    hub.set_input_voltage(12.4);
+    hub.set_muted(false);
+    CHECK(wait_until([&] { return !value_read_throws(); }, std::chrono::milliseconds(6000)));
+    CHECK(driver->get_switch_value(15) == 12.4);
+    CHECK(driver->get_connected());
+}
+
+TEST_CASE("Gemini PDH Switch Driver - Dead serial link (EIO) faults the link instead of serving stale status",
+          "[gemini][switch][unit][fake]") {
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+    driver->set_switch_value(0, 0.0);  // a commanded value that must NOT survive the fault
+    CHECK(driver->get_switch_value(0) == 0.0);
+
+    hub.sever_link();  // master side closed: every read/write on the slave is EIO now
+    auto value_read_throws = [&] {
+        try {
+            (void)driver->get_switch_value(0);
+            return false;
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+    };
+    CHECK(wait_until(value_read_throws, std::chrono::milliseconds(12000)));
+    CHECK(driver->get_connected());
+    // Commanded values are gated the same way as live telemetry.
+    require_alpaca_error([&]() { (void)driver->get_switch_value(0); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_switch_value(18); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->set_switch(1, true); }, alpacacore::AlpacaError::DriverException);
+    // Disconnect is still clean with a dead fd.
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}
+
 TEST_CASE("Gemini PDH Switch Driver - Old firmware is refused at connect", "[gemini][switch][unit][fake]") {
     FakeGeminiPdh hub;
     hub.set_firmware(305);

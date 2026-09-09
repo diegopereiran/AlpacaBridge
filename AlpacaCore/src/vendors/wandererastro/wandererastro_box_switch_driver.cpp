@@ -270,12 +270,14 @@ public:
     bool get_switch(int id) const override {
         validate_switch_id(id);
         ensure_connected();
+        ensure_link_up();
         return get_switch_value(id) > kSwitches[static_cast<std::size_t>(id)].min;
     }
 
     void set_switch(int id, bool state) override {
         validate_switch_id(id);
         ensure_connected();
+        ensure_link_up();
         const auto& info = kSwitches[static_cast<std::size_t>(id)];
         set_switch_value(id, state ? info.max : info.min);
     }
@@ -289,6 +291,9 @@ public:
     double get_switch_value(int id) const override {
         validate_switch_id(id);
         ensure_connected();
+        // Commanded values are gated too: with the box unreachable, "what we
+        // last asked for" is no more trustworthy than the stale frame (#237).
+        ensure_link_up();
         if (kSwitches[static_cast<std::size_t>(id)].writable) {
             std::lock_guard<std::mutex> lock(state_mutex_);
             const auto& commanded = commanded_[static_cast<std::size_t>(id)];
@@ -302,6 +307,7 @@ public:
     void set_switch_value(int id, double value) override {
         validate_switch_id(id);
         ensure_connected();
+        ensure_link_up();
         const auto& info = kSwitches[static_cast<std::size_t>(id)];
         if (!info.writable) {
             throw AlpacaException("Switch " + std::to_string(id) + " is read-only", AlpacaError::NotImplemented);
@@ -380,6 +386,17 @@ private:
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("WandererBox not connected", AlpacaError::NotConnected);
+        }
+    }
+
+    // Issue #237: reads are served from the reader thread's cache, so a dead
+    // serial link would otherwise be invisible to every reader. Once the
+    // wrapper latches a link fault, every value read and write throws
+    // DriverException (Connected is still true, so not NotConnected) until
+    // frames resume. Static metadata keeps answering.
+    void ensure_link_up() const {
+        if (const auto fault = protocol_.link_fault()) {
+            throw AlpacaException("WandererBox communications compromised: " + *fault, AlpacaError::DriverException);
         }
     }
 

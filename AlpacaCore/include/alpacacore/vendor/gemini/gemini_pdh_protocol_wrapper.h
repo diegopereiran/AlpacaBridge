@@ -198,7 +198,9 @@ std::string format_pdh_firmware(int version);
  * firmware unprompted or in reply to >G#) or to the one in-flight
  * request (>H#/>V#). The reader also re-polls >G# whenever the cache is older
  * than kStatusPollMs, so Switch reads are always served from cache and never
- * block on serial I/O. TODO(hardware): confirm whether the firmware streams
+ * block on serial I/O. Cache validity is tied to link health: consecutive
+ * unanswered polls latch a link fault (link_fault()) that invalidates the
+ * cache until frames resume. TODO(hardware): confirm whether the firmware streams
  * >G frames on its own -- the vendor's sensor window reads whatever arrives
  * every 3 s without sending anything, which suggests it does.
  */
@@ -223,8 +225,29 @@ public:
     /** @brief Check if connected. */
     bool is_connected() const;
 
-    /** @brief Get the most recent hub state (never blocks on serial I/O). */
+    /**
+     * @brief Get the most recent hub state (never blocks on serial I/O).
+     *
+     * `valid` is cleared while the link is faulted (see link_fault()), so a
+     * caller that ignores link_fault() still cannot mistake a dead link for
+     * live telemetry.
+     */
     PdhState get_state() const;
+
+    /**
+     * @brief Why the serial link is currently considered dead, if it is.
+     *
+     * Reads are served from a cache the reader thread fills; when the hub
+     * stops answering (USB re-enumeration, unplugged cable, port stolen by
+     * another process) the cache would otherwise be served unchanged forever
+     * (issue #237). After kLinkFaultPolls consecutive >G# polls with no
+     * status frame -- a failed poll write counts the same -- the link is
+     * latched faulted and this returns the reason; the driver turns that
+     * into a DriverException on every value read and write. It clears on
+     * its own when a status frame arrives again. Connected stays true: the
+     * client decides whether to reconnect.
+     */
+    std::optional<std::string> link_fault() const;
 
     /**
      * @brief Get the firmware version for display ("3.0.8"), if connected.

@@ -158,3 +158,68 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - HaltCover is implemented", "[w
     // therefore reports NotConnected (0x407) rather than MethodNotImplemented.
     require_alpaca_error([&]() { driver->halt_cover(); }, alpacacore::AlpacaError::NotConnected);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #237: a device that stops streaming must not be served from the cache
+// forever. Wire-level over a pty-backed streamer (fake_serial_streamer.h).
+// ---------------------------------------------------------------------------
+
+#include <chrono>
+#include <thread>
+
+#include "fake_serial_streamer.h"
+
+namespace {
+
+template <typename Pred>
+bool wait_until_cover(Pred pred, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
+}  // namespace
+
+// <model>A<fw>A<closePos>A<openPos>A<curPos>A<voltage>A<brightness>A<dew>A<asiair>
+const char* const kCoverFrame = "WandererCoverV4ProA20240301A10.0A270.0A10.0A12.5A0A0A0\n";
+
+TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and refuses commands (issue #237)",
+          "[wandererastro][covercalibrator][unit][fake]") {
+    using alpacacore::CalibratorState;
+    using alpacacore::CoverState;
+    alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_cover_state() == CoverState::Closed);
+    driver->calibrator_on(100);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+    CHECK(driver->get_brightness() == 100);
+
+    cover.set_muted(true);
+    CHECK(wait_until_cover([&] { return driver->get_cover_state() == CoverState::Unknown; },
+                           std::chrono::milliseconds(15000)));
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_cover_moving());
+    // The panel is unreachable: its commanded state is no longer known to hold.
+    CHECK(driver->get_calibrator_state() == CalibratorState::Unknown);
+    require_alpaca_error([&]() { (void)driver->get_brightness(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->close_cover(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->halt_cover(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->calibrator_on(50); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->calibrator_off(); }, alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(cover.received("1001"));  // nothing went on the wire while faulted
+
+    cover.set_muted(false);
+    CHECK(wait_until_cover([&] { return driver->get_cover_state() == CoverState::Closed; },
+                           std::chrono::milliseconds(3000)));
+    CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+    CHECK(driver->get_brightness() == 100);
+    CHECK_NOTHROW(driver->set_connected(false));
+}

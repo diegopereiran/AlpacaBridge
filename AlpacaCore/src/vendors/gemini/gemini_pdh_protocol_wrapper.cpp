@@ -61,6 +61,14 @@ constexpr int kStatusPollMs = 2000;
 // Reply timeout for the identity/version/status requests at connect.
 constexpr int kRequestTimeoutMs = 2500;
 
+// Consecutive >G# polls that produce no status frame before the link is
+// declared faulted (issue #237). Three polls at kStatusPollMs is ~6 s of
+// silence: long enough that one lost frame or a slow reply never trips it,
+// short enough that a client polling at 2-8 s sees the fault on its next
+// read instead of half an hour of byte-identical telemetry. A failed poll
+// write (EIO after a USB re-enumeration) counts the same as an unanswered one.
+constexpr int kLinkFaultPolls = 3;
+
 // Handshake cadence: the CH340 adapter asserts DTR on open, which resets the
 // hub's MCU; the vendor driver sleeps a flat 2 s before its first >H#. Same
 // staggered retry as the Gemini focuser (100 ms, 2 s, 1 s -- worst case ~9 s,
@@ -428,6 +436,11 @@ public:
             config_ = config;
             open_serial_locked();
         }
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            polls_since_frame_ = 0;
+            link_fault_.clear();
+        }
 
         // The reader thread owns every read from here on (handshake included),
         // so an unsolicited status frame arriving mid-handshake is routed to
@@ -527,6 +540,14 @@ public:
             return std::nullopt;
         }
         return firmware_;
+    }
+
+    std::optional<std::string> link_fault() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (link_fault_.empty()) {
+            return std::nullopt;
+        }
+        return link_fault_;
     }
 
     void set_output(int channel, bool on) {
@@ -635,9 +656,18 @@ private:
         if (frame[1] == 'G') {
             auto state = parse_pdh_status_frame(frame);
             if (state.has_value()) {
-                std::lock_guard<std::mutex> state_lock(state_mutex_);
-                state_ = *state;
-                last_frame_ = std::chrono::steady_clock::now();
+                bool restored = false;
+                {
+                    std::lock_guard<std::mutex> state_lock(state_mutex_);
+                    state_ = *state;
+                    last_frame_ = std::chrono::steady_clock::now();
+                    polls_since_frame_ = 0;
+                    restored = !link_fault_.empty();
+                    link_fault_.clear();
+                }
+                if (restored) {
+                    ALPACA_LOG_INFO("Gemini", "Power hub: serial link restored, status frames are flowing again");
+                }
             } else {
                 ALPACA_LOG_DEBUG("Gemini", "Power hub: unparseable status frame '" + frame + "'");
             }
@@ -681,14 +711,66 @@ private:
             }
             if (stale && (now - last_poll) > std::chrono::milliseconds(kStatusPollMs)) {
                 last_poll = now;
-                std::lock_guard<std::mutex> lock(io_mutex_);
-                if (connected_ && serial_fd_ >= 0) {
-                    if (!write_line(serial_fd_, ">G#")) {
-                        ALPACA_LOG_DEBUG("Gemini",
-                                         "Power hub: status poll write failed: " + std::string(std::strerror(errno)));
+                std::optional<std::string> write_error;
+                bool polled = false;
+                {
+                    std::lock_guard<std::mutex> lock(io_mutex_);
+                    if (connected_ && serial_fd_ >= 0) {
+                        polled = true;
+                        if (!write_line(serial_fd_, ">G#")) {
+                            write_error = std::string(std::strerror(errno));
+                        }
                     }
                 }
+                if (polled) {
+                    record_poll_outcome(write_error);
+                }
             }
+        }
+    }
+
+    // Link health (issue #237): the cache is only as good as the link that
+    // fills it. Every >G# poll that goes out while the cache is stale counts;
+    // a status frame resets the count (dispatch_frame). Past kLinkFaultPolls
+    // the link is latched faulted -- the cache is invalidated and the driver
+    // refuses to serve it -- until a frame arrives again. Polling continues
+    // at the normal cadence so recovery (a re-plugged hub on the same node)
+    // is noticed without a reconnect.
+    void record_poll_outcome(const std::optional<std::string>& write_error) {
+        std::string latched;
+        std::string transient;
+        int polls = 0;
+        {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            polls = ++polls_since_frame_;
+            const bool already_faulted = !link_fault_.empty();
+            std::string detail;
+            if (write_error.has_value()) {
+                detail = "status poll write failed: " + *write_error;
+            } else {
+                detail = "no status frame for " + std::to_string(polls_since_frame_) + " consecutive polls (" +
+                         std::to_string(polls_since_frame_ * kStatusPollMs / 1000) + " s)";
+            }
+            if (polls_since_frame_ >= kLinkFaultPolls) {
+                if (!already_faulted) {
+                    latched = detail;
+                }
+                link_fault_ = detail;
+                state_.valid = false;
+            } else if (write_error.has_value() || polls_since_frame_ > 1) {
+                // First unanswered poll after a frame is normal cadence; a
+                // failed write or a second silent poll is worth a warning.
+                transient = detail;
+            }
+        }
+        if (!latched.empty()) {
+            ALPACA_LOG_ERROR("Gemini", "Power hub: serial link faulted (" + latched +
+                                           "); cached status is invalid and reads will fail until frames resume");
+        } else if (!transient.empty()) {
+            ALPACA_LOG_WARN("Gemini", "Power hub: " + transient + " (" + std::to_string(polls) + "/" +
+                                          std::to_string(kLinkFaultPolls) + " before the link is faulted)");
+        } else if (write_error.has_value()) {
+            ALPACA_LOG_DEBUG("Gemini", "Power hub: status poll write failed: " + *write_error);
         }
     }
 
@@ -752,6 +834,8 @@ private:
             state_ = PdhState{};
             firmware_.clear();
             last_frame_ = {};
+            polls_since_frame_ = 0;
+            link_fault_.clear();
         }
 #ifndef _WIN32
         close_serial_locked();
@@ -768,6 +852,8 @@ private:
     PdhState state_;
     std::string firmware_;  // "3.0.8", from >V#
     std::chrono::steady_clock::time_point last_frame_{};
+    int polls_since_frame_ = 0;  // >G# polls sent since the last status frame (issue #237)
+    std::string link_fault_;     // non-empty while the link is latched faulted; the reason
 
     std::mutex request_mutex_;  // one in-flight request at a time
     std::mutex pending_mutex_;  // guards the pending_* fields
@@ -799,6 +885,8 @@ bool GeminiPdhProtocolWrapper::is_connected() const { return impl_->is_connected
 PdhState GeminiPdhProtocolWrapper::get_state() const { return impl_->get_state(); }
 
 std::optional<std::string> GeminiPdhProtocolWrapper::get_firmware() const { return impl_->get_firmware(); }
+
+std::optional<std::string> GeminiPdhProtocolWrapper::link_fault() const { return impl_->link_fault(); }
 
 void GeminiPdhProtocolWrapper::set_output(int channel, bool on) { impl_->set_output(channel, on); }
 

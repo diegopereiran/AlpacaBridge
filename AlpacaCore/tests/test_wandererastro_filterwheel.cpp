@@ -183,3 +183,63 @@ TEST_CASE("WandererAstro FilterWheel Protocol Wrapper - Disconnected behavior", 
     require_alpaca_error([&]() { wrapper.connect(config); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(wrapper.is_connected() == false);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #237: a device that stops streaming must not be served from the cache
+// forever. Wire-level over a pty-backed streamer (fake_serial_streamer.h).
+// ---------------------------------------------------------------------------
+
+#include <chrono>
+#include <thread>
+
+#include "fake_serial_streamer.h"
+
+namespace {
+
+template <typename Pred>
+bool wait_until_sfw(Pred pred, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
+}  // namespace
+
+// <model>A<fw>A<position>A<letters>A<8 per-filter fields>A<deviceID>A
+const char* const kSfwFrame = "WSFW368A20260124A3ABCDEFGHIA0A0A0A0A0A0A0A0A1A\n";
+
+TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and moves (issue #237)",
+          "[wandererastro][filterwheel][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_position() == 2);  // wire slot 3 -> Alpaca 2
+
+    wheel.set_muted(true);
+    auto position_throws = [&] {
+        try {
+            (void)driver->get_position();
+            return false;
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+    };
+    CHECK(wait_until_sfw(position_throws, std::chrono::milliseconds(15000)));
+    CHECK(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->set_position(5); }, alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(wheel.received("6"));  // no move went on the wire while faulted
+    // Names and offsets are driver-side and keep answering.
+    CHECK(driver->get_names().size() == 8);
+
+    wheel.set_muted(false);
+    CHECK(wait_until_sfw([&] { return !position_throws(); }, std::chrono::milliseconds(3000)));
+    CHECK(driver->get_position() == 2);
+    CHECK_NOTHROW(driver->set_connected(false));
+}

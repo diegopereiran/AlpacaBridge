@@ -216,6 +216,7 @@ public:
 
     int get_brightness() const override {
         ensure_connected();
+        ensure_link_up();  // a number cannot say "unknown" (issue #237)
         // Report the last commanded brightness synchronously. The streamed
         // status lags a command by up to ~1s, but ASCOM clients (and ConformU)
         // read Brightness immediately after CalibratorOn and expect the value
@@ -226,6 +227,11 @@ public:
 
     CalibratorState get_calibrator_state() const override {
         ensure_connected();
+        if (protocol_.link_fault().has_value()) {
+            // The panel is unreachable: the commanded state is no longer
+            // known to match it (issue #237). ASCOM has a word for that.
+            return CalibratorState::Unknown;
+        }
         // Synchronous: the panel applies brightness instantly, so the calibrator
         // is Ready whenever it has been turned on (including at brightness 0) and
         // Off after CalibratorOff. Derived from the commanded state rather than
@@ -264,6 +270,7 @@ public:
                                   AlpacaError::InvalidValue);
         }
         ensure_connected();
+        ensure_link_up();
         // Hold state_mutex_ across the write so a concurrent calibrator_off()
         // can't interleave between the state update and the command (which would
         // leave the panel on while the driver reports Off, or vice versa).
@@ -286,6 +293,7 @@ public:
 
     void calibrator_off() override {
         ensure_connected();
+        ensure_link_up();
         std::lock_guard<std::mutex> lock(state_mutex_);
         const int prev_brightness = commanded_brightness_;
         const bool prev_engaged = calibrator_engaged_;
@@ -335,6 +343,7 @@ public:
 
     void open_cover() override {
         ensure_connected();
+        ensure_link_up();
         // Hold state_mutex_ across the write so the target and the command can't
         // be separated by a concurrent halt_cover()/close_cover(): otherwise that
         // could reset commanded_ in the gap, the write would still start the
@@ -355,6 +364,7 @@ public:
 
     void close_cover() override {
         ensure_connected();
+        ensure_link_up();
         std::lock_guard<std::mutex> lock(state_mutex_);
         const CoverTarget prev = commanded_;
         commanded_ = CoverTarget::Closing;
@@ -368,6 +378,7 @@ public:
 
     void halt_cover() override {
         ensure_connected();
+        ensure_link_up();
         // ASCOM requires HaltCover to function on a cover-capable device, but the
         // WandererCover serial protocol has no halt command. Stop tracking the
         // in-progress move so CoverState/CoverMoving immediately stop reporting
@@ -381,6 +392,17 @@ private:
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("WandererCover not connected", AlpacaError::NotConnected);
+        }
+    }
+
+    // Issue #237: the status cache the reads are served from is only as good
+    // as the link that fills it. While the wrapper has the link latched
+    // faulted, the invalidated cache already makes CoverState read Unknown
+    // (cover_state_locked); commands and Brightness throw DriverException
+    // (Connected is still true, so not NotConnected) until frames resume.
+    void ensure_link_up() const {
+        if (const auto fault = protocol_.link_fault()) {
+            throw AlpacaException("WandererCover communications compromised: " + *fault, AlpacaError::DriverException);
         }
     }
 

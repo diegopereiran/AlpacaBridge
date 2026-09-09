@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
@@ -44,6 +45,11 @@ namespace {
 // Both wheel models stream a token beginning with this prefix (WSFW508 for the
 // SFW50/SFW50S, WSFW368 for the SFW36S).
 constexpr char kFilterWheelModelPrefix[] = "WSFW";
+
+// The wheel streams its status frame continuously (~1 Hz, tokens keep
+// flowing even mid-move); this much silence means the link is dead, not
+// slow (issue #237).
+constexpr int kFilterWheelLinkSilenceMs = 10000;
 constexpr int MAX_TOKEN_LEN = 64;
 
 using util::is_serial_port_in_use;
@@ -371,6 +377,10 @@ public:
         }
 
         // Start the background reader that keeps the latest streamed status.
+        {
+            std::lock_guard<std::mutex> status_lock(status_mutex_);
+            link_.reset(std::chrono::steady_clock::now());
+        }
         running_.store(true);
         reader_thread_ = std::thread([this] { reader_loop(); });
 
@@ -418,10 +428,19 @@ public:
             std::lock_guard<std::mutex> status_lock(status_mutex_);
             status_ = FilterWheelStatus{};
             firmware_date_.clear();
+            link_.reset(std::chrono::steady_clock::now());
         }
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
         close_serial();
+    }
+
+    std::optional<std::string> link_fault() const {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        if (!link_.faulted()) {
+            return std::nullopt;
+        }
+        return link_.fault();
     }
 
     bool is_connected() const {
@@ -524,9 +543,14 @@ private:
                 // Persistent read error (device unplugged): VTIME rate-limits
                 // the no-data path but not errors, so back off to avoid a CPU
                 // spin until stop_reader() runs.
+                {
+                    std::lock_guard<std::mutex> lock(status_mutex_);
+                    link_.note_read_error(errno);
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 #endif
+            check_link_silence();
             if (!got) {
                 continue;  // VTIME timeout — loop and re-check running_
             }
@@ -538,6 +562,10 @@ private:
                     continue;
                 }
                 status_ = updated;
+                if (link_.on_frame(std::chrono::steady_clock::now())) {
+                    ALPACA_LOG_INFO("WandererAstro",
+                                    "Filter wheel: serial link restored, status frames are flowing again");
+                }
                 // Cache the firmware date once (YYYYMMDD int -> YYYY-MM-DD).
                 if (firmware_date_.empty() && updated.valid && updated.firmware_version > 0) {
                     const int fw = updated.firmware_version;
@@ -555,6 +583,25 @@ private:
                     firmware_date_ = buf;
                 }
             }
+        }
+    }
+
+    // Issue #237: latch a link fault after kFilterWheelLinkSilenceMs without
+    // a frame. The cache is invalidated (valid=false) and the driver refuses
+    // Position reads and moves until the next frame clears the latch.
+    void check_link_silence() {
+        std::optional<std::string> latched;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            latched = link_.check_silence(std::chrono::steady_clock::now(),
+                                          std::chrono::milliseconds(kFilterWheelLinkSilenceMs));
+            if (latched.has_value()) {
+                status_.valid = false;
+            }
+        }
+        if (latched.has_value()) {
+            ALPACA_LOG_ERROR("WandererAstro", "Filter wheel: serial link faulted (" + *latched +
+                                                  "); cached status is invalid until frames resume");
         }
     }
 
@@ -666,6 +713,7 @@ private:
     std::atomic<bool> running_{false};
     std::thread reader_thread_;
     FilterWheelStatus status_;
+    util::StreamLinkHealth link_;  // issue #237; guarded by status_mutex_
     // Firmware date (YYYY-MM-DD), captured once from the first valid frame and
     // cleared on disconnect; guarded by status_mutex_ alongside status_.
     std::string firmware_date_;
@@ -692,6 +740,8 @@ void WandererFilterWheelProtocolWrapper::disconnect() { impl_->disconnect(); }
 bool WandererFilterWheelProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 
 FilterWheelStatus WandererFilterWheelProtocolWrapper::get_status() const { return impl_->get_status(); }
+
+std::optional<std::string> WandererFilterWheelProtocolWrapper::link_fault() const { return impl_->link_fault(); }
 
 std::optional<std::string> WandererFilterWheelProtocolWrapper::get_firmware_date() const {
     return impl_->get_firmware_date();
