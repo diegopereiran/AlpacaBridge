@@ -23,6 +23,7 @@ Checks:
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -164,10 +165,35 @@ CODE_SPAN_RE = re.compile(r"`([^`\s]+)`")
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
 
+def _run_git(args, check=True):
+    return subprocess.run(
+        ["git"] + args, cwd=ROOT, capture_output=True, text=True, check=check
+    )
+
+
+def _is_gitignored(path):
+    """True if git would ignore this path (e.g. a generated file/dir).
+
+    Used instead of a plain filesystem exists() check: a generated file like
+    debian/changelog can be present in one developer's tree from a past
+    local build (making exists() pass by accident there) while being absent
+    from every clean checkout, including CI's. A path git ignores is
+    expected to be absent and isn't a documentation error.
+    """
+    return _run_git(["check-ignore", "-q", path], check=False).returncode == 0
+
+
 def check_agents_md_paths_exist():
     failures = []
     text = read("AGENTS.md")
     seen = set()
+
+    tracked = set(_run_git(["ls-files"]).stdout.splitlines())
+    tracked_dirs = set()
+    for f in tracked:
+        parts = f.split("/")
+        for i in range(1, len(parts)):
+            tracked_dirs.add("/".join(parts[:i]) + "/")
 
     for m in CODE_SPAN_RE.finditer(text):
         span = m.group(1)
@@ -176,17 +202,21 @@ def check_agents_md_paths_exist():
         path = TRIM_SUFFIX_RE.sub("", span)
         # Markdown anchors / fragments (`docs/x.md#section`), glob patterns,
         # and template placeholders (`AlpacaCore/src/vendors/<vendor>/...`)
-        # aren't real filesystem paths. Generated build output (`.../build/...`)
-        # is real but never committed, so it can't be checked this way either.
+        # aren't real filesystem paths.
         if "#" in path or "*" in path or "<" in path or ">" in path:
-            continue
-        if "/build/" in path or path.startswith("build/"):
             continue
         if path in seen:
             continue
         seen.add(path)
-        if not (ROOT / path).exists():
-            failures.append("AGENTS.md references a path that does not exist: %s" % path)
+
+        if path in tracked or path in tracked_dirs:
+            continue
+        # Not a tracked file or the directory of one: a generated/ignored
+        # path (debian/changelog, a `.../build/` output dir) is expected to
+        # be absent from a clean checkout, so it isn't a documentation error.
+        if _is_gitignored(path):
+            continue
+        failures.append("AGENTS.md references a path that does not exist: %s" % path)
     return failures
 
 
