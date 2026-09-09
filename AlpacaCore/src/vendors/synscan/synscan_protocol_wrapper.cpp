@@ -14,6 +14,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -21,6 +22,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
@@ -75,7 +77,12 @@ std::string probe_synscan_port(const std::string& port_path) {
     tty.c_oflag &= ~OPOST;
     tty.c_oflag &= ~ONLCR;
     tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 20;
+    // 100 ms per read(): the echo helper below and the version loop after it
+    // both check their deadline only BETWEEN reads, so the per-read timeout
+    // is the granularity at which those deadlines are honoured. The previous
+    // 2 s (VTIME=20) let a silent port overrun a 3 s budget by up to another
+    // 2 s (review finding on PR #3); the deadlines bound the loops, not this.
+    tty.c_cc[VTIME] = 1;
 
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         close(fd);
@@ -88,34 +95,12 @@ std::string probe_synscan_port(const std::string& port_path) {
     }
     tcflush(fd, TCIOFLUSH);
 
-    const char echo_cmd[] = {'K', 0x42};
-    if (!util::write_all(fd, echo_cmd, 2)) {
-        close(fd);
-        return "";
-    }
-
-    char resp[4] = {};
-    int total = 0;
-    auto start = std::chrono::steady_clock::now();
-    while (total < 2) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 3) {
-            break;
-        }
-        char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
-        if (r == 1) {
-            resp[total++] = ch;
-            if (ch == '#') break;
-        } else if (r == 0) {
-            continue;
-        } else {
-            break;
-        }
-    }
-
-    if (total < 2 || resp[0] != 0x42 || resp[1] != '#') {
+    // Echo check ("K" + byte -> byte + "#"), shared with the Sky-Watcher
+    // scan's handset guard (util/synscan_handset_probe.h) so the two probes
+    // agree on what counts as a handset — including tolerating a stale
+    // '#'-terminated reply ahead of the real one instead of mistaking it for
+    // silence.
+    if (!util::exchange_synscan_echo_on_fd(fd, 3000)) {
         close(fd);
         return "";
     }
@@ -130,8 +115,8 @@ std::string probe_synscan_port(const std::string& port_path) {
     }
 
     char ver_resp[8] = {};
-    total = 0;
-    start = std::chrono::steady_clock::now();
+    int total = 0;
+    auto start = std::chrono::steady_clock::now();
     while (total < 7) {
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - start).count();
@@ -294,6 +279,24 @@ std::vector<SynScanPortInfo> enumerate_synscan_ports() {
 }
 
 namespace {
+
+// Wire bytes for the TRACE log: the protocol mixes ASCII commands with raw
+// binary bytes (model id, echo payload), so escape anything non-printable.
+std::string printable(const std::string& bytes) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(bytes.size());
+    for (const unsigned char c : bytes) {
+        if (c >= 0x20 && c < 0x7f) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out += "\\x";
+            out.push_back(kHex[c >> 4]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
 
 int parse_hex_pair(std::string_view value, std::size_t offset) {
     if (offset + 2 > value.size()) {
@@ -462,7 +465,29 @@ public:
         if (timeout_ms <= 0) {
             timeout_ms = connection_info_.response_timeout_ms;
         }
-        return read_response(require_hash_terminator, timeout_ms, binary_bytes);
+        // TRACE-only wire log: every handset command and its reply (or the
+        // timeout). Without it a "commands time out" report cannot show
+        // which command stalled or what the handset actually said. Unlike
+        // ALPACA_LOG_INFO/WARN/etc., this call site gates on the level
+        // itself: ALPACA_LOG_TRACE(component, message) is a bare
+        // ::alpacacore::logging::log(...) call, so `message` - here two
+        // printable() passes plus concatenation, each a heap allocation - is
+        // built by the caller before log() gets a chance to drop it, on
+        // every single wire round trip (position reads, GOTOs, pulse-guide,
+        // tracking - dozens of calls per second while a client polls). Only
+        // pay that cost when TRACE is actually active.
+        try {
+            std::string response = read_response(require_hash_terminator, timeout_ms, binary_bytes);
+            if (alpacacore::logging::get_log_level() == alpacacore::logging::LogLevel::Trace) {
+                ALPACA_LOG_TRACE("SynScan", "HC " + printable(command) + " -> " + printable(response));
+            }
+            return response;
+        } catch (const AlpacaException& e) {
+            if (alpacacore::logging::get_log_level() == alpacacore::logging::LogLevel::Trace) {
+                ALPACA_LOG_TRACE("SynScan", "HC " + printable(command) + " -> " + e.what());
+            }
+            throw;
+        }
     }
 
     void send_command_blind(const std::string& command) {
@@ -480,6 +505,71 @@ public:
         } catch (...) {
             // Ignore optional response drain errors for fire-and-forget commands.
         }
+    }
+
+    bool echo_test() {
+        // "K" + chr(x) -> chr(x) + "#". connect_serial() succeeds on any open
+        // port, so this is the one check that tells a handset apart from a
+        // port with nothing listening - every later query would otherwise
+        // burn its full response timeout and be swallowed by the driver's
+        // connect sequence.
+        //
+        // Silence fails immediately (single attempt, no retry): nothing is
+        // listening, and doubling that wait buys nothing. A framed reply that
+        // does NOT match the echo gets exactly one retry before failing too:
+        // a real handset can garble a single byte, but accepting a mismatch
+        // outright (review finding on PR #3) let a port that merely answers
+        // SOMETHING framed like the protocol - not necessarily a handset -
+        // through to the firmware/model/site queries that follow, each of
+        // which is individually caught and swallowed; that reproduces the
+        // exact "Connected=true, then every command times out" bug this gate
+        // exists to prevent, just triggered by a garbled echo instead of
+        // total silence. A second mismatch (or a timeout on the retry) means
+        // this is not trustworthy enough to proceed on.
+        //
+        // A mismatched token is not necessarily the handset's answer to us:
+        // read_response() returns the FIRST '#'-terminated token on the line,
+        // and right after the port opens that can be a stale reply to a
+        // command the previous session never read (abrupt restart mid-poll;
+        // connect_serial()'s tcflush clears the tty buffer but not a USB
+        // adapter's own FIFO). So before spending the retry, keep reading
+        // tokens for the rest of one response timeout - the real echo, if the
+        // handset is alive, is queued right behind the stale one. This is the
+        // same discard-and-continue rule util::exchange_synscan_echo_on_fd()
+        // applies for the auto-detect scans (review finding on PR #3: the
+        // connect path, the actual fix for issue #130, lacked it).
+        constexpr char kEchoByte = 'B';
+        const std::string want(1, kEchoByte);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            std::string reply;
+            try {
+                reply = send_command(std::string("K") + kEchoByte, true, 0);
+            } catch (const AlpacaException&) {
+                return false;
+            }
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(connection_info_.response_timeout_ms);
+            while (reply != want) {
+                ALPACA_LOG_WARN("SynScan", "Echo test answered '" + printable(reply) +
+                                               "' instead of the echoed byte; reading past it");
+                const auto remaining =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+                if (remaining.count() <= 0) {
+                    break;
+                }
+                try {
+                    reply = read_response(true, static_cast<int>(remaining.count()), 0);
+                } catch (const AlpacaException&) {
+                    break;  // nothing else queued behind the stale token
+                }
+            }
+            if (reply == want) {
+                return true;
+            }
+            ALPACA_LOG_WARN("SynScan", std::string("Echo test: no matching echo within the response timeout") +
+                                           (attempt == 0 ? "; retrying once" : "; giving up"));
+        }
+        return false;
     }
 
     std::string get_handset_firmware_version() {
@@ -846,6 +936,20 @@ private:
         if (serial_fd_ < 0) {
             return false;
         }
+        // Exclusive access: without this, any other scan on this process that
+        // opens the same node (e.g. the Sky-Watcher auto-detect probe, which
+        // shares Prolific/FTDI/CP210x adapter classes with a SynScan handset)
+        // can open this fd's port concurrently, flush our pending reply out
+        // from under a read in flight, and write its own probe bytes onto the
+        // wire — corrupting whatever query this driver is mid-flight on. Not
+        // a substitute for the handset-echo guard those scans run first (this
+        // only protects a port already claimed by a connected driver, not one
+        // a scan reaches before any driver has opened it), and it does not
+        // stop another process or a root process from opening the node — but
+        // it closes the same-process, common-user race. Ignored on failure:
+        // some pty/virtual-serial back ends used in tests don't support it,
+        // and a mount that already works without it should keep working.
+        (void)ioctl(serial_fd_, TIOCEXCL);
         termios tty{};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
@@ -891,6 +995,14 @@ private:
             serial_fd_ = -1;
             return false;
         }
+        // Drop whatever is already queued on the port before the first
+        // exchange - the same flush probe_synscan_port() does. A reply to a
+        // command the previous session never read (abrupt service restart
+        // mid-poll) is otherwise the first thing echo_test() reads (review
+        // finding on PR #3). Only the tty layer's buffer is cleared: a USB
+        // adapter's own FIFO can still deliver a late token after this, which
+        // is what echo_test()'s drain-past-stale-tokens loop is for.
+        tcflush(serial_fd_, TCIOFLUSH);
         return true;
 #endif
     }
@@ -1252,6 +1364,8 @@ std::string SynScanProtocolWrapper::send_raw_command(const std::string& bytes,
 void SynScanProtocolWrapper::send_command_blind(const std::string& command) {
     pimpl_->send_command_blind(command);
 }
+
+bool SynScanProtocolWrapper::echo_test() { return pimpl_->echo_test(); }
 
 std::string SynScanProtocolWrapper::get_handset_firmware_version() {
     return pimpl_->get_handset_firmware_version();
