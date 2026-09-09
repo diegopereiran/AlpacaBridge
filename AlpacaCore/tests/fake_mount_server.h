@@ -122,8 +122,21 @@ public:
     /// Replies "0#" to anything: valid terminator for every '#'-framed
     /// protocol in the family; per-command parse failures are tolerated by
     /// the drivers (and swallowed by the stress harness).
+    // Canned "0#" for everything, EXCEPT the SynScan/NexStar protocol echo
+    // ("K" + byte -> byte + "#"): the SynScan driver's connect now gates on
+    // that echo matching, so a fake that never answers it leaves the driver
+    // permanently unconnected - and the concurrency stress tests, whose whole
+    // point is to race worker threads on a CONNECTED driver, silently turn
+    // into no-ops (review finding on PR #3). No other protocol served by this
+    // fake sends a bare 'K' (iOptron and OnStep commands start with ':'), so
+    // the echo branch is invisible to them.
     static Responder default_responder() {
-        return [](const std::string&) { return std::string("0#"); };
+        return [](const std::string& chunk) {
+            if (chunk.size() >= 2 && chunk[0] == 'K') {
+                return std::string(1, chunk[1]) + "#";
+            }
+            return std::string("0#");
+        };
     }
 
 private:
