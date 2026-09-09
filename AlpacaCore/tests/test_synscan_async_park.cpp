@@ -213,6 +213,42 @@ TEST_CASE("SynScan - a garbled echo reply recovers on retry", "[synscan][telesco
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan - a stale reply queued ahead of the echo does not fail the connect", "[synscan][telescope][async]") {
+    // Right after the port opens, the first '#'-terminated token on the line
+    // can be a reply to a command the PREVIOUS session never read (abrupt
+    // service restart mid-poll) with the handset's answer to our echo queued
+    // right behind it. echo_test() must read past the stale token within its
+    // response timeout and accept the echo - not burn its retry on it, and
+    // not fail a healthy handset (PR #3 review). Both tokens arrive in one
+    // write here, the worst case for a first-token reader.
+    auto echo_attempts = std::make_shared<std::atomic<int>>(0);
+    alpacacore::test::FakeMountServer server([echo_attempts](const std::string& chunk) -> std::string {
+        if (chunk.empty()) return "0#";
+        switch (chunk[0]) {
+            case 'K':
+                echo_attempts->fetch_add(1);
+                return std::string("12AB0500,20000500#") + std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
+            case 'V':
+                return "042A00#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return "12AB0500,20000500#";
+            default:
+                return "0#";
+        }
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+
+    driver->connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(echo_attempts->load() == 1);  // the stale token was read past, not retried around
+    driver->set_connected(false);
+}
+
 TEST_CASE("SynScan - a persistently garbled echo fails the connect rather than proceeding",
           "[synscan][telescope][async]") {
     // Two wrong-but-framed replies in a row must fail the connect, not be

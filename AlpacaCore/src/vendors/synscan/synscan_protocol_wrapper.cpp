@@ -526,7 +526,20 @@ public:
         // exists to prevent, just triggered by a garbled echo instead of
         // total silence. A second mismatch (or a timeout on the retry) means
         // this is not trustworthy enough to proceed on.
+        //
+        // A mismatched token is not necessarily the handset's answer to us:
+        // read_response() returns the FIRST '#'-terminated token on the line,
+        // and right after the port opens that can be a stale reply to a
+        // command the previous session never read (abrupt restart mid-poll;
+        // connect_serial()'s tcflush clears the tty buffer but not a USB
+        // adapter's own FIFO). So before spending the retry, keep reading
+        // tokens for the rest of one response timeout - the real echo, if the
+        // handset is alive, is queued right behind the stale one. This is the
+        // same discard-and-continue rule util::exchange_synscan_echo_on_fd()
+        // applies for the auto-detect scans (review finding on PR #3: the
+        // connect path, the actual fix for issue #130, lacked it).
         constexpr char kEchoByte = 'B';
+        const std::string want(1, kEchoByte);
         for (int attempt = 0; attempt < 2; ++attempt) {
             std::string reply;
             try {
@@ -534,10 +547,26 @@ public:
             } catch (const AlpacaException&) {
                 return false;
             }
-            if (reply == std::string(1, kEchoByte)) {
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(connection_info_.response_timeout_ms);
+            while (reply != want) {
+                ALPACA_LOG_WARN("SynScan", "Echo test answered '" + printable(reply) +
+                                               "' instead of the echoed byte; reading past it");
+                const auto remaining =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+                if (remaining.count() <= 0) {
+                    break;
+                }
+                try {
+                    reply = read_response(true, static_cast<int>(remaining.count()), 0);
+                } catch (const AlpacaException&) {
+                    break;  // nothing else queued behind the stale token
+                }
+            }
+            if (reply == want) {
                 return true;
             }
-            ALPACA_LOG_WARN("SynScan", "Echo test answered '" + printable(reply) + "' instead of the echoed byte" +
+            ALPACA_LOG_WARN("SynScan", std::string("Echo test: no matching echo within the response timeout") +
                                            (attempt == 0 ? "; retrying once" : "; giving up"));
         }
         return false;
@@ -966,6 +995,14 @@ private:
             serial_fd_ = -1;
             return false;
         }
+        // Drop whatever is already queued on the port before the first
+        // exchange - the same flush probe_synscan_port() does. A reply to a
+        // command the previous session never read (abrupt service restart
+        // mid-poll) is otherwise the first thing echo_test() reads (review
+        // finding on PR #3). Only the tty layer's buffer is cleared: a USB
+        // adapter's own FIFO can still deliver a late token after this, which
+        // is what echo_test()'s drain-past-stale-tokens loop is for.
+        tcflush(serial_fd_, TCIOFLUSH);
         return true;
 #endif
     }
