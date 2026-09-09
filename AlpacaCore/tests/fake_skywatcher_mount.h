@@ -183,6 +183,20 @@ public:
         stop_ramp_ms_ = ms;
     }
 
+    /// Acknowledge but silently DROP the next @p n ":I" step-period writes on
+    /// an axis (regression: the ":i" readback logs the mismatch but the write
+    /// is NOT resent and the call does NOT throw -- the INDI/EQMod contract).
+    void drop_step_period_writes(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).drop_step_period_writes = n;
+    }
+
+    /// The T1 step period the axis is actually running with (last APPLIED ":I").
+    uint32_t step_period(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<uint32_t>(ax(axis).t1);
+    }
+
     /// Move the simulated axes instantly (test setup).
     void jump_axis_degrees(int axis, double deg) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -214,6 +228,7 @@ private:
         uint32_t indexer = 0;
         int start_count = 0;
         int stop_count = 0;
+        int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
@@ -343,11 +358,17 @@ private:
                 a.goto_target = static_cast<int64_t>(parse_u24(data));
                 return "=";
             case 'I': {
+                if (a.drop_step_period_writes > 0) {
+                    --a.drop_step_period_writes;
+                    return "=";  // acked, not applied
+                }
                 a.t1 = parse_u24(data);
                 double cps = a.t1 > 0 ? static_cast<double>(kTimerFreq) / a.t1 : 0.0;
                 a.rate_counts = a.dir == '1' ? -cps : cps;
                 return "=";
             }
+            case 'i':  // inquire the T1 step period last written with ":I"
+                return "=" + u24(static_cast<uint32_t>(a.t1 & 0xFFFFFF));
             case 'J':
                 ++a.start_count;
                 a.running = true;

@@ -1026,7 +1026,11 @@ public:
                 if (axis == kAxisDec) {
                     start_speed_motion_locked(lock, kAxisDec, dec_rate);
                 } else if (restore_tracking && !pulse_restart) {
-                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate));
+                    // No ":i" readback here: the axis is already running at
+                    // the pulse rate once ":I" is acknowledged, and the pulse
+                    // timer only starts after this returns, so an extra
+                    // round-trip would lengthen every pulse (#245 review).
+                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate), /*with_readback=*/false);
                     cmd_axis_rate_deg_s_[0] = ra_pulse_rate;
                 } else if (restore_tracking) {
                     // Pulse rate is non-positive (direction reversal): a live
@@ -1054,7 +1058,8 @@ public:
                 if (restore_tracking && !pulse_restart) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped.
-                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec));
+                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
+                                          /*with_readback=*/false);
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                 } else if (restore_tracking) {

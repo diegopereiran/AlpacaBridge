@@ -122,7 +122,9 @@ public:
     void initialization_done(int axis);                         // ":F"
     void set_motion_mode(int axis, char mode, char direction);  // ":G"
     void set_goto_target(int axis, uint32_t counts);            // ":S"
-    void set_step_period(int axis, uint32_t t1_preset);         // ":I"
+    // ":I". with_readback=false skips the diagnostic ":i" comparison (one extra
+    // serial round-trip) for callers on a timing-critical path.
+    void set_step_period(int axis, uint32_t t1_preset, bool with_readback = true);
     void start_motion(int axis);                                // ":J"
     void stop_motion(int axis);                                 // ":K"
     void instant_stop(int axis);                                // ":L"

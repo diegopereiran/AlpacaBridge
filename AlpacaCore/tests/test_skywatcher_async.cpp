@@ -958,4 +958,33 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not resent and not thrown",
+          "[skywatcher][async]") {
+    // 6b4988b read every ":I" preset back with ":i" and resent, then threw,
+    // on a mismatch. Reverted to the contract INDI's skywatcherAPI.cpp and
+    // indi-eqmod use (PR #1 review): a transport failure throws, what the
+    // board STORED never does -- the rounding tolerance was measured on one
+    // board, and on the real EQM-35 a matching readback proved nothing anyway
+    // (the board stores a live preset without applying it; a follow-up commit
+    // handles that). The fake acks and drops one write: the rate change must
+    // return normally, the dropped write must not be resent, and the axis
+    // must not be stopped.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.drop_step_period_writes(1, 1);
+    REQUIRE_NOTHROW(driver->set_right_ascension_rate(0.5));  // live ":I" on the tracking axis
+
+    REQUIRE(mount.step_period(1) == sidereal_preset);  // logged, not resent
+    REQUIRE(mount.stop_count(1) == stops_before);      // and the axis was left running
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
