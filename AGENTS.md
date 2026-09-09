@@ -1447,6 +1447,18 @@ datagrams before each send so replies cannot get off-by-one.
   in-place (`:I` is legal during slow-mode motion), then restoring the sidereal preset —
   the axis never stops. Dec pulses (and RA while not tracking) are software-timed
   speed-mode nudges. Position override accumulation as per the SynScan lessons.
+- **A live `:I` on a running axis is not always applied** (EQM-35 Pro, MC firmware 3.39,
+  2026-09-06): the board stores the preset (`:i` reads it back) but the motor keeps its old
+  rate. Every live in-place `:I` is therefore followed by a `:J` re-latch (INDI does the
+  same), and the driver sample-verifies the rate over ~450 ms (`verify_live_rate_or_rekick`)
+  and resends `:I`+`:J` if the axis did not change speed. Pulses ≥ 1.5 s verify inside the
+  pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone);
+  the `RightAscensionRate`/`TrackingRate` setters cannot wait 450 ms inside a property call,
+  so they spawn a one-shot background task (`rate_verify_thread_`, open-astro #248). That
+  task never takes `mutex_`, which is what lets every RA-taking path reap it WITH `mutex_`
+  held (setters, Tracking off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew,
+  disconnect) — a lock-free reap would leave a window for a setter to spawn one between an
+  initiator's reap and its lock, and the resend would land mid-pulse or on a stopped axis.
 - `:f` status nibbles: char0 bit0 speed-mode/bit1 CCW/bit2 fast; char1 bit0 running/bit1
   blocked; char2 bit0 init-done/bit1 level switch. Slewing = running AND NOT speed-mode
   on either axis (a tracking axis is not slewing).

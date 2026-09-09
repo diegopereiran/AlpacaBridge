@@ -65,10 +65,28 @@ constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
 // non-positive rate needs a direction change ":I" cannot deliver).
 constexpr double kMinInPlacePulseRateDegPerSec = 0.05 * kSiderealDegPerSec;
 // Shortest RA pulse that still gets the sample-based "did the rate actually
-// apply" check (see verify_live_rate_or_rekick). The check costs ~450 ms of
-// wall time DURING the pulse; on a typical 50-500 ms autoguider pulse that
-// would dominate the pulse itself, so those rely on the ":J" kick alone.
+// apply" check (see verify_live_rate_or_rekick). The check costs >= ~450 ms
+// of wall time DURING the pulse (more at small rate deltas, where the sample
+// window stretches to stay resolvable); on a typical 50-500 ms autoguider
+// pulse that would dominate the pulse itself, so those rely on the ":J" kick
+// alone.
 constexpr int kMinPulseForRateVerifyMs = 1500;
+// verify_live_rate_or_rekick timing. kRateVerifyMaxWindow is the ceiling
+// used by callers with no duration budget to respect (the RightAscensionRate
+// /TrackingRate background task, and the pulse's own end-of-pulse restore
+// check, which runs after the axis already stopped and so only adds
+// latency, never overshoot). The pulse DISPATCH check is different: it
+// samples while the axis is already running at the pulse rate, and its
+// result only ever SHRINKS the remaining hold (never extends it -- see the
+// call site), so a window bigger than the pulse's own duration would let
+// the axis run at the pulse rate for longer than commanded. That call site
+// caps its window at (duration - kRateVerifySettle) instead of this ceiling
+// (bot review round 1 on open-astro/AlpacaBridge#248: a low-guide-rate pulse
+// right at kMinPulseForRateVerifyMs could stretch to ~3.15 s, over 2x its
+// commanded duration).
+constexpr auto kRateVerifySettle = std::chrono::milliseconds(150);
+constexpr auto kRateVerifyMinWindow = std::chrono::milliseconds(300);
+constexpr auto kRateVerifyMaxWindow = std::chrono::milliseconds(3000);
 // AutoHome (home index sensor) constants — SynScan/EQMod ":q"/":W" extended
 // commands. Indexer reads: 0 = armed below the index, 0xFFFFFF = armed above,
 // anything else = the count at which the sensor edge latched.
@@ -1064,6 +1082,17 @@ public:
             };
             try {
                 std::unique_lock<std::mutex> lock(mutex_);
+                // An in-place RA pulse never goes through a stop-wait: reap a
+                // pending RightAscensionRate check here so it cannot sample
+                // the pulse rate and "restore" the tracking rate mid-pulse.
+                // RA only: a Dec pulse never touches the RA axis, and reaping
+                // here would cancel a pending check with nothing to replace
+                // it -- a Dec correction landing inside the check's window
+                // (routine while autoguiding) would silently drop the one
+                // chance to catch a stalled ":I" (#258 review).
+                if (axis == kAxisRa) {
+                    reap_rate_verify_task();
+                }
                 auto& proto = SkyWatcherProtocolWrapper::instance();
                 if (axis == kAxisDec) {
                     start_speed_motion_locked(lock, kAxisDec, dec_rate);
@@ -1123,7 +1152,17 @@ public:
                 // Runs unlocked (samples position across a short window):
                 // never hold mutex_ across a sleep -- see stop_axis_and_wait_locked.
                 const auto verify_start = std::chrono::steady_clock::now();
-                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate);
+                // Bounded by the pulse's own duration budget, not the full
+                // kRateVerifyMaxWindow: this check samples the axis WHILE it
+                // is already running at the pulse rate, and its cost below
+                // can only shrink the remaining hold, never extend it -- so
+                // a window bigger than the pulse itself would let the axis
+                // overshoot its commanded on-time (round-1 review finding).
+                const auto dispatch_max_window = std::chrono::milliseconds(duration) > kRateVerifySettle
+                                                     ? std::chrono::milliseconds(duration) - kRateVerifySettle
+                                                     : std::chrono::milliseconds(0);
+                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, pulse_task_cancel_,
+                                           dispatch_max_window);
                 verify_elapsed = std::chrono::steady_clock::now() - verify_start;
             }
             auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec, pulse_restart]() {
@@ -1204,10 +1243,10 @@ public:
             }
             // Same duration guard as the dispatch check: this one runs after
             // the motion, so it costs no pulse distance, but it does hold the
-            // pulse task ~450 ms longer, which the next command's reap must
-            // join. Not worth that latency on short guide pulses.
+            // pulse task ~450 ms (or more) longer, which the next command's
+            // reap must join. Not worth that latency on short guide pulses.
             if (stopped && restore_tracking && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
-                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, ra_restore_rate_deg_per_sec);
+                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, ra_restore_rate_deg_per_sec, pulse_task_cancel_);
             }
             if (!stopped) {
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
@@ -1610,6 +1649,7 @@ public:
         // and its dispatch aborts BEFORE sending new motor commands (the
         // cancel flag alone only catches it after the re-dispatch).
         ++motion_generation_;
+        reap_rate_verify_task();  // AbortSlew stops RA too: no resend into it
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         // Instant stop (":L") rather than the ramped ":K": AbortSlew's contract
         // is to stop NOW, and the ramp-down from an 800x slew otherwise leaves
@@ -1907,7 +1947,8 @@ private:
     // common thread across the three live-rate-change call sites (PulseGuide
     // dispatch/restore, RightAscensionRate). Must run with mutex_ NOT held
     // (see stop_axis_and_wait_locked) — it sleeps across the sample window,
-    // via task_wait_for so a pulse cancellation aborts it promptly instead of
+    // via task_wait_for on the OWNING task's cancel flag (pulse task or the
+    // one-shot rate-verify task) so a reap aborts it promptly instead of
     // stalling teardown.
     // Did a live step-period change take? Classify the observed rate by which
     // of the two commanded rates it is closer to, so the check stays
@@ -1922,21 +1963,54 @@ private:
         return std::abs(o - std::abs(expected_cps)) < std::abs(o - std::abs(previous_cps));
     }
 
-    void verify_live_rate_or_rekick(int channel, double previous_rate_deg_per_sec, double expected_rate_deg_per_sec) {
+    // max_window bounds how far the sample window may stretch to resolve a
+    // small rate delta (see kRateVerifyMaxWindow above for why the pulse
+    // dispatch call passes something tighter than the default).
+    void verify_live_rate_or_rekick(int channel, double previous_rate_deg_per_sec, double expected_rate_deg_per_sec,
+                                    std::atomic<bool>& cancel,
+                                    std::chrono::milliseconds max_window = kRateVerifyMaxWindow) {
         if (previous_rate_deg_per_sec == expected_rate_deg_per_sec) {
             return;  // nothing changed, nothing to verify
         }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
-        constexpr auto kSettle = std::chrono::milliseconds(150);
-        constexpr auto kWindow = std::chrono::milliseconds(300);
+        const AxisParameters& params = axis_params_[static_cast<std::size_t>(channel - 1)];
+        const double expected_counts_per_sec =
+            std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
+        const double previous_counts_per_sec =
+            std::abs(previous_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
+        // ":j" is whole counts, and each of the two reads truncates, so the
+        // sampled delta carries up to ~2 counts of error. The window must be
+        // long enough for the two candidate rates to sit at least
+        // kMinResolvableDeltaCounts apart, or the nearest-rate verdict is a
+        // coin flip: on the EQM-35 Pro (~107 counts/s sidereal) a 300 ms
+        // window resolves a 0.5 s/s RA offset (16 counts) fine, but Lunar is
+        // 3.5% off sidereal (1.1 counts) and Solar 0.27% (0.09) -- seen on
+        // hardware 2026-09-10 as a spurious "did not take" + resend on a
+        // TrackingRate=Lunar write. Stretch the window as far as needed, up
+        // to max_window; past that the change is below what this check can
+        // resolve within its budget, so leave it to the ":J" kick alone.
+        const auto effective_max_window = std::min(max_window, kRateVerifyMaxWindow);
+        constexpr double kMinResolvableDeltaCounts = 4.0;
+        const double delta_counts_per_sec = std::abs(expected_counts_per_sec - previous_counts_per_sec);
+        const double needed_s = delta_counts_per_sec > 0.0 ? kMinResolvableDeltaCounts / delta_counts_per_sec : 1e9;
+        if (needed_s > std::chrono::duration<double>(effective_max_window).count()) {
+            ALPACA_LOG_INFO("SkyWatcher", "Axis " + std::to_string(channel) + " rate change of " +
+                                              std::to_string(delta_counts_per_sec) +
+                                              " counts/s is below the rate-applied check's resolution; relying "
+                                              "on the :J re-latch alone");
+            return;
+        }
+        const auto window =
+            std::clamp(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<double>(needed_s)),
+                       kRateVerifyMinWindow, effective_max_window);
         uint32_t before = 0;
         uint32_t after = 0;
         try {
-            if (!task_wait_for(kSettle, pulse_task_cancel_)) {
+            if (!task_wait_for(kRateVerifySettle, cancel)) {
                 return;  // cancelled by a reaper — it owns the axis now
             }
             before = protocol.inquire_position(channel);
-            if (!task_wait_for(kWindow, pulse_task_cancel_)) {
+            if (!task_wait_for(window, cancel)) {
                 return;
             }
             after = protocol.inquire_position(channel);
@@ -1945,8 +2019,7 @@ private:
                                               " could not read position: " + e.what());
             return;
         }
-        const AxisParameters& params = axis_params_[static_cast<std::size_t>(channel - 1)];
-        const double window_s = std::chrono::duration<double>(kWindow).count();
+        const double window_s = std::chrono::duration<double>(window).count();
         // ":j" is a 24-bit counter: take the delta modulo 2^24 and re-sign it
         // so a wrap inside the sample window reads as the few hundred counts
         // it was, not as +/-16 million (fork PR #6 review).
@@ -1955,10 +2028,6 @@ private:
             delta -= static_cast<int32_t>(kCountsMask) + 1;
         }
         const double observed_counts_per_sec = static_cast<double>(delta) / window_s;
-        const double expected_counts_per_sec =
-            std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
-        const double previous_counts_per_sec =
-            std::abs(previous_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
         // Not a rate measurement: this only has to tell "changed speed" from
         // "still at the old rate". Nearest-of-the-two keeps that distinction
         // sharp at small guide rates, where a fixed fraction of the expected
@@ -1994,6 +2063,42 @@ private:
         }
     }
 
+    // One-shot background rate-applied check for a live in-place RA
+    // step-period change made from a PROPERTY setter (RightAscensionRate,
+    // TrackingRate -> apply_ra_tracking_rate_locked). The pulse path runs the
+    // check inside its own task; a setter has no task and must answer inside
+    // the property response target, so it cannot sit in the ~450 ms sample
+    // window itself. Unlike a pulse, a stall here has no natural end point: a
+    // silently unapplied RightAscensionRate leaves RA tracking at the wrong
+    // rate until the next rate change (open-astro/AlpacaBridge#248).
+    //
+    // Ownership follows the pulse task's discipline, with one difference:
+    // the task NEVER takes mutex_, so it is reaped (cancel + join) WITH
+    // mutex_ held by every path that takes the RA axis -- the setters
+    // themselves, Tracking off, stop_axis_and_wait_locked (goto/park/home/
+    // MoveAxis/duty bursts), the pulse dispatch and AbortSlew -- and by
+    // disconnect. Reaping under the lock is what closes the race a lock-free
+    // reap would leave: a setter spawning between an initiator's reap and
+    // its lock, whose re-kick would then land mid-pulse or on a stopped axis.
+    // Called with mutex_ held, after reap_rate_verify_task() on the same
+    // lock hold, so the handle is never joinable here.
+    void spawn_rate_verify_task_locked(double previous_rate_deg_per_sec, double expected_rate_deg_per_sec) {
+        if (previous_rate_deg_per_sec == expected_rate_deg_per_sec) {
+            return;
+        }
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        rate_verify_thread_ = std::thread([this, previous_rate_deg_per_sec, expected_rate_deg_per_sec]() {
+            try {
+                verify_live_rate_or_rekick(kAxisRa, previous_rate_deg_per_sec, expected_rate_deg_per_sec,
+                                           rate_verify_cancel_);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SkyWatcher", std::string("RA rate-applied check failed: ") + e.what());
+            } catch (...) {
+                ALPACA_LOG_WARN("SkyWatcher", "RA rate-applied check failed with unknown exception");
+            }
+        });
+    }
+
     // Direction char for ":G": '0' = increasing counts, '1' = decreasing.
     // Positive axis rates (increasing axis angle) map to increasing counts.
     static char direction_char(double signed_rate) { return signed_rate >= 0.0 ? '0' : '1'; }
@@ -2018,6 +2123,11 @@ private:
         // The newer generation owns the axes now, whatever their state.
         if (motion_generation_ != gen) {
             return false;
+        }
+        if (channel == kAxisRa) {
+            // Whoever stops RA owns it from here: a rate-applied check still
+            // sampling the tracking rate must not resend it after the stop.
+            reap_rate_verify_task();
         }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         cmd_axis_rate_deg_s_[channel - 1] = 0.0;
@@ -2353,28 +2463,43 @@ private:
             // place — the axis never stops. ":J" kick for the same reason
             // as the PulseGuide live-rate change (see
             // verify_live_rate_or_rekick): a bare ":I" here is not always
-            // enough on this firmware. Deliberately NOT followed by the
-            // sampled rate-applied check: this runs synchronously under
-            // mutex_ from the RightAscensionRate setter, and the check needs
-            // an unlocked ~450 ms sample window, which would blow the
-            // property's response target. A stall here has no natural end
-            // point (a standing property, not a bounded pulse), so a
-            // background one-shot verify is the right follow-up (tracked as
-            // open-astro/AlpacaBridge#248); the ConformU failure this fix
-            // targets was on the pulse path only.
+            // enough on this firmware. The sampled rate-applied check cannot
+            // run here (synchronous under mutex_ from a property setter, and
+            // it needs an unlocked ~450 ms window), so it runs as a one-shot
+            // background task instead.
             if (eff == previous_effective) {
-                return;  // nothing changed: no write, no blocking ":J" round-trip under mutex_ (#249 review)
+                // Nothing changed: no write, no blocking ":J" round-trip under
+                // mutex_ (#249 review) -- and deliberately NO reap either: a
+                // check still in flight for this very rate is still valid.
+                // set_tracking_rate() has no idempotent-rewrite guard of its
+                // own, so a client re-asserting the same TrackingRate lands
+                // here mid-check; reaping it with nothing to replace it would
+                // silently drop the one chance to catch a stalled ":I" (#258
+                // review).
+                return;
             }
+            // A check still sampling an OLDER rate change would resend that
+            // rate over this one; this write supersedes it (see
+            // spawn_rate_verify_task_locked for why reaping under mutex_ is
+            // safe).
+            reap_rate_verify_task();
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             protocol.start_motion(kAxisRa);
             cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
+            spawn_rate_verify_task_locked(previous_effective, eff);
         } else {
+            // Stop-and-restart path: the axis is about to stop, so any
+            // pending check must go first (its resend would restart it).
+            reap_rate_verify_task();
             apply_ra_drive_locked(lock);
         }
     }
 
     void set_tracking_locked(std::unique_lock<std::mutex>& lock, bool tracking) {
+        // Tracking off stops the RA axis: a pending rate-applied check must
+        // not resend its ":I"+":J" into the stopped axis and restart it.
+        reap_rate_verify_task();
         if (tracking) {
             // Track: RA axis in the direction of increasing hour angle
             // (positive axis angle by this driver's convention) at the
@@ -2834,17 +2959,20 @@ private:
         pulse_task_cancel_.store(true);
         stop_task_cancel_[0].store(true);
         stop_task_cancel_[1].store(true);
+        rate_verify_cancel_.store(true);
         task_cv_.notify_all();
         std::thread slew_thread;
         std::thread pulse_thread;
         std::thread stop_thread_ra;
         std::thread stop_thread_dec;
+        std::thread rate_verify_thread;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
             slew_thread = std::move(slew_task_thread_);
             pulse_thread = std::move(pulse_task_thread_);
             stop_thread_ra = std::move(stop_task_thread_[0]);
             stop_thread_dec = std::move(stop_task_thread_[1]);
+            rate_verify_thread = std::move(rate_verify_thread_);
         }
         if (slew_thread.joinable()) {
             slew_thread.join();
@@ -2857,6 +2985,9 @@ private:
         }
         if (stop_thread_dec.joinable()) {
             stop_thread_dec.join();
+        }
+        if (rate_verify_thread.joinable()) {
+            rate_verify_thread.join();
         }
         // The duty worker goes through the lifecycle mutex like every other
         // reap+create path, so a disconnect racing a setter serializes with
@@ -2913,6 +3044,23 @@ private:
             prev.join();
         }
         pulse_task_cancel_.store(false);
+    }
+
+    // Safe with mutex_ held: the rate-verify task never takes mutex_ (see
+    // spawn_rate_verify_task_locked). A cancelled check just returns; it
+    // never touches the hardware on the way out.
+    void reap_rate_verify_task() {
+        rate_verify_cancel_.store(true);
+        task_cv_.notify_all();
+        std::thread prev;
+        {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            prev = std::move(rate_verify_thread_);
+        }
+        if (prev.joinable()) {
+            prev.join();
+        }
+        rate_verify_cancel_.store(false);
     }
 
     // ── State ───────────────────────────────────────────────────────────────
@@ -2997,9 +3145,11 @@ private:
     std::thread slew_task_thread_;
     std::thread pulse_task_thread_;
     std::thread stop_task_thread_[2];  // indexed by axis (0=RA, 1=Dec)
+    std::thread rate_verify_thread_;   // one-shot RightAscensionRate/TrackingRate rate-applied check
     mutable std::atomic<bool> slew_task_cancel_{false};
     mutable std::atomic<bool> pulse_task_cancel_{false};
     mutable std::atomic<bool> stop_task_cancel_[2]{false, false};  // indexed by axis
+    mutable std::atomic<bool> rate_verify_cancel_{false};
 };
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
