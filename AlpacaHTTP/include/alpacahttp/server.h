@@ -135,12 +135,18 @@ private:
     // to the ready queue when their next request arrives. Woken through a
     // self-pipe when a worker parks a connection or stop() begins.
     std::thread reactor_thread_;
-    // Created once in the constructor and closed in the destructor, never
-    // replaced: wake_reactor() reads the write end from any thread with no
-    // lock, and a worker detached across a restart could still call it while
-    // a per-start recreation was in progress. Immutable descriptors have no
-    // such race. Leftover wake bytes from a previous run cost one spurious
-    // poll() return.
+    // Threads stop() could not join because it was running ON them (a
+    // handler that called stop() from its own worker; no current handler
+    // does). Never detached: the next stop() from another thread, or the
+    // destructor, joins them, so no server thread outlives the Server and
+    // nothing can touch its members, the wake pipe included, after
+    // destruction. Guarded by lifecycle_mutex_.
+    std::vector<std::thread> orphaned_threads_;
+    // Created once in the constructor and closed in the destructor after
+    // every thread, orphaned ones included, has been joined; never replaced
+    // while the Server is alive, since wake_reactor() reads the write end
+    // from any thread with no lock. Leftover wake bytes from a previous run
+    // cost one spurious poll() return.
     int reactor_wake_fds_[2]{-1, -1};
     std::mutex reactor_mutex_;
     std::vector<ConnectionPtr> reactor_incoming_;
@@ -162,6 +168,7 @@ private:
     void close_connection(ConnectionPtr conn, bool graceful);
     void wake_reactor();
     void close_wake_pipe();
+    void join_orphaned_threads(std::thread::id current_id);
     void reset_queues_for_start();
     void handle_shutdown_request();
     void handle_restart_request();

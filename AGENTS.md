@@ -970,9 +970,16 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     no handler code and cannot be the caller.
   - The reactor's wake pipe is created once in the constructor and closed
     only in the destructor. It is read lock-free by `wake_reactor()` from
-    any thread, and a worker detached across a restart could still call
+    any thread, and a worker orphaned across a restart could still call
     that while a per-start recreation was in flight (PR #235 review round
     3); immutable descriptors have no such race.
+  - **No server thread is ever detached.** A thread `stop()` cannot join
+    because it is running on it (a handler calling `stop()` synchronously;
+    no current handler does) goes into `orphaned_threads_`, and the next
+    `stop()` from another thread or the destructor joins it. So nothing
+    can touch a `Server`'s members, the wake pipe included, after the
+    destructor returns (review round 5). Destroying a `Server` from inside
+    one of its own handlers is not supported.
   - The reactor enforces only the idle gap (`kKeepAliveIdleSeconds`) and the
     first-request slowloris bound (`kSocketTimeoutSeconds`, so a client that
     connects and never sends costs no worker). Caps that should end with a

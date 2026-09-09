@@ -69,7 +69,32 @@ void Server::set_restart_callback(std::function<void()> callback) {
 
 Server::~Server() {
     stop();
+    {
+        // Anything stop() could not join because it ran on that thread.
+        // Joined here, on whatever thread destroys the Server, so no server
+        // thread survives the object. (Destroying the Server from inside one
+        // of its own request handlers is not supported.)
+        std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+        join_orphaned_threads(std::this_thread::get_id());
+    }
     close_wake_pipe();
+}
+
+// Join every orphaned thread except the calling one. Caller holds
+// lifecycle_mutex_.
+void Server::join_orphaned_threads(std::thread::id current_id) {
+    std::vector<std::thread> still_orphaned;
+    for (auto& thread : orphaned_threads_) {
+        if (!thread.joinable()) {
+            continue;
+        }
+        if (thread.get_id() == current_id) {
+            still_orphaned.push_back(std::move(thread));
+            continue;
+        }
+        thread.join();
+    }
+    orphaned_threads_.swap(still_orphaned);
 }
 
 // Prepare the queues for a (re)start. Both are expected to be empty: stop()
@@ -149,11 +174,13 @@ void Server::stop() {
             reactor_accepting_ = false;
         }
         wake_reactor();
+        // Threads a previous stop() could not join because it ran on them.
+        join_orphaned_threads(current_id);
         if (reactor_thread_.joinable()) {
             // The reactor runs no handler code, so it cannot be the caller;
-            // the self-detach is kept only so a future bug cannot deadlock here.
+            // the orphan branch is kept only so a future bug cannot deadlock.
             if (reactor_thread_.get_id() == current_id) {
-                reactor_thread_.detach();
+                orphaned_threads_.push_back(std::move(reactor_thread_));
             } else {
                 reactor_thread_.join();
             }
@@ -176,10 +203,11 @@ void Server::stop() {
                 // stop() was called from inside a request handler on this
                 // worker (not a path any current handler takes: the management
                 // restart/shutdown endpoints run it on a detached thread). It
-                // cannot join itself; it finishes its request, then exits on
-                // the generation check in worker_thread once the next
-                // run_server() bumps worker_generation_.
-                thread.detach();
+                // cannot join itself. It finishes its request and exits on
+                // the shutdown flag or the generation check; its handle is
+                // kept, not detached, so the next stop() from another thread
+                // or the destructor joins it.
+                orphaned_threads_.push_back(std::move(thread));
                 continue;
             }
             thread.join();
@@ -196,7 +224,10 @@ void Server::stop() {
 
     if (server_thread_.joinable()) {
         if (server_thread_.get_id() == current_id) {
-            server_thread_.detach();
+            // Unreachable (run_server() never calls stop()); kept as an
+            // orphan rather than a detach for the same reason as above.
+            std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+            orphaned_threads_.push_back(std::move(server_thread_));
         } else {
             server_thread_.join();
         }
@@ -204,11 +235,11 @@ void Server::stop() {
     util::log_info("HTTP server stopped");
 }
 
-// Destructor only. The pipe is never closed or replaced while the Server is
-// alive: stop() may return with the accept loop still unwinding (blocking
-// start() stopped from a handler) and a detached worker may still call
-// wake_reactor() after a restart, and either would otherwise write into a
-// recycled descriptor.
+// Destructor only, after every thread has been joined. The pipe is never
+// closed or replaced while the Server is alive: stop() may return with the
+// accept loop still unwinding (blocking start() stopped from a handler), and
+// an orphaned worker may still call wake_reactor() until it is joined, and
+// either would otherwise write into a recycled descriptor.
 void Server::close_wake_pipe() {
     for (int& pipe_fd : reactor_wake_fds_) {
         if (pipe_fd >= 0) {
