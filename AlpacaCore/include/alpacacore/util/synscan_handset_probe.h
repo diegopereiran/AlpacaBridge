@@ -54,6 +54,10 @@ namespace alpacacore::util {
  *        open, already-configured (9600 8N1, non-canonical) fd and wait up
  *        to @p timeout_ms for the exact reply (the same byte followed by
  *        '#'). Leaves the fd open; the caller owns it before and after.
+ *        The deadline is checked between reads, so the caller's VTIME is the
+ *        granularity at which it is honoured: configure a short one (100 ms,
+ *        as both callers do), or a silent port overruns @p timeout_ms by up
+ *        to one read timeout.
  *
  * Strict, and tolerant of noise ahead of the real reply: only an exact
  * `#`-terminated token that is the echoed byte followed by '#' counts as a
