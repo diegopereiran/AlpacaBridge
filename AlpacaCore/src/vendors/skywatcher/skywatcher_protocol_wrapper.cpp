@@ -139,6 +139,26 @@ std::string mc_error_message(const std::string& code) {
     return "Motor controller error code " + code;
 }
 
+// A "!<code>" reply: the board received the command and refused it. Kept
+// distinct from transport failures (timeout, mis-paired or malformed reply,
+// not connected) so a caller can tell "this board does not know the command"
+// from "this exchange did not complete".
+class MotorControllerRejected : public AlpacaException {
+public:
+    MotorControllerRejected(const std::string& what, std::string code)
+        : AlpacaException(what), code_(std::move(code)) {}
+    const std::string& code() const { return code_; }
+    bool unknown_command() const { return code_ == "0"; }
+
+private:
+    std::string code_;
+};
+
+// Build the TRACE wire-log line only when TRACE is actually enabled: the
+// macro checks the level inside log(), after the caller has already
+// concatenated the string, so the gate has to be here.
+bool trace_enabled() { return alpacacore::logging::get_log_level() <= alpacacore::logging::LogLevel::Trace; }
+
 }  // namespace
 
 std::string SkyWatcherProtocolWrapper::encode_u24(uint32_t value) {
@@ -664,27 +684,25 @@ private:
 #endif
     }
 
-    // Absorb a late reply on the serial link: read and discard until the line
-    // has been quiet for a short while or the window elapses. Used after a
-    // timeout (the reply may still be in flight) and after a mis-paired reply,
-    // so the NEXT command cannot consume a stale frame as its own answer.
+    // Absorb a late reply on the serial link: read and discard everything
+    // for the whole window. Used after a timeout (the reply may still be in
+    // flight) and after a mis-paired reply, so the NEXT command cannot
+    // consume a stale frame as its own answer. The window is not cut short
+    // when the line is quiet: a reply that has not STARTED arriving when
+    // the settle begins would otherwise slip through, and if it has the same
+    // shape as the next command's reply (":j" after a timed-out ":j") the
+    // shape check in send_command cannot tell it apart either (pty-backed
+    // regression in test_skywatcher_serial.cpp). Replies later than the
+    // window are only caught when their shape differs.
     void settle_serial(int window_ms) {
 #ifndef _WIN32
-        auto now = std::chrono::steady_clock::now();
-        const auto deadline = now + std::chrono::milliseconds(window_ms);
-        auto quiet_until = now + std::chrono::milliseconds(30);
-        while (now < deadline) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(window_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
             char ch = 0;
             ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-            now = std::chrono::steady_clock::now();
-            if (r == 1) {
-                quiet_until = now + std::chrono::milliseconds(30);
-                continue;
+            if (r != 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
-            if (now >= quiet_until) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         tcflush(serial_fd_, TCIFLUSH);
 #else
@@ -990,12 +1008,14 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
     std::string reply;
     for (int attempt = 0;; ++attempt) {
         reply = pimpl_->exchange(frame, timeout, expected_len);
-        // TRACE-only wire log: every motor-controller frame and its reply.
-        // Cheap below TRACE (the macro gates on level before formatting) and
+        // TRACE-only wire log: every motor-controller frame and its reply,
         // the only way to see what the board was actually told when a
         // driver-level symptom (e.g. a pulse that produced no motion) has no
-        // other trace.
-        ALPACA_LOG_TRACE("SkyWatcher", "MC " + frame.substr(0, frame.size() - 1) + " -> " + reply);
+        // other trace. Gated on the level here so the string is not built
+        // for every exchange below TRACE.
+        if (trace_enabled()) {
+            ALPACA_LOG_TRACE("SkyWatcher", "MC " + frame.substr(0, frame.size() - 1) + " -> " + reply);
+        }
         // Shape check: an OK reply whose data length does not match the
         // command is a reply to SOMETHING ELSE (a late frame from a timed-out
         // exchange). Accepting it would report success for a command the
@@ -1019,8 +1039,9 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
         return reply.substr(1);
     }
     if (!reply.empty() && reply[0] == kReplyError) {
-        throw AlpacaException("Motor controller rejected '" + std::string(1, command) + std::to_string(axis) +
-                              "': " + mc_error_message(reply.substr(1)));
+        throw MotorControllerRejected("Motor controller rejected '" + std::string(1, command) + std::to_string(axis) +
+                                          "': " + mc_error_message(reply.substr(1)),
+                                      reply.substr(1));
     }
     throw AlpacaException("Malformed motor controller reply to '" + std::string(1, command) + std::to_string(axis) +
                           "': '" + reply + "'");
@@ -1029,7 +1050,10 @@ std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, cons
 std::string SkyWatcherProtocolWrapper::send_raw_command(const std::string& frame, int timeout_ms_override) {
     int timeout = timeout_ms_override > 0 ? timeout_ms_override : pimpl_->default_timeout();
     std::string reply = pimpl_->exchange(frame, timeout);
-    ALPACA_LOG_TRACE("SkyWatcher", "MC raw " + frame.substr(0, frame.empty() ? 0 : frame.size() - 1) + " -> " + reply);
+    if (trace_enabled()) {
+        ALPACA_LOG_TRACE("SkyWatcher",
+                         "MC raw " + frame.substr(0, frame.empty() ? 0 : frame.size() - 1) + " -> " + reply);
+    }
     return reply;
 }
 
@@ -1122,12 +1146,26 @@ void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset) {
     uint32_t readback = 0;
     try {
         readback = decode_u24(send_command('i', axis));
-    } catch (const std::exception& e) {
-        // This board has no ":i" -- off until the next connect.
+    } catch (const MotorControllerRejected& e) {
+        if (!e.unknown_command()) {
+            // Refused for some other reason (busy, not initialised): the
+            // board does know ":i"; skip this readback only.
+            ALPACA_LOG_WARN("SkyWatcher", std::string("Step-period readback (':i') refused this time: ") + e.what());
+            return;
+        }
+        // "!0" Unknown command: this board has no ":i" -- off until the
+        // next connect.
         pimpl_->disable_step_period_readback();
         ALPACA_LOG_WARN("SkyWatcher", std::string("Step-period readback (':i') unavailable on this board; diagnostic "
                                                   "disabled until reconnect: ") +
                                           e.what());
+        return;
+    } catch (const std::exception& e) {
+        // Transport failure on the diagnostic itself (timeout, mis-paired or
+        // malformed reply): the ":I" write already succeeded, and a busy link
+        // is exactly when this readback matters, so keep it enabled and
+        // just skip this one.
+        ALPACA_LOG_WARN("SkyWatcher", std::string("Step-period readback (':i') skipped, exchange failed: ") + e.what());
         return;
     }
     const uint32_t diff = readback > t1_preset ? readback - t1_preset : t1_preset - readback;
