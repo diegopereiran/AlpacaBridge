@@ -2434,10 +2434,6 @@ private:
     }
 
     void apply_ra_tracking_rate_locked(std::unique_lock<std::mutex>& lock, double previous_effective) {
-        // A check still sampling an OLDER rate change would resend that rate
-        // over this one; this write supersedes it (see
-        // spawn_rate_verify_task_locked for why reaping under mutex_ is safe).
-        reap_rate_verify_task();
         double eff = effective_ra_rate_locked();
         double floor_rate = slow_mode_floor_rate_locked(kAxisRa) * kSlowModeFloorPad;
         if (std::abs(eff) >= floor_rate && std::abs(previous_effective) >= floor_rate &&
@@ -2451,14 +2447,30 @@ private:
             // it needs an unlocked ~450 ms window), so it runs as a one-shot
             // background task instead.
             if (eff == previous_effective) {
-                return;  // nothing changed: no write, no blocking ":J" round-trip under mutex_ (#249 review)
+                // Nothing changed: no write, no blocking ":J" round-trip under
+                // mutex_ (#249 review) -- and deliberately NO reap either: a
+                // check still in flight for this very rate is still valid.
+                // set_tracking_rate() has no idempotent-rewrite guard of its
+                // own, so a client re-asserting the same TrackingRate lands
+                // here mid-check; reaping it with nothing to replace it would
+                // silently drop the one chance to catch a stalled ":I" (#258
+                // review).
+                return;
             }
+            // A check still sampling an OLDER rate change would resend that
+            // rate over this one; this write supersedes it (see
+            // spawn_rate_verify_task_locked for why reaping under mutex_ is
+            // safe).
+            reap_rate_verify_task();
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             protocol.start_motion(kAxisRa);
             cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
             spawn_rate_verify_task_locked(previous_effective, eff);
         } else {
+            // Stop-and-restart path: the axis is about to stop, so any
+            // pending check must go first (its resend would restart it).
+            reap_rate_verify_task();
             apply_ra_drive_locked(lock);
         }
     }

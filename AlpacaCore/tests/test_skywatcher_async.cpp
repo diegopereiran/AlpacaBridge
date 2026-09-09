@@ -1316,4 +1316,39 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - re-asserting the same TrackingRate leaves a pending rate check running",
+          "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#258 review: apply_ra_tracking_rate_locked()
+    // reaped any pending check unconditionally, BEFORE its own "nothing
+    // changed" early return. set_tracking_rate() has no idempotent-rewrite
+    // guard (unlike set_right_ascension_rate), so a client re-asserting the
+    // same TrackingRate mid-check cancelled it and spawned no replacement:
+    // a stalled ":I" from the first write was then never caught -- the
+    // exact unbounded-stall failure the background check exists for.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    // Lunar stall that survives the setter's own ":I"+":J" (fake's lower
+    // CPR needs ~2.4 s of window to resolve, so the check is still in
+    // flight when the rewrite lands).
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_tracking_rate(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // inside the sample window
+    driver->set_tracking_rate(1);                                 // same value: must NOT drop the check
+    REQUIRE(mount.start_count(1) == starts_before + 1);           // and must not write/kick again itself
+
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 4500));  // check re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
