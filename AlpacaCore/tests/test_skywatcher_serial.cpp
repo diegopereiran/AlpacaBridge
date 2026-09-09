@@ -26,9 +26,11 @@
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
 #include <chrono>
+#include <filesystem>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -142,6 +144,81 @@ TEST_CASE("SkyWatcher serial - a transient failure of the ':i' readback does not
     REQUIRE(link.board.count_frames('i') == 5);
     REQUIRE_NOTHROW(link.proto.set_step_period(1, 5020));
     REQUIRE(link.board.count_frames('i') == 5);  // no further ":i"
+}
+
+TEST_CASE("SkyWatcher serial - connect claims the port in the cross-vendor registry and releases it",
+          "[skywatcher][serial][registry]") {
+    // Issue #230: EQDIR cables share their USB-serial chips with other
+    // vendors' hardware, so the registry is what keeps one driver's connect
+    // off a port another driver holds. connect_serial() must refuse a held
+    // port, claim a free one before opening, and release it on disconnect
+    // and on every failure path.
+    FakeSkyWatcherSerialBoard board;
+    auto& proto = sw::SkyWatcherProtocolWrapper::instance();
+    const std::string key = std::filesystem::canonical(board.slave_path()).string();
+    REQUIRE_FALSE(alpacacore::util::is_serial_port_in_use(key));
+
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Serial;
+    info.port_path = board.slave_path();
+    info.baud_rate = 9600;
+    info.response_timeout_ms = 300;
+
+    // Held by "another vendor": refused, nothing on the wire, still held.
+    alpacacore::util::mark_serial_port_open(key);
+    REQUIRE_FALSE(proto.connect(info));
+    REQUIRE(board.frames().empty());
+    REQUIRE(alpacacore::util::is_serial_port_in_use(key));
+    alpacacore::util::mark_serial_port_closed(key);
+
+    // Free: claimed for the life of the connection, released on disconnect.
+    REQUIRE(proto.connect(info));
+    REQUIRE(alpacacore::util::is_serial_port_in_use(key));
+    REQUIRE_FALSE(proto.get_motor_board_version().empty());
+    proto.disconnect();
+    REQUIRE_FALSE(alpacacore::util::is_serial_port_in_use(key));
+
+    // A failed open must not leave a stale claim behind.
+    info.port_path = "/dev/alpacacore-no-such-port";
+    REQUIRE_FALSE(proto.connect(info));
+    REQUIRE_FALSE(alpacacore::util::is_serial_port_in_use(info.port_path));
+}
+
+TEST_CASE("SkyWatcher serial - the dual-baud probe finds a Synta EQ board at 115200 and carries the baud",
+          "[skywatcher][serial][probe]") {
+    // Issue #230: a Synta EQ board over its own USB port speaks 115200 and
+    // never answered the 9600-only scan. probe_skywatcher_port_any_baud()
+    // tries 9600 first (a Wave answers there) and then 115200.
+    FakeSkyWatcherSerialBoard board;
+    sw::MotorBoardInfo info;
+    int baud = 0;
+
+    SECTION("a Wave answers the 9600 attempt") {
+        REQUIRE(sw::probe_skywatcher_port_any_baud(board.slave_path(), info, baud));
+        CHECK(baud == 9600);
+        CHECK(info.firmware_version == "3.58");
+        CHECK(board.count_frames('e') == 1);  // no second attempt
+    }
+
+    SECTION("an EQM-35 board only decodes at 115200") {
+        board.set_version_reply("032732");  // MC 3.39, mount code 0x32
+        board.answer_only_at_baud(115200);
+        REQUIRE(sw::probe_skywatcher_port_any_baud(board.slave_path(), info, baud));
+        CHECK(baud == 115200);
+        CHECK(info.firmware_version == "3.39");
+        CHECK(info.mount_code == 0x32);
+        CHECK(info.model_name == "EQM-35 Pro");
+    }
+
+    SECTION("a port another device holds is not probed at all") {
+        // The re-check after open() (issue #230) and the echo guard's own
+        // registry look: nothing is written to a held port at either rate.
+        const std::string key = std::filesystem::canonical(board.slave_path()).string();
+        alpacacore::util::mark_serial_port_open(key);
+        REQUIRE_FALSE(sw::probe_skywatcher_port_any_baud(key, info, baud));
+        REQUIRE(board.frames().empty());
+        alpacacore::util::mark_serial_port_closed(key);
+    }
 }
 
 #endif  // _WIN32

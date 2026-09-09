@@ -116,6 +116,22 @@ public:
         straggler_ms_ = straggler_ms;
     }
 
+    /// The ":e1" payload (default "033A44": Wave 100i, MC 3.58 / code 0x44).
+    void set_version_reply(std::string payload) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        version_reply_ = std::move(payload);
+    }
+
+    /// Answer frames only while the wrapper has the line configured at
+    /// @p baud (0 = any). A pty carries no real signalling rate, but the
+    /// termios speed the wrapper sets on its fd is visible on every fd of
+    /// the same slave, so this models a board that only decodes at its own
+    /// rate: the 9600 probe gets silence, the 115200 one an answer.
+    void answer_only_at_baud(int baud) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        answer_baud_ = baud;
+    }
+
     /// Refuse ":i" with "!0" (Unknown command), as a board without the
     /// step-period readback does.
     void set_no_readback(bool no_readback) {
@@ -167,8 +183,28 @@ private:
     }
 
     // Returns the reply for one frame (without the trailing CR).
+    // The speed currently configured on the slave (the wrapper's fd and the
+    // keepalive fd share one termios).
+    int line_baud() const {
+        struct termios tty {};
+        if (keepalive_fd_ < 0 || tcgetattr(keepalive_fd_, &tty) != 0) return 0;
+        switch (cfgetispeed(&tty)) {
+            case B9600:
+                return 9600;
+            case B115200:
+                return 115200;
+            default:
+                return -1;
+        }
+    }
+
+    // Returns the reply for one frame (without the trailing CR), or an empty
+    // string for "stay silent".
     std::string handle(const std::string& frame) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (answer_baud_ != 0 && line_baud() != answer_baud_) {
+            return "";  // wrong rate for this board: nothing decodable arrives
+        }
         frames_.push_back(frame);
         if (frame.size() < 2) return "!3";
         const char cmd = frame[0];
@@ -182,7 +218,7 @@ private:
         }
         switch (cmd) {
             case 'e':
-                return "=033A44";
+                return "=" + version_reply_;
             case 'a':
                 return "=" + u24(4147200);
             case 'b':
@@ -242,7 +278,11 @@ private:
                 }
                 const std::string frame = pending;
                 pending.clear();
-                const std::string reply = handle(frame) + "\r";
+                const std::string body = handle(frame);
+                if (body.empty()) {
+                    continue;  // silent: the board did not decode the frame
+                }
+                const std::string reply = body + "\r";
                 int delay = 0;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -284,6 +324,8 @@ private:
     uint32_t t1_[2] = {0, 0};
     int delay_ms_ = 0;
     char delay_command_ = 0;
+    std::string version_reply_ = "033A44";
+    int answer_baud_ = 0;
     int mispair_left_ = 0;
     std::string straggler_;
     int straggler_ms_ = 0;

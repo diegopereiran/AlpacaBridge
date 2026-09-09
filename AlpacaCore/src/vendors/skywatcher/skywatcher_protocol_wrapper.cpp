@@ -273,11 +273,10 @@ uint32_t SkyWatcherProtocolWrapper::decode_u24(const std::string& data) {
 
 // ── Serial probe / enumeration ──────────────────────────────────────────────
 
-namespace {
-
 #ifndef _WIN32
-// Open a serial port at 9600 8N1 and probe it with ":e1\r". Returns the motor
-// board version string on success, empty on failure.
+// Open a serial port at @p baud_rate 8N1 and probe it with ":e1\r". Returns
+// the motor board version payload on success, empty on failure. Declared in
+// the public header (with probe_skywatcher_port_any_baud) for the pty tests.
 std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     // A SynScan hand controller shares the adapter classes this scan targets
     // and speaks its own protocol at 9600. It is only put at risk by a probe
@@ -410,6 +409,8 @@ bool probe_skywatcher_port_any_baud(const std::string& port_path, MotorBoardInfo
     return false;
 }
 
+namespace {
+
 std::string describe_found_port(const SkyWatcherPortInfo& port) {
     return "Found Sky-Watcher " + port.model_name + " on " + port.port_path + " (MC firmware " + port.firmware_version +
            ", " + std::to_string(port.baud_rate) + " baud)";
@@ -424,9 +425,8 @@ bool raw_port_looks_like_skywatcher_candidate(const std::string& port_path) {
         *descriptor, {"STM32", "STMicroelectronics", "0483", "Prolific", "PL2303", "067b", "FTDI", "CP210", "CH340",
                       "CH341", "1a86", "Silicon_Labs", "USB_Serial", "USB-Serial"});
 }
-#endif  // _WIN32
-
 }  // namespace
+#endif  // _WIN32
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
     std::vector<SkyWatcherPortInfo> results;
@@ -743,16 +743,17 @@ private:
         std::string canonical_path = std::filesystem::canonical(info.port_path, path_ec).string();
         std::string registry_key = path_ec ? info.port_path : canonical_path;
 
-        if (alpacacore::util::is_serial_port_in_use(registry_key)) {
+        // Claim BEFORE opening: a concurrent auto-detect scan (this vendor's
+        // own, or another's) checks is_serial_port_in_use() then opens -- claiming
+        // first closes the window where it could slip in between our check and
+        // our open() and start reading this mount's replies. The check and the
+        // claim are one atomic step so two racing connects cannot both pass a
+        // separate check and both claim the port (PR #251 review).
+        if (!alpacacore::util::try_mark_serial_port_open(registry_key)) {
             ALPACA_LOG_ERROR("SkyWatcher",
                              "Port " + registry_key + " is already held open by another connected device");
             return false;
         }
-        // Claim BEFORE opening: a concurrent auto-detect scan (this vendor's
-        // own, or another's) checks is_serial_port_in_use() then opens -- claiming
-        // first closes the window where it could slip in between our check and
-        // our open() and start reading this mount's replies.
-        alpacacore::util::mark_serial_port_open(registry_key);
 
         serial_fd_ = open(info.port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
