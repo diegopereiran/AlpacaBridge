@@ -164,6 +164,16 @@ public:
         ax(axis).stall_live_rate_writes = n;
     }
 
+    /// Swallow the re-latch of the next @p n ":J" on a RUNNING axis: the kick
+    /// is acknowledged but the stored preset still is not applied. Combined
+    /// with stall_live_rate_writes this is a stall that survives the driver's
+    /// unconditional ":I"+":J" and can only be recovered by the sampled
+    /// rate-applied check re-kicking (verify_live_rate_or_rekick).
+    void ignore_start_relatches(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).ignore_start_relatches = n;
+    }
+
     /// The T1 step period the axis is actually running with (last APPLIED ":I").
     uint32_t step_period(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -200,6 +210,7 @@ private:
         int stop_count = 0;
         int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
         int stall_live_rate_writes = 0;   // ":I" writes on a running axis to store but not apply (test knob)
+        int ignore_start_relatches = 0;   // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
@@ -348,6 +359,8 @@ private:
                 a.running = true;
                 if (a.in_goto) {
                     a.goto_target &= 0xFFFFFF;
+                } else if (a.ignore_start_relatches > 0) {
+                    --a.ignore_start_relatches;  // acked, preset still not applied
                 } else {
                     // Re-latch the current T1 preset into the running rate --
                     // this is what makes a ":J" kick after a stalled live

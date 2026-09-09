@@ -1055,7 +1055,7 @@ public:
                 // Runs unlocked (samples position across a short window):
                 // never hold mutex_ across a sleep -- see stop_axis_and_wait_locked.
                 const auto verify_start = std::chrono::steady_clock::now();
-                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate);
+                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate);
                 verify_elapsed = std::chrono::steady_clock::now() - verify_start;
             }
             auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec, pulse_restart]() {
@@ -1138,7 +1138,7 @@ public:
             // pulse task ~450 ms longer, which the next command's reap must
             // join. Not worth that latency on short guide pulses.
             if (stopped && restore_tracking && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
-                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec);
+                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, ra_restore_rate_deg_per_sec);
             }
             if (!stopped) {
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
@@ -1808,7 +1808,23 @@ private:
     // (see stop_axis_and_wait_locked) — it sleeps across the sample window,
     // via task_wait_for so a pulse cancellation aborts it promptly instead of
     // stalling teardown.
-    void verify_live_rate_or_rekick(int channel, double expected_rate_deg_per_sec) {
+    // Did a live step-period change take? Classify the observed rate by which
+    // of the two commanded rates it is closer to, so the check stays
+    // discriminating however small the change: a guide rate of 0.1x sidereal
+    // moves the RA rate by only 10%, well inside any fixed fractional
+    // tolerance (fork PR #6 review). Strict "closer to the new rate" -- a tie
+    // or a tiny delta falls on the "did not take" side, because a spurious
+    // re-kick costs one redundant ":I"+":J" at the rate the axis is already
+    // meant to run at, while a missed stall costs the whole pulse.
+    static bool live_rate_change_took(double observed_cps, double previous_cps, double expected_cps) {
+        const double o = std::abs(observed_cps);
+        return std::abs(o - std::abs(expected_cps)) < std::abs(o - std::abs(previous_cps));
+    }
+
+    void verify_live_rate_or_rekick(int channel, double previous_rate_deg_per_sec, double expected_rate_deg_per_sec) {
+        if (previous_rate_deg_per_sec == expected_rate_deg_per_sec) {
+            return;  // nothing changed, nothing to verify
+        }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         constexpr auto kSettle = std::chrono::milliseconds(150);
         constexpr auto kWindow = std::chrono::milliseconds(300);
@@ -1833,11 +1849,13 @@ private:
         const double observed_counts_per_sec = (static_cast<double>(after) - static_cast<double>(before)) / window_s;
         const double expected_counts_per_sec =
             std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
-        // Loose tolerance: this distinguishes "changed speed" from "still at
-        // the old rate", not a rate measurement — 25% comfortably separates
-        // the two without false-triggering on encoder jitter or a window
-        // that straddled the write.
-        if (std::abs(std::abs(observed_counts_per_sec) - expected_counts_per_sec) <= 0.25 * expected_counts_per_sec) {
+        const double previous_counts_per_sec =
+            std::abs(previous_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
+        // Not a rate measurement: this only has to tell "changed speed" from
+        // "still at the old rate". Nearest-of-the-two keeps that distinction
+        // sharp at small guide rates, where a fixed fraction of the expected
+        // rate would swallow the whole difference (see live_rate_change_took).
+        if (live_rate_change_took(observed_counts_per_sec, previous_counts_per_sec, expected_counts_per_sec)) {
             return;
         }
         // Board state is diagnostics only: if ":f" itself fails, still emit the
@@ -1854,7 +1872,8 @@ private:
         ALPACA_LOG_WARN("SkyWatcher",
                         "Axis " + std::to_string(channel) + " step-period change did not take: observed " +
                             std::to_string(observed_counts_per_sec) + " counts/s, expected " +
-                            std::to_string(expected_counts_per_sec) + " (" + board_state + "); resending :I and :J");
+                            std::to_string(expected_counts_per_sec) + " (was " + std::to_string(previous_counts_per_sec) +
+                            "; " + board_state + "); resending :I and :J");
         try {
             const AxisParameters& p = axis_params_[static_cast<std::size_t>(channel - 1)];
             double counts_per_sec = std::abs(expected_rate_deg_per_sec) * p.counts_per_revolution / 360.0;

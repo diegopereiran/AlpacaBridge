@@ -751,6 +751,41 @@ TEST_CASE("SkyWatcher async - a live step-period change the board stores but nev
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - the rate-applied check still catches a stall at a small guide rate",
+          "[skywatcher][async]") {
+    // Fork PR #6 review: the check used a fixed 25% tolerance on the expected
+    // pulse rate, so at guide rates below ~0.33x sidereal (East) / ~0.2x
+    // (West) an axis still stuck at sidereal read as "rate applied" and the
+    // re-kick never fired -- and 0.1-0.3x is a common autoguider setting. The
+    // check now classifies the observed rate by which commanded rate it is
+    // nearer to. Model a stall that survives the dispatch's own ":I"+":J"
+    // (the fake stores the preset, ignores one kick) at 0.1x sidereal and
+    // assert the sampled check re-kicks within the pulse.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_guide_rate({0.1 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.1 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->pulse_guide(2, 3000);  // East, long enough for the ~450 ms sampled check
+    REQUIRE(driver->get_is_pulse_guiding());
+
+    // Dispatch sends one ":J"; only the re-kick sends a second one before the
+    // end-of-pulse restore (which cannot arrive before the 3 s hold expires).
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 1500));
+    REQUIRE(mount.stop_count(1) == stops_before);  // a kick, never a stop/restart
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    REQUIRE(mount.axis_running(1));  // tracking restored after the pulse
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rate-applied check",
           "[skywatcher][async]") {
     // The rate-applied check (verify_live_rate_or_rekick) samples the axis
