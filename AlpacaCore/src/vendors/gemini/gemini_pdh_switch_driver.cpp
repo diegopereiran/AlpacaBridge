@@ -288,7 +288,10 @@ public:
     void set_switch(int id, bool state) override {
         validate_switch_id(id);
         ensure_connected();
-        set_switch_value(id, state ? get_max_switch_value(id) : kSwitches[static_cast<std::size_t>(id)].min);
+        // Resolve the (mode-dependent) max under the write lock so the value
+        // is computed, validated and sent against one mode.
+        std::lock_guard<std::mutex> write_lock(write_mutex_);
+        set_switch_value_locked(id, state ? get_max_switch_value(id) : kSwitches[static_cast<std::size_t>(id)].min);
     }
 
     void set_async(int id, bool /*state*/) override {
@@ -313,26 +316,8 @@ public:
     void set_switch_value(int id, double value) override {
         validate_switch_id(id);
         ensure_connected();
-        const auto& info = kSwitches[static_cast<std::size_t>(id)];
-        if (!info.writable) {
-            throw AlpacaException("Switch " + std::to_string(id) + " is read-only", AlpacaError::NotImplemented);
-        }
-        if (!std::isfinite(value)) {
-            throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
-        }
-        const double max = get_max_switch_value(id);
-        if (value < info.min || value > max) {
-            throw AlpacaException(
-                "Switch value out of range [" + std::to_string(info.min) + ", " + std::to_string(max) + "]",
-                AlpacaError::InvalidValue);
-        }
-        // Quantise to the switch step BEFORE commanding and recording, so the
-        // reported value is exactly what went on the wire.
-        const double quantised =
-            std::clamp(info.min + std::round((value - info.min) / info.step) * info.step, info.min, max);
-        dispatch_write(id, quantised);
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        commanded_[static_cast<std::size_t>(id)] = quantised;
+        std::lock_guard<std::mutex> write_lock(write_mutex_);
+        set_switch_value_locked(id, value);
     }
 
     void set_async_value(int id, double /*value*/) override {
@@ -473,6 +458,34 @@ private:
         }
     }
 
+    // Validate, quantise, send and record one write. Caller holds write_mutex_,
+    // so the DEW outputs' mode-dependent max (effective_dew_mode()) cannot
+    // change between the range check and the commanded-value record: a
+    // concurrent write to the matching mode switch waits for this one to
+    // finish (PR #236 review).
+    void set_switch_value_locked(int id, double value) {
+        const auto& info = kSwitches[static_cast<std::size_t>(id)];
+        if (!info.writable) {
+            throw AlpacaException("Switch " + std::to_string(id) + " is read-only", AlpacaError::NotImplemented);
+        }
+        if (!std::isfinite(value)) {
+            throw AlpacaException("Switch value must be a finite number", AlpacaError::InvalidValue);
+        }
+        const double max = get_max_switch_value(id);
+        if (value < info.min || value > max) {
+            throw AlpacaException(
+                "Switch value out of range [" + std::to_string(info.min) + ", " + std::to_string(max) + "]",
+                AlpacaError::InvalidValue);
+        }
+        // Quantise to the switch step BEFORE commanding and recording, so the
+        // reported value is exactly what went on the wire.
+        const double quantised =
+            std::clamp(info.min + std::round((value - info.min) / info.step) * info.step, info.min, max);
+        dispatch_write(id, quantised);
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        commanded_[static_cast<std::size_t>(id)] = quantised;
+    }
+
     // Send the command for a validated, quantised write.
     void dispatch_write(int id, double value) {
         const bool on = value > kSwitches[static_cast<std::size_t>(id)].min;
@@ -538,6 +551,11 @@ private:
 
     mutable std::mutex names_mutex_;  // guards switch_names_
     std::array<std::string, kPdhSwitchCount> switch_names_;
+
+    // Serializes every writable-switch write (validate + send + record) so a
+    // DEW value and the mode it was validated against can never disagree.
+    // Never taken by readers, so the FAST-target read path is unaffected.
+    std::mutex write_mutex_;
 
     mutable std::mutex state_mutex_;  // guards commanded_
     // Per-switch commanded value (writable switches only); unset until the

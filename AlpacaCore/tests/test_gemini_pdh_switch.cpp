@@ -307,6 +307,7 @@ TEST_CASE("Gemini PDH Protocol Wrapper - Status frame parsing", "[gemini][switch
 // streamed frames vs. pending requests, and the commanded-value write paths.
 // ---------------------------------------------------------------------------
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -480,4 +481,50 @@ TEST_CASE("Gemini PDH Switch Driver - Old firmware is refused at connect", "[gem
     CHECK_FALSE(driver->get_connected());
     CHECK(hub.received(">V#"));
     CHECK_FALSE(hub.received(">G#"));
+}
+
+TEST_CASE("Gemini PDH Switch Driver - Concurrent DEW value and mode writes never disagree",
+          "[gemini][switch][unit][fake]") {
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+
+    // One writer flips DEW6's mode between Manual and Switch while another
+    // writes the DEW6 output at whatever max the driver currently reports.
+    // Writes are serialized under the driver's write mutex, so the recorded
+    // value must always sit inside the range of the mode it was validated
+    // against -- an out-of-range InvalidValue here would mean a value was
+    // checked against a mode that changed underneath it (PR #236 review).
+    std::atomic<int> invalid_value_errors{0};
+    std::atomic<int> other_errors{0};
+    auto value_writer = [&] {
+        for (int i = 0; i < 150; ++i) {
+            try {
+                driver->set_switch(11, (i % 2) == 0);
+            } catch (const alpacacore::AlpacaException& e) {
+                if (e.error_code() == alpacacore::AlpacaError::InvalidValue) {
+                    invalid_value_errors.fetch_add(1);
+                } else {
+                    other_errors.fetch_add(1);
+                }
+            }
+        }
+    };
+    auto mode_writer = [&] {
+        for (int i = 0; i < 150; ++i) {
+            try {
+                driver->set_switch_value(13, (i % 2) == 0 ? 2.0 : 1.0);
+            } catch (const alpacacore::AlpacaException&) {
+                other_errors.fetch_add(1);
+            }
+        }
+    };
+    std::thread t1(value_writer);
+    std::thread t2(mode_writer);
+    t1.join();
+    t2.join();
+    CHECK(invalid_value_errors.load() == 0);
+    CHECK(other_errors.load() == 0);
+    // Final state is self-consistent: value within the max of the final mode.
+    CHECK(driver->get_switch_value(11) <= driver->get_max_switch_value(11));
+    CHECK(driver->get_switch_value(11) >= 0.0);
 }
