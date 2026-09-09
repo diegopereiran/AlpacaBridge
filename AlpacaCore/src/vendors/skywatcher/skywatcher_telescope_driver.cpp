@@ -1846,7 +1846,14 @@ private:
         }
         const AxisParameters& params = axis_params_[static_cast<std::size_t>(channel - 1)];
         const double window_s = std::chrono::duration<double>(kWindow).count();
-        const double observed_counts_per_sec = (static_cast<double>(after) - static_cast<double>(before)) / window_s;
+        // ":j" is a 24-bit counter: take the delta modulo 2^24 and re-sign it
+        // so a wrap inside the sample window reads as the few hundred counts
+        // it was, not as +/-16 million (fork PR #6 review).
+        int32_t delta = static_cast<int32_t>((after - before) & kCountsMask);
+        if (delta > static_cast<int32_t>(kCountsMask >> 1)) {
+            delta -= static_cast<int32_t>(kCountsMask) + 1;
+        }
+        const double observed_counts_per_sec = static_cast<double>(delta) / window_s;
         const double expected_counts_per_sec =
             std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
         const double previous_counts_per_sec =
