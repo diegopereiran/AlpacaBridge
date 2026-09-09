@@ -27,6 +27,7 @@ set(TEST_SOURCES
     test_error_handling.cpp
     test_poll_settle.cpp
     test_serial_by_id_scan.cpp
+    test_synscan_handset_probe.cpp
     test_units.cpp
     test_version_format.cpp
 )
@@ -57,7 +58,7 @@ if(TARGET alpacacore_synscan)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
-        test_skywatcher_async.cpp)
+        test_skywatcher_async.cpp test_skywatcher_serial.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp

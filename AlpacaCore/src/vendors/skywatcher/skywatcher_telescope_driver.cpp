@@ -246,9 +246,13 @@ public:
                 ALPACA_LOG_INFO("SkyWatcher", "Motor board: " + board.model_name + " (mount code " +
                                                   std::to_string(static_cast<int>(board.mount_code)) + "), firmware " +
                                                   board.firmware_version);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {
                 // Identity is cosmetic; a board that will not answer ":e" is
-                // still usable, so never fail the connect over it.
+                // still usable, so never fail the connect over it -- but do
+                // not keep a previous connection's identity either.
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                firmware_cache_.clear();
+                model_cache_.clear();
             }
 
             axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
@@ -1022,13 +1026,54 @@ public:
             // retries) runs here so pulse_guide() returns inside the STANDARD
             // response target. IsPulseGuiding is already true.
             bool verify_dispatch_rate = false;
+            // Set once the live ":I" at the pulse rate has gone out on a
+            // tracking axis. From then on a dispatch failure (the ":J"
+            // re-latch below throwing, say) leaves the axis running at the
+            // pulse rate with nothing scheduled to bring it back: before the
+            // ":J" kick a dispatch failure left the axis at its prior, safe
+            // drive rate. Give the drive-rate restore the same retried care
+            // as the end-of-pulse stop (#249 review).
+            bool ra_live_write_sent = false;
+            auto recover_ra_drive_rate = [this, &ra_live_write_sent, ra_restore_rate_deg_per_sec]() {
+                if (!ra_live_write_sent) {
+                    return;
+                }
+                constexpr int kRestoreAttempts = 3;
+                std::string last_error;
+                for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
+                    try {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        auto& proto = SkyWatcherProtocolWrapper::instance();
+                        proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
+                                              /*with_readback=*/false);
+                        proto.start_motion(kAxisRa);
+                        cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
+                        return;
+                    } catch (const std::exception& e) {
+                        last_error = e.what();
+                    } catch (...) {
+                        last_error = "unknown error";
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                ALPACA_LOG_ERROR("SkyWatcher",
+                                 "PulseGuide dispatch failed AFTER the RA pulse rate was written and "
+                                 "the drive-rate restore failed " +
+                                     std::to_string(kRestoreAttempts) +
+                                     " times: RA may be running at the guide rate: " + last_error);
+            };
             try {
                 std::unique_lock<std::mutex> lock(mutex_);
                 auto& proto = SkyWatcherProtocolWrapper::instance();
                 if (axis == kAxisDec) {
                     start_speed_motion_locked(lock, kAxisDec, dec_rate);
                 } else if (restore_tracking && !pulse_restart) {
-                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate));
+                    // No ":i" readback here: the axis is already running at
+                    // the pulse rate once ":I" is acknowledged, and the pulse
+                    // timer only starts after this returns, so an extra
+                    // round-trip would lengthen every pulse (#245 review).
+                    ra_live_write_sent = true;
+                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate), /*with_readback=*/false);
                     // A bare ":I" on an already-running axis is sometimes
                     // accepted (":i" readback matches) but never applied to
                     // the spinning motor -- ConformU: "PulseGuide East ...
@@ -1059,11 +1104,13 @@ public:
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
+                recover_ra_drive_rate();
                 std::lock_guard<std::mutex> lock(mutex_);
                 pulse_guiding_active_ = false;
                 return;
             } catch (...) {
                 ALPACA_LOG_WARN("SkyWatcher", "PulseGuide dispatch failed with unknown exception");
+                recover_ra_drive_rate();
                 std::lock_guard<std::mutex> lock(mutex_);
                 pulse_guiding_active_ = false;
                 return;
@@ -1076,7 +1123,7 @@ public:
                 // Runs unlocked (samples position across a short window):
                 // never hold mutex_ across a sleep -- see stop_axis_and_wait_locked.
                 const auto verify_start = std::chrono::steady_clock::now();
-                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate);
+                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate);
                 verify_elapsed = std::chrono::steady_clock::now() - verify_start;
             }
             auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec, pulse_restart]() {
@@ -1085,7 +1132,8 @@ public:
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped. Same ":J" kick as
                     // the dispatch above, for the same reason.
-                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec));
+                    proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
+                                          /*with_readback=*/false);
                     proto.start_motion(kAxisRa);
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
@@ -1159,7 +1207,7 @@ public:
             // pulse task ~450 ms longer, which the next command's reap must
             // join. Not worth that latency on short guide pulses.
             if (stopped && restore_tracking && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
-                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec);
+                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, ra_restore_rate_deg_per_sec);
             }
             if (!stopped) {
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
@@ -1861,7 +1909,23 @@ private:
     // (see stop_axis_and_wait_locked) — it sleeps across the sample window,
     // via task_wait_for so a pulse cancellation aborts it promptly instead of
     // stalling teardown.
-    void verify_live_rate_or_rekick(int channel, double expected_rate_deg_per_sec) {
+    // Did a live step-period change take? Classify the observed rate by which
+    // of the two commanded rates it is closer to, so the check stays
+    // discriminating however small the change: a guide rate of 0.1x sidereal
+    // moves the RA rate by only 10%, well inside any fixed fractional
+    // tolerance (fork PR #6 review). Strict "closer to the new rate" -- a tie
+    // or a tiny delta falls on the "did not take" side, because a spurious
+    // re-kick costs one redundant ":I"+":J" at the rate the axis is already
+    // meant to run at, while a missed stall costs the whole pulse.
+    static bool live_rate_change_took(double observed_cps, double previous_cps, double expected_cps) {
+        const double o = std::abs(observed_cps);
+        return std::abs(o - std::abs(expected_cps)) < std::abs(o - std::abs(previous_cps));
+    }
+
+    void verify_live_rate_or_rekick(int channel, double previous_rate_deg_per_sec, double expected_rate_deg_per_sec) {
+        if (previous_rate_deg_per_sec == expected_rate_deg_per_sec) {
+            return;  // nothing changed, nothing to verify
+        }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         constexpr auto kSettle = std::chrono::milliseconds(150);
         constexpr auto kWindow = std::chrono::milliseconds(300);
@@ -1883,14 +1947,23 @@ private:
         }
         const AxisParameters& params = axis_params_[static_cast<std::size_t>(channel - 1)];
         const double window_s = std::chrono::duration<double>(kWindow).count();
-        const double observed_counts_per_sec = (static_cast<double>(after) - static_cast<double>(before)) / window_s;
+        // ":j" is a 24-bit counter: take the delta modulo 2^24 and re-sign it
+        // so a wrap inside the sample window reads as the few hundred counts
+        // it was, not as +/-16 million (fork PR #6 review).
+        int32_t delta = static_cast<int32_t>((after - before) & kCountsMask);
+        if (delta > static_cast<int32_t>(kCountsMask >> 1)) {
+            delta -= static_cast<int32_t>(kCountsMask) + 1;
+        }
+        const double observed_counts_per_sec = static_cast<double>(delta) / window_s;
         const double expected_counts_per_sec =
             std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
-        // Loose tolerance: this distinguishes "changed speed" from "still at
-        // the old rate", not a rate measurement — 25% comfortably separates
-        // the two without false-triggering on encoder jitter or a window
-        // that straddled the write.
-        if (std::abs(std::abs(observed_counts_per_sec) - expected_counts_per_sec) <= 0.25 * expected_counts_per_sec) {
+        const double previous_counts_per_sec =
+            std::abs(previous_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
+        // Not a rate measurement: this only has to tell "changed speed" from
+        // "still at the old rate". Nearest-of-the-two keeps that distinction
+        // sharp at small guide rates, where a fixed fraction of the expected
+        // rate would swallow the whole difference (see live_rate_change_took).
+        if (live_rate_change_took(observed_counts_per_sec, previous_counts_per_sec, expected_counts_per_sec)) {
             return;
         }
         // Board state is diagnostics only: if ":f" itself fails, still emit the
@@ -1907,13 +1980,13 @@ private:
         ALPACA_LOG_WARN("SkyWatcher",
                         "Axis " + std::to_string(channel) + " step-period change did not take: observed " +
                             std::to_string(observed_counts_per_sec) + " counts/s, expected " +
-                            std::to_string(expected_counts_per_sec) + " (" + board_state + "); resending :I and :J");
+                            std::to_string(expected_counts_per_sec) + " (was " +
+                            std::to_string(previous_counts_per_sec) + "; " + board_state + "); resending :I and :J");
         try {
-            const AxisParameters& p = axis_params_[static_cast<std::size_t>(channel - 1)];
-            double counts_per_sec = std::abs(expected_rate_deg_per_sec) * p.counts_per_revolution / 360.0;
-            double preset = static_cast<double>(p.timer_frequency) / counts_per_sec;
-            preset = std::clamp(preset, 1.0, static_cast<double>(kCountsMask));
-            protocol.set_step_period(channel, static_cast<uint32_t>(std::lround(preset)));
+            // Same preset the dispatch computed (slow mode: a live change never
+            // switches speed mode). step_period_for_locked only reads
+            // axis_params_, immutable after connect, so it is safe unlocked.
+            protocol.set_step_period(channel, step_period_for_locked(channel, expected_rate_deg_per_sec, false));
             protocol.start_motion(channel);
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("SkyWatcher", "Resend after rate-applied check failed on axis " + std::to_string(channel) +
@@ -2266,7 +2339,18 @@ private:
             // place — the axis never stops. ":J" kick for the same reason
             // as the PulseGuide live-rate change (see
             // verify_live_rate_or_rekick): a bare ":I" here is not always
-            // enough on this firmware.
+            // enough on this firmware. Deliberately NOT followed by the
+            // sampled rate-applied check: this runs synchronously under
+            // mutex_ from the RightAscensionRate setter, and the check needs
+            // an unlocked ~450 ms sample window, which would blow the
+            // property's response target. A stall here has no natural end
+            // point (a standing property, not a bounded pulse), so a
+            // background one-shot verify is the right follow-up (tracked as
+            // open-astro/AlpacaBridge#248); the ConformU failure this fix
+            // targets was on the pulse path only.
+            if (eff == previous_effective) {
+                return;  // nothing changed: no write, no blocking ":J" round-trip under mutex_ (#249 review)
+            }
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             protocol.start_motion(kAxisRa);

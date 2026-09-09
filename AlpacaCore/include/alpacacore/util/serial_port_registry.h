@@ -48,6 +48,21 @@ inline void mark_serial_port_open(const std::string& path) {
     detail::serial_registry_set().insert(path);
 }
 
+/**
+ * @brief Register @p path as held open unless it already is.
+ * @return true if this call claimed the port; false if another device holds it.
+ *
+ * One critical section for the check and the claim: a connect that calls
+ * is_serial_port_in_use() and then mark_serial_port_open() leaves a window
+ * in which two racing connects (two vendors, or two instances) both pass
+ * the check and both claim the port.
+ */
+inline bool try_mark_serial_port_open(const std::string& path) {
+    if (path.empty()) return true;
+    std::lock_guard<std::mutex> lock(detail::serial_registry_mutex());
+    return detail::serial_registry_set().insert(path).second;
+}
+
 /** @brief Remove @p path from the in-use registry. */
 inline void mark_serial_port_closed(const std::string& path) {
     if (path.empty()) return;
