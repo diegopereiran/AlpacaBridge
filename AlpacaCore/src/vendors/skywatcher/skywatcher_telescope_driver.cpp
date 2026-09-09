@@ -2226,11 +2226,25 @@ private:
     // full fix: MoveAxis, which applies no sign transform at all, is the
     // hardware-observed reference for which way a raw axis rate moves
     // reported Dec (AGENTS.md, EQM-35 Pro at latitude -37.2).
-    // TODO(open-astro#255, deferred from #214): the sign is evaluated at (re)apply time and held;
-    // a session whose dec axis crosses the branch boundary (a2 through 0)
-    // between apply events keeps the stale sign until the next goto, pulse,
-    // tracking toggle, or rate write re-applies it. Long unattended sessions
-    // near the pole should re-set DeclinationRate after a meridian flip.
+    // The sign is evaluated once at (re)apply time and held: it is NOT
+    // re-evaluated as this offset's own motion carries the axis across the
+    // branch boundary (a2 through 0). This was tracked as a bug for a while
+    // (open-astro#255, deferred from #214) and even implemented -- and the
+    // "fix" made the axis reverse and oscillate right at the crossing,
+    // breaking the "DeclinationRate drives Dec with the east-branch sign"
+    // loopback test, which asserts a HELD sign for exactly this case.
+    // a2 = 0 is the celestial pole in this driver's convention (dec = 90 at
+    // a2 = 0 on both branches): continuing a raw axis motion through it
+    // necessarily produces a real cusp in reported Dec (it rises to 90 then
+    // falls), on any correctly-behaving mount -- confirmed on hardware during
+    // the EQM-35 Pro bring-up ("at a2 = 0, reported Dec rises for EITHER
+    // mechanical direction", see AGENTS.md). Holding the sign is what
+    // produces that correct cusp; dynamically flipping it to keep reported
+    // Dec monotonic would be fighting the mount's own geometry. Closed as
+    // not a bug: see open-astro#255 for the full derivation. Every real
+    // re-apply trigger (goto completion, sync, pulse end, MoveAxis stop,
+    // tracking toggle, a rate write) already re-reads the axis position
+    // fresh, which is the only case that ever needed covering.
     void apply_dec_rate_offset_locked(std::unique_lock<std::mutex>& lock, bool defer_motion = false) {
         double rate = dec_rate_arcsec_per_sec_ / 3600.0;
         if (rate == 0.0) {
