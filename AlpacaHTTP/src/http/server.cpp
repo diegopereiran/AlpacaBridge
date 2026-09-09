@@ -14,6 +14,9 @@
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/util/socket_utils.h>
 #include <alpacahttp/version.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -22,7 +25,6 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
-#include <queue>
 #include <stdexcept>
 #include <utility>
 
@@ -36,6 +38,19 @@ Server::Server(const Config& config)
     router_.set_server_info(config_.server_name(), config_.manufacturer(), alpacahttp::kVersion, config_.location(),
                             config_.profile_name());
     router_.set_config_path(config_.config_path());
+
+    // The reactor's wake pipe lives as long as the Server. Non-blocking on
+    // both ends: a wake is one byte, and a full pipe already means a wake is
+    // pending.
+    if (::pipe(reactor_wake_fds_) == 0) {
+        for (int pipe_fd : reactor_wake_fds_) {
+            ::fcntl(pipe_fd, F_SETFL, ::fcntl(pipe_fd, F_GETFL) | O_NONBLOCK);
+        }
+    } else {
+        util::log_error("Failed to create reactor wake pipe: " + util::socket_error_message(errno));
+        reactor_wake_fds_[0] = -1;
+        reactor_wake_fds_[1] = -1;
+    }
 }
 
 void Server::set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver) {
@@ -54,6 +69,60 @@ void Server::set_restart_callback(std::function<void()> callback) {
 
 Server::~Server() {
     stop();
+    {
+        // Anything stop() could not join because it ran on that thread.
+        // Joined here, on whatever thread destroys the Server, so no server
+        // thread survives the object. (Destroying the Server from inside one
+        // of its own request handlers is not supported.)
+        std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+        join_orphaned_threads(std::this_thread::get_id());
+    }
+    close_wake_pipe();
+}
+
+// Join every orphaned thread except the calling one. Caller holds
+// lifecycle_mutex_.
+void Server::join_orphaned_threads(std::thread::id current_id) {
+    std::vector<std::thread> still_orphaned;
+    for (auto& thread : orphaned_threads_) {
+        if (!thread.joinable()) {
+            continue;
+        }
+        if (thread.get_id() == current_id) {
+            still_orphaned.push_back(std::move(thread));
+            continue;
+        }
+        thread.join();
+    }
+    orphaned_threads_.swap(still_orphaned);
+}
+
+// Prepare the queues for a (re)start. Both are expected to be empty: stop()
+// joins the reactor, which closes what it held, and the workers, which drain
+// ready_queue_. Anything still here is a connection nobody owns, so it is
+// closed through close_connection rather than dropped, which is also what
+// keeps live_connections_ exact. The counter itself is never reset: every
+// connection is counted once at accept and once at close, whichever server
+// generation each happens in, so a connection that outlives a restart (a
+// worker detached because stop() was called on it) still balances.
+void Server::reset_queues_for_start() {
+    std::deque<ConnectionPtr> leftover_ready;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        shutdown_workers_ = false;
+        leftover_ready.swap(ready_queue_);
+    }
+    std::vector<ConnectionPtr> leftover_incoming;
+    {
+        std::lock_guard<std::mutex> lock(reactor_mutex_);
+        leftover_incoming.swap(reactor_incoming_);
+    }
+    for (auto& conn : leftover_ready) {
+        close_connection(std::move(conn), true);
+    }
+    for (auto& conn : leftover_incoming) {
+        close_connection(std::move(conn), true);
+    }
 }
 
 void Server::start() {
@@ -62,13 +131,7 @@ void Server::start() {
     }
 
     shutdown_requested_ = false;
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        shutdown_workers_ = false;
-        while (!connection_queue_.empty()) {
-            connection_queue_.pop();
-        }
-    }
+    reset_queues_for_start();
     running_ = true;
     run_server();
 }
@@ -79,13 +142,7 @@ void Server::start_async() {
     }
 
     shutdown_requested_ = false;
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        shutdown_workers_ = false;
-        while (!connection_queue_.empty()) {
-            connection_queue_.pop();
-        }
-    }
+    reset_queues_for_start();
     running_ = true;
     server_thread_ = std::thread(&Server::run_server, this);
 }
@@ -97,43 +154,99 @@ void Server::stop() {
 
     util::log_info("Stopping HTTP server...");
     running_ = false;
-    
-    // Shutdown worker threads
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        shutdown_workers_ = true;
-    }
-    queue_condition_.notify_all();
-    
-    // Wait for all worker threads to finish
     const auto current_id = std::this_thread::get_id();
-    for (auto& thread : worker_threads_) {
-        if (!thread.joinable()) {
-            continue;
+    // Phases 1 and 2 run under lifecycle_mutex_, serialized against
+    // run_server()'s spawn phase: either that phase ran first and every
+    // thread it made is in worker_threads_ and counted in worker_count_, or
+    // it runs after this and sees running_ false and spawns nothing. The
+    // mutex is released before phase 3 joins the server thread, which may be
+    // about to take it for exactly that check.
+    {
+        std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+
+        // 1. Reactor first. Once it stops accepting handoffs, a worker that
+        //    finishes a request closes the connection instead of parking it, and
+        //    the reactor closes every connection it was holding on its way out.
+        //    Nothing is ever parked past this point, so stop() no longer has to
+        //    wait out an idle gap: an idle client costs nothing here.
+        {
+            std::lock_guard<std::mutex> lock(reactor_mutex_);
+            reactor_accepting_ = false;
         }
-        if (thread.get_id() == current_id) {
-            thread.detach();
-            continue;
+        wake_reactor();
+        // Threads a previous stop() could not join because it ran on them.
+        join_orphaned_threads(current_id);
+        if (reactor_thread_.joinable()) {
+            // The reactor runs no handler code, so it cannot be the caller;
+            // the orphan branch is kept only so a future bug cannot deadlock.
+            if (reactor_thread_.get_id() == current_id) {
+                orphaned_threads_.push_back(std::move(reactor_thread_));
+            } else {
+                reactor_thread_.join();
+            }
         }
-        thread.join();
+
+        // 2. Workers. Each finishes what is queued (every response from now on
+        //    carries Connection: close, since running_ is false) and exits.
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            shutdown_workers_ = true;
+        }
+        // One permit per live worker, including any detached one that is no
+        // longer in worker_threads_, so none stays blocked on the semaphore.
+        ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
+        for (auto& thread : worker_threads_) {
+            if (!thread.joinable()) {
+                continue;
+            }
+            if (thread.get_id() == current_id) {
+                // stop() was called from inside a request handler on this
+                // worker (not a path any current handler takes: the management
+                // restart/shutdown endpoints run it on a detached thread). It
+                // cannot join itself. It finishes its request and exits on
+                // the shutdown flag or the generation check; its handle is
+                // kept, not detached, so the next stop() from another thread
+                // or the destructor joins it.
+                orphaned_threads_.push_back(std::move(thread));
+                continue;
+            }
+            thread.join();
+        }
+        worker_threads_.clear();
     }
-    worker_threads_.clear();
-    
-    // Shutdown and close the server socket to interrupt accept() call
+
+    // 3. Listener: shutdown before close so a blocked accept() wakes up.
     auto fd = server_fd_.exchange(util::kInvalidSocket);
     if (fd != util::kInvalidSocket) {
-        util::socket_shutdown(fd);  // Shutdown before close to ensure accept() wakes up
+        util::socket_shutdown(fd);
         util::socket_close(fd);
     }
-    
+
     if (server_thread_.joinable()) {
         if (server_thread_.get_id() == current_id) {
-            server_thread_.detach();
+            // Unreachable (run_server() never calls stop()); kept as an
+            // orphan rather than a detach for the same reason as above.
+            std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+            orphaned_threads_.push_back(std::move(server_thread_));
         } else {
             server_thread_.join();
         }
     }
     util::log_info("HTTP server stopped");
+}
+
+// Destructor only, after every thread has been joined. The pipe is never
+// closed or replaced while the Server is alive: stop() may return with the
+// accept loop still unwinding (blocking start() stopped from a handler), and
+// an orphaned worker may still call wake_reactor() until it is joined, and
+// either would otherwise write into a recycled descriptor.
+void Server::close_wake_pipe() {
+    for (int& pipe_fd : reactor_wake_fds_) {
+        if (pipe_fd >= 0) {
+            ::close(pipe_fd);
+            pipe_fd = -1;
+        }
+    }
 }
 
 void Server::wait() {
@@ -149,6 +262,34 @@ namespace {
 // worker is mid-request, and a backlog shorter than that burst turns into
 // refused connections rather than a short wait.
 constexpr int kListenBacklog = 64;
+
+// Per-connection socket timeout: a peer that stalls mid-request (slowloris)
+// or mid-response is disconnected after this many seconds of inactivity.
+constexpr int kSocketTimeoutSeconds = 30;
+
+// Resolve the peer address once per connection so the router can
+// discriminate clients that send no ClientID in the per-client Connected
+// registry (issue #163).
+std::string peer_address_string(const struct sockaddr_storage& peer) {
+    char addr_buf[INET6_ADDRSTRLEN] = {0};
+    if (peer.ss_family == AF_INET) {
+        inet_ntop(AF_INET, &reinterpret_cast<const struct sockaddr_in*>(&peer)->sin_addr, addr_buf, sizeof(addr_buf));
+    } else if (peer.ss_family == AF_INET6) {
+        // On the dual-stack listener an IPv4 client arrives as a v4-mapped
+        // IPv6 peer (::ffff:a.b.c.d); report the plain dotted form so the
+        // registry key and logs keep the format the IPv4-only listener
+        // produced.
+        const struct in6_addr* a6 = &reinterpret_cast<const struct sockaddr_in6*>(&peer)->sin6_addr;
+        if (IN6_IS_ADDR_V4MAPPED(a6)) {
+            struct in_addr a4 {};
+            std::memcpy(&a4, &a6->s6_addr[12], sizeof(a4));
+            inet_ntop(AF_INET, &a4, addr_buf, sizeof(addr_buf));
+        } else {
+            inet_ntop(AF_INET6, a6, addr_buf, sizeof(addr_buf));
+        }
+    }
+    return addr_buf;
+}
 
 // Create a bound, listening HTTP socket on `port`. Prefers a dual-stack IPv6
 // socket (IPV6_V6ONLY off) so both ::1 and 127.0.0.1 connect directly; falls
@@ -271,16 +412,77 @@ void Server::run_server() {
         return false;
     };
 
-    // Start worker thread pool for handling concurrent requests
+    // Self-pipe the reactor sleeps on alongside its idle connections, so a
+    // worker parking a connection (or stop()) can wake it without a timeout
+    // spin. Created by the constructor; refuse to run without it.
+    if (reactor_wake_fds_[0] < 0 || reactor_wake_fds_[1] < 0) {
+        util::log_error("Reactor wake pipe unavailable; cannot start HTTP server");
+        running_ = false;
+        auto listener = server_fd_.exchange(util::kInvalidSocket);
+        if (listener != util::kInvalidSocket) {
+            util::socket_close(listener);
+        }
+        return;
+    }
     std::size_t pool_size = config_.thread_pool_size();
-    worker_threads_.reserve(pool_size);
-    for (size_t i = 0; i < pool_size; ++i) {
-        worker_threads_.emplace_back(&Server::worker_thread, this);
+    {
+        // Spawn phase, serialized against stop(): either stop() has not run
+        // yet and will find every thread made here in worker_threads_ and
+        // counted, or it already ran (start_async() followed at once by
+        // stop()) and there is nothing to spawn for.
+        std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+        if (!running_) {
+            auto listener = server_fd_.exchange(util::kInvalidSocket);
+            if (listener != util::kInvalidSocket) {
+                util::socket_close(listener);
+            }
+            util::log_info("Server stopped");
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(reactor_mutex_);
+            reactor_accepting_ = true;
+        }
+        reactor_thread_ = std::thread(&Server::reactor_loop, this);
+
+        // Start worker thread pool for handling concurrent requests. A new
+        // generation: any worker left over from the previous one (detached
+        // because stop() was called on it) wakes, sees its generation is
+        // stale, and exits instead of serving alongside these.
+        std::uint64_t generation = 0;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            generation = ++worker_generation_;
+        }
+        // One permit per worker still alive from a previous generation
+        // (detached across a restart), so each wakes, sees its generation is
+        // stale, and exits, however many there are. The new pool is counted
+        // below, after this, so none of these permits are consumed by it.
+        ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
+        worker_threads_.reserve(pool_size);
+        for (size_t i = 0; i < pool_size; ++i) {
+            // Counted before the thread exists, so a stop() that follows
+            // this phase releases a permit for it even if it has not yet
+            // executed an instruction.
+            worker_count_.fetch_add(1, std::memory_order_relaxed);
+            worker_threads_.emplace_back(&Server::worker_thread, this, generation);
+        }
     }
     util::log_info("Started " + std::to_string(pool_size) + " worker threads for concurrent request handling");
 
+    const std::size_t max_connections = config_.max_connections();
+
     // Accept connections using select() to allow checking running_ flag periodically
     while (running_) {
+        // At the connection bound, stop accepting rather than accept-and-
+        // refuse: the kernel keeps completing handshakes into the listen
+        // backlog, so a new client waits (an idle connection expires within
+        // kKeepAliveIdleSeconds) instead of getting a reset. Polled rather
+        // than signalled; the 20 ms adds nothing a client can notice.
+        if (live_connections_.load(std::memory_order_relaxed) >= max_connections) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
         // Use select() to wait for connections with a timeout, so we can check running_ periodically
         fd_set read_fds;
         FD_ZERO(&read_fds);
@@ -347,12 +549,26 @@ void Server::run_server() {
                 }
             }
 
-            // Dispatch connection to worker thread pool for concurrent handling
-            {
-                std::lock_guard<std::mutex> lock(queue_mutex_);
-                connection_queue_.push(client_fd);
+            // Bound how long a slow or stalled peer can hold a worker mid-
+            // request (slowloris). Fail closed: without recv/send timeouts a
+            // stalled request could pin a worker forever.
+            if (!util::socket_set_timeouts(client_fd, kSocketTimeoutSeconds)) {
+                util::log_warning("Dropping connection, failed to set socket timeouts: " +
+                                  util::socket_error_message(util::socket_get_last_error()));
+                util::socket_close(client_fd);
+                continue;
             }
-            queue_condition_.notify_one();
+
+            auto conn = std::make_unique<Connection>();
+            conn->fd = client_fd;
+            conn->remote_address = peer_address_string(client_address);
+            conn->opened_at = std::chrono::steady_clock::now();
+            // The first request gets the same slowloris bound a worker's recv
+            // would have given it, but waited out on the reactor: a client
+            // that connects and never sends costs no worker at all.
+            conn->deadline = conn->opened_at + std::chrono::seconds(kSocketTimeoutSeconds);
+            live_connections_.fetch_add(1, std::memory_order_relaxed);
+            park_connection(std::move(conn));
         }
     }
 
@@ -365,10 +581,6 @@ void Server::run_server() {
 }
 
 namespace {
-
-// Per-connection socket timeout: a peer that stalls mid-request (slowloris)
-// or mid-response is disconnected after this many seconds of inactivity.
-constexpr int kSocketTimeoutSeconds = 30;
 
 // Upper bound on how long a whole request may take to arrive (headers +
 // body). Complements SO_RCVTIMEO, which only bounds the gap between bytes —
@@ -396,36 +608,18 @@ constexpr int kKeepAliveIdleSeconds = 15;
 // forbid outright) and adversarial ones to give up a worker periodically.
 constexpr std::uint64_t kMaxRequestsPerConnection = 1000;
 
-// Upper bound on how long a single connection may stay persistent, regardless
-// of request count. kMaxRequestsPerConnection alone still lets a connection
-// that sends one request every kKeepAliveIdleSeconds legitimately hold a
-// worker for up to ~4 hours (1000 * 15s), and a client that simply reconnects
-// immediately afterward repeats that indefinitely (PR #2 review). This is a
-// second, independent cap on the same failure mode: once a connection has
-// been open this long, the NEXT response forces a reconnect no matter how few
-// requests it has served. Well under the request-count cap's worst case, so
-// it is the tighter bound in practice; a well-behaved long-lived client
-// (autoguiding, ConformU) pays one extra handshake every few minutes, which
-// is negligible next to the per-request handshake keep-alive exists to avoid.
-constexpr int kMaxConnectionLifetimeSeconds = 300;
-
-// How many workers are held back for connections that have not been served
-// yet. A keep-alive connection parks a worker for up to
-// kKeepAliveIdleSeconds between requests, so without a reserve the pool's
-// size stops bounding concurrent REQUESTS (what config.h documents it as)
-// and starts bounding concurrent CONNECTIONS -- a browser tab alone opens
-// ~6, and a rig running NINA, PHD2 and the web UI can hold every worker
-// while a new client waits in an unbounded queue with no dequeue deadline.
-// Past the reserve, connections are answered and closed, which is exactly
-// the pre-keep-alive behaviour, so the degradation is graceful.
-//
-// Proportional rather than fixed, with a floor of one: a fixed reserve of a
-// few workers would disable keep-alive outright on the small pools the
-// config allows (thread_pool_size can be set as low as 1).
-//
-// Stopgap: the reactor removes the tradeoff entirely by parking idle
-// connections on a poll set rather than on a worker.
-constexpr std::size_t keepalive_worker_reserve(std::size_t pool_size) { return pool_size / 8 > 1 ? pool_size / 8 : 1; }
+// The connection lifetime cap (Config::keep_alive_lifetime_seconds, 300 s by
+// default) is the second, independent bound on the same failure mode: the
+// count cap alone still lets a connection that sends one request every
+// kKeepAliveIdleSeconds stay persistent for ~4 hours (1000 * 15 s) and simply
+// reconnect afterward (PR #2 review). Once a connection has been open that
+// long, the NEXT response forces a reconnect no matter how few requests it
+// has served (never a reactor-side close, which would race the client's next
+// request; an idle connection past the cap just runs out its idle gap). A
+// well-behaved
+// long-lived client (autoguiding, ConformU) pays one extra handshake every
+// few minutes, negligible next to the per-request handshake keep-alive
+// exists to avoid. Lives in Config so the cap can be tested.
 
 // Upper bound on the request line + headers; larger header blocks are
 // rejected before any body is read.
@@ -520,48 +714,18 @@ bool may_persist(const Request& request, const Response& response) {
 // Returns false after sending an error response where possible (on a dead or
 // timed-out socket nothing can be sent); the caller closes the connection.
 //
-// `idle_timeout_pending`, when non-null, means the socket's SO_RCVTIMEO is
-// currently set to the short kKeepAliveIdleSeconds bound (the caller is
-// between requests on a keep-alive connection and does not yet know whether
-// the peer is idle or has already started sending). That short bound must
-// only govern the WAIT for the next request's first byte -- once it arrives,
-// this read is a normal in-progress request like any other and deserves the
-// same kSocketTimeoutSeconds per-recv budget request 1 gets, not a tighter
-// one just because it happens to be request 2+. So the first successful recv
-// below restores the normal timeout and clears the flag. Bytes carried over
-// from a pipelining client mean this request has ALREADY begun arriving, so
-// in that case the restore happens before any recv at all -- otherwise a
-// request whose headers were pre-carried but whose body trickles in later
-// would have its first body recv bound by the idle timeout, the same bug in
-// a different coat.
-bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus,
-                  bool* idle_timeout_pending) {
+// Every recv here runs under the per-request kSocketTimeoutSeconds bound set
+// at accept time. The wait BETWEEN requests never happens in this function:
+// a worker only reads a connection the reactor has already seen become
+// readable (or one with carried bytes), so by the time we get here the
+// request has begun arriving and deserves the same budget as request 1.
+bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::string& surplus) {
     char buffer[8192];
 
     // Total-request wall-clock deadline. SO_RCVTIMEO bounds each individual
     // recv, but a peer trickling one byte per just-under-timeout interval
     // would pass every per-recv check and pin this worker indefinitely.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kRequestDeadlineSeconds);
-
-    // Returns false (fail closed, matching every other timeout-setting call
-    // on this connection) if the restore itself fails -- silently leaving the
-    // socket on the tighter idle timeout for the rest of this request would
-    // reintroduce the exact bug this restore exists to fix.
-    auto note_recv = [&]() {
-        if (idle_timeout_pending != nullptr && *idle_timeout_pending) {
-            if (!util::socket_set_recv_timeout(socket_fd, kSocketTimeoutSeconds)) {
-                return false;
-            }
-            *idle_timeout_pending = false;
-        }
-        return true;
-    };
-
-    // Carried-over bytes mean the idle wait is already over: restore the
-    // per-request budget before the first recv, not after it.
-    if (!raw_request.empty() && !note_recv()) {
-        return false;
-    }
 
     // Skip any empty line(s) before the request line. RFC 7230 §3.5 says a
     // server SHOULD do this, and on a persistent connection it matters:
@@ -594,11 +758,7 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
         }
         int bytes_read = util::socket_recv(socket_fd, buffer, static_cast<int>(sizeof(buffer)));
         if (bytes_read <= 0) {
-            // Peer closed, error, or receive timeout — drop the connection.
-            // Between keep-alive requests this is the normal way out.
-            return false;
-        }
-        if (!note_recv()) {
+            // Peer closed, error, or receive timeout: drop the connection.
             return false;
         }
         if (std::chrono::steady_clock::now() > deadline) {
@@ -677,9 +837,6 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
         if (bytes_read <= 0) {
             return false;
         }
-        if (!note_recv()) {
-            return false;
-        }
         if (std::chrono::steady_clock::now() > deadline) {
             send_error(socket_fd, 408, "Request Timeout", "Request took too long to arrive");
             return false;
@@ -699,224 +856,352 @@ bool read_request(util::SocketHandle socket_fd, std::string& raw_request, std::s
 
 }  // namespace
 
-void Server::handle_connection(util::SocketHandle socket_fd) {
-    // Bound how long a slow or stalled peer can hold this worker (slowloris)
-    if (!util::socket_set_timeouts(socket_fd, kSocketTimeoutSeconds)) {
-        // Fail closed: without recv/send timeouts this connection could pin a
-        // worker thread forever (the slowloris hole the timeouts exist to plug).
-        util::log_warning("Dropping connection, failed to set socket timeouts: " +
-                          util::socket_error_message(util::socket_get_last_error()));
-        return;
-    }
-
-    // Resolve the peer address once per connection so the router can
-    // discriminate clients that send no ClientID in the per-client Connected
-    // registry (issue #163).
-    std::string remote_address;
-    {
-        struct sockaddr_storage peer {};
-        util::SocketLen peer_len = sizeof(peer);
-        char addr_buf[INET6_ADDRSTRLEN] = {0};
-        if (getpeername(socket_fd, reinterpret_cast<struct sockaddr*>(&peer), &peer_len) == 0) {
-            if (peer.ss_family == AF_INET) {
-                inet_ntop(AF_INET, &reinterpret_cast<struct sockaddr_in*>(&peer)->sin_addr, addr_buf, sizeof(addr_buf));
-            } else if (peer.ss_family == AF_INET6) {
-                // On the dual-stack listener an IPv4 client arrives as a
-                // v4-mapped IPv6 peer (::ffff:a.b.c.d); report the plain
-                // dotted form so the registry key and logs keep the format
-                // the IPv4-only listener produced.
-                const struct in6_addr* a6 = &reinterpret_cast<struct sockaddr_in6*>(&peer)->sin6_addr;
-                if (IN6_IS_ADDR_V4MAPPED(a6)) {
-                    struct in_addr a4 {};
-                    std::memcpy(&a4, &a6->s6_addr[12], sizeof(a4));
-                    inet_ntop(AF_INET, &a4, addr_buf, sizeof(addr_buf));
-                } else {
-                    inet_ntop(AF_INET6, a6, addr_buf, sizeof(addr_buf));
-                }
-            }
-        }
-        remote_address = addr_buf;
-    }
-
-    // Count this worker as parked on a connection for as long as it stays in
-    // the serve loop below, so concurrent connections can be bounded against
-    // the pool size. Scoped so every exit path -- including the early returns
-    // for a malformed request, a failed send and a dropped peer -- decrements
-    // exactly once.
-    struct KeepAliveWorkerGuard {
-        std::atomic<std::size_t>& counter;
-        explicit KeepAliveWorkerGuard(std::atomic<std::size_t>& c) : counter(c) {
-            counter.fetch_add(1, std::memory_order_relaxed);
-        }
-        ~KeepAliveWorkerGuard() { counter.fetch_sub(1, std::memory_order_relaxed); }
-        KeepAliveWorkerGuard(const KeepAliveWorkerGuard&) = delete;
-        KeepAliveWorkerGuard& operator=(const KeepAliveWorkerGuard&) = delete;
-    } keepalive_worker_guard(keepalive_workers_);
-
-    // Serve requests on this connection until the client asks to close, the
-    // request is malformed, the idle gap runs out, or the send fails. Bytes
+// Serve exactly one request on `conn`. Returns KeepOpen when the connection
+// may persist (the caller decides whether to keep serving carried bytes or
+// hand it back to the reactor) and Close when it must end: the client asked,
+// the request was malformed, a cap fired, the server is stopping, the
+// exchange was not framed with certainty, or a send failed.
+Server::ServeResult Server::serve_one_request(Connection& conn) {
+    // Read request (headers, then exactly Content-Length body bytes). Bytes
     // read past the end of one request (a pipelining client) seed the next.
-    std::string carried;
-    bool first_request = true;
-    std::uint64_t requests_served = 0;
-    const auto connection_opened_at = std::chrono::steady_clock::now();
-    while (true) {
-        // Whether the socket's SO_RCVTIMEO is currently the short idle bound
-        // rather than the normal per-request one; read_request clears this
-        // (restoring kSocketTimeoutSeconds) the moment the peer's first byte
-        // of the new request actually arrives, so the 15s bound covers only
-        // the wait between requests, never the request itself.
-        bool idle_timeout_pending = false;
-        if (!first_request) {
-            // Between requests the peer may legitimately go quiet; bound how
-            // long an idle keep-alive connection can hold this worker.
-            if (!util::socket_set_recv_timeout(socket_fd, kKeepAliveIdleSeconds)) {
-                return;
-            }
-            idle_timeout_pending = true;
-        }
-
-        // Read request (headers, then exactly Content-Length body bytes)
-        std::string raw_request = std::move(carried);
-        carried.clear();
-        if (!read_request(socket_fd, raw_request, carried, &idle_timeout_pending)) {
-            return;
-        }
-
-        // Parse request
-        Request request;
-        if (!request.parse(raw_request)) {
-            send_error(socket_fd, 400, "Bad Request", "Invalid request");
-            return;
-        }
-        request.set_remote_address(remote_address);
-
-        bool keep_alive = wants_keep_alive(request);
-        ++requests_served;
-        const auto connection_age = std::chrono::steady_clock::now() - connection_opened_at;
-        if (requests_served >= kMaxRequestsPerConnection ||
-            connection_age >= std::chrono::seconds(kMaxConnectionLifetimeSeconds)) {
-            // Force a reconnect so this connection can't hold the worker
-            // forever -- by request count or by wall clock, whichever comes
-            // first. A fresh TCP handshake at either bound is negligible next
-            // to the per-request handshake this feature exists to avoid.
-            keep_alive = false;
-        }
-        const std::size_t pool_size = config_.thread_pool_size();
-        if (keep_alive &&
-            keepalive_workers_.load(std::memory_order_relaxed) + keepalive_worker_reserve(pool_size) > pool_size) {
-            // Parking this connection would hold a worker for up to
-            // kKeepAliveIdleSeconds while a client that has no connection yet
-            // waits in connection_queue_, which is unbounded and has no
-            // dequeue deadline. The caps above bound how long ONE connection
-            // lives; they do not bound how many workers are parked at once.
-            //
-            // A parked worker is blocked in recv and cannot notice the queue
-            // growing, so the decision has to be made here, on the way in.
-            // Under pressure the server degrades to close-per-request -- its
-            // behaviour before keep-alive existed -- instead of leaving new
-            // clients unserved for minutes.
-            //
-            // Stopgap. The reactor (see the connection-ownership notes in
-            // AGENTS.md) parks idle connections on a poll set instead of a
-            // worker, which removes the tradeoff and this check with it.
-            keep_alive = false;
-        }
-        if (!running_) {
-            // stop() joins every worker, and a worker only leaves this loop
-            // when the connection ends. Without this check a client that
-            // keeps sending (NINA/PHD2 polling) holds the worker -- and so
-            // stop() -- until the lifetime cap, long past systemd's 90s
-            // TimeoutStopSec. Measured: stop() blocked 26s behind a client
-            // sending every 2s, serving every one of its requests. Answer
-            // this request, tell the client to reconnect, and get out.
-            keep_alive = false;
-        }
-
-        // Generate transaction ID (thread-safe)
-        static std::atomic<std::uint32_t> transaction_counter{0};
-        std::uint32_t server_tx_id = ++transaction_counter;
-
-        // Route request
-        Response response = router_.route(request, server_tx_id);
-
-        // Persistence is opt-in: whatever the client asked for, only keep the
-        // connection open if this exchange is one we framed correctly.
-        keep_alive = keep_alive && may_persist(request, response);
-
-        // A handler that set its own Connection header can only narrow
-        // keep_alive to false, never widen it back to true past the count/
-        // lifetime caps above. Matched case-insensitively for consistency
-        // with how the request-side Connection header is parsed in
-        // wants_keep_alive -- no handler sets this today, but a
-        // differently-cased "Keep-Alive" would otherwise be silently treated
-        // as a close.
-        const std::string& connection_header = response.get_header("Connection");
-        if (!connection_header.empty()) {
-            std::string lower_connection_header = connection_header;
-            std::transform(lower_connection_header.begin(), lower_connection_header.end(),
-                           lower_connection_header.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            keep_alive = keep_alive && lower_connection_header == "keep-alive";
-        }
-        // Always rewrite the header to match the final decision (rather than
-        // only setting it when absent) -- otherwise a handler that had set
-        // "Connection: keep-alive" before the count/lifetime caps forced
-        // keep_alive to false would leave that stale header on the wire: the
-        // client would read "keep-alive" while the server closes the socket
-        // right after sending, a protocol-violating response (review round
-        // 3). Explicitly writing "close" here is identical to leaving the
-        // header unset, since Response::to_string() defaults to "close".
-        response.set_header("Connection", keep_alive ? "keep-alive" : "close");
-
-        // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
-        std::string response_str = response.to_string();
-        if (!util::socket_send_all(socket_fd, response_str.c_str(), response_str.size())) {
-            util::log_warning("Failed to send full response: " +
-                              util::socket_error_message(util::socket_get_last_error()));
-            return;
-        }
-
-        if (!keep_alive) {
-            return;
-        }
-        first_request = false;
+    std::string raw_request = std::move(conn.carried);
+    conn.carried.clear();
+    if (!read_request(conn.fd, raw_request, conn.carried)) {
+        return ServeResult::Close;
     }
+
+    // Parse request
+    Request request;
+    if (!request.parse(raw_request)) {
+        send_error(conn.fd, 400, "Bad Request", "Invalid request");
+        return ServeResult::Close;
+    }
+    request.set_remote_address(conn.remote_address);
+
+    bool keep_alive = wants_keep_alive(request);
+    ++conn.requests_served;
+    const auto connection_age = std::chrono::steady_clock::now() - conn.opened_at;
+    if (conn.requests_served >= kMaxRequestsPerConnection ||
+        connection_age >= std::chrono::seconds(config_.keep_alive_lifetime_seconds())) {
+        // Force a reconnect so one connection cannot stay persistent forever
+        // -- by request count or by wall clock, whichever comes first. A
+        // fresh TCP handshake at either bound is negligible next to the
+        // per-request handshake this feature exists to avoid.
+        keep_alive = false;
+    }
+    if (!running_) {
+        // stop() has begun. The reactor is already refusing handoffs, so a
+        // KeepOpen here would be closed anyway; saying so in the response
+        // lets a polling client (NINA/PHD2) reconnect cleanly instead of
+        // reading EOF on its next request.
+        keep_alive = false;
+    }
+
+    // Generate transaction ID (thread-safe)
+    static std::atomic<std::uint32_t> transaction_counter{0};
+    std::uint32_t server_tx_id = ++transaction_counter;
+
+    // Route request
+    Response response = router_.route(request, server_tx_id);
+
+    // Persistence is opt-in: whatever the client asked for, only keep the
+    // connection open if this exchange is one we framed correctly.
+    keep_alive = keep_alive && may_persist(request, response);
+
+    // A handler that set its own Connection header can only narrow
+    // keep_alive to false, never widen it back to true past the count/
+    // lifetime caps above. Matched case-insensitively for consistency
+    // with how the request-side Connection header is parsed in
+    // wants_keep_alive -- no handler sets this today, but a
+    // differently-cased "Keep-Alive" would otherwise be silently treated
+    // as a close.
+    const std::string& connection_header = response.get_header("Connection");
+    if (!connection_header.empty()) {
+        std::string lower_connection_header = connection_header;
+        std::transform(lower_connection_header.begin(), lower_connection_header.end(), lower_connection_header.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        keep_alive = keep_alive && lower_connection_header == "keep-alive";
+    }
+    // Always rewrite the header to match the final decision (rather than
+    // only setting it when absent) -- otherwise a handler that had set
+    // "Connection: keep-alive" before the count/lifetime caps forced
+    // keep_alive to false would leave that stale header on the wire: the
+    // client would read "keep-alive" while the server closes the socket
+    // right after sending, a protocol-violating response (review round
+    // 3). Explicitly writing "close" here is identical to leaving the
+    // header unset, since Response::to_string() defaults to "close".
+    response.set_header("Connection", keep_alive ? "keep-alive" : "close");
+
+    // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
+    std::string response_str = response.to_string();
+    if (!util::socket_send_all(conn.fd, response_str.c_str(), response_str.size())) {
+        util::log_warning("Failed to send full response: " + util::socket_error_message(util::socket_get_last_error()));
+        return ServeResult::Close;
+    }
+
+    return keep_alive ? ServeResult::KeepOpen : ServeResult::Close;
 }
 
-void Server::worker_thread() {
+void Server::worker_thread(std::uint64_t generation) {
+    // Counted by run_server() at spawn; this thread only ever decrements.
     while (true) {
-        util::SocketHandle client_fd = util::kInvalidSocket;
-        
-        // Wait for a connection to handle
+        ConnectionPtr conn;
+
+        // Wait for a permit: a queued connection, a stop, or a generation
+        // change. The critical section below is only the pop.
+        ready_signal_.acquire();
         {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            queue_condition_.wait(lock, [this] {
-                return !connection_queue_.empty() || shutdown_workers_;
-            });
-            
-            if (shutdown_workers_ && connection_queue_.empty()) {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (worker_generation_ != generation) {
+                // A newer generation of workers owns the queue now. This
+                // thread was detached by a stop() it called itself (a
+                // request handler that restarted the server synchronously);
+                // whatever is queued belongs to the new pool.
+                break;
+            }
+            if (shutdown_workers_ && ready_queue_.empty()) {
                 // Shutdown requested and no more work
                 break;
             }
-            
-            if (!connection_queue_.empty()) {
-                client_fd = connection_queue_.front();
-                connection_queue_.pop();
+
+            if (!ready_queue_.empty()) {
+                conn = std::move(ready_queue_.front());
+                ready_queue_.pop_front();
             }
         }
-        
-        if (client_fd != util::kInvalidSocket) {
-            // Handle the connection
-            handle_connection(client_fd);
-            // Every exit path in handle_connection lands here, so this is the
-            // single place a client socket is closed. Close gracefully: with
-            // keep-alive the peer often has its next request already in our
-            // receive queue when we decide to stop, and a plain close() on a
-            // socket with unread bytes sends RST, which makes the peer
-            // discard the response we just sent it.
-            util::socket_close_graceful(client_fd);
+        if (!conn) {
+            continue;
         }
+
+        if (conn->close_only) {
+            // The reactor gave up waiting on it (idle gap or lifetime cap).
+            // Closed here, gracefully, so the reactor never blocks in a drain.
+            close_connection(std::move(conn), true);
+            continue;
+        }
+
+        // Serve the request the reactor saw arrive. Then keep going only
+        // while there are buffered bytes from a pipelining client: the
+        // reactor polls the socket and would never see them. A lone stray
+        // CRLF after a body is not a request, so it is stripped before that
+        // decision -- otherwise the worker would sit in recv waiting for a
+        // request that may be seconds away, which is exactly the idle wait
+        // the reactor exists to take off the pool.
+        ServeResult result;
+        do {
+            result = serve_one_request(*conn);
+            std::size_t skip = 0;
+            while (conn->carried.compare(skip, 2, "\r\n") == 0) {
+                skip += 2;
+            }
+            conn->carried.erase(0, skip);
+        } while (result == ServeResult::KeepOpen && !conn->carried.empty());
+
+        if (result != ServeResult::KeepOpen) {
+            // Every closing exit of serve_one_request lands here: this and
+            // the close_only branch above are the client-close sites for
+            // served connections. Graceful, because with keep-alive the
+            // peer often has its next request already in our receive queue
+            // when we decide to stop, and a plain close() on a socket with
+            // unread bytes sends RST.
+            close_connection(std::move(conn), true);
+            continue;
+        }
+
+        // Between requests the peer may legitimately go quiet; bound the
+        // wait. Deliberately NOT clamped to the lifetime cap: closing an
+        // idle connection the instant the cap passes races a polling
+        // client's next request (it would meet EOF instead of a response,
+        // and .NET HttpClient does not retry a PUT on a dead pooled
+        // connection). The cap is enforced on the next RESPONSE instead,
+        // with Connection: close, so the client reconnects cleanly; an idle
+        // connection past the cap costs at most one more idle gap.
+        conn->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kKeepAliveIdleSeconds);
+        park_connection(std::move(conn));
+    }
+    worker_count_.fetch_sub(1, std::memory_order_relaxed);
+}
+
+// Hand an idle connection to the reactor. After stop() has begun the reactor
+// no longer accepts, and the connection is closed here instead; nothing is
+// ever left parked with no one to poll it.
+void Server::park_connection(ConnectionPtr conn) {
+    bool parked = false;
+    {
+        std::lock_guard<std::mutex> lock(reactor_mutex_);
+        if (reactor_accepting_) {
+            reactor_incoming_.push_back(std::move(conn));
+            parked = true;
+        }
+    }
+    if (!parked) {
+        // Not parked: the reactor is gone. Graceful, since the peer may
+        // already have sent its next request.
+        close_connection(std::move(conn), true);
+        return;
+    }
+    wake_reactor();
+}
+
+void Server::enqueue_ready(ConnectionPtr conn) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        ready_queue_.push_back(std::move(conn));
+    }
+    ready_signal_.release();
+}
+
+// The single place a client socket is closed, so live_connections_ can never
+// drift: every owner ends a connection through here.
+void Server::close_connection(ConnectionPtr conn, bool graceful) {
+    if (!conn) {
+        return;
+    }
+    if (graceful) {
+        util::socket_close_graceful(conn->fd);
+    } else {
+        util::socket_close(conn->fd);
+    }
+    conn->fd = util::kInvalidSocket;
+    live_connections_.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void Server::wake_reactor() {
+    const int fd = reactor_wake_fds_[1];
+    if (fd < 0) {
+        return;
+    }
+    const char byte = 0;
+    // EAGAIN (pipe full) means a wake is already pending; any other failure
+    // is a closed pipe during stop(), where the reactor is on its way out.
+    (void)::write(fd, &byte, 1);
+}
+
+// The reactor: parks idle connections on a poll set and hands each one to the
+// worker pool the moment its next request begins to arrive. One thread, no
+// request parsing, no blocking calls except poll(). A connection is here
+// exactly when no worker holds it, which is what makes thread_pool_size mean
+// concurrent requests rather than concurrent connections: a hundred idle
+// clients cost a hundred pollfds and nothing else.
+void Server::reactor_loop() {
+    std::vector<ConnectionPtr> idle;
+    std::vector<struct pollfd> pfds;
+    const int wake_fd = reactor_wake_fds_[0];
+
+    while (true) {
+        // Take in what workers and the accept loop parked since last time,
+        // and find out whether stop() has begun (after draining, so nothing
+        // handed over in the meantime is lost).
+        bool accepting = true;
+        {
+            std::lock_guard<std::mutex> lock(reactor_mutex_);
+            for (auto& conn : reactor_incoming_) {
+                idle.push_back(std::move(conn));
+            }
+            reactor_incoming_.clear();
+            accepting = reactor_accepting_;
+        }
+        if (!accepting) {
+            break;
+        }
+
+        // Poll every idle connection plus the wake pipe, sleeping no longer
+        // than the nearest deadline (capped, so a clock oddity cannot park
+        // the reactor for long).
+        pfds.clear();
+        pfds.push_back({wake_fd, POLLIN, 0});
+        auto now = std::chrono::steady_clock::now();
+        int timeout_ms = 1000;
+        for (const auto& conn : idle) {
+            pfds.push_back({conn->fd, POLLIN, 0});
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(conn->deadline - now).count();
+            timeout_ms = static_cast<int>(std::min<long long>(timeout_ms, std::max<long long>(remaining, 0)));
+        }
+
+        const int ready = ::poll(pfds.data(), pfds.size(), timeout_ms);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            util::log_error("Reactor poll error: " + util::socket_error_message(errno));
+            // Do not spin on a persistent error; the connections still get
+            // their deadlines applied below.
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (pfds[0].revents != 0) {
+            char drain[64];
+            while (::read(wake_fd, drain, sizeof(drain)) > 0) {
+            }
+        }
+
+        // Readable (or hung up, or errored: the worker's recv will find out
+        // and close) goes to the pool; expired goes to the pool marked
+        // close-only; the rest stay parked.
+        now = std::chrono::steady_clock::now();
+        std::vector<ConnectionPtr> still_idle;
+        still_idle.reserve(idle.size());
+        for (std::size_t i = 0; i < idle.size(); ++i) {
+            ConnectionPtr& conn = idle[i];
+            const short revents = ready > 0 ? pfds[i + 1].revents : short{0};
+            if ((revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+                enqueue_ready(std::move(conn));
+            } else if (now >= conn->deadline) {
+                conn->close_only = true;
+                enqueue_ready(std::move(conn));
+            } else {
+                still_idle.push_back(std::move(conn));
+            }
+        }
+        idle.swap(still_idle);
+    }
+
+    // stop(). One last look, without waiting: a request that is already on
+    // the wire goes to the workers, which are still draining their queue and
+    // will answer it with Connection: close (serve_one_request sees
+    // running_ false).
+    pfds.clear();
+    for (const auto& conn : idle) {
+        pfds.push_back({conn->fd, POLLIN, 0});
+    }
+    std::vector<ConnectionPtr> quiet;
+    quiet.reserve(idle.size());
+    const int last_ready = idle.empty() ? 0 : ::poll(pfds.data(), pfds.size(), 0);
+    for (std::size_t i = 0; i < idle.size(); ++i) {
+        ConnectionPtr& conn = idle[i];
+        if (last_ready > 0 && (pfds[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+            enqueue_ready(std::move(conn));
+        } else {
+            quiet.push_back(std::move(conn));
+        }
+    }
+
+    // The rest were silent at that poll, but a request could land in the
+    // microseconds between it and a close(), and close() with unread bytes
+    // is an RST that makes the peer discard what it has not read. So close
+    // them the way socket_close_graceful does, in parallel rather than one
+    // 400 ms drain at a time: send FIN to all of them at once, give every
+    // peer one shared window to react (a well-behaved client closes on FIN
+    // and sends nothing after it), then drain without blocking and close.
+    // This is what keeps stop() at ~100 ms no matter how many clients were
+    // parked, instead of a per-connection wait through the exiting workers.
+    for (const auto& conn : quiet) {
+        ::shutdown(conn->fd, SHUT_WR);
+    }
+    if (!quiet.empty()) {
+        pfds.clear();
+        for (const auto& conn : quiet) {
+            pfds.push_back({conn->fd, POLLIN, 0});
+        }
+        ::poll(pfds.data(), pfds.size(), 100);
+    }
+    for (auto& conn : quiet) {
+        char sink[2048];
+        for (int i = 0; i < 4; ++i) {
+            if (::recv(conn->fd, sink, sizeof(sink), MSG_DONTWAIT) <= 0) {
+                break;
+            }
+        }
+        close_connection(std::move(conn), false);
     }
 }
 
