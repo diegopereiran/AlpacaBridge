@@ -736,10 +736,11 @@ private:
         // "acknowledged" by the previous command's data while its own frame
         // was never applied.
         if (serial_dirty_) {
-            settle_serial(200);
+            settle_serial(200);  // ends with its own tcflush
             serial_dirty_ = false;
+        } else {
+            tcflush(serial_fd_, TCIFLUSH);
         }
-        tcflush(serial_fd_, TCIFLUSH);
         if (!util::write_all(serial_fd_, frame.data(), frame.size())) {
             throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)));
         }
@@ -1131,7 +1132,7 @@ void SkyWatcherProtocolWrapper::set_goto_target(int axis, uint32_t counts) {
     send_command('S', axis, encode_u24(counts));
 }
 
-void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset) {
+void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset, bool with_readback) {
     // A plain ":I" write, the way INDI's skywatcherAPI.cpp and indi-eqmod do
     // it: a transport failure (no, garbled or rejected reply) throws from
     // send_command; what the board STORED is never a failure condition.
@@ -1146,7 +1147,10 @@ void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset) {
     // below was measured on ONE board (MC fw 3.39); failing the write on a
     // Synta board that rounds differently would turn a harmless imprecision
     // into a hard MoveAxis/PulseGuide error (PR #1 review).
-    if (!pimpl_->step_period_readback()) {
+    // Callers on a timing-critical path (the pulse-guide dispatch and its
+    // end-of-pulse restore: the axis is already moving at the new rate while
+    // this runs, so a second round-trip would stretch the pulse) opt out.
+    if (!with_readback || !pimpl_->step_period_readback()) {
         return;
     }
     // An EQM-35 Pro (MC fw 3.39) rounds the preset to a multiple of 4,
