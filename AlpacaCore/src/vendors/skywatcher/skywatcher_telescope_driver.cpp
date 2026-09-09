@@ -2207,8 +2207,9 @@ private:
             // an unlocked ~450 ms sample window, which would blow the
             // property's response target. A stall here has no natural end
             // point (a standing property, not a bounded pulse), so a
-            // background one-shot verify is the right follow-up; the
-            // ConformU failure this fix targets was on the pulse path only.
+            // background one-shot verify is the right follow-up (tracked as
+            // open-astro/AlpacaBridge#248); the ConformU failure this fix
+            // targets was on the pulse path only.
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             protocol.start_motion(kAxisRa);
