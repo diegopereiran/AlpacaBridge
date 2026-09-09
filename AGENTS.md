@@ -1560,6 +1560,92 @@ datagrams before each send so replies cannot get off-by-one.
   `md5sum /usr/bin/alpacabridge` after restart; a wedged park/slew thread can hang
   `systemctl stop` (use `systemctl kill -s SIGKILL`).
 
+#### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
+
+Found on an EQM-35 Pro 2026-09-06, but **not hemisphere- or model-specific — the Wave
+100i is equally affected.** Not caused by the southern-hemisphere RA fix; that change
+only altered a rate sign and does not touch this machinery.
+
+**Symptom.** After a sequence of `MoveAxis` presses, the driver reports `Slewing = true`
+indefinitely while the axis is demonstrably stopped (`":f1"` running bit clear, `":j1"`
+counts frozen), AND tracking is never restarted even though `Tracking` still reports
+true. The mount sits motionless claiming to be both tracking and slewing. Reported RA
+then drifts at 1.0x sidereal — the signature of a stationary mount — instead of holding.
+
+This is the dangerous shape: a sequencer that waits for `Slewing` to clear before
+exposing hangs forever, and one that does not wait images on an untracked mount.
+
+**Mechanism.** `move_axis()` uses a SINGLE shared `stop_task_thread_` for both axes.
+When a new stop supersedes a pending one, the old task is cancelled
+(`stop_task_cancel_.store(true)`) and returns early from `task_wait_for()` — before
+reaching `manual_axis_slewing_[axis] = false` and the restore-tracking tail. Its axis's
+flag is stranded set, and `get_hardware_slewing_locked()` returns true forever because
+it ORs both `manual_axis_slewing_` entries.
+
+**Reproduction.** Drive MoveAxis on alternating axes with stops close together — CCDciel
+issues MoveAxis pairs ~44 ms apart on button release (observed in the journal), which is
+enough for the second stop to cancel the first axis's task. N, S, E, W in sequence
+reproduced it reliably.
+
+**Recovery (user-level).** `PUT moveaxis Axis=<n> Rate=0` on the stranded axis clears the
+flag and restores tracking, because a stop on an axis whose flag is set spawns a fresh
+task that runs to completion.
+
+**Fix (done).** `stop_task_thread_` and `stop_task_cancel_` are now per-axis arrays;
+`reap_stop_task(axis)` and the spawn/retry-join block only ever race with a prior task
+for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
+dispatched, Dec stop dispatched while RA's stop task is still mid-ramp) and asserts
+`Slewing` clears promptly. The generation guard
+(`motion_generation_ == stop_task_generation`) is unchanged and still gates the
+tracking-restore tail — which is exactly what exposed the SECOND bug below.
+
+#### KNOWN BUG (FIXED): cross-axis `motion_generation_` can block a same-axis tracking restore
+
+Found while writing the regression test for the bug above, on the SAME night
+(2026-09-06) — the per-axis stop-task fix is necessary but not sufficient. Not
+hemisphere- or model-specific.
+
+**Symptom.** With the per-axis fix in place, `Slewing` now clears correctly after
+stopping both axes close together — but the RA axis can still fail to resume tracking
+after a `MoveAxis(0, 0)` stop, even though `Tracking` reports true throughout. Caught by
+a loopback test asserting `mount.axis_running(1)` becomes true again after the stop
+settles: it does not, reliably, when a Dec-axis stop is dispatched while the RA stop
+task is still polling.
+
+**Mechanism.** The restore-tracking tail guards itself with
+`motion_generation_ == stop_task_generation` — "only restore if nothing newer
+superseded this stop." But `motion_generation_` is ONE counter bumped by every motion
+command on EITHER axis (see its declaration: "bumped by every motion command"). A Dec
+stop dispatched while RA's stop task is polling bumps the shared counter for a reason
+that has nothing to do with RA, so the RA task's tail reads a mismatch and silently
+skips restoring RA's tracking — even though nothing actually superseded the RA stop
+itself (which is correctly detected via the now-per-axis `stop_task_cancel_[0]`, a
+separate and correctly-scoped check).
+
+The codebase already has the right idiom for this elsewhere: the duty-cycle worker
+(`apply_ra_drive_locked`'s burst path, guarding sub-floor rate duty-cycling) computes a
+`same_axis_owner` flag from `goto_in_progress_ || parking_ || homing_ || slewing_cached_
+|| manual_axis_slewing_[i] || (pulse_guiding_active_ && pulse_axis_ == channel)` before
+trusting a generation mismatch as a real supersession, specifically BECAUSE "the global
+generation cannot tell a same-axis supersession from an unrelated other-axis command"
+(exact wording from that code's own comment). The MoveAxis stop-task tail does not apply
+this idiom and should.
+
+**Fix (done).** Applied option (a): the stop-task restore tail now computes a
+channel-scoped `same_axis_owner` (`goto_in_progress_ || parking_ || homing_ ||
+slewing_cached_ || manual_axis_slewing_[axis] || (pulse_guiding_active_ &&
+pulse_axis_ == channel)`), the exact idiom the duty-cycle worker already uses, and only
+treats a `motion_generation_` mismatch as a real supersession when `same_axis_owner`
+is true. Verified the historical regression this guards against (PR #216 round-5:
+`SetTracking(false)` racing the restore) is still covered independently: that path sets
+`tracking_ = false` under the SAME `mutex_` this task also holds, so there is no
+interleaving where the restore reads `tracking_ == true` while a completed
+`SetTracking(false)` meant otherwise -- the `tracking_ &&`/`dec_rate_arcsec_per_sec_ !=
+0.0 &&` guards already ahead of the generation check cover that case on their own.
+Extended the regression test from the first bug to assert the RA axis actually resumes
+running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
+with the fix reverted to the raw equality check, and passes with it restored.
+
 ### iOptron
 
 Devices: Telescope (mount), Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, via Player One SDK).
