@@ -782,6 +782,15 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   this rule fixes; there is no per-driver signal yet for which
   `get_connected()` implementations are safe to read mid-task (the 30
   lock-free ones) versus which aren't (the six above).
+  **Known gap (narrow, code review on PR #3):** `get_connecting()` and
+  `get_connected()` are two separate calls, not one atomic snapshot — if a
+  connect task starts in the gap between them, the `get_connected()` call
+  can still block on a mutex-holding driver's handshake for the six above.
+  Far narrower than the bug this rule fixes (needs a second request to land
+  in a specific few-instruction window, not just a slow connect), and not
+  worth a structural fix here: closing it means every driver exposing one
+  atomic "get state" call instead of two, a bigger change than this PR's
+  scope. Left as a known risk rather than solved.
 - **`Connected` is per-client, refcounted in the router — never wire an
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +

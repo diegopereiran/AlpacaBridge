@@ -81,9 +81,12 @@ public:
     void send_command_blind(const std::string& command);
 
     /// Protocol echo ("K" + byte -> byte + "#"), the handset's own link check.
-    /// True when the handset answered at all (a mismatched echo is logged, not
-    /// fatal: a live but quirky handset still takes commands); false when the
-    /// reply timed out, i.e. nothing is listening on the port.
+    /// True on an exact match, on either attempt (a mismatched reply is
+    /// retried once - a real handset can garble a single byte - and logged
+    /// either way). False if the second reply also mismatches or either
+    /// attempt times out: a port that only ever answers something other than
+    /// the echo is not trustworthy enough to proceed into the handshake that
+    /// follows, since those queries are individually caught and swallowed.
     bool echo_test();
 
     std::string get_handset_firmware_version();

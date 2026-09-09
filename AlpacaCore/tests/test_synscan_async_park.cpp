@@ -52,6 +52,8 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
         switch (chunk[0]) {
+            case 'K':  // protocol echo: "K" + byte -> byte + "#" (the connect-time link check)
+                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
             case 'e':
             case 'E':
             case 'z':
@@ -172,6 +174,74 @@ TEST_CASE("SynScan - a silent handset fails the connect instead of reporting a p
     CHECK_FALSE(driver->get_connected());
     CHECK(connect_ms < 1000);     // one echo timeout, not five swallowed query timeouts
     CHECK(queries->load() == 1);  // only the echo went out
+}
+
+TEST_CASE("SynScan - a garbled echo reply recovers on retry", "[synscan][telescope][async]") {
+    // A real handset that answers the echo wrong ONCE (a single garbled
+    // byte, not silence and not a different device) must not be treated as
+    // "not a handset" - the one retry in echo_test() exists for exactly
+    // this case, so a momentary line glitch doesn't fail a real connect.
+    auto echo_attempts = std::make_shared<std::atomic<int>>(0);
+    alpacacore::test::FakeMountServer server([echo_attempts](const std::string& chunk) -> std::string {
+        if (chunk.empty()) return "0#";
+        switch (chunk[0]) {
+            case 'K': {
+                const int attempt = echo_attempts->fetch_add(1);
+                if (attempt == 0) {
+                    return "X#";  // wrong byte, first attempt only
+                }
+                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
+            }
+            case 'V':
+                return "042A00#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return "12AB0500,20000500#";
+            default:
+                return "0#";
+        }
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+
+    driver->connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(echo_attempts->load() == 2);  // one wrong reply, one retry that matched
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan - a persistently garbled echo fails the connect rather than proceeding",
+          "[synscan][telescope][async]") {
+    // Two wrong-but-framed replies in a row must fail the connect, not be
+    // accepted as "probably a handset, continuing" - accepting an unverified
+    // reply here is what let a merely-noisy port (something answering SOME
+    // '#'-terminated bytes, not necessarily a handset) proceed into the
+    // firmware/model/site queries that follow and get individually
+    // swallowed, reproducing the original "Connected=true, then every
+    // command times out" bug for a narrower trigger (garbled echo instead
+    // of total silence) - the exact gap a code review caught on PR #3.
+    auto queries = std::make_shared<std::atomic<int>>(0);
+    alpacacore::test::FakeMountServer server([queries](const std::string& chunk) -> std::string {
+        queries->fetch_add(1);
+        if (!chunk.empty() && chunk[0] == 'K') {
+            return "X#";  // always wrong, never the echoed byte
+        }
+        return "0#";
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+
+    const auto t0 = Clock::now();
+    driver->connect();
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 5000));
+    const auto connect_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+    CHECK_FALSE(driver->get_connected());
+    CHECK(connect_ms < 1000);     // two quick mismatched replies, not five swallowed query timeouts
+    CHECK(queries->load() == 2);  // only the two echo attempts - never firmware/model/site
 }
 
 TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew ends", "[synscan][telescope][async]") {

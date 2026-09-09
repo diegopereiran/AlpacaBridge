@@ -503,22 +503,39 @@ public:
     }
 
     bool echo_test() {
-        // "K" + chr(x) -> chr(x) + "#". Only silence is fatal: connect_serial()
-        // succeeds on any open port, so this is the one check that tells a
-        // handset apart from a port with nothing listening - every later
-        // query would otherwise burn its full response timeout and be
-        // swallowed by the driver's connect sequence.
+        // "K" + chr(x) -> chr(x) + "#". connect_serial() succeeds on any open
+        // port, so this is the one check that tells a handset apart from a
+        // port with nothing listening - every later query would otherwise
+        // burn its full response timeout and be swallowed by the driver's
+        // connect sequence.
+        //
+        // Silence fails immediately (single attempt, no retry): nothing is
+        // listening, and doubling that wait buys nothing. A framed reply that
+        // does NOT match the echo gets exactly one retry before failing too:
+        // a real handset can garble a single byte, but accepting a mismatch
+        // outright (review finding on PR #3) let a port that merely answers
+        // SOMETHING framed like the protocol - not necessarily a handset -
+        // through to the firmware/model/site queries that follow, each of
+        // which is individually caught and swallowed; that reproduces the
+        // exact "Connected=true, then every command times out" bug this gate
+        // exists to prevent, just triggered by a garbled echo instead of
+        // total silence. A second mismatch (or a timeout on the retry) means
+        // this is not trustworthy enough to proceed on.
         constexpr char kEchoByte = 'B';
-        try {
-            const std::string reply = send_command(std::string("K") + kEchoByte, true, 0);
-            if (reply != std::string(1, kEchoByte)) {
-                ALPACA_LOG_WARN("SynScan",
-                                "Echo test answered '" + printable(reply) + "' instead of the echoed byte; continuing");
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            std::string reply;
+            try {
+                reply = send_command(std::string("K") + kEchoByte, true, 0);
+            } catch (const AlpacaException&) {
+                return false;
             }
-            return true;
-        } catch (const AlpacaException&) {
-            return false;
+            if (reply == std::string(1, kEchoByte)) {
+                return true;
+            }
+            ALPACA_LOG_WARN("SynScan", "Echo test answered '" + printable(reply) + "' instead of the echoed byte" +
+                                            (attempt == 0 ? "; retrying once" : "; giving up"));
         }
+        return false;
     }
 
     std::string get_handset_firmware_version() {
