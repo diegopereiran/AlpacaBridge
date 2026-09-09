@@ -164,7 +164,16 @@ public:
 
     int get_device_number() const override { return device_number_; }
 
-    std::string get_name() const override { return "Sky-Watcher Wave Mount"; }
+    // Model comes from the ":e" mount-code byte captured at connect. Falls back
+    // to the generic name while disconnected. Served from the narrow firmware
+    // mutex so it stays inside ConformU's 0.1 s FAST target.
+    std::string get_name() const override {
+        std::lock_guard<std::mutex> lock(firmware_mutex_);
+        if (model_cache_.empty()) {
+            return "Sky-Watcher Mount";
+        }
+        return "Sky-Watcher " + model_cache_;
+    }
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
 
@@ -223,11 +232,22 @@ public:
             reset_runtime_state_locked();
 
             try {
-                std::string version = protocol.get_motor_board_version();
+                MotorBoardInfo board = protocol.get_motor_board_info();
+                {
+                    std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                    firmware_cache_ = board.firmware_version;
+                    model_cache_ = board.model_name;
+                }
+                ALPACA_LOG_INFO("SkyWatcher", "Motor board: " + board.model_name + " (mount code " +
+                                                  std::to_string(static_cast<int>(board.mount_code)) + "), firmware " +
+                                                  board.firmware_version);
+            } catch (...) {
+                // Identity is cosmetic; a board that will not answer ":e" is
+                // still usable, so never fail the connect over it -- but do
+                // not keep a previous connection's identity either.
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_ = version;
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-                // TODO: Confirm ":e" reliability on Wave 100i over both transports.
+                firmware_cache_.clear();
+                model_cache_.clear();
             }
 
             axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
@@ -277,6 +297,7 @@ public:
             {
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_.clear();
+                model_cache_.clear();
             }
             reset_runtime_state_locked();
         }
@@ -2702,6 +2723,7 @@ private:
 
     // Web-UI firmware copy under its own narrow mutex (never mutex_).
     mutable std::mutex firmware_mutex_;
+    std::string model_cache_;  // guarded by firmware_mutex_
     std::string firmware_cache_;
 
     // Background task threads; task_mutex_ only guards handles + cv, never
