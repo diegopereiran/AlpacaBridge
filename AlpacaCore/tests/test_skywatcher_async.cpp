@@ -764,7 +764,8 @@ TEST_CASE("SkyWatcher async - the rate-applied check still catches a stall at a 
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
-    driver->set_guide_rate({0.1 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.1 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_guide_rate(
+        {0.1 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.1 * FakeSkyWatcherMount::kSiderealDegPerSec});
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     const int starts_before = mount.start_count(1);

@@ -1872,8 +1872,8 @@ private:
         ALPACA_LOG_WARN("SkyWatcher",
                         "Axis " + std::to_string(channel) + " step-period change did not take: observed " +
                             std::to_string(observed_counts_per_sec) + " counts/s, expected " +
-                            std::to_string(expected_counts_per_sec) + " (was " + std::to_string(previous_counts_per_sec) +
-                            "; " + board_state + "); resending :I and :J");
+                            std::to_string(expected_counts_per_sec) + " (was " +
+                            std::to_string(previous_counts_per_sec) + "; " + board_state + "); resending :I and :J");
         try {
             const AxisParameters& p = axis_params_[static_cast<std::size_t>(channel - 1)];
             double counts_per_sec = std::abs(expected_rate_deg_per_sec) * p.counts_per_revolution / 360.0;
