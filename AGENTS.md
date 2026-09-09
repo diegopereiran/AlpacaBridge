@@ -196,7 +196,7 @@ vendor-agnostic; do them in the driver from the start.
 - Every persisted field allowlisted per device type in `sanitize_device_config`, every
   non-ZWO form field `name` vendor-prefixed — the full rules live in ONE place:
   [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors).
-  The round-trip test (Required Test Case #6) is the automated catch.
+  The round-trip test (Required Test Case #9) is the automated catch.
 
 > The connection-thread lifecycle lives in ONE place: `AsyncConnectable`
 > (`AlpacaCore/include/alpacacore/async_connectable.h`). Every vendor driver
@@ -1144,7 +1144,7 @@ so a driver-building agent bumps correctly without them.
 
 ### Required Test Cases for Every New Vendor Device Driver
 
-Every new driver **must** ship with at least the following test cases. Use the existing tests (e.g. `test_svbony_camera.cpp`, `test_gemini_focuser.cpp`) as reference.
+Every new driver **must** ship with at least the following 8 unit test cases, plus the config round-trip test (case 9). Use the existing tests (e.g. `test_svbony_camera.cpp`, `test_gemini_focuser.cpp`) as reference.
 
 1. **Defaults** `"<Vendor> <Device> Driver - Defaults"` `[<vendor>][<device>][unit]`
    - Create driver with device number 0.
@@ -1174,7 +1174,15 @@ Every new driver **must** ship with at least the following test cases. Use the e
    - Switches: `get_max_switch`, invalid switch ID handling.
    - Rotators: `get_can_reverse`, device state telemetry.
 
-6. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test.
+6. **Value range validation** — invalid inputs must throw `AlpacaException` with `error_code() == AlpacaError::InvalidValue`, not silently normalize or throw a generic error (ConformU specifically tests boundary values).
+
+7. **State machine contracts** — device state follows ASCOM rules without needing hardware (e.g. `CameraState == Idle` before any exposure, `Slewing == false` when not connected, `IsPulseGuiding == false` when idle). These have caught real bugs: iOptron's settle loop prematurely declared slews complete, SynScan's `IsPulseGuiding` always returned false, SVBONY's `CameraState` got stuck after SDK hangs.
+
+8. **Unsupported method error codes** — a method the device doesn't support must throw with the correct error code (usually `InvalidOperation` or `MethodNotImplemented`), not a generic `DriverException`. ConformU distinguishes "not implemented" from "driver error."
+
+   Cases 6-8 are the **ASCOM contract tests**: they exist specifically because a generic "does it throw?" test (case 3/4) is not enough to pass ConformU, which checks the exact Alpaca error code and state-machine behavior. See `/driver-build` Step 7 for the full pattern, worked examples per device type, and the `require_alpaca_error` helper. **Minimum 8 test cases, 30+ assertions total** — cases 6-8 alone should add 10-15 assertions on top of the 5 basic cases; if you have significantly fewer you are probably not testing enough error codes and state transitions.
+
+9. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test. This is an `AlpacaHTTP`-level integration test, additional to the 8 vendor unit tests above, not a substitute for cases 6-8.
 
 ### Hardware-free driver tests via the SDK seam (ToupTek pattern — extend to other vendors)
 
@@ -1217,9 +1225,9 @@ When adding a test file for a new vendor device:
 
 - CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
-- **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`.**
+- **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`** — `scripts/check_docs_drift.py` (the `docs-drift` CI job / pre-flight gate) now fails if they diverge, so this can't silently drift again.
 - **Web UI JavaScript is gated only by `node --check`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS with no bundler/eslint/`package.json`, so this parse-only check is its sole automated validation — there is nothing else stopping a stray brace from shipping.
-- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together.
+- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together; `scripts/check_docs_drift.py` fails the build if they disagree. The same script also fails if a `docs/development.md` build-options table row goes missing for a CMake `ALPACACORE_ENABLE_*` option, if `VERSION` and the README badge disagree, or if AGENTS.md references a repo path that doesn't exist.
 - **Concurrency now has automated coverage — but only where a driver is registered with the stress harness.** The `sanitizers-tsan` job (issue #101) builds all-vendors with ThreadSanitizer and runs the `[stress]` connect/disconnect/operate suite (`AlpacaCore/tests/concurrency_stress.h`): lifecycle storms from N threads, destruction racing an in-flight connect, and the racing-disconnect-never-dropped settle check. Locally: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. Registered so far: ToupTek camera / AFW / thermal switch (over the fake SDK seam, wrapped in `LockedToupTekSDK`), ZWO EFW + camera, Player One Phoenix + camera, SVBONY camera, Bisque, and — over the loopback fake-mount TCP seam (`tests/fake_mount_server.h`, which drives drivers into the *connected* state so the poll/pulse/GOTO/teardown threads actually run) — the ZWO, Celestron, SynScan, and iOptron telescopes. **When you add or substantially change a driver, add a `[stress]` TEST_CASE for it** — one factory + one operate callback (see `test_touptek_concurrency_stress.cpp`). Drivers without a registration are still covered only by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver); do not assume green CI means thread-safe for them. **SDK-callback paths especially**: the TSan suppressions mute any report with a vendor-blob frame on the stack, so a race in driver code invoked from an SDK internal thread is invisible to CI unless that callback path is exercised through a fake-SDK seam (fully instrumented, no suppression applies) — when you add an SDK callback to a driver, register a fake-seam stress path for it in the same change.
 
 ## Logging, Threading, and Errors
@@ -1637,9 +1645,13 @@ against its checklist, 2026-09-06:
   built for WandererAstro, explicitly designed to generalize "across wrappers"). Fixed:
   both scan loops skip a port another connected device holds open, `probe_skywatcher_port`
   re-checks after `open()` for the TOCTOU window, and `connect_serial()` claims the port
-  in the registry BEFORE opening it and releases it in `disconnect_locked()`. This is a
-  project-wide gap outside WandererAstro (synscan, ioptron, gemini, celestron, onstep none
-  use the registry either) — only `skywatcher` was closed here, in scope for this issue.
+  in the registry BEFORE opening it and releases it in `disconnect_locked()`. The gap is
+  wider than this vendor: only WandererAstro (all four wrappers) and Gemini's PDH wrapper
+  (`gemini_pdh_protocol_wrapper.cpp`) use the registry; synscan, ioptron, celestron, onstep
+  and Gemini's focuser/flat-panel wrappers do not — only `skywatcher` was closed here, in
+  scope for this issue. The claim/release in `connect_serial()` is covered by a pty-backed
+  test in `test_skywatcher_serial.cpp`; the post-`open()` re-check in `probe_skywatcher_port`
+  narrows the TOCTOU window but cannot close it (in-process best-effort set, not a file lock).
 - [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open; see the
   hemisphere fixes and pending bench test elsewhere in this section.
 - [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session

@@ -473,6 +473,22 @@ jobs:
         # vendored external/ tree (see the script).
         run: python3 .github/scripts/check-unicode.py
 
+  docs-drift:
+    name: Docs drift check
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check docs/config for self-inconsistency
+        # Catches drift between the repo's own docs and its actual config
+        # (CMake options vs docs/development.md, zizmor/cppcheck pins between
+        # ci.yml and ci_preflight.sh, VERSION vs the README badge, and stale
+        # paths in AGENTS.md) that nothing previously caught automatically.
+        run: python3 scripts/check_docs_drift.py
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-24.04-arm   # static text analysis; arch-independent

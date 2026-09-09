@@ -133,6 +133,11 @@ cmake --build . --parallel
 | `ALPACACORE_ENABLE_PLAYERONE` | `OFF` | Player One cameras |
 | `ALPACACORE_ENABLE_GEMINI` | `OFF` | Losmandy Gemini focusers |
 | `ALPACACORE_ENABLE_WEEWX` | `OFF` | WeeWX observing conditions |
+| `ALPACACORE_ENABLE_ONSTEP` | `OFF` | OnStep mounts |
+| `ALPACACORE_ENABLE_SKYWATCHER` | `OFF` | SkyWatcher motor controller mounts |
+| `ALPACACORE_ENABLE_BISQUE` | `OFF` | Bisque/Paramount (TheSkyX) telescope support |
+| `ALPACACORE_ENABLE_WANDERERASTRO` | `OFF` | WandererAstro CoverCalibrator |
+| `ALPACACORE_ENABLE_ASTROASIS` | `OFF` | Astroasis Oasis Focuser |
 
 ## Running tests
 
