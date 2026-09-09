@@ -823,4 +823,92 @@ TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rat
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a RightAscensionRate stall that survives the :J kick is caught in the background",
+          "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#248: the RightAscensionRate / TrackingRate
+    // setters (apply_ra_tracking_rate_locked) got the ":J" kick but not the
+    // sampled rate-applied check -- they run under mutex_ inside a property
+    // call and the check needs an unlocked ~450 ms window. A stall there has
+    // no natural end point: RA would track at the wrong rate until the next
+    // rate change. The setter now spawns a one-shot background check that
+    // re-kicks the axis, without the property call itself waiting for it.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    auto measure_rate = [&] {
+        double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        double p1 = mount.physical_degrees(1);
+        return (p1 - p0) / 0.3;
+    };
+    const double sidereal_rate = measure_rate();
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    // A stall that survives the setter's own ":I"+":J": the preset is stored
+    // (":i" agrees) and the kick is acknowledged but swallowed. Only the
+    // sampled check can recover this.
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_right_ascension_rate(0.5);  // continuous, same direction: live ":I" on the tracking axis
+    const double setter_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // The property call must not absorb the ~450 ms sample window.
+    REQUIRE(setter_ms < 200.0);
+
+    // The setter's kick, then the background check's re-kick -- and never a
+    // stop/restart, the axis keeps running throughout.
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 1500));
+    REQUIRE(mount.stop_count(1) == stops_before);
+    const double new_rate = measure_rate();
+    REQUIRE(std::abs(new_rate - sidereal_rate) > std::abs(sidereal_rate) * 0.1);
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a pending RightAscensionRate check is reaped by Tracking off and by disconnect",
+          "[skywatcher][async]") {
+    // The background check is owned like the pulse task: whatever takes the
+    // RA axis while its sample window is open reaps it, so its ":I"+":J"
+    // resend can never land on an axis someone else just stopped (which
+    // would silently restart tracking), and a disconnect joins it instead of
+    // leaking a thread into the destructor.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.5);
+    driver->set_tracking(false);  // lands inside the check's ~450 ms sample window
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 3000));
+    // Give a leaked check its whole window and then some: nothing may
+    // restart the axis, and no second ":J" may reach the board.
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    REQUIRE_FALSE(mount.axis_running(1));
+    REQUIRE(mount.start_count(1) == starts_before + 1);  // the setter's own kick only
+
+    // Disconnect racing a fresh check: set_connected(false) must return
+    // promptly (the check is cancelled, not waited out) and cleanly.
+    driver->set_tracking(true);  // offset 0.5 still stored: restarts at the offset rate
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.0);  // live change back to sidereal: spawns a check
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    const double disconnect_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    REQUIRE(disconnect_ms < 2000.0);
+    REQUIRE_FALSE(driver->get_connected());
+}
+
 #endif  // _WIN32
