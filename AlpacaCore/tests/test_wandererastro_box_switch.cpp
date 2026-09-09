@@ -175,3 +175,88 @@ TEST_CASE("WandererAstro Box Protocol Wrapper - Defaults and disconnected state"
     // Disconnect on a never-connected wrapper is a safe no-op.
     CHECK_NOTHROW(wrapper.disconnect());
 }
+
+// ---------------------------------------------------------------------------
+// Issue #237: a device that stops streaming must not be served from the cache
+// forever. Wire-level over a pty-backed streamer (fake_serial_streamer.h).
+// ---------------------------------------------------------------------------
+
+#include <chrono>
+#include <thread>
+
+#include "fake_serial_streamer.h"
+
+namespace {
+
+template <typename Pred>
+bool wait_until_box(Pred pred, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
+}  // namespace
+
+// 22 'A'-terminated fields after the identity token, in the wire order the
+// wrapper indexes: fw, probe1-3, humidity, ambient, total A, 19 V A, DC3-4 A,
+// input V, USB3.1 x3, USB2 x2, DC3-4, DC5/6/7 PWM, DC8-9, DC10-11, DC3-4 set x10.
+const char* const kBoxFrame =
+    "ZXWBProV3A20250410A-127.00A-127.00A-127.00A45.20A21.30A1.50A0.20A0.30A13.10A1A1A1A1A1A1A0A0A0A1A1A120A\n";
+
+TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames restore them (issue #237)",
+          "[wandererastro][switch][unit][fake]") {
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(500));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_switch_value(14) == 13.1);  // input voltage, live from the stream
+    driver->set_switch(7, true);                  // DC8-9: a commanded value that must not survive the fault
+    CHECK(driver->get_switch(7));
+
+    box.set_muted(true);
+    auto value_read_throws = [&] {
+        try {
+            (void)driver->get_switch_value(14);
+            return false;
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+    };
+    // 10 s of silence latches the fault; reads keep answering from cache until then.
+    CHECK(wait_until_box(value_read_throws, std::chrono::milliseconds(15000)));
+    CHECK(driver->get_connected());  // the client decides whether to reconnect
+    require_alpaca_error([&]() { (void)driver->get_switch_value(14); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_switch(7); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { driver->set_switch(7, false); }, alpacacore::AlpacaError::DriverException);
+    // Static metadata does not depend on the box and keeps answering.
+    CHECK(driver->get_can_write(7));
+    CHECK_FALSE(driver->get_switch_name(14).empty());
+    // DeviceState omits the unavailable members rather than failing outright.
+    const auto state = driver->get_device_state();
+    REQUIRE(state.size() == 1);
+    CHECK(state.front().name == "TimeStamp");
+
+    // The next frame restores the link without a reconnect.
+    box.set_muted(false);
+    CHECK(wait_until_box([&] { return !value_read_throws(); }, std::chrono::milliseconds(3000)));
+    CHECK(driver->get_switch_value(14) == 13.1);
+    CHECK(driver->get_connected());
+
+    // A dead fd (EIO) is silence too, and the reason names the read error.
+    box.sever_link();
+    CHECK(wait_until_box(value_read_throws, std::chrono::milliseconds(15000)));
+    try {
+        (void)driver->get_switch_value(14);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("Input/output error") != std::string::npos);
+    }
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}

@@ -120,8 +120,24 @@ public:
 
     /**
      * @brief Get the most recent decoded status frame.
+     *
+     * `valid` is cleared while the link is faulted (see link_fault()), so
+     * the driver's CoverState derivation reads Unknown instead of the last
+     * position the cover reported before the link died.
      */
     WandererStatus get_status() const;
+
+    /**
+     * @brief Why the serial link is currently considered dead, if it is.
+     *
+     * The cover streams its status line unprompted (~1 Hz), so silence is
+     * the fault signal: after 10 s without a frame (issue #237 -- USB
+     * re-enumeration, unplugged cable, port stolen) the link is latched
+     * faulted, the cache is invalidated and this returns the reason. Clears
+     * on its own when frames resume. Connected stays true: the client
+     * decides whether to reconnect.
+     */
+    std::optional<std::string> link_fault() const;
 
     /**
      * @brief Get the device firmware date (YYYY-MM-DD), if known.

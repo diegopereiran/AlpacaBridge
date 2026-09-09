@@ -163,7 +163,70 @@ Ask: "Do you have protocol docs, a PDF, or SDK headers to reference? If so, wher
 
 Also check `AlpacaCore/external/<vendor>/` for existing docs, headers, or libraries and report what you find.
 
-**If the user does NOT have an SDK or protocol docs**, automatically search the INDI project for a reference implementation:
+**If the user does NOT have an SDK or protocol docs**, look for the vendor's own Windows ASCOM
+driver FIRST (Question 5a), and only fall back to INDI/INDIGO (Question 5b) when that yields nothing.
+
+### Question 5a: Decompile the vendor's Windows ASCOM driver (preferred over INDI)
+
+The vendor's shipped ASCOM driver is the only reference that matches the exact firmware in the
+box — INDI/INDIGO drivers are written by third parties against whatever unit they had, and
+often lag firmware revisions or cover a different model variant. Most small astro vendors
+(Gemini, WandererAstro, Pegasus, ...) ship their ASCOM driver as a .NET assembly, which
+decompiles to readable C# with the full command set, reply parsing, switch/index mapping,
+baud rate and timing. Reverse-engineering for interoperability is how the Gemini Flat Panel
+Lite and the Gemini Power & Data Hub Advanced 3 drivers were built.
+
+1. Ask: "Does the vendor publish a Windows ASCOM driver or control app? Point me to the
+   download page or the installer file." Check the vendor's website `downloads` page yourself
+   too (`curl -sL -A "Mozilla/5.0 ..."` — many vendor sites 403 the default curl/WebFetch UA).
+   A `CH341SER.exe`/`CP210x` USB driver next to it tells you the USB-serial chip before the
+   hardware is even plugged in.
+
+2. Unpack and decompile — all of this runs rootless in the scratchpad, no sudo/Docker needed
+   (the dev VM has neither passwordless sudo nor docker):
+
+   ```bash
+   S=<scratchpad>; cd "$S"
+   # Inno Setup installer (Delphi strings in `strings -n 8 setup.exe` = Inno): unpack the .deb
+   # of innoextract without root — apt-get download works unprivileged, dpkg -x needs no root.
+   mkdir -p debs && (cd debs && apt-get download innoextract) && dpkg -x debs/innoextract_*.deb innolocal
+   innolocal/usr/bin/innoextract -s -d extracted setup.exe      # NSIS/MSI: 7z x setup.exe
+   file extracted/app/*.dll                                      # "Mono/.Net assembly" => decompilable
+   # Rootless .NET SDK + ilspycmd (pin ilspycmd: the newest package needs a newer SDK than 8.0)
+   export DOTNET_ROOT="$S/dotnet" DOTNET_CLI_HOME="$S/dotnet_home" NUGET_PACKAGES="$S/nuget" \
+          DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 PATH="$S/dotnet:$PATH"
+   curl -fsSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 8.0 --install-dir "$DOTNET_ROOT"
+   dotnet tool install --tool-path "$S/tools" ilspycmd --version 9.1.0.7988
+   "$S/tools/ilspycmd" -p -o decomp extracted/app/<Vendor>.<Device>.dll
+   ```
+
+   Quick triage before the full decompile: `strings -el -n 2 <dll>` dumps the UTF-16 user-string
+   heap — every command literal (`>H#`, `>G#`, ...), switch name and error message is visible in
+   seconds and tells you whether the assembly is worth decompiling.
+
+3. Read the decompiled source and extract: connect sequence (baud, DTR/RTS, post-open sleep,
+   handshake string and the exact comparison), every command and its argument encoding, reply
+   framing and parsing (split characters, field positions, which fields are ignored), index
+   mapping between ASCOM ids and hardware channels, min/max/step per channel, firmware-version
+   gate, and any settings the vendor persists (those are candidates for runtime-only switches
+   under the project's no-persisted-thermal-config rule, not config fields).
+
+4. **Do not commit the decompiled source or the installer.** Write your own protocol summary to
+   `AlpacaCore/external/<Vendor>/<Model>-protocol.md` (add `!external/<Vendor>/**` to
+   `AlpacaCore/.gitignore` if it is a new vendor dir) and cite the vendor driver name/version as
+   the source. Everything not observable on real hardware stays flagged as "per vendor driver,
+   unconfirmed" until ConformU/hardware validation.
+
+5. If the driver is native C++ (`file` says "PE32 executable" without "Mono/.Net"), a
+   decompile is not practical — fall through to Question 5b and treat INDI as primary.
+
+Even when the decompile succeeds, still run the INDI/INDIGO search below as a cross-check:
+where INDI and the vendor driver disagree, the vendor driver wins on framing/commands and
+INDI usually wins on documented quirks.
+
+### Question 5b: Search INDI/INDIGO for a reference implementation
+
+Search the INDI project for a reference implementation:
 
 1. Search the INDI drivers directory for a match:
    - Use WebFetch to check `https://github.com/indilib/indi/tree/master/drivers` and look under the appropriate subdirectory for the device type:
@@ -212,7 +275,7 @@ Also check `AlpacaCore/external/<vendor>/` for existing docs, headers, or librar
 
 Store these findings and use them as a protocol reference throughout the implementation.
 
-After all questions are answered, summarize the plan (including any INDI reference found) and confirm with the user before proceeding.
+After all questions are answered, summarize the plan (including the decompiled vendor driver and/or any INDI reference found) and confirm with the user before proceeding.
 
 ### Create the feature branch
 

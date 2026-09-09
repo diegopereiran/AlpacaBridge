@@ -201,6 +201,7 @@ public:
 
     int get_position() const override {
         ensure_connected();
+        ensure_link_up();  // -1 would masquerade as "moving" (issue #237)
         const FilterWheelStatus s = protocol_.get_status();
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!s.valid) {
@@ -229,6 +230,7 @@ public:
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         ensure_connected();
+        ensure_link_up();
         const int target = position + 1;  // Alpaca 0-based -> wire 1-based
         const FilterWheelStatus s = protocol_.get_status();
         // Hold state_mutex_ across the write so the move target and the command
@@ -286,6 +288,17 @@ private:
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
+        }
+    }
+
+    // Issue #237: Position is served from the reader thread's cache, so a
+    // dead serial link would otherwise report the last slot forever. While
+    // the wrapper has the link latched faulted, Position and moves throw
+    // DriverException (Connected is still true, so not NotConnected) until
+    // frames resume. Names and offsets are driver-side and keep answering.
+    void ensure_link_up() const {
+        if (const auto fault = protocol_.link_fault()) {
+            throw AlpacaException("Filter wheel communications compromised: " + *fault, AlpacaError::DriverException);
         }
     }
 

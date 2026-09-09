@@ -452,16 +452,12 @@ int main() {
         ::close(fd);
     }
 
-    // A keep-alive connection parks a worker for up to kKeepAliveIdleSeconds
-    // between requests, so without a reserve the pool size stops bounding
-    // concurrent REQUESTS (what config.h documents) and starts bounding
-    // concurrent CONNECTIONS -- and a client with no connection yet waits in
-    // an unbounded queue with no dequeue deadline. With a pool of 2 and no
-    // reserve, two idle keep-alive connections hold every worker and a third
-    // client goes unserved for the full idle timeout.
-    //
-    // Own server on its own port: the shared one above has the default pool
-    // of 32, which would need 32 sockets to put under the same pressure.
+    // Idle keep-alive connections cost no worker: they are parked on the
+    // reactor's poll set, so thread_pool_size bounds concurrent REQUESTS
+    // (what config.h documents) and not connections. Before the reactor a
+    // parked connection held a worker in recv, and a stopgap reserve had to
+    // force Connection: close as the pool filled. Own server on its own
+    // port: the shared one above has the default pool of 32.
     {
         alpacahttp::Config small_config;
         small_config.set_http_port(6872);
@@ -475,24 +471,28 @@ int main() {
         if (small_server.is_running()) {
             const std::uint16_t small_port = small_config.http_port();
 
-            // Park as many keep-alive connections as the pool would allow.
-            int parked[2] = {-1, -1};
-            std::string parked_response[2];
-            for (int i = 0; i < 2; ++i) {
+            // Twice as many idle keep-alive connections as workers, every
+            // one of them kept alive (no reserve forcing a close).
+            constexpr int kParked = 4;
+            int parked[kParked];
+            std::string parked_carry[kParked];
+            for (int i = 0; i < kParked; ++i) {
                 parked[i] = connect_local(small_port);
                 EXPECT(parked[i] >= 0);
-                std::string carry;
                 send_all(parked[i], kGet11);
-                parked_response[i] = read_one_response(parked[i], carry);
-                EXPECT(!parked_response[i].empty());
+                std::string r = read_one_response(parked[i], parked_carry[i]);
+                EXPECT(r.find("Connection: keep-alive\r\n") != std::string::npos);
             }
-            // The reserve must degrade, not disable: with a pool of 2 and a
-            // reserve of 1, the first connection is parked with keep-alive
-            // and only the second -- which would fill the pool -- is told to
-            // close. A reserve that shut keep-alive off entirely on small
-            // pools would pass the late-client check below vacuously.
-            EXPECT(parked_response[0].find("Connection: keep-alive\r\n") != std::string::npos);
-            EXPECT(parked_response[1].find("Connection: close\r\n") != std::string::npos);
+
+            // Clients that connect and never send cost no worker either:
+            // before the reactor, three of these would have held both
+            // workers in recv for the 30 s slowloris bound.
+            int silent[3];
+            for (int& fd : silent) {
+                fd = connect_local(small_port);
+                EXPECT(fd >= 0);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
             // A fresh client must still be served promptly. The recv timeout
             // makes a regression fail in seconds instead of hanging until
@@ -507,13 +507,272 @@ int main() {
             std::string r = read_one_response(late, carry);
             EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
 
+            // And every parked connection is still live: its next request
+            // is picked up off the poll set and served.
+            for (int i = 0; i < kParked; ++i) {
+                ::setsockopt(parked[i], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                send_all(parked[i], kGet11);
+                std::string again = read_one_response(parked[i], parked_carry[i]);
+                EXPECT(again.find("Connection: keep-alive\r\n") != std::string::npos);
+            }
+
             ::close(late);
-            for (int slot : parked) {
-                ::close(slot);
+            for (int fd : silent) {
+                ::close(fd);
+            }
+            for (int fd : parked) {
+                ::close(fd);
             }
             small_server.stop();
         } else {
-            std::cout << "  (skipped pool-pressure case: port 6872 unavailable)\n";
+            std::cout << "  (skipped reactor pool case: port 6872 unavailable)\n";
+        }
+    }
+
+    // The connection lifetime cap, injectable through Config so it can be
+    // exercised without waiting five minutes. The cap is enforced only on a
+    // RESPONSE (Connection: close on the first one past it), never by the
+    // reactor closing an idle socket at the cap: that would race a polling
+    // client's next request, which would meet EOF instead of an answer. So
+    // an active connection sees the close header, and an idle one is still
+    // open past the cap and gets the header on its next request.
+    {
+        alpacahttp::Config cap_config;
+        cap_config.set_http_port(6873);
+        cap_config.set_discovery_enabled(false);
+        cap_config.set_server_name("TestServerLifetime");
+        cap_config.set_keep_alive_lifetime_seconds(2);
+        alpacahttp::Server cap_server(cap_config);
+        cap_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (cap_server.is_running()) {
+            const std::uint16_t cap_port = cap_config.http_port();
+
+            // Idle connection: one request, then silence.
+            int idle_fd = connect_local(cap_port);
+            EXPECT(idle_fd >= 0);
+            std::string idle_carry;
+            send_all(idle_fd, kGet11);
+            EXPECT(read_one_response(idle_fd, idle_carry).find("Connection: keep-alive\r\n") != std::string::npos);
+
+            // Active connection: a request every 250 ms until the cap fires.
+            int active_fd = connect_local(cap_port);
+            EXPECT(active_fd >= 0);
+            std::string active_carry;
+            bool got_close = false;
+            int served = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < 20 && !got_close; ++i) {
+                send_all(active_fd, kGet11);
+                std::string r = read_one_response(active_fd, active_carry);
+                EXPECT(!r.empty());
+                ++served;
+                got_close = r.find("Connection: close\r\n") != std::string::npos;
+                if (!got_close) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                }
+            }
+            const auto elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+            EXPECT(got_close);
+            EXPECT(served >= 4);         // kept alive through most of the 2 s
+            EXPECT(elapsed_ms >= 1900);  // not closed early
+            EXPECT(elapsed_ms < 4000);   // not the 15 s idle gap or the 300 s default
+            EXPECT(peer_closed(active_fd, 2000));
+
+            // The idle one is past the cap too but still open (only the idle
+            // gap closes a parked socket); its next request gets the close.
+            EXPECT(!peer_closed(idle_fd, 200));
+            send_all(idle_fd, kGet11);
+            std::string idle_r = read_one_response(idle_fd, idle_carry);
+            EXPECT(idle_r.rfind("HTTP/1.1 200 ", 0) == 0);
+            EXPECT(idle_r.find("Connection: close\r\n") != std::string::npos);
+            EXPECT(peer_closed(idle_fd, 2000));
+
+            ::close(active_fd);
+            ::close(idle_fd);
+            cap_server.stop();
+        } else {
+            std::cout << "  (skipped lifetime-cap case: port 6873 unavailable)\n";
+        }
+    }
+
+    // The connection bound (Config::max_connections). Idle connections cost
+    // no worker, so without a bound the only limit on parked clients would
+    // be the process's descriptor limit. At the bound the accept loop
+    // pauses: a new client's handshake completes in the listen backlog and
+    // its request waits, unanswered, until a connection is released.
+    {
+        alpacahttp::Config bound_config;
+        bound_config.set_http_port(6874);
+        bound_config.set_discovery_enabled(false);
+        bound_config.set_server_name("TestServerBound");
+        bound_config.set_max_connections(2);
+        alpacahttp::Server bound_server(bound_config);
+        bound_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (bound_server.is_running()) {
+            const std::uint16_t bound_port = bound_config.http_port();
+
+            int held[2];
+            for (int& fd : held) {
+                fd = connect_local(bound_port);
+                EXPECT(fd >= 0);
+                std::string carry;
+                send_all(fd, kGet11);
+                EXPECT(read_one_response(fd, carry).find("Connection: keep-alive\r\n") != std::string::npos);
+            }
+
+            // Third client: connects (kernel backlog) but is not accepted.
+            int third = connect_local(bound_port);
+            EXPECT(third >= 0);
+            struct timeval tv {};
+            tv.tv_usec = 700 * 1000;
+            ::setsockopt(third, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string carry;
+            send_all(third, kGet11);
+            EXPECT(read_one_response(third, carry).empty());  // nothing within 700 ms
+
+            // Release one held connection; the third is accepted and served.
+            ::close(held[0]);
+            tv.tv_sec = 5;
+            tv.tv_usec = 0;
+            ::setsockopt(third, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string r = read_one_response(third, carry);
+            EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
+
+            ::close(third);
+            ::close(held[1]);
+            bound_server.stop();
+        } else {
+            std::cout << "  (skipped max-connections case: port 6874 unavailable)\n";
+        }
+    }
+
+    // The management restart endpoint tears the server down and brings it
+    // back on a detached thread while the requesting client's connection is
+    // still alive. Connection accounting (live_connections_, which gates
+    // accept()) must survive that: a counter reset on start, or a queue
+    // cleared without closing what it held, would let a connection that
+    // straddles the restart drive the count below zero and block every
+    // later accept. Two restarts back to back, each followed by a fresh
+    // client that must be served, and a keep-alive client that lived
+    // through the restart and is closed rather than leaked.
+    {
+        alpacahttp::Config restart_config;
+        restart_config.set_http_port(6875);
+        restart_config.set_discovery_enabled(false);
+        restart_config.set_server_name("TestServerRestart");
+        restart_config.set_max_connections(3);
+        alpacahttp::Server restart_server(restart_config);
+        restart_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (restart_server.is_running()) {
+            const std::uint16_t restart_port = restart_config.http_port();
+            const std::string restart_request =
+                "PUT /management/restart HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+            struct timeval tv {};
+            tv.tv_sec = 5;
+
+            for (int round = 0; round < 2; ++round) {
+                // A bystander parked on the reactor across the restart.
+                int bystander = connect_local(restart_port);
+                EXPECT(bystander >= 0);
+                std::string bystander_carry;
+                send_all(bystander, kGet11);
+                EXPECT(read_one_response(bystander, bystander_carry).find("Connection: keep-alive\r\n") !=
+                       std::string::npos);
+
+                int fd = connect_local(restart_port);
+                EXPECT(fd >= 0);
+                ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                std::string carry;
+                send_all(fd, restart_request);
+                std::string r = read_one_response(fd, carry);
+                EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
+                ::close(fd);
+
+                // The restart runs on a detached thread 100 ms after the
+                // response, so polling is_running() here would race it (a
+                // true seen before stop() begins is the OLD generation, and
+                // a client connecting then lands in a listener about to be
+                // closed and gets a reset). Wait for proof the restart
+                // happened instead: stop() closes the parked bystander.
+                EXPECT(peer_closed(bystander, 5000));
+                ::close(bystander);
+                // Then for the new generation to be up. is_running() goes
+                // true before the new listener is bound, so retry connect.
+                bool back = false;
+                for (int i = 0; i < 50 && !back; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    back = restart_server.is_running();
+                }
+                EXPECT(back);
+
+                // New generation accepts and serves, as many times as the
+                // bound allows: a drifted counter would refuse all of them.
+                for (int i = 0; i < 3; ++i) {
+                    int after = -1;
+                    for (int attempt = 0; attempt < 50 && after < 0; ++attempt) {
+                        after = connect_local(restart_port);
+                        if (after < 0) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
+                    }
+                    EXPECT(after >= 0);
+                    ::setsockopt(after, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                    std::string after_carry;
+                    send_all(after, kGet11);
+                    std::string ra = read_one_response(after, after_carry);
+                    EXPECT(ra.rfind("HTTP/1.1 200 ", 0) == 0);
+                    ::close(after);
+                }
+            }
+            restart_server.stop();
+        } else {
+            std::cout << "  (skipped restart case: port 6875 unavailable)\n";
+        }
+    }
+
+    // stop() straight after start_async(), with no settle time, repeatedly.
+    // The spawn phase and stop() are serialized by a lifecycle mutex and
+    // workers are counted at spawn, so a stop() that lands before a new
+    // worker has executed an instruction still releases its wake permit
+    // and the join completes. Before that, stop() could undercount and hang
+    // on the uncounted thread. Ends with a normal start and a served request
+    // to prove the object is still usable.
+    {
+        alpacahttp::Config churn_config;
+        churn_config.set_http_port(6876);
+        churn_config.set_discovery_enabled(false);
+        churn_config.set_server_name("TestServerChurn");
+        churn_config.set_thread_pool_size(4);
+        alpacahttp::Server churn_server(churn_config);
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 20; ++i) {
+            churn_server.start_async();
+            churn_server.stop();
+            EXPECT(!churn_server.is_running());
+        }
+        const auto churn_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        EXPECT(churn_ms < 10000);  // a hung join would sit here for good
+
+        churn_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        if (churn_server.is_running()) {
+            int fd = connect_local(churn_config.http_port());
+            EXPECT(fd >= 0);
+            std::string carry;
+            send_all(fd, kGet11);
+            EXPECT(read_one_response(fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(fd);
+            churn_server.stop();
+        } else {
+            std::cout << "  (skipped churn case's final request: port 6876 unavailable)\n";
         }
     }
 
@@ -544,17 +803,32 @@ int main() {
         ::close(fd);
     }
 
-    // stop() must not wait out an ACTIVE keep-alive client. stop() joins every
-    // worker, and a worker only leaves handle_connection's loop when the
-    // connection ends -- so before the running_ check in that loop, a client
-    // that kept sending (NINA/PHD2 polling) held its worker, and therefore
-    // stop(), until the 300s lifetime cap; systemd would SIGKILL the service
-    // at its 90s TimeoutStopSec first. Measured 26s of stop() latency behind
-    // a client sending every 2s. Now the first response after stop() carries
-    // "Connection: close" and the worker exits. This must be the last test:
-    // it stops the server.
+    // stop() must not wait out an ACTIVE keep-alive client. Before the
+    // running_ check a client that kept sending (NINA/PHD2 polling) held its
+    // worker, and therefore stop(), until the 300s lifetime cap; systemd
+    // would SIGKILL the service at its 90s TimeoutStopSec first. Measured
+    // 26s of stop() latency behind a client sending every 2s. Now a request
+    // in flight when stop() begins is answered with "Connection: close", and
+    // a connection idle on the reactor at that moment gets FIN, a shared
+    // 100 ms window and a drain (its next request meets EOF), so the client
+    // sees one or the other and stop() never waits on it. This must be the
+    // last test: it stops the server.
+    //
+    // Also: idle connections parked on the reactor are closed by stop()
+    // immediately. Before the reactor each one held a worker in recv, and
+    // stop() had to wait out the idle gap for every one of them.
     {
+        int idle_parked[2];
+        for (int& fd : idle_parked) {
+            fd = connect_local(port);
+            EXPECT(fd >= 0);
+            std::string carry;
+            send_all(fd, kGet11);
+            EXPECT(read_one_response(fd, carry).find("Connection: keep-alive\r\n") != std::string::npos);
+        }
+
         std::atomic<bool> got_close{false};
+        std::atomic<bool> got_eof{false};
         std::atomic<int> served{0};
         std::thread client([&] {
             int fd = connect_local(port);
@@ -564,7 +838,8 @@ int main() {
                 send_all(fd, kGet11);
                 std::string r = read_one_response(fd, carry);
                 if (r.empty()) {
-                    break;  // server closed the socket
+                    got_eof = true;  // server closed the socket while idle
+                    break;
                 }
                 ++served;
                 if (r.find("Connection: close\r\n") != std::string::npos) {
@@ -590,9 +865,16 @@ int main() {
         // One in-flight idle gap (<= 500 ms here) plus scheduling slack, not
         // the ~19 s the client was prepared to keep going.
         EXPECT(stop_ms < 5000);
-        EXPECT(got_close.load());
+        // Either a last answer marked close (request was in flight) or a
+        // clean EOF (idle on the reactor); never a stall.
+        EXPECT(got_close.load() || got_eof.load());
         // stop() answered at most one more request after being called.
         EXPECT(served.load() <= served_before_stop + 1);
+        // The idle ones are gone too, and stop() did not wait on them.
+        for (int fd : idle_parked) {
+            EXPECT(peer_closed(fd, 2000));
+            ::close(fd);
+        }
     }
 
     std::cout << "All server socket tests passed!\n";

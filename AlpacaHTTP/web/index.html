@@ -1130,8 +1130,9 @@
                     </div>
                 </div>
 
-                <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro) and
-                     CoverCalibrator (Flat Panel Cover Lite) share one vendor block,
+                <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro),
+                     CoverCalibrator (flat panels) and Switch (Power & Data Hubs
+                     Advanced 3) share one vendor block,
                      with the relevant sub-section shown based on Device Type
                      (same pattern as the iOptron mount/switch config). -->
                 <div id="gemini-config" class="vendor-config" style="display: none;">
@@ -1312,6 +1313,46 @@
                                         <option value="115200">115200</option>
                                     </select>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="gemini-pdh-fields" style="display: none;">
+                        <h3>Gemini Power &amp; Data Hubs Advanced 3</h3>
+                        <p><small>Power and USB hub with four switched 12&nbsp;V outputs, six switchable USB ports,
+                           two PWM dew heater channels with Auto (PID), Manual and Switch modes, an AHT20
+                           ambient sensor, a DS18B20 lens probe, and voltage/current/power telemetry. All
+                           outputs, dew modes and sensors appear as Alpaca Switch values. USB serial for control.</small></p>
+
+                        <div class="form-group">
+                            <label for="gemini-pdh-connection-type">Connection Type:</label>
+                            <select id="gemini-pdh-connection-type" name="geminiPdhConnectionType">
+                                <option value="auto" selected>Auto-detect (recommended)</option>
+                                <option value="serial">Serial (USB) - manual port</option>
+                            </select>
+                            <small>Auto-detect scans USB serial ports and probes for the hub automatically.</small>
+                        </div>
+
+                        <div id="gemini-pdh-auto-fields">
+                            <div class="form-group">
+                                <label for="gemini-pdh-index">Power Hub Index:</label>
+                                <input type="number" id="gemini-pdh-index" name="geminiPdhIndex" value="0" min="0">
+                                <small>0-based index if multiple hubs are detected. Usually 0.</small>
+                            </div>
+                        </div>
+
+                        <div id="gemini-pdh-serial-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="gemini-pdh-port-path">Serial Port:</label>
+                                <input type="text" id="gemini-pdh-port-path" name="geminiPdhPortPath" placeholder="/dev/ttyUSB0">
+                                <small>USB serial port path (e.g., /dev/ttyUSB0 on Linux).</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="gemini-pdh-baud-rate">Baud Rate:</label>
+                                <select id="gemini-pdh-baud-rate" name="geminiPdhBaudRate">
+                                    <option value="19200" selected>19200</option>
+                                </select>
+                                <small>The Power &amp; Data Hub protocol is fixed at 19200 baud.</small>
                             </div>
                         </div>
                     </div>

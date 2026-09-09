@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-08-27
+## Updated 2026-09-08
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -523,6 +523,22 @@ This document lists all hardware vendors and device types that are verified to w
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Switch Drivers
+
+### Gemini
+
+| Device Type | Model Series | Connection | Linux<br>(arm64) | Status |
+|-------------|--------------|------------|------------------|--------|
+| Power & Data Hubs Advanced 3 | Power & Data Hubs Advanced 3 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Gemini/Power%20%26%20Data%20Hubs%20Advanced%203/) |
+
+<details>
+<summary><strong>Gemini Switch Driver Notes</strong></summary>
+
+- **Power & Data Hubs Advanced 3** (`vendor: gemini`, `deviceType: switch`, `switchType: pdh-adv3`) — the power and USB hub as 24 Alpaca switches: USB A–F power (A/B are the USB 3.2 Gen1 ports), DC1 always-on (read-only), DC2–DC5 switched 12 V outputs, DEW6/DEW7 dew heater outputs (0–100 % PWM in Manual mode, on/off in Auto or Switch mode, the same behaviour as the vendor's Windows driver), DEW6/DEW7 mode selectors (0 Auto PID, 1 Manual, 2 Switch; runtime-only, never persisted), and read-only telemetry: input voltage, output current and power, AHT20 ambient temperature, humidity and dew point, DS18B20 lens temperature, and the two sensor-attached flags. Auto mode needs both the AHT20 (Temp port) and the DS18B20 (Dew Temp port) plugged in; the firmware runs a PID loop that keeps the lens above the dew point. Custom switch names are runtime-only.
+  - **Protocol**: vendor `>X#` ASCII serial protocol at 19200 8N1 over the hub's CH340 bridge (no SDK). Reverse-engineered from the vendor's own ASCOM driver (v2.6.0206); summary in `AlpacaCore/external/Gemini/PowerDataHubAdv3-protocol.md`. Firmware 3.0.8 or newer is required (older firmware is refused at connect, as the vendor driver does).
+  - **Tested model**: Power & Data Hubs Advanced 3 (firmware 3.0.9) on Linux arm64 (Raspberry Pi, Debian 13).
+  - **ConformU** 4.5.0 — ✓ 0 errors, 0 issues, 0 timing issues on the Raspberry Pi (DeviceState with all 73 properties in 43 ms against the 100 ms FAST target; every other member under 20 ms). A second clean run on an arm64 Debian 13 VM preceded it. [Report](AlpacaCore/conformu/Gemini/Power%20%26%20Data%20Hubs%20Advanced%203/Linux-arm64.txt).
+
+</details>
 
 ### iOptron
 

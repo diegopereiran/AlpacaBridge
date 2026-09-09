@@ -84,6 +84,7 @@
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
+#include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_ASTROASIS
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
@@ -8248,6 +8249,53 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "gemini" && device_type_str == "switch") {
+#ifdef ALPACACORE_ENABLE_GEMINI
+        // switchType discriminates the vendor's switch backends. Only the
+        // Power & Data Hubs Advanced 3 exists today; the PowerBox Mini 2 is a
+        // candidate second backend under the same vendor/device-type pair.
+        std::string switch_type = config.value("switchType", "pdh-adv3");
+        if (switch_type != "pdh-adv3") {
+            error_message = "Unknown Gemini switchType: " + switch_type + " (supported: pdh-adv3)";
+            return false;
+        }
+
+        std::string conn_type = config.value("connectionType", "auto");
+
+        std::unique_ptr<alpacacore::SwitchDriver> hub;
+        if (conn_type == "serial") {
+            std::string port_path = config.value("portPath", "");
+            if (port_path.empty()) {
+                // Serial mode means an explicit port. Don't silently auto-detect
+                // behind the user's back -- surface a clear validation error.
+                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
+                return false;
+            }
+            int baud_rate = config.value("baudRate", 19200);
+            hub = alpacacore::vendor::gemini::create_gemini_pdh_switch(device_number, port_path, baud_rate);
+        } else {
+            // "auto" or unset -- auto-detect
+            int hub_index = config.value("hubIndex", 0);
+            if (hub_index < 0) {
+                error_message = "hubIndex must be >= 0.";
+                return false;
+            }
+            hub = alpacacore::vendor::gemini::create_gemini_pdh_switch_by_index(device_number, hub_index);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(hub)))) {
+            util::log_info("Registered Gemini Power & Data Hubs Advanced 3");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "wandererastro" && device_type_str == "covercalibrator") {
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
         std::string conn_type = config.value("connectionType", "auto");
@@ -8637,6 +8685,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("panelIndex");
         copy_if_present(
             "flatPanelModel");  // "lite" (Cover Lite), "v2" (Automatic FlatPanel v2) or "pro" (Motorized Flat Panel V3)
+        if (device_type == "switch") {
+            copy_if_present("switchType");  // backend selector (pdh-adv3)
+            copy_if_present("hubIndex");    // Power & Data Hub auto-detect index
+        }
         std::string connection_type = config.value("connectionType", "auto");
         if (connection_type == "serial") {
             copy_if_present("portPath");

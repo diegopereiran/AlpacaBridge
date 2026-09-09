@@ -435,6 +435,39 @@ it at disconnect (both under `firmware_mutex_`), and read only it from the gette
 a `firmware_mutex_`). Do NOT consult `connected_` in the getter — rely on the
 cache being empty while disconnected, so there is no atomic-vs-mutex ordering bug.
 
+### Cache-backed reads must track link health (issue #237)
+
+A driver whose reads are served from a cache that a background reader fills (streamed status
+frames, or a reader thread that re-polls on staleness) has a failure mode ConformU never sees:
+the serial link dies (USB re-enumeration, unplugged cable, port stolen) and the cache is served
+unchanged forever. The PDH ADV3 served byte-identical voltage/humidity for 30 minutes with
+`Connected` true, and only a write surfaced the truth as `EIO`; the failed poll was a DEBUG log.
+Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cover/SFW):
+
+- **Tie cache validity to the link.** A status-frame cache is only as good as the link that
+  fills it. Latch a *link fault* after a small threshold of silence (PDH: 3 consecutive `>G#`
+  polls with no frame, ~6 s; streaming Wanderer devices: 10 s without a frame via
+  `util::StreamLinkHealth`), clear `valid` on the cached state, log the latch at ERROR (with
+  the last `read()` errno when there was one) and the recovery at INFO. Never leave the only
+  reaction to a failed poll write at DEBUG.
+- **Refuse to serve a faulted cache.** Value reads AND writes throw `DriverException`
+  ("<device> communications compromised: <reason>", the iOptron `device_faulted_` vocabulary),
+  *commanded values included*: "what we last asked for" is no more trustworthy than the stale
+  frame once the device is unreachable. Use `DriverException`, not `NotConnected`: `Connected`
+  stays true (the client decides whether to reconnect) so `NotConnected` would contradict it.
+  Where ASCOM has a word for "unknown" (`CoverState`/`CalibratorState::Unknown`) return it
+  instead of throwing on the read; commands still throw.
+- **Static metadata keeps answering** (names, descriptions, ranges, `CanWrite`, driver-side
+  filter names/offsets) — it does not depend on the device. `DeviceState` then degrades to
+  `TimeStamp` only through the base class's per-id try/catch.
+- **Recovery is automatic**: keep polling/reading at the normal cadence while faulted so the
+  first frame clears the latch without a reconnect (a re-plugged hub on the same node).
+- **Test it hardware-free** with the pty fakes: `set_muted(true)` (hung MCU, healthy fd) and
+  `sever_link()` (master closed, reads/writes EIO) — `tests/fake_serial_streamer.h` for any
+  streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
+  threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
+  and the next frame restores service.
+
 ### Reconnect must not self-deadlock: `disconnect_locked()`
 
 A protocol wrapper's `connect()` that re-uses an existing connection typically
@@ -766,8 +799,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   defaulted to `Connection: close`, and `Server::handle_connection` served one
   request per TCP connection — real non-compliance with the README's existing
   keep-alive claim, and unnecessary overhead for every long-lived Alpaca
-  client (NINA, PHD2, ConformU). `handle_connection` now loops over requests
-  on one connection (RFC 7230 §6.3: HTTP/1.1 persists unless the client sends
+  client (NINA, PHD2, ConformU). Connections now persist across requests
+  (`Server::serve_one_request` serves one; the reactor, below, holds the
+  connection between them) (RFC 7230 §6.3: HTTP/1.1 persists unless the client sends
   `Connection: close`, HTTP/1.0 closes unless it sends `Connection: keep-alive`),
   carries pipelined surplus bytes into the next `read_request`, marks the
   response `Connection: keep-alive`, respects a handler-set `Connection`
@@ -810,16 +844,20 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   own `Connection` header. The reconnect this costs a well-behaved long-lived
   client (PHD2 autoguiding, ConformU) is negligible next to the per-request
   handshake this whole feature exists to avoid. **Also capped by wall clock**:
-  `kMaxConnectionLifetimeSeconds` (300s) forces the same reconnect regardless
-  of request count, since the count cap alone still lets a connection that
-  sends one request every `kKeepAliveIdleSeconds` hold a worker for up to
-  ~4 hours (1000 × 15s) and simply reconnect afterward (PR #2 review, round
-  2). The handler-set `Connection` header comparison (`server.cpp`) is
+  `Config::keep_alive_lifetime_seconds` (300 s default; settable so the cap
+  can be tested, see the lifetime-cap case in `test_server_socket.cpp`)
+  forces the same reconnect regardless of request count, since the count cap
+  alone still lets a connection that sends one request every
+  `kKeepAliveIdleSeconds` stay persistent for up to ~4 hours (1000 × 15s)
+  and simply reconnect afterward (PR #2 review, round 2). **The lifetime cap
+  is enforced only on a response** (`Connection: close` on the first one
+  past it), never by closing an idle socket the moment the cap passes: that
+  would race a polling client's next request, which would meet EOF instead
+  of an answer, and .NET `HttpClient` does not retry a PUT on a dead pooled
+  connection. An idle connection past the cap just runs out its idle gap.
+  The handler-set `Connection` header comparison (`server.cpp`) is
   case-insensitive for the same reason `wants_keep_alive` is on the request
-  side. `note_recv()`'s restore of the normal per-request timeout after the
-  idle wait fails closed (drops the connection) like every other
-  timeout-setting call in this path, rather than silently continuing on the
-  tighter 15s budget if the `setsockopt` call itself fails. The outgoing
+  side. The outgoing
   `Connection` header is now always rewritten to match the final `keep_alive`
   decision, rather than only set when absent -- a handler that had set
   `Connection: keep-alive` before the count/lifetime caps forced closure
@@ -855,11 +893,15 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   cover: they bound how long a connection may live, not whether it outlives
   the server. Measured with a client sending every 2s: `stop()` blocked
   26,006 ms and served 13 further requests before the check, 1 ms after.
-  Worst case now is one idle gap (`kKeepAliveIdleSeconds`, 15s) for a
-  worker blocked in `recv` — the same order as the pre-existing 30s
-  per-request bound. Regression test: the last case in
-  `AlpacaHTTP/tests/test_server_socket.cpp` (it has to be last; it stops
-  the server).
+  With the reactor (below) no worker is ever parked, so `stop()` no longer
+  waits out an idle gap at all: a request in flight is answered with
+  `Connection: close`, a request already on the wire at the reactor's final
+  zero-timeout poll is handed to the draining workers and answered the same
+  way, and idle connections are all sent FIN at once, given one shared
+  100 ms window, drained and closed (measured: 114 ms with three parked
+  clients; 14 s on the pre-reactor design with two). Regression test:
+  the last case in `AlpacaHTTP/tests/test_server_socket.cpp` (it has to be
+  last; it stops the server).
 - **`Response` header names compare case-insensitively** (2026-09-09, review
   round 5). `Response::headers_` was a plain case-sensitive map while
   `Request` lowercases its keys on parse, so the keep-alive override's
@@ -871,16 +913,17 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   default-`close` check match case-insensitively. No handler sets a
   `Connection` header today; the override exists precisely for the day one
   does. Test: the `Response` case at the end of `test_routing.cpp`.
-- **Pre-carried (pipelined) headers restore the per-request timeout before
-  the first recv** (same review round). `read_request` restored the 30s
-  budget only *after* a successful recv, so when request B's headers had
-  arrived in the same write as request A (carried over, terminator already
-  present, header loop does no recv) B's first *body* recv still ran under
-  the 15s idle bound — the slow-body bug fixed earlier, reached through
-  carry-over. Now non-empty carried bytes mean "this request has begun" and
-  the restore happens up front. Test: the pre-carried-headers case in
-  `test_server_socket.cpp` (A complete + B's headers in one write, 16s gap,
-  then B's body).
+- **A connection with carried (pipelined) bytes is never parked** (issue
+  #234). The reactor polls the *socket*, so bytes already read into
+  `Connection::carried` would be invisible to it; the worker keeps serving
+  until `carried` is empty (after stripping a lone trailing CRLF, which is
+  padding, not a request). This also settles the per-request timeout
+  question that two review rounds on #233 got wrong in different ways: a
+  worker only ever reads a connection whose request has already begun
+  arriving, so every recv runs under the plain 30 s `kSocketTimeoutSeconds`
+  bound set at accept time and there is no idle timeout to restore. Tests:
+  the slow-body and pre-carried-headers cases in `test_server_socket.cpp`
+  (16 s gap inside request 2's body, in its own write and pre-carried).
 - **Persistence is opt-in: a connection may only stay open for an exchange we
   framed correctly** (2026-09-08, PR #233 review). Keep-alive turned every
   latent framing gap into a stream desync, because leftover or mis-framed
@@ -910,31 +953,115 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   its next request already in flight. Use `util::socket_close_graceful`, never
   a bare `util::socket_close`, on a **client** socket. The drain budget is
   deliberately short (100 ms x 4) so it cannot become the worker-pinning
-  problem it sits next to. `Server::worker_thread` is the single client-close
-  site; the listener closed by `stop()` is not a client connection. Test: the
+  problem it sits next to. `Server::close_connection` is the single
+  client-close site (it also keeps `live_connections_` honest); the one
+  non-graceful call, from the reactor at `stop()`, is safe because a socket
+  that was not readable at the last poll has nothing queued, so `close()`
+  sends FIN. The listener closed by `stop()` is not a client connection. Test: the
   graceful-close case in `test_server_socket.cpp` (a `Connection: close`
   request with 10 KB of trailing bytes the server never reads; on Linux a
   bare `close()` still delivered the queued response but ended the
   connection in `ECONNRESET` instead of EOF, and Windows stacks discard the
   queued response outright).
-- **`thread_pool_size` bounds concurrent REQUESTS, not connections — keep it
-  that way** (same review). A parked keep-alive connection holds a worker for
-  up to `kKeepAliveIdleSeconds`, so without a bound the pool's documented
-  meaning (`config.h`: "32 concurrent requests") silently became a cap on
-  concurrent *connections*; a browser tab alone opens ~6, and a new client
-  then waits in `connection_queue_`, which is unbounded and has no dequeue
-  deadline. `keepalive_worker_reserve()` holds back a proportional slice
-  (floor of 1, since `thread_pool_size` may be 1) and forces a close once the
-  pool nears saturation, degrading to pre-keep-alive close-per-request. This
-  is a **stopgap**: the real fix is to park idle connections on a poll set
-  rather than on a worker, which also removes the `SO_RCVTIMEO` restore
-  dance (`idle_timeout_pending`/`note_recv`) that two separate review rounds
-  found bugs in. Test: the pool-pressure case in `test_server_socket.cpp`
-  (own server, `set_thread_pool_size(2)`, on port 6872). It asserts the
-  first connection is kept alive and only the pool-filling one is closed,
-  so a reserve that silently disables keep-alive on small pools (the
-  original fixed-reserve-of-4 design did exactly that) fails it rather than
-  passing the late-client check vacuously.
+- **Idle connections live on the reactor, never on a worker; `thread_pool_size`
+  bounds concurrent REQUESTS** (2026-09-08, issue #234, replaces the #233
+  reserve stopgap). `Server::reactor_loop` (one thread) parks every idle
+  connection on a `poll()` set with a self-pipe for wakeups; when a
+  connection becomes readable it goes to `ready_queue_`, a worker serves
+  exactly one request (`serve_one_request`), keeps going only while it holds
+  carried bytes, then hands the connection back (`park_connection`). A
+  `Connection` (fd, remote address, carried bytes, request count, open time,
+  deadline) has exactly one owner at a time and moves by `unique_ptr`. Rules
+  this earns:
+  - Never block in the reactor. Expired connections are handed to a worker
+    marked `close_only` so the graceful drain happens off the poll thread.
+    The one exception is the final pass at `stop()`: after a zero-timeout
+    poll hands already-arrived requests to the draining workers, every
+    remaining idle socket gets `shutdown(SHUT_WR)`, one shared 100 ms
+    `poll()` so peers can react to the FIN and in-flight bytes can land,
+    then a non-blocking drain and `close()`. That is `socket_close_graceful`
+    applied to all of them in parallel; a plain `close()` straight after the
+    zero-timeout poll left a microsecond window for an RST (PR #235 review).
+  - Workers carry a generation number (`worker_generation_`, bumped by every
+    `run_server()`, waits notified). A worker that detached itself because
+    `stop()` was called on it (no current handler does; the management
+    endpoints restart on a detached thread) exits on the generation check
+    instead of surviving as an extra thread once `start()` clears
+    `shutdown_workers_`. Wake permits are released per live worker
+    (`worker_count_`), not per `thread_pool_size`, so any number of detached
+    stale workers get their wake-and-exit. **Count at spawn, not in the
+    thread body**: a `stop()` landing before a new thread executes its first
+    instruction would otherwise undercount, leave that thread with no permit,
+    and hang the join (PR #235 review round 4). `run_server()`'s spawn phase
+    and `stop()`'s reactor/worker teardown are serialized by
+    `lifecycle_mutex_`; `stop()` releases it before joining the server
+    thread (which may be about to take it), and the spawn phase bails out
+    under it when `running_` is already false, so `start_async()` followed
+    at once by `stop()` is safe. Test: the churn case in
+    `test_server_socket.cpp` (20 start/stop pairs with no settle time, then
+    a served request). The reactor keeps a self-detach branch too, but it runs
+    no handler code and cannot be the caller.
+  - The reactor's wake pipe is created once in the constructor and closed
+    only in the destructor. It is read lock-free by `wake_reactor()` from
+    any thread, and a worker orphaned across a restart could still call
+    that while a per-start recreation was in flight (PR #235 review round
+    3); immutable descriptors have no such race.
+  - **No server thread is ever detached.** A thread `stop()` cannot join
+    because it is running on it (a handler calling `stop()` synchronously;
+    no current handler does) goes into `orphaned_threads_`, and the next
+    `stop()` from another thread or the destructor joins it. So nothing
+    can touch a `Server`'s members, the wake pipe included, after the
+    destructor returns (review round 5). Destroying a `Server` from inside
+    one of its own handlers is not supported.
+  - The reactor enforces only the idle gap (`kKeepAliveIdleSeconds`) and the
+    first-request slowloris bound (`kSocketTimeoutSeconds`, so a client that
+    connects and never sends costs no worker). Caps that should end with a
+    `Connection: close` response (request count, lifetime) belong in
+    `serve_one_request`, see the lifetime note above.
+  - `Config::max_connections` (512 default; `RLIMIT_NOFILE` is 1024 on a
+    typical systemd unit and the other half is for SDKs, serial ports and
+    logs) bounds live connections across all owners. Both it and
+    `keep_alive_lifetime_seconds` are settable from the config file
+    (`http:` section keys of the same name) and the environment
+    (`ALPACAHTTP_MAX_CONNECTIONS`, `ALPACAHTTP_KEEP_ALIVE_LIFETIME_SECONDS`),
+    routed through the clamping setters so every path clamps alike; tested
+    in `test_config.cpp`. At the bound the accept
+    loop pauses and new clients wait in the listen backlog (64) rather than
+    being refused; an idle connection expires within 15 s.
+  - Do not reintroduce a worker-side counter or reserve: the previous design
+    counted busy workers as parked and pushed clients to close-per-request at
+    exactly the busiest moments (review of #233).
+  - `live_connections_` is exact by construction (one increment at accept,
+    one decrement in `close_connection`) and is **never reset**; a
+    connection that straddles a management restart balances in whichever
+    generation it closes. `reset_queues_for_start()` closes anything left in
+    `ready_queue_`/`reactor_incoming_` through `close_connection` rather than
+    clearing it. (PR #235 review flagged a start-time reset as an underflow
+    that would gate `accept()` forever; the restart endpoint runs `stop()` on
+    the router's detached thread, so every connection is already closed and
+    the count already zero before the reset ran, but the reset was wrong on
+    principle and is gone.)
+  - Restart-path tests must not poll `is_running()` right after the restart
+    response: the router fires the callback 100 ms later on a detached
+    thread, so a true seen before `stop()` begins is the OLD generation, and
+    a client connecting then lands in a listener about to close and reads a
+    reset. Wait for a parked bystander to see EOF (proof `stop()` ran), then
+    for `is_running()`, then retry `connect()` (it goes true before the new
+    listener is bound). And lines "missing" from a test log after an
+    `EXPECT` abort are usually buffered stdout lost at `abort()`, not a hang;
+    confirm with a backtrace (`pidof test_server_socket`, never `pgrep -f`
+    with a pattern that matches your own shell) before chasing one.
+  Tests in `test_server_socket.cpp`: the reactor pool case (2 workers, 4
+  idle keep-alive connections all kept alive and all served again, 3
+  connect-and-never-send clients, a late client still served), the
+  lifetime-cap case (2 s cap, own server), the max-connections case (bound
+  of 2, third client waits in the backlog and is served once one is
+  released), the restart case (two management restarts back to back on a
+  bounded server, each with a parked bystander closed and three fresh
+  clients served afterwards), and the idle-parked assertions in the final
+  `stop()` case. On
+  the pre-reactor design the pool case fails at its second keep-alive
+  assertion and the `stop()` case fails on a 14 s stop.
 - **Test-suite hygiene for socket tests** (same review). `peer_closed()` must
   save and restore `SO_RCVTIMEO` — leaving its short budget on the socket made
   every later `read_one_response()` flaky on loaded CI and reported a slow
@@ -1845,7 +1972,7 @@ Protocol: reverse-engineered USB HID vendor protocol (VID:PID `338F:A0F0`, 65-by
 
 ### Gemini
 
-Devices: Focuser (Automatic Astro Focuser Pro), CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3).
+Devices: Focuser (Automatic Astro Focuser Pro), CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3), Switch (Power & Data Hubs Advanced 3).
 
 #### Automatic Astro Focuser Pro (Focuser)
 
@@ -1912,6 +2039,24 @@ Third model on the same `gemini`+`covercalibrator` slot (`flatPanelModel: "pro"`
 - **Light commands cost ~125 ms EACH in the Pro firmware** (`>L#`, `>D#`, `>B<n>#` all measured 123-129 ms raw on the Pi, vs 27 ms for `>S#`), and `>B<n>#` alone does NOT light the panel (the `>S#` light flag stays 0 until `>L#`), so a toggle is two commands = ~250 ms hardware floor. `CalibratorOn`/`CalibratorOff` in the shared v2/Pro driver now take a **synchronous fast path** when no cover move or earlier calibrator command is in flight (checked under `cover_task_mutex_` so a move can't start mid-command): the call returns with `CalibratorState` already `Ready`/`Off`. The background-thread path (the ConformU-contention fix documented for v2 above) is kept only for the cover-in-flight case. Reason: with the always-async path, NINA's toggle looked multi-second because NINA polled `CalibratorState` slowly while the light had actually flipped in 250 ms.
 - Extra Pro-only commands exist (`>M±nn#` manual jog, `>E#`/`>F#` set open/close position) and are deliberately not exposed - out of ASCOM CoverCalibrator scope.
 
+#### Power & Data Hubs Advanced 3 (Switch, power box)
+
+`gemini` + `switch`, `switchType: "pdh-adv3"` (discriminator from day one; the PowerBox Mini 2 is the obvious second backend). Files: `gemini_pdh_protocol_wrapper.{h,cpp}` + `gemini_pdh_switch_driver.{h,cpp}`, template = the WandererBox Pro V3 switch driver. Hardware: 4x switched 12 V (DC2-DC5) + DC1 always-on, 6x switchable USB (A/B = USB 3.2 Gen1, C-F = USB 2.0), 2x PWM dew heaters (DEW6/DEW7) with Auto (PID) / Manual / Switch modes, AHT20 ambient temp+humidity on the "Temp" port, DS18B20 lens probe on the "Dew Temp" port, input V / output A / W telemetry. Both sensors are meant to be used together: Auto mode is the PID loop that keeps lens temperature above the AHT20 dew point.
+
+Protocol: **no docs, no INDI/INDIGO driver, no vendor app capture** -- everything came from decompiling the vendor's Windows ASCOM driver (`ASCOM.GeminiPowerBoxPlusAdv3.Switch.dll` v2.6.0206, .NET, Inno Setup installer from geminiastro.cc/downloads; rootless `innoextract` + `ilspycmd` recipe in `/driver-build` Question 5a). Summary in `AlpacaCore/external/Gemini/PowerDataHubAdv3-protocol.md`; the decompiled source is NOT committed. Same `>X#`/`*X...#` family as the flat panels but a different command set and **19200 baud** (the panels are 9600), CH340/CH341 bridge (vendor ReadMe requires the CH341 driver), `>H#` -> `*HGeminiPowerBoxPlusAdv3#` compared verbatim, `>V#` -> 3-digit firmware (308 = 3.0.8, vendor refuses < 308 and so do we), `>G#` -> one positional status frame the vendor splits on the letters `DUATMBCSHVP` (17 fields: 4 DC digits, 6 USB digits, AHT/DS18 flags, DEW6/7 enabled+mode, DEW6/7 manual %, lens/ambient/humidity/dew point, V/A/W). Set commands (`>O<n>#`/`>C<n>#` outputs 1-11, `>X`/`>Y` manual PWM, `>Z1x`/`>Z2x` enable, `>M1x`/`>M2x` mode) are fire-and-forget; the vendor never reads their reply.
+
+- **Commands go out with a trailing `\n`** (`SerialPort.WriteLine`), unlike the flat panel wrapper's bare `>X#`. Mirror the vendor: the firmware is only proven against that framing.
+- **Reader thread owns every read, handshake included.** The vendor's sensor window reads whatever is in the buffer every 3 s without sending anything and parses it as a `>G` frame, which strongly suggests the firmware streams status on its own. The wrapper routes any `*G` frame to the cache and only letter-matched frames to the one pending request (`>H#`/`>V#`/`>G#`), and re-polls `>G#` when the cache is older than 2 s -- so Switch reads never touch the wire (FAST target) and an unsolicited frame can never be mistaken for a handshake reply. TODO(hardware): confirm streaming vs. reply-only, and the actual tag letters/order of the frame.
+- **Auto-detect must match the exact identity string.** The focuser, all three flat panels and the hub enumerate as the same CH340 by-id names; accepting any `*H` reply would grab a flat panel. `is_pdh_handshake_reply()` is an exact compare; a `*HGeminiPowerBox...` reply that is not `...PlusAdv3` is logged as an unsupported model (the previous-generation PowerBox Plus V3 has a different frame). The probe reads frames until the deadline instead of taking the first `#`-terminated reply, for the streaming reason above.
+- **DEW output switches follow the vendor's mode-dependent range**: 0-100 (`>X`/`>Y` PWM) in Manual, 0-1 (`>Z` enable) in Auto/Switch. `MaxSwitchValue` therefore reads the channel's *effective* mode (commanded this session, else firmware-reported). The mode switches (0 Auto / 1 Manual / 2 Switch) are **writable at runtime and never persisted** (project thermal policy -- the vendor persists them in its setup dialog; we deliberately don't). Auto without both sensors attached is allowed with a warning; the firmware itself falls back to Manual (vendor logic).
+- Commanded-value semantics for every writable switch (WandererBox/ETA lesson): set commands are blind and the frame lags by a poll period, ConformU reads back immediately. A post-write `>G#` request refreshes the cache sooner than the periodic poll.
+- Read-only telemetry as switches (V/A/W, ambient temp/humidity/dew point, lens temp, two "sensor attached" flags): the vendor only shows these in a pop-up window; exposing them is what makes them usable in NINA. Absent-sensor convention -127 degC / 0 % (WandererBox).
+- **ConformU 4.5.0 validated on real hardware (firmware 3.0.9, 2026-09-08): 0 errors, 0 issues, 0 timing issues** on the Raspberry Pi rig (`openastro.lan`, ConformU on the Pi against localhost; DeviceState 43 ms, everything else under 20 ms) -- that log is the one in `AlpacaCore/conformu/Gemini/Power & Data Hubs Advanced 3/`. An earlier run on the dev VM against localhost (hub on VMware USB passthrough) was equally clean (slowest 20 ms), so this driver is fine to smoke-test on the VM before a Pi deploy.
+- **Link health (issue #237, 2026-09-09)**: reads are cache-only by design, so the reader thread latches a link fault after 3 consecutive unanswered `>G#` polls (~6 s; a failed poll write counts too), clears `PdhState::valid`, and the driver throws `DriverException` on every value read/write (commanded values included) until a frame arrives again. Found on the VM rig: USB passthrough re-enumerated, the hub served byte-identical telemetry for 30 min while `SetSwitchValue` failed with EIO. See "Cache-backed reads must track link health" above.
+- **Hardware findings (confirmed 2026-09-08)**: `>H#` -> `*HGeminiPowerBoxPlusAdv3#` verbatim; `>V#` -> `*V309#`. The `>G#` frame uses **suffix** tags with fixed-width, space-padded numbers: `*G1111D111111U1A1T1A1M1B1M100C100C 24.06S 23.39T 42.04H  9.76D12.6V 0.11C  1.38P#` -- the split-on-tag-letters parser handles it because `strtod`/`strtol` skip leading spaces (a stricter "all digits" parse of the numeric fields would have broken). **The firmware streams `*G` frames at ~3 s only after the first `>G#`** (nothing unsolicited for the first ~5 s after open, then continuous once queried) -- so the reader-thread design was necessary: a request/response wrapper would have read a streamed frame as the `>V#` reply. Set commands produce no ack. Both dew channels came up Manual at 100 % on power-up.
+- **All writable-switch writes are serialized under `write_mutex_`** (validate + send + record as one step; readers never take it). PR #236's bot review spotted that a DEW output's mode-dependent max was read in one lock and the commanded value recorded in another, so a concurrent mode write could let a value be validated against a stale max. A concurrent mode/value writer stress case covers it.
+- 17 hardware-free Catch2 cases: 11 driver-contract/frame-parsing/handshake cases (incl. the real captured frame above) plus 6 over a pty-backed fake hub (`tests/fake_gemini_pdh.h`: replies to `>H#`/`>V#`/`>G#`, never acks set commands, optionally streams `*G` frames) covering connect + first frame, every write path incl. the mode-dependent DEW range, streamed frames routed past the handshake, the 2 s stale re-poll, the firmware gate, and concurrent DEW mode/value writers. Plus routing/config round-trip.
+
 ### WandererAstro (WandererCover V4, WandererRotator Mini, SFW filter wheels, WandererBox Pro V3)
 
 Devices: CoverCalibrator, Rotator (the project's first — the generic CoverCalibrator dispatch already existed in `AlpacaHTTP/src/http/router.cpp`; only the vendor instantiation block + web UI were new). The WandererCover V4 is a motorized dust cover combined with an EL flat panel.
@@ -1966,6 +2111,7 @@ Connection types: USB serial (CH340 adapter, vendor `1a86`) only. No WiFi. Fixed
 - **Step-quantisation FP accumulation** (ConformU round 1): `min + round((v-min)/step)*step` at v=Max produced 13.200000000000001 > 13.2 and failed the wrapper's range check exactly at the boundary ConformU tests. Clamp the quantised value into [min, max].
 - ConformU 4.4.0 validated on real hardware (WandererBox Pro V3, firmware 20250410, Debian 13 arm64): **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/WandererAstro/WandererBox Pro V3/Linux-arm64.txt`. Round 1 had the two issues above; round 2 was clean.
 - **`switchType` discriminator** (`wandererbox-pro-v3`) in the router config from day one — the parked ETA tilt adjuster branch will add `eta` as a second backend under (wandererastro, switch); dew-heater auto modes (dew-point/constant-temp) stay device-side per the runtime-only thermal policy (the vendor's own ASCOM driver also only writes Manual Mode).
+- **Link health for the whole streaming family (issue #237, 2026-09-09)**: the cover, SFW and box wrappers all latch a link fault after 10 s without a frame (`util::StreamLinkHealth`, the last `read()` errno named in the reason) and clear `valid`; the box throws `DriverException` on value reads/writes, the cover reads `CoverState`/`CalibratorState::Unknown` and refuses commands, the wheel throws on `Position`/moves. Same rule as the Gemini PDH; see "Cache-backed reads must track link health".
 
 ### WeeWX
 

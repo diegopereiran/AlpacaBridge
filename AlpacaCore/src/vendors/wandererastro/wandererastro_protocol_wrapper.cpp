@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
@@ -43,6 +44,10 @@ namespace alpacacore::vendor::wandererastro {
 namespace {
 
 constexpr char kModelPrefix[] = "WandererCoverV4";
+
+// The cover streams its status line at ~1 Hz; this much silence means the
+// link is dead, not slow (issue #237).
+constexpr int kCoverLinkSilenceMs = 10000;
 constexpr int MAX_LINE_LEN = 256;
 
 // The in-use port registry lives in util/serial_port_registry.h and is shared
@@ -325,6 +330,10 @@ public:
             config_ = config;
             open_serial();
         }
+        {
+            std::lock_guard<std::mutex> status_lock(status_mutex_);
+            link_.reset(std::chrono::steady_clock::now());
+        }
 
         // Start the background reader that keeps the latest streamed status.
         running_.store(true);
@@ -368,6 +377,7 @@ public:
             std::lock_guard<std::mutex> status_lock(status_mutex_);
             status_ = WandererStatus{};
             firmware_date_.clear();
+            link_.reset(std::chrono::steady_clock::now());
         }
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
@@ -377,6 +387,14 @@ public:
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
+    }
+
+    std::optional<std::string> link_fault() const {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        if (!link_.faulted()) {
+            return std::nullopt;
+        }
+        return link_.fault();
     }
 
     WandererStatus get_status() const {
@@ -488,17 +506,28 @@ private:
                 // no-data path but not errors, so back off to avoid a CPU spin
                 // until stop_reader() runs. (The Windows branch above does the
                 // same on ReadFile failure.)
+                {
+                    std::lock_guard<std::mutex> lock(status_mutex_);
+                    link_.note_read_error(errno);
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 #endif
+            check_link_silence();
             if (!got) {
                 continue;  // VTIME timeout — loop and re-check running_
             }
             if (ch == '\n' || ch == '\r') {
                 WandererStatus parsed;
                 if (parse_status_line(buffer, parsed)) {
+                    bool restored = false;
                     std::lock_guard<std::mutex> lock(status_mutex_);
                     status_ = parsed;
+                    restored = link_.on_frame(std::chrono::steady_clock::now());
+                    if (restored) {
+                        ALPACA_LOG_INFO("WandererAstro",
+                                        "WandererCover: serial link restored, status frames are flowing again");
+                    }
                     // Cache the firmware date once (YYYYMMDD int -> YYYY-MM-DD).
                     if (firmware_date_.empty() && parsed.valid && parsed.firmware_version > 0) {
                         const int fw = parsed.firmware_version;
@@ -521,6 +550,26 @@ private:
                 buffer += ch;
                 if (buffer.size() > MAX_LINE_LEN) buffer.clear();
             }
+        }
+    }
+
+    // Issue #237: latch a link fault after kCoverLinkSilenceMs without a
+    // frame. The cache is invalidated (valid=false, so CoverState reads
+    // Unknown) and the driver refuses commands until the next frame clears
+    // the latch in reader_loop().
+    void check_link_silence() {
+        std::optional<std::string> latched;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            latched =
+                link_.check_silence(std::chrono::steady_clock::now(), std::chrono::milliseconds(kCoverLinkSilenceMs));
+            if (latched.has_value()) {
+                status_.valid = false;
+            }
+        }
+        if (latched.has_value()) {
+            ALPACA_LOG_ERROR("WandererAstro", "WandererCover: serial link faulted (" + *latched +
+                                                  "); cached status is invalid until frames resume");
         }
     }
 
@@ -622,6 +671,7 @@ private:
     // Firmware date (YYYY-MM-DD), captured once from the first valid frame and
     // cleared on disconnect; guarded by status_mutex_ alongside status_.
     std::string firmware_date_;
+    util::StreamLinkHealth link_;  // issue #237; guarded by status_mutex_
 
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
@@ -645,6 +695,8 @@ bool WandererProtocolWrapper::is_connected() const { return impl_->is_connected(
 WandererStatus WandererProtocolWrapper::get_status() const { return impl_->get_status(); }
 
 std::optional<std::string> WandererProtocolWrapper::get_firmware_date() const { return impl_->get_firmware_date(); }
+
+std::optional<std::string> WandererProtocolWrapper::link_fault() const { return impl_->link_fault(); }
 
 void WandererProtocolWrapper::open_cover() { impl_->open_cover(); }
 
