@@ -26,8 +26,52 @@
 //                          can leave the fd non-blocking, spinning a reader
 //                          thread at 100% CPU. The result must be checked.
 //
-// The whole header is POSIX-only; callers already wrap their serial code in
-// `#ifndef _WIN32`, so this is compiled into the same branches.
+// The serial helpers are POSIX-only; callers already wrap their serial code
+// in `#ifndef _WIN32`, so they are compiled into the same branches.
+// errno_string() below is portable and sits outside that guard.
+
+#include <cerrno>
+#include <cstring>
+#include <string>
+
+namespace alpacacore::util {
+
+namespace detail {
+
+// strerror_r() comes in two flavours with the same name and argument list:
+// the GNU one returns `char*` (the message, which may live in a static table
+// rather than in the caller's buffer) and the XSI/POSIX one returns `int`
+// (0 on success, the message always in the buffer). glibc picks by
+// `_GNU_SOURCE`, which g++ defines implicitly, but musl and macOS always
+// give the XSI form regardless of that macro — so select on the actual
+// return type by overload instead of guessing from feature macros.
+inline const char* strerror_r_message(const char* ret, const char* buf) { return ret != nullptr ? ret : buf; }
+inline const char* strerror_r_message(int ret, const char* buf) { return ret == 0 ? buf : nullptr; }
+
+}  // namespace detail
+
+// Thread-safe replacement for `std::strerror(errno)`. strerror() formats into
+// a single static buffer that a serial reader thread and an HTTP-thread
+// writer can race on when both fail at once (e.g. EIO on both sides after a
+// USB re-enumeration). Takes the errno VALUE so callers snapshot it before
+// anything else in the expression can clobber it.
+inline std::string errno_string(int err) {
+    char buf[256]{};
+#if defined(_WIN32)
+    if (::strerror_s(buf, sizeof(buf), err) != 0) {
+        return "errno " + std::to_string(err);
+    }
+    return std::string(buf);
+#else
+    const char* msg = detail::strerror_r_message(::strerror_r(err, buf, sizeof(buf)), buf);
+    if (msg == nullptr || *msg == '\0') {
+        return "errno " + std::to_string(err);
+    }
+    return std::string(msg);
+#endif
+}
+
+}  // namespace alpacacore::util
 
 #ifndef _WIN32
 
@@ -92,7 +136,7 @@ inline bool write_all(int fd, const char* data, std::size_t len) {
         if (written == 0) {
             // write() made no progress on a non-empty request; treat as a hard
             // error rather than spinning forever waiting for it to advance. Set
-            // errno so a caller that reports strerror(errno) gets a real message
+            // errno so a caller that reports errno_string(errno) gets a real message
             // instead of a stale/zero value.
             errno = EIO;
             return false;
@@ -144,7 +188,7 @@ inline bool send_all(int fd, const char* data, std::size_t len, int flags) {
             return false;
         }
         if (sent == 0) {
-            errno = EIO;  // keep strerror(errno) meaningful for callers that report it
+            errno = EIO;  // keep errno_string(errno) meaningful for callers that report it
             return false;
         }
         total += static_cast<std::size_t>(sent);

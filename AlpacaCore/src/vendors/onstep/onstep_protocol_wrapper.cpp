@@ -958,8 +958,7 @@ private:
     bool connect_serial(const std::string& port_path, int baud_rate) {
         serial_fd_ = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
-            ALPACA_LOG_ERROR("OnStep",
-                             "Failed to open serial port [" + port_path + "]: " + std::string(std::strerror(errno)));
+            ALPACA_LOG_ERROR("OnStep", "Failed to open serial port [" + port_path + "]: " + util::errno_string(errno));
             return false;
         }
 
