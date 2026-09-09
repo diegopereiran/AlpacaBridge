@@ -533,7 +533,7 @@ public:
                 return true;
             }
             ALPACA_LOG_WARN("SynScan", "Echo test answered '" + printable(reply) + "' instead of the echoed byte" +
-                                            (attempt == 0 ? "; retrying once" : "; giving up"));
+                                           (attempt == 0 ? "; retrying once" : "; giving up"));
         }
         return false;
     }
