@@ -756,6 +756,41 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `test_async_connectable.cpp` for the regression test. This is a router bug,
   not a driver bug: no per-driver fix can work around a caller that trusts
   the wrong flag.
+- **The router must never call `get_connected()` while `get_connecting()` is
+  true — the connect side of the rule above** (SynScan hand controller,
+  2026-09, issue #130). Six telescope drivers (SynScan, Celestron, OnStep,
+  Bisque, iOptron, Sky-Watcher) answer `get_connected()` under the state
+  mutex that their `set_connected(true)` holds for the entire handshake, so
+  a `get_connected()` call from the `PUT connected` wait or from a `GET
+  connected` blocked for the whole connect and the wait's 8 s deadline never
+  fired (25 s on a silent handset: five 5 s query timeouts). Every router
+  site now reads `get_connecting()` first and short-circuits; while a task
+  is in flight `Connected` reports false. A connect request that arrives
+  mid-task is still passed to `device->connect()` so `AsyncConnectable` can
+  queue it against an in-flight disconnect or drop it against an in-flight
+  connect. Driver side, prefer an atomic `connected_` with a lock-free
+  getter (30 drivers already do; SynScan now does) — the other five still
+  take the mutex and rely on the router rule. Regression tests:
+  `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
+  `AlpacaCore/tests/test_synscan_async_park.cpp`.
+  **Known trade-off:** while a task is in flight, `Connected` reports false
+  for every client, including one whose `PUT connected` reply already came
+  back at the 8 s deadline with the connect still proceeding — a Platform 6
+  client that treats that combination as a hard failure gives up on a
+  connect that may still succeed moments later. Accepted because the
+  alternative (reading `get_connected()` directly) is the phantom-link bug
+  this rule fixes; there is no per-driver signal yet for which
+  `get_connected()` implementations are safe to read mid-task (the 30
+  lock-free ones) versus which aren't (the six above).
+  **Known gap (narrow, code review on PR #3):** `get_connecting()` and
+  `get_connected()` are two separate calls, not one atomic snapshot — if a
+  connect task starts in the gap between them, the `get_connected()` call
+  can still block on a mutex-holding driver's handshake for the six above.
+  Far narrower than the bug this rule fixes (needs a second request to land
+  in a specific few-instruction window, not just a slow connect), and not
+  worth a structural fix here: closing it means every driver exposing one
+  atomic "get state" call instead of two, a bigger change than this PR's
+  scope. Left as a known risk rather than solved.
 - **`Connected` is per-client, refcounted in the router — never wire an
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +
@@ -1371,6 +1406,8 @@ Protocol documentation: `AlpacaCore/external/SynScan/`. No external SDK required
 Connection types: Serial (USB serial) only. Default 9600 baud, 8N1. Protocol versions V3 (older) and V4 (current).
 
 - Auto-detection scans `/dev/serial/by-id/` and `/dev/ttyUSB*` for SynScan hand controllers, probes each port with a firmware version query, and connects to the first responding mount.
+- **Connect verifies the link with the protocol echo (`K` + byte → byte + `#`)** (issue #130): `connect()` only opens the port, so before this gate a port with nothing listening came up as `Connected=true` once every handshake query (firmware, model, site, time, RA/Dec, Alt/Az) had burnt its 5 s response timeout inside `catch (...)`, and every command then timed out too. Silence on the echo fails the connect within one timeout with a message naming the port. A mismatched reply is NOT accepted (PR #3 review: a port that merely answers something framed like the protocol would otherwise proceed into the swallowed handshake queries and reproduce the phantom link) — `echo_test()` first reads past it for the rest of one response timeout, because right after `connect_serial()` opens the port the first token can be a stale reply from the previous session (`connect_serial()` flushes the tty buffer, but a USB adapter's own FIFO can still deliver one), then resends the echo once for a handset that garbled a byte, and fails after a second mismatch. Regression tests for silence, garbled-once, garbled-twice and stale-token-ahead-of-echo are in `test_synscan_async_park.cpp`; the shared `FakeMountServer::default_responder()` answers the echo so the concurrency stress tests still connect (they assert it). `connected_` is atomic and `get_connected()` lock-free (the connect sequence holds `mutex_` throughout). Every handset command and reply is logged at TRACE (`HC <cmd> -> <reply>`; non-printable bytes as `\xNN`).
+- **A silent handset is usually a wedged handset, not wiring** (EQM-35 Pro rig, SynScan V4 fw 04.40.00, 2026-09): after ANY bytes at the wrong baud (115200 from the Sky-Watcher direct-USB probe or a manual test) the handset answers nothing — both protocols, every baud, every DTR/RTS state — until power-cycled, and a mount restart does not reboot a handset that is USB-powered from the SBC (no re-enumeration in `dmesg` is the tell). Recovery: unplug USB from the SBC → power-cycle the mount → handset to its main screen → plug USB back in. Healthy, it answers `K`+byte with byte+`#` at 9600, auto-detect finds it (`HC firmware 04.40.00`), connect takes 0.6 s and reads 2–35 ms. Never send non-9600 traffic to a port that may be a handset; see `util/synscan_handset_probe.h`.
 - **Pulse guiding**: SynScan V3/V4 protocol has no hardware pulse guide command. Driver implements software-timed variable-rate slew: issues a variable-rate axis slew at the guide rate, sleeps for the requested duration, then stops the axis and restores sidereal tracking. `IsPulseGuiding` tracks completion via time-based end time plus delay.
 - **GEM pier-side DEC direction flip**: DEC motor direction is inverted when the mount's pointing state is 'W' (west), matching the physical axis reversal on German equatorial mounts. This affects pulse guide and MoveAxis DEC commands.
 - **Position override accumulation**: Instead of reading back noisy mount positions after tiny guide pulses, the driver accumulates expected `rate × duration` deltas directly into the target coordinate frame. All consecutive pulse guide directions (N/S/E/W) operate in the same coordinate baseline, eliminating drift between reads.
@@ -1392,6 +1429,7 @@ Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi 
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
 
+- **The serial probe asks for a SynScan handset echo first and skips the port if one answers** (`util/synscan_handset_probe.h`, 2026-09): a SynScan V4 hand controller (fw 04.40.00, built-in PL2303 `067b:23a3`) shares the Prolific adapter class this scan targets, and it stops answering serial ENTIRELY after receiving bytes at the wrong rate — one motor-controller probe at 115200 is enough — until it is power-cycled (unplugging the mount is not enough when the handset runs on USB power from the SBC). On the EQM-35 Pro rig this was the whole "hand-controller commands time out" report: the handset had been wedged by this probe at service start. The guard is at the top of `probe_skywatcher_port()`, gated on the caller's baud not being 9600 (the rate that is safe for a handset to receive) so it costs nothing on the only baud any caller currently probes at while still covering every future non-9600 caller; the same hazard applies to any other scan that sends non-9600 traffic to Prolific-class ports (the iOptron iEAF/iAFS2/3 and iEFW handshakes at 115200 are the known ones — not yet guarded). The SynScan driver's serial connect additionally claims the port with `TIOCEXCL`, an independent layer that blocks a concurrent same-process open regardless of baud. Hardware-verified 2026-09-09 (EQM-35 Pro rig): the exact-echo path connects cleanly, a manual open of the port while connected fails with `EBUSY` and succeeds again immediately after disconnect (no lock leak), and an abrupt `systemctl restart` mid-poll still re-detects the handset on the very first probe after restart (the closest this rig can reproduce of the stale-reply race the tolerant read loop targets). **Not exercised by this pass:** the baud gate itself — `fix/eqm35-hand-controller-timeout` only ever calls `probe_skywatcher_port()` at 9600, so the guard structurally cannot fire on this branch alone; its actual trigger (`kProbeBauds` including 115200) lives on `driver/skywatcher-eqm35` and needs its own hardware pass once combined with this fix. **Reverse direction (review on open-astro#242):** the guard sends the 9600 echo to a port that may be a Sky-Watcher motor board expecting 115200 — could a board be wedged by wrong-rate bytes the way the handset is? Empirically no, and the guard adds no new class of traffic: on `main` the probe has always sent `:e1` at 9600 to every candidate port, and `driver/skywatcher-eqm35`'s `kProbeBauds` tries 9600 first, so the real EQM-35 board received 9600 traffic before every successful 115200 detection during that branch's hardware bring-up (build a014531). The guard only runs on the non-9600 pass, i.e. after that same port has just been probed at 9600. Still, when the branches are combined, the combined pass should confirm both directions on the same rig: handset not wedged by the scan, board still detected at 115200 after the 9600 echo.
 - **All pointing math lives in the driver.** The MC protocol only counts steps: the driver
   owns RA/Dec <-> axis-angle conversion (CPR read at connect via `:a`, timer frequency
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
