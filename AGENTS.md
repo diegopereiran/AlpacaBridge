@@ -1749,13 +1749,12 @@ with the fix reverted to the raw equality check, and passes with it restored.
     coupling in every case. `move_axis()` applies NO branch or hemisphere sign
     transform (the rate goes straight to `start_speed_motion_locked`), so this is
     also the hardware reference for which way a raw Dec-axis rate moves reported
-    Dec below the equator -- the fact the DeclinationRate/PulseGuide fix (a later
-    commit on this branch) rests on. Reported coordinates come from the driver's
-    own pointing model; an independent sky check (plate solve) is still on the
-    list below. Do NOT "fix" MoveAxis to follow sky Dec: the ASCOM spec says the
-    sign of the Rate parameter "is purposely left undefined" and the motion is
-    about the MECHANICAL axis, so the no-transform behaviour is correct in both
-    hemispheres (checked against
+    Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
+    rests on. Reported coordinates come from the driver's own pointing model; an
+    independent sky check (plate solve) is still on the list below. Do NOT "fix"
+    MoveAxis to follow sky Dec: the ASCOM spec says the sign of the Rate parameter
+    "is purposely left undefined" and the motion is about the MECHANICAL axis, so
+    the no-transform behaviour is correct in both hemispheres (checked against
     ascom-standards.org/newdocs/telescope.html#Telescope.MoveAxis, 2026-09-06).
   - **Tracking rate measured at 0.99995x sidereal over 5 minutes** (-46 ppm,
     -2.5 arcsec/hour, against a +/-31 ppm encoder-quantisation floor), Dec drift
@@ -1771,6 +1770,103 @@ with the fix reverted to the raw equality check, and passes with it restored.
     only if the gear ratio matches what the firmware's `":a"` assumes; a belt/pulley
     mod that changes the reduction would track perfectly in counts and still drift on
     sky. (Confirmed ratio-preserving on this unit.)
+  - **Dec-axis direction of `DeclinationRate` / `PulseGuide` North-South below the
+    equator: MEASURED on the mount 2026-09-06** (build `d29d650`, Pi-native arm64 build,
+    daylight, OTA mounted). Method: `Connected=true`, tracking on at sidereal, Dec axis
+    first offset +0.51 deg from home with `MoveAxis` so a2 > 0 -- **do not run this test
+    from the home position: at a2 = 0 (Dec -90) reported Dec rises for EITHER mechanical
+    direction, so the pass/fail signature is invisible there.** Reported Dec and raw
+    `":j2"` counts (via `commandstring`) sampled around each command:
+    PulseGuide North 5000 ms -> Dec +37.7" / +268 counts (expected +37.6" / +267 at the
+    default 0.5x sidereal guide rate); South -> -37.7" / -268, net 0.
+    `DeclinationRate` +5"/s for 60 s -> +302.9" / +2159 counts (expected +300" / +2133,
+    the excess is the ~60.7 s wall time); -5"/s -> -299.7" / -2144; rate 0 -> 0 counts of
+    drift in 30 s. Both call sites of the KNOWN BUG fix below are confirmed on the a2 > 0
+    branch; the a2 < 0 branch rests on the loopback tests only -- see the PENDING BENCH
+    TEST below, which reaches it WITHOUT a real meridian flip. Same session: reported RA
+    held constant to 1e-5 h over ~90 s of tracking (RA tracking-direction fix confirmed),
+    and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
+    to home, tracking off.
+  - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
+    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, the
+    `":g"` high-speed ratio under fast slews, and the Dec-axis direction of
+    `DeclinationRate` / `PulseGuide` North-South below the equator (fixed in code from
+    the pointing model -- see the KNOWN BUG below -- but not yet measured on the mount;
+    a short autoguiding session is the cheapest check).
+  - **PENDING BENCH TEST (not yet run): `a2 < 0` Dec-direction sign coverage.** Closes the
+    gap above. Key realization (2026-09-07): `a2` is the raw Dec-axis angle relative to
+    home (see `compute_ra_dec_locked()`) and is NOT coupled to the RA axis at all, so the
+    `a2 < 0` branch does not require an actual GOTO across the meridian -- the same
+    `MoveAxis` bench technique already used for `a2 > 0` reaches it directly, mirrored:
+    1. `Connected=true`, tracking on at sidereal, OTA mounted, daylight is fine (same
+       setup as the `a2 > 0` session, 2026-09-06).
+    2. `MoveAxis` the Dec axis to roughly **-0.5 deg from home** (the OPPOSITE direction
+       from the `a2 > 0` session's +0.51 deg) so `a2 < 0`. Do NOT start from `a2 = 0`
+       (Dec -90): reported Dec rises for either mechanical direction there, so the
+       pass/fail signature is invisible right at home -- same caveat as the `a2 > 0` run.
+    3. Sample reported `Declination` and raw `":j2"` counts via the `commandstring`
+       passthrough around each command (same technique as the `a2 > 0` bring-up notes).
+    4. `PulseGuide` North 5000 ms -> expect reported Dec to RISE; South -> back to
+       baseline, net 0 counts.
+    5. `DeclinationRate` +5"/s for ~60 s -> expect Dec rising roughly 300" (accounting for
+       actual wall time as in the `a2 > 0` run); -5"/s -> back down; rate 0 -> no drift in
+       30 s.
+    6. Compare signs against the fix's table: on the `a2 < 0` (west) branch, southern
+       sites should NEGATE (previously wrongly kept) and northern sites should KEEP
+       (unchanged) -- the mirror image of the `a2 > 0` row already confirmed.
+    This closes ONLY the sign-rule coverage gap. It does NOT validate `SideOfPier`
+    reporting or automatic pier-flip behaviour during a real GOTO across the meridian --
+    that is the separate, still-open bullet directly above, and realistically waits on
+    the plate-solve work since confirming a flip landed correctly needs an independent
+    sky check.
+
+#### KNOWN BUG (FIXED): DeclinationRate and PulseGuide North/South run backwards south of the equator
+
+Found by static review on 2026-09-06 while auditing the hemisphere-conditional code
+after the RA tracking-direction fix above -- NOT on hardware. Not model-specific: any
+Sky-Watcher mount on this driver at a southern site was affected; northern sites never
+were.
+
+**Symptom.** Below the equator, a positive `DeclinationRate` drives the reported
+Declination DOWN, and a `PulseGuide` North pushes the star further south. For an
+autoguider this is the dangerous shape: every Dec correction lands on the wrong side, so
+the guide loop diverges instead of converging. Magnitudes were always right, only the
+direction was wrong -- exactly the signature of the RA bug above, which is why a
+rate-only check never caught it.
+
+**Mechanism.** Both `apply_dec_rate_offset_locked()` and the North/South branch of
+`pulse_guide()` chose the axis direction with the plain rule "a2 >= 0 -> negate the
+rate", derived from the northern pointing formula `dec = 90 - a2` (so d(dec)/d(a2) = -1
+on that branch). But `compute_ra_dec_locked()` mirrors Dec below the equator
+(`dec_sky = -(90 - a2) = a2 - 90` on the same branch), which flips the sign of that
+derivative. Neither call site consulted `hemisphere_south_locked()`, so south of the
+equator the rule was backwards on BOTH dec-axis branches. The full sign table:
+
+| Site      | a2 >= 0 (east branch) | a2 < 0 (west branch) |
+|-----------|-----------------------|----------------------|
+| Northern  | negate (was correct)  | keep (was correct)   |
+| Southern  | keep (was: negate)    | negate (was: keep)   |
+
+**Why it survived.** The Wave 100i was ConformU-validated in the northern hemisphere,
+where the rule is right, and the ConformU measured-rate tests that "confirmed" the sign
+ran there. The southern-hemisphere hardware session (2026-09-06) exercised tracking and
+`MoveAxis` -- and `move_axis()` applies no sign transform at all, so it was never
+exposed to this rule.
+
+**Fix (done).** Both call sites now negate when `(a2 >= 0) != hemisphere_south_locked()`
+(XOR), which reproduces the table above. Two loopback regressions on the EQM-35 Pro
+profile at latitude -37.2 assert the ASCOM contract against the driver's own pointing
+model -- reported Declination RISES under `+DeclinationRate` and after a North pulse --
+and both were confirmed to fail before the fix (axis moved -19.97 arcsec and -11.25
+arcsec respectively, the exact mirror of the passing northern-hemisphere cases). The
+existing northern-hemisphere tests are untouched and still pass.
+
+**Still open.** This is validated against the pointing model and the loopback
+simulator, not measured on the mount. The cheapest hardware confirmation is a short
+autoguiding session (PHD2 calibration reports the Dec direction directly) or a
+plate-solved drift run with a non-zero `DeclinationRate`. Do this before ConformU: the
+suite's offset-rate tests measure the Dec direction and will fail on the old code at a
+southern site.
 
 
 ### iOptron
