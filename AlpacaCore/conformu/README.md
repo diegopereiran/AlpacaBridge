@@ -16,9 +16,22 @@ Test results are organized by vendor/driver:
 
 ## Current Test Results
 
-- **iOptron** - Telescope/Mount driver test results
-- **SynScan** - Sky-Watcher EQM-35 Pro via SynScan V4 hand controller (serial), telescope driver test results; site coordinates rounded to whole degrees
-- **ZWO** - Camera driver test results (ASI174MM Mini, ASI290MM Mini, ASI462MM, ASI662MC, ASI2600MC Pro, ASI2600MM Pro) and Switch driver test results (Dew Heater for ASI2600MC Pro, ASI2600MM Pro)
+One folder per vendor, one subfolder per tested model. See [SUPPORTED-DRIVERS.md](../../SUPPORTED-DRIVERS.md) for the device type, connection, firmware, and ConformU version behind each report.
+
+- **Astroasis** - Oasis Focuser
+- **Celestron** - CGX-L telescope (NexStar hand controller)
+- **Gemini** - Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3 (CoverCalibrator); Astro Focuser Pro (Focuser); Power & Data Hubs Advanced 3 (Switch)
+- **iOptron** - HEM27, HAE43, HAE29C, HAE16 telescopes; iCAM178M, iCAM462C, iCAM464C cameras; iEFW-15, iEFW-18 filter wheels; iEAF, iAFS2 focusers; iMate PowerBox switch
+- **OnStep** - Generic OnStep telescope
+- **Player One** - Ceres 462M, Uranus-C PRO, Mars-C II cameras; PW8 filter wheel; Uranus-C PRO thermal switch
+- **QHY** - QHY268C, miniCam8M cameras; miniCam8M CFW filter wheel
+- **SkyWatcher** - Wave 100i telescope (direct motor controller, USB and Wi-Fi reports)
+- **SVBONY** - SV905C2 camera
+- **SynScan** - Sky-Watcher HEQ5 PRO and EQM-35 Pro telescopes via SynScan V3/V4 hand controller (serial); site coordinates rounded to whole degrees
+- **ToupTek** - GPCMOS01200KPF, GPCMOS02000KPA, ATR2600M, GPM662M, ATR585M cameras; AFW-M filter wheel; AAF focuser; ATR2600M and ATR585M thermal switches; StellaVita PowerBox switch
+- **WandererAstro** - WandererCover V4 (CoverCalibrator); SFW36S filter wheel; WandererRotator Mini V2 (Rotator); WandererBox Pro V3 (Switch)
+- **WeeWX** - HTTP JSON ObservingConditions source
+- **ZWO** - ASI120MM Mini, ASI174MM Mini, ASI290MM Mini, ASI462MM, ASI585MC Pro, ASI662MC, ASI2600MC Pro, ASI2600MM Pro cameras; EFW filter wheel; EAF focuser; CAA rotator; Dew Heater, ASIAIR Pro, ASIAIR Plus (Pi CM4 and RK3568) switches; AM3, AM5N telescopes
 
 ## Notes
 
