@@ -1522,6 +1522,29 @@ datagrams before each send so replies cannot get off-by-one.
   `md5sum /usr/bin/alpacabridge` after restart; a wedged park/slew thread can hang
   `systemctl stop` (use `systemctl kill -s SIGKILL`).
 
+#### EQ-class Synta boards (EQM-35 Pro and relatives) — 2026-09-06
+
+The `:` command set is identical on classic Synta EQ mounts, so the Wave driver drives
+them unchanged. What differs is the transport and the identity, and both bit us:
+
+- **`":e"` byte 3 is the MOUNT CODE, not a firmware patch level.** Layout is
+  `<fw major><fw minor><mount code>`, matching INDI `skywatcherAPI.cpp`. The Wave's
+  `=033A44` is firmware 3.58 + code 0x44 (WAVE_100I), never "3.58.68". EQM-35 Pro:
+  `=032732` -> firmware 3.39, code **0x32**, a code in neither INDI's `MountType` enum
+  nor Sky-Watcher's published SynScan model list. Cross-confirmed: the SynScan handset
+  on the same mount reports model id 50 (= 0x32) from its own `m` command, so
+  `synscan_model_id_to_name` gained `case 50` too.
+- **Feature word tells you which mount you are on.** `":q"` with data 0x000001 succeeds
+  on EQ boards — it does not throw — the home-index bit is simply absent. EQM-35 Pro
+  returns **0x7000** (POLAR_LED | COMMON_SLEW_START | HALF_CURRENT_TRACKING); the Wave
+  returns 0x100C (POLAR_LED | IS_AZEQ | HOME_INDEXER). Flags follow EQMod's set. Gate
+  AutoHome on the 0x04 bit, never on `":q"` failing: an EQM-35 takes the count-frame
+  `FindHome` fallback, and running the sensor hunt on a mount with no index sensors
+  would drive the axes looking for an edge that never arrives.
+- Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
+  `eqm35_pro()`, so loopback tests run against real captured geometry.
+
+
 ### iOptron
 
 Devices: Telescope (mount), Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, via Player One SDK).

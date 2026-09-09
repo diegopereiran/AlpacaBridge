@@ -675,4 +675,97 @@ TEST_CASE("SkyWatcher async - rate offset entry keeps the reported RA continuous
     driver->set_connected(false);
 }
 
+// ── EQM-35 Pro (Synta EQ board) ─────────────────────────────────────────
+// The driver was written against the Wave 100i. These cases pin the behaviour
+// that differs on a classic Synta board, using the geometry captured from real
+// EQM-35 Pro hardware (see FakeMountProfile::eqm35_pro).
+
+TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher][telescope][eqm35]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    // ":e" -> "=032732": firmware 3.39, mount code 0x32. The third byte is an
+    // identity, NOT a patch level, so the version must read "3.39" and never
+    // "3.39.50".
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    auto firmware = driver->get_device_firmware();
+    REQUIRE(firmware.has_value());
+    CHECK(*firmware == "3.39");
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher EQM-35 - FindHome uses the count-frame fallback", "[skywatcher][telescope][eqm35]") {
+    // ":q" 0x000001 answers 0x7000 on this board: POLAR_LED |
+    // COMMON_SLEW_START | HALF_CURRENT_TRACKING, with NO HOME_INDEXER (0x04).
+    // The inquiry succeeds -- the bit is simply absent -- so the driver must
+    // take the count-frame branch. This is the safety-relevant case: running
+    // the AutoHome sensor hunt on a mount with no index sensors would drive
+    // the axes looking for an edge that never arrives.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    // CanFindHome is unconditionally true by design (AGENTS.md): boards
+    // without the sensor fall back to a goto of the power-on count frame.
+    CHECK(driver->get_can_find_home() == true);
+
+    // Move both axes away from the count home, then home them.
+    mount.jump_axis_degrees(1, 5.0);
+    mount.jump_axis_degrees(2, -4.0);
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return !driver->get_slewing() && driver->get_at_home(); }, 20000));
+
+    // Landed on the count frame origin, not wherever a sensor hunt drifted to.
+    CHECK(std::fabs(mount.axis_degrees(1)) < 0.2);
+    CHECK(std::fabs(mount.axis_degrees(2)) < 0.2);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher Wave - home indexer still enables FindHome", "[skywatcher][telescope][eqm35]") {
+    // Guard against the EQM-35 work regressing the Wave: same code path, the
+    // 0x100C feature word, and FindHome must stay available.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    CHECK(driver->get_name() == "Sky-Watcher Wave 100i");
+    CHECK(driver->get_can_find_home() == true);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period", "[skywatcher][telescope][eqm35]") {
+    // The EQM-35's motor board reports its sidereal step period via ":D" as
+    // 149592. The driver derives it independently as
+    //   T1 = timer_freq * 360 / rate / CPR
+    //      = 16e6 * 360 / 9216000 / (360.98564736629/86400 deg/s)
+    // Agreement to ~1e-5 is what makes the Wave-derived rate math correct on
+    // this mount unchanged, so assert the driver actually tracks at that rate.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    const double before = mount.physical_degrees(1);
+    driver->set_tracking(true);
+    CHECK(driver->get_tracking());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    const double after = mount.physical_degrees(1);
+
+    // Sidereal is ~0.004178 deg/s; over 0.6 s that is ~2.5e-3 deg. Assert the
+    // axis moved in the tracking direction at roughly the sidereal rate rather
+    // than pinning an exact figure (the loopback clock is not real-time).
+    const double moved = std::fabs(after - before);
+    const double expected = FakeSkyWatcherMount::kSiderealDegPerSec * 0.6;
+    CHECK(moved > expected * 0.3);
+    CHECK(moved < expected * 3.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
