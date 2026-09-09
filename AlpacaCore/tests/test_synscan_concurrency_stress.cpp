@@ -64,6 +64,14 @@ TEST_CASE("SynScan telescope - concurrent connect/disconnect/slew/pulse stress",
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, synscan_endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
 
+    // Prove the fake can actually be connected to before the storm. Every
+    // exception inside the storm is swallowed by design, so without this the
+    // whole scenario would pass while never once exercising a connected
+    // driver - which is exactly what happened when the echo-gated connect
+    // landed against a fake that did not answer the echo (PR #3 review).
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    driver->set_connected(false);
+
     alpacacore::test::run_lifecycle_stress(*driver, telescope_operate);
 
     static_cast<void>(driver->get_connected());
@@ -93,7 +101,11 @@ TEST_CASE("SynScan telescope - destruction mid-operation (slew/pulse threads liv
     for (int i = 0; i < 10; ++i) {
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
             0, synscan_endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
-        static_cast<void>(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        // A hard assertion, not a discarded result: the slew/pulse worker
+        // threads this scenario destroys mid-flight only exist on a
+        // connected driver, so a fake that cannot be connected to would
+        // silently reduce this to destroying an idle object.
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
         try {
             driver->slew_to_coordinates_async(5.0, 20.0);
         } catch (const std::exception&) {
