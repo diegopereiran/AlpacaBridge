@@ -817,6 +817,59 @@ TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period", "
     driver->set_connected(false);
 }
 
+// ── Southern hemisphere tracking direction ──────────────────────────────────
+
+TEST_CASE("SkyWatcher southern hemisphere - tracking turns RA the right way",
+          "[skywatcher][telescope][eqm35][hemisphere]") {
+    // Regression for the hardware bug found on an EQM-35 Pro at latitude -37.2
+    // (2026-09-06). start_speed_motion_locked() negated the RA rate below the
+    // equator, so tracking drove axis 1 counts DOWN when holding a star needs
+    // them UP -- doubling the sky's apparent motion instead of cancelling it.
+    //
+    // Crucially, the RATE was correct the whole time (0.99995x sidereal on
+    // hardware). Only the DIRECTION was wrong, so any test that measures the
+    // magnitude of axis motion passes. This asserts the sign.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
+    driver->set_connected(true);
+
+    const double before = mount.axis_degrees(1);
+    driver->set_tracking(true);
+    REQUIRE(driver->get_tracking());
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double after = mount.axis_degrees(1);
+
+    // Hour angle is a1/15 in BOTH hemispheres, and tracking must make HA
+    // increase with sidereal time -- so the axis angle must INCREASE.
+    INFO("axis1 moved from " << before << " to " << after << " deg");
+    CHECK(after > before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[skywatcher][telescope][hemisphere]") {
+    // The fix removed a hemisphere conditional; guard that the northern
+    // behaviour (which was correct, and is what the Wave 100i was validated
+    // on) is untouched -- both hemispheres now drive RA the same way.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    driver->set_connected(true);
+
+    const double before = mount.axis_degrees(1);
+    driver->set_tracking(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double after = mount.axis_degrees(1);
+
+    INFO("axis1 moved from " << before << " to " << after << " deg");
+    CHECK(after > before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not resent and not thrown",
           "[skywatcher][async]") {
     // 6b4988b read every ":I" preset back with ":i" and resent, then threw,
