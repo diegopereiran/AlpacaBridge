@@ -241,9 +241,13 @@ public:
                 ALPACA_LOG_INFO("SkyWatcher", "Motor board: " + board.model_name + " (mount code " +
                                                   std::to_string(static_cast<int>(board.mount_code)) + "), firmware " +
                                                   board.firmware_version);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            } catch (...) {
                 // Identity is cosmetic; a board that will not answer ":e" is
-                // still usable, so never fail the connect over it.
+                // still usable, so never fail the connect over it -- but do
+                // not keep a previous connection's identity either.
+                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+                firmware_cache_.clear();
+                model_cache_.clear();
             }
 
             axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
