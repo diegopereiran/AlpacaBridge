@@ -1351,4 +1351,34 @@ TEST_CASE("SkyWatcher async - re-asserting the same TrackingRate leaves a pendin
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a Dec pulse leaves a pending RA rate check running", "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#258 review: the pulse dispatch reaped a pending
+    // RA rate-verify check unconditionally, so a North/South pulse (Dec axis
+    // only) cancelled it with nothing to replace it. Dec corrections landing
+    // inside the check's window are routine while autoguiding; a stalled
+    // ":I" from a RightAscensionRate write would then never be caught.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.5);                        // spawns the check
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // inside its settle/window
+    driver->pulse_guide(0, 200);                                  // North: Dec axis only
+    REQUIRE(mount.start_count(1) == starts_before + 1);           // the pulse itself touched no RA
+
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 1500));  // check re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

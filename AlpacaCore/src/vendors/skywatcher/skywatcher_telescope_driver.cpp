@@ -1085,7 +1085,14 @@ public:
                 // An in-place RA pulse never goes through a stop-wait: reap a
                 // pending RightAscensionRate check here so it cannot sample
                 // the pulse rate and "restore" the tracking rate mid-pulse.
-                reap_rate_verify_task();
+                // RA only: a Dec pulse never touches the RA axis, and reaping
+                // here would cancel a pending check with nothing to replace
+                // it -- a Dec correction landing inside the check's window
+                // (routine while autoguiding) would silently drop the one
+                // chance to catch a stalled ":I" (#258 review).
+                if (axis == kAxisRa) {
+                    reap_rate_verify_task();
+                }
                 auto& proto = SkyWatcherProtocolWrapper::instance();
                 if (axis == kAxisDec) {
                     start_speed_motion_locked(lock, kAxisDec, dec_rate);
