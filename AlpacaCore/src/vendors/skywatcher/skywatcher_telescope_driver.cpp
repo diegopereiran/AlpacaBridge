@@ -1022,6 +1022,42 @@ public:
             // retries) runs here so pulse_guide() returns inside the STANDARD
             // response target. IsPulseGuiding is already true.
             bool verify_dispatch_rate = false;
+            // Set once the live ":I" at the pulse rate has gone out on a
+            // tracking axis. From then on a dispatch failure (the ":J"
+            // re-latch below throwing, say) leaves the axis running at the
+            // pulse rate with nothing scheduled to bring it back: before the
+            // ":J" kick a dispatch failure left the axis at its prior, safe
+            // drive rate. Give the drive-rate restore the same retried care
+            // as the end-of-pulse stop (#249 review).
+            bool ra_live_write_sent = false;
+            auto recover_ra_drive_rate = [this, &ra_live_write_sent, ra_restore_rate_deg_per_sec]() {
+                if (!ra_live_write_sent) {
+                    return;
+                }
+                constexpr int kRestoreAttempts = 3;
+                std::string last_error;
+                for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
+                    try {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        auto& proto = SkyWatcherProtocolWrapper::instance();
+                        proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
+                                              /*with_readback=*/false);
+                        proto.start_motion(kAxisRa);
+                        cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
+                        return;
+                    } catch (const std::exception& e) {
+                        last_error = e.what();
+                    } catch (...) {
+                        last_error = "unknown error";
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                ALPACA_LOG_ERROR("SkyWatcher",
+                                 "PulseGuide dispatch failed AFTER the RA pulse rate was written and "
+                                 "the drive-rate restore failed " +
+                                     std::to_string(kRestoreAttempts) +
+                                     " times: RA may be running at the guide rate: " + last_error);
+            };
             try {
                 std::unique_lock<std::mutex> lock(mutex_);
                 auto& proto = SkyWatcherProtocolWrapper::instance();
@@ -1032,6 +1068,7 @@ public:
                     // the pulse rate once ":I" is acknowledged, and the pulse
                     // timer only starts after this returns, so an extra
                     // round-trip would lengthen every pulse (#245 review).
+                    ra_live_write_sent = true;
                     proto.set_step_period(kAxisRa, tracking_step_period_for(ra_pulse_rate), /*with_readback=*/false);
                     // A bare ":I" on an already-running axis is sometimes
                     // accepted (":i" readback matches) but never applied to
@@ -1063,11 +1100,13 @@ public:
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
+                recover_ra_drive_rate();
                 std::lock_guard<std::mutex> lock(mutex_);
                 pulse_guiding_active_ = false;
                 return;
             } catch (...) {
                 ALPACA_LOG_WARN("SkyWatcher", "PulseGuide dispatch failed with unknown exception");
+                recover_ra_drive_rate();
                 std::lock_guard<std::mutex> lock(mutex_);
                 pulse_guiding_active_ = false;
                 return;
@@ -2271,6 +2310,9 @@ private:
             // background one-shot verify is the right follow-up (tracked as
             // open-astro/AlpacaBridge#248); the ConformU failure this fix
             // targets was on the pulse path only.
+            if (eff == previous_effective) {
+                return;  // nothing changed: no write, no blocking ":J" round-trip under mutex_ (#249 review)
+            }
             auto& protocol = SkyWatcherProtocolWrapper::instance();
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             protocol.start_motion(kAxisRa);

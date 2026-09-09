@@ -893,6 +893,34 @@ TEST_CASE("SkyWatcher async - a live step-period change the board stores but nev
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a ':J' failure after the pulse-rate ':I' restores the drive rate",
+          "[skywatcher][async]") {
+    // The live-rate pulse dispatch writes ":I" (pulse rate) then ":J". If the
+    // ":J" throws, the ":I" has already gone out and the board may well have
+    // applied it, so the axis is running at the guide rate with the pulse
+    // aborted and nothing scheduled to bring it back (#249 review). The
+    // dispatch failure path must restore the drive rate.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.reject_start_motion(1, 1);  // the ":J" after the pulse-rate ":I" is refused
+    driver->pulse_guide(3, 5000);     // West: sidereal + guide rate, same direction -> live ":I"
+    // The dispatch fails, the pulse is abandoned...
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 3000));
+    // ...and the axis is back on the drive rate, never stopped.
+    REQUIRE(mount.step_period(1) == sidereal_preset);
+    REQUIRE(mount.axis_running(1));
+    REQUIRE(mount.stop_count(1) == stops_before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - the rate-applied check still catches a stall at a small guide rate",
           "[skywatcher][async]") {
     // Fork PR #6 review: the check used a fixed 25% tolerance on the expected

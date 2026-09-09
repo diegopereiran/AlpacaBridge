@@ -214,6 +214,14 @@ public:
         ax(axis).ignore_start_relatches = n;
     }
 
+    /// Refuse the next @p n ":J" on an axis with "!2" (Motor not stopped):
+    /// the start/re-latch throws in the wrapper. Models a transport-level
+    /// failure of the ":J" kick that follows a live ":I" (#249 review).
+    void reject_start_motion(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).reject_starts = n;
+    }
+
     /// The T1 step period the axis is actually running with (last APPLIED ":I").
     uint32_t step_period(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -241,7 +249,7 @@ private:
         char dir = '0';
         uint32_t t1 = 0;
         int64_t goto_target = kHome;
-        int64_t frame_shift = 0;  // physical = counts + frame_shift
+        int64_t frame_shift = 0;                          // physical = counts + frame_shift
         std::chrono::steady_clock::time_point stop_at{};  // ramped ":K" deadline
         bool stopping = false;
         bool in_goto = false;
@@ -254,6 +262,7 @@ private:
         int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
         int stall_live_rate_writes = 0;   // ":I" writes on a running axis to store but not apply (test knob)
         int ignore_start_relatches = 0;   // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
+        int reject_starts = 0;            // ":J" to refuse with "!2" (test knob)
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
@@ -401,6 +410,10 @@ private:
             case 'i':  // inquire the T1 step period last written with ":I"
                 return "=" + u24(static_cast<uint32_t>(a.t1 & 0xFFFFFF));
             case 'J':
+                if (a.reject_starts > 0) {
+                    --a.reject_starts;
+                    return "!2";  // refused: nothing applied
+                }
                 ++a.start_count;
                 a.running = true;
                 if (a.in_goto) {
