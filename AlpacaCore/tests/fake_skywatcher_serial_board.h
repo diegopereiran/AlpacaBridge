@@ -103,11 +103,17 @@ public:
         delay_command_ = command;
     }
 
-    /// Answer the next frame with an OK reply of the wrong length ("=00"),
-    /// i.e. a reply that belongs to some other command.
-    void mispair_next() {
+    /// Answer the next @p times frames with an OK reply of the wrong length
+    /// ("=00"), i.e. a reply that belongs to some other command. If
+    /// @p straggler is given, it is sent @p straggler_ms after the LAST
+    /// mis-paired reply, as the stale frame that was still in flight behind
+    /// it: a caller that gives up on the mis-pair must settle the line, or
+    /// its next command is answered by this frame instead.
+    void mispair_next(int times = 1, std::string straggler = "", int straggler_ms = 0) {
         std::lock_guard<std::mutex> lock(mutex_);
-        mispair_ = true;
+        mispair_left_ = times;
+        straggler_ = std::move(straggler);
+        straggler_ms_ = straggler_ms;
     }
 
     /// Refuse ":i" with "!0" (Unknown command), as a board without the
@@ -168,8 +174,10 @@ private:
         const char cmd = frame[0];
         const int axis = frame[1] == '2' ? 2 : 1;
         const std::string data = frame.substr(2);
-        if (mispair_) {
-            mispair_ = false;
+        if (mispair_left_ > 0) {
+            if (--mispair_left_ == 0 && !straggler_.empty()) {
+                straggler_pending_ = true;
+            }
             return "=00";  // OK reply, wrong length for anything the wrapper asks
         }
         switch (cmd) {
@@ -248,6 +256,20 @@ private:
                     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
                 }
                 (void)!write(master_fd_, reply.data(), reply.size());
+                std::string straggler;
+                int straggler_ms = 0;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (straggler_pending_) {
+                        straggler_pending_ = false;
+                        straggler = straggler_ + "\r";
+                        straggler_ms = straggler_ms_;
+                    }
+                }
+                if (!straggler.empty()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(straggler_ms));
+                    (void)!write(master_fd_, straggler.data(), straggler.size());
+                }
             }
         }
     }
@@ -262,7 +284,10 @@ private:
     uint32_t t1_[2] = {0, 0};
     int delay_ms_ = 0;
     char delay_command_ = 0;
-    bool mispair_ = false;
+    int mispair_left_ = 0;
+    std::string straggler_;
+    int straggler_ms_ = 0;
+    bool straggler_pending_ = false;
     bool no_readback_ = false;
     std::string reject_readback_code_;
     std::vector<std::string> frames_;

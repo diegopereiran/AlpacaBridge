@@ -91,6 +91,27 @@ TEST_CASE("SkyWatcher serial - a mis-paired OK reply is rejected and the command
     REQUIRE(link.board.count_frames('j') == 2);  // rejected once, resent once
 }
 
+TEST_CASE("SkyWatcher serial - giving up on a second mis-pair still settles the line", "[skywatcher][serial]") {
+    // send_command settles the link before its one resend. It must also
+    // settle before it gives up on a second mis-pair: the stale frame behind
+    // the mis-paired reply is still in flight, and a caller that catches the
+    // exception and carries on (the driver's dispatch threads do) would have
+    // its NEXT command answered by it. When that straggler has the same
+    // shape as the next reply the shape check cannot help, so only the
+    // settle window catches it (PR #245 review).
+    SerialLink link(300);
+    link.board.set_counts(1, 0x800000);
+    // Two mis-paired ":j1" replies, then a stale ":j" reply (the old counts)
+    // landing 50 ms after the second one -- inside the settle window.
+    link.board.mispair_next(2, "=800000", 50);
+    REQUIRE_THROWS_AS(link.proto.inquire_position(1), alpacacore::AlpacaException);
+    REQUIRE(link.board.count_frames('j') == 2);  // one resend, then gave up
+
+    link.board.set_counts(1, 0x812345);
+    // The next inquiry must get its OWN reply, not the straggler.
+    REQUIRE(link.proto.inquire_position(1) == 0x812345);
+}
+
 TEST_CASE("SkyWatcher serial - a transient failure of the ':i' readback does not disable the diagnostic",
           "[skywatcher][serial]") {
     // Only an explicit "!0" (Unknown command) means the board has no ":i". A
