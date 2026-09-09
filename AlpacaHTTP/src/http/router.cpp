@@ -17,6 +17,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/router.h>
 #include <alpacahttp/util/error_mapping.h>
@@ -6576,9 +6577,9 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     ts.tv_sec = static_cast<time_t>(epoch_seconds);
     ts.tv_nsec = 0;
     if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-                                std::string("clock_settime failed (requires CAP_SYS_TIME): ") + std::strerror(errno));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+            std::string("clock_settime failed (requires CAP_SYS_TIME): ") + alpacacore::util::errno_string(errno));
         response.set_body(alpaca_response);
         return response;
     }

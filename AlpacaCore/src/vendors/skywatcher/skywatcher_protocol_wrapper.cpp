@@ -548,7 +548,7 @@ private:
 #ifndef _WIN32
         serial_fd_ = open(info.port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
-            ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + std::strerror(errno));
+            ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + util::errno_string(errno));
             return false;
         }
         struct termios tty {};
@@ -649,7 +649,7 @@ private:
         // this command's reply — drain them first.
         tcflush(serial_fd_, TCIFLUSH);
         if (!util::write_all(serial_fd_, frame.data(), frame.size())) {
-            throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)));
+            throw AlpacaException("Serial write failed: " + util::errno_string(errno));
         }
         std::string reply;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -666,7 +666,7 @@ private:
                     throw AlpacaException("Motor controller reply overflow");
                 }
             } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
-                throw AlpacaException("Serial read failed: " + std::string(std::strerror(errno)));
+                throw AlpacaException("Serial read failed: " + util::errno_string(errno));
             }
         }
         throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "'");
@@ -712,7 +712,7 @@ private:
                     ALPACA_LOG_WARN("SkyWatcher",
                                     "UDP socket went stale (interface address changed); rebuilt and resent");
                 } else {
-                    throw AlpacaException("UDP send failed: " + std::string(std::strerror(errno)));
+                    throw AlpacaException("UDP send failed: " + util::errno_string(errno));
                 }
             }
             auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -761,7 +761,7 @@ private:
                 }
                 if (n < 0) {
                     link_dirty_ = true;
-                    throw AlpacaException("UDP receive failed: " + std::string(std::strerror(errno)));
+                    throw AlpacaException("UDP receive failed: " + util::errno_string(errno));
                 }
             }
             link_dirty_ = true;
