@@ -12,6 +12,7 @@
 
 #include "alpacahttp/wifi_manager.h"
 
+#include <alpacacore/util/serial_io.h>
 #include <linux/genetlink.h>
 #include <linux/netlink.h>
 #include <linux/nl80211.h>
@@ -54,7 +55,8 @@ constexpr std::uint32_t kCapFreq2 = 0x200;
 constexpr std::uint32_t kCapFreq5 = 0x400;
 
 void throw_bus(const char* what, int r, const sd_bus_error* err = nullptr) {
-    std::string msg = std::string(what) + ": " + (err && err->message ? err->message : std::strerror(-r));
+    std::string msg = std::string(what) + ": " +
+                      (err && err->message ? std::string(err->message) : alpacacore::util::errno_string(-r));
     throw WifiError(msg);
 }
 
@@ -232,7 +234,7 @@ struct WifiManager::BusHandle {
         nlohmann::json out = nlohmann::json::object();
         int r = sd_bus_call_method(bus, kNmService, conn_path.c_str(), kNmConnIface, "GetSettings", &err, &m, "");
         if (r < 0) {
-            std::string msg = err.message ? err.message : std::strerror(-r);
+            std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
             sd_bus_error_free(&err);
             throw WifiError("GetSettings failed: " + msg);
         }
@@ -381,7 +383,7 @@ struct WifiManager::BusHandle {
         r = sd_bus_call(bus, m, 0, &err, &reply);
         sd_bus_message_unref(m);
         if (r < 0) {
-            std::string msg = err.message ? err.message : std::strerror(-r);
+            std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
             sd_bus_error_free(&err);
             throw WifiError("AddConnection failed: " + msg);
         }
@@ -398,7 +400,7 @@ struct WifiManager::BusHandle {
         r = sd_bus_call(bus, m, 0, &err, &reply);
         sd_bus_message_unref(m);
         if (r < 0) {
-            std::string msg = err.message ? err.message : std::strerror(-r);
+            std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
             sd_bus_error_free(&err);
             throw WifiError("Update failed: " + msg);
         }
@@ -418,7 +420,7 @@ struct WifiManager::BusHandle {
         sd_bus_message* src = nullptr;
         int r = sd_bus_call_method(bus, kNmService, conn_path.c_str(), kNmConnIface, "GetSettings", &err, &src, "");
         if (r < 0) {
-            std::string msg = err.message ? err.message : std::strerror(-r);
+            std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
             sd_bus_error_free(&err);
             throw WifiError("GetSettings failed: " + msg);
         }
@@ -473,7 +475,7 @@ struct WifiManager::BusHandle {
         r = sd_bus_call(bus, m, 0, &err, &reply);
         sd_bus_message_unref(m);
         if (r < 0) {
-            std::string msg = err.message ? err.message : std::strerror(-r);
+            std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
             sd_bus_error_free(&err);
             throw WifiError("Update (interface-name pin) failed: " + msg);
         }
@@ -485,7 +487,7 @@ struct WifiManager::BusHandle {
         sd_bus_message* reply = nullptr;
         int r = sd_bus_call_method(bus, kNmService, path, iface, method, &err, &reply, "");
         if (r < 0) {
-            std::string msg = err.message ? err.message : std::strerror(-r);
+            std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
             sd_bus_error_free(&err);
             throw WifiError(std::string(method) + " failed: " + msg);
         }
@@ -498,7 +500,7 @@ struct WifiManager::BusHandle {
         int r = sd_bus_call_method(bus, kNmService, kNmPath, kNmIface, "ActivateConnection", &err, &reply, "ooo",
                                    conn_path.c_str(), device_path.c_str(), "/");
         if (r < 0) {
-            std::string msg = err.message ? err.message : std::strerror(-r);
+            std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
             sd_bus_error_free(&err);
             throw WifiError("ActivateConnection failed: " + msg);
         }
@@ -718,7 +720,7 @@ std::vector<char> genl_build(std::uint16_t nl_type, std::uint8_t genl_cmd, std::
 
 void genl_send_recv(int fd, std::vector<char>& msg, std::vector<char>& reply) {
     if (send(fd, msg.data(), msg.size(), 0) < 0) {
-        throw WifiError(std::string("netlink send: ") + std::strerror(errno));
+        throw WifiError(std::string("netlink send: ") + alpacacore::util::errno_string(errno));
     }
     // The GETFAMILY descriptor can be large on some drivers. MSG_TRUNC
     // makes recv() return the real datagram length even when it exceeds
@@ -730,7 +732,7 @@ void genl_send_recv(int fd, std::vector<char>& msg, std::vector<char>& reply) {
     // whole operations, not to bound their latency.
     // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
     ssize_t n = recv(fd, reply.data(), reply.size(), MSG_TRUNC);
-    if (n < 0) throw WifiError(std::string("netlink recv: ") + std::strerror(errno));
+    if (n < 0) throw WifiError(std::string("netlink recv: ") + alpacacore::util::errno_string(errno));
     if (static_cast<size_t>(n) > reply.size()) {
         throw WifiError("netlink reply truncated (" + std::to_string(n) + " bytes)");
     }
@@ -750,7 +752,7 @@ std::uint16_t nl80211_family_id(int fd) {
         if (nlh->nlmsg_type == NLMSG_ERROR) {
             auto* e = static_cast<nlmsgerr*>(NLMSG_DATA(nlh));
             if (e->error != 0) {
-                throw WifiError(std::string("nl80211 family lookup: ") + std::strerror(-e->error));
+                throw WifiError(std::string("nl80211 family lookup: ") + alpacacore::util::errno_string(-e->error));
             }
             continue;
         }
@@ -815,7 +817,7 @@ std::uint32_t nl80211_iftype(const std::string& ifname) {
 // Needs CAP_NET_ADMIN (granted to the service as an ambient capability).
 void nl80211_set_regdom(const std::string& alpha2) {
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
-    if (fd < 0) throw WifiError(std::string("netlink socket: ") + std::strerror(errno));
+    if (fd < 0) throw WifiError(std::string("netlink socket: ") + alpacacore::util::errno_string(errno));
     FdGuard guard{fd};
 
     auto family_id = nl80211_family_id(fd);
@@ -831,7 +833,8 @@ void nl80211_set_regdom(const std::string& alpha2) {
         if (nlh->nlmsg_type == NLMSG_ERROR) {
             auto* e = static_cast<nlmsgerr*>(NLMSG_DATA(nlh));
             if (e->error != 0) {
-                throw WifiError(std::string("REQ_SET_REG failed (needs CAP_NET_ADMIN): ") + std::strerror(-e->error));
+                throw WifiError(std::string("REQ_SET_REG failed (needs CAP_NET_ADMIN): ") +
+                                alpacacore::util::errno_string(-e->error));
             }
         }
     }
@@ -864,7 +867,7 @@ void WifiManager::ensure_bus_locked() {
     if (r < 0) {
         delete bus_;
         bus_ = nullptr;
-        throw WifiError(std::string("cannot connect to system bus: ") + std::strerror(-r));
+        throw WifiError(std::string("cannot connect to system bus: ") + alpacacore::util::errno_string(-r));
     }
 }
 
@@ -970,7 +973,7 @@ void WifiManager::set_wireless_enabled(bool enabled) {
     int r =
         sd_bus_set_property(bus_->bus, kNmService, kNmPath, kNmIface, "WirelessEnabled", &err, "b", enabled ? 1 : 0);
     if (r < 0) {
-        std::string msg = err.message ? err.message : std::strerror(-r);
+        std::string msg = err.message ? std::string(err.message) : alpacacore::util::errno_string(-r);
         sd_bus_error_free(&err);
         throw WifiError("set WirelessEnabled failed: " + msg);
     }

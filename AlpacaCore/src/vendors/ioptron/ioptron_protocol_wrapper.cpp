@@ -1202,8 +1202,11 @@ private:
         int open_errno = errno;
         ALPACA_LOG_INFO("iOptron", "open() returned: " + std::to_string(serial_fd_) + ", errno: " + std::to_string(open_errno));
         if (serial_fd_ < 0) {
-            const char* errmsg = (open_errno != 0) ? std::strerror(open_errno) : "unknown";
-            ALPACA_LOG_ERROR("iOptron", "Failed to open serial port [" + port_path + "]: " + std::string(errmsg) + " (errno " + std::to_string(open_errno) + "). Check port exists, permissions (e.g. user in dialout group), and that no other process has it open.");
+            const std::string errmsg = (open_errno != 0) ? util::errno_string(open_errno) : "unknown";
+            ALPACA_LOG_ERROR("iOptron", "Failed to open serial port [" + port_path + "]: " + errmsg + " (errno " +
+                                            std::to_string(open_errno) +
+                                            "). Check port exists, permissions (e.g. user in dialout group), and that "
+                                            "no other process has it open.");
             return false;
         }
         
@@ -1212,7 +1215,8 @@ private:
         struct termios tty;
         if (tcgetattr(serial_fd_, &tty) != 0) {
             int tc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "tcgetattr failed: " + std::string(std::strerror(tc_err)) + " (errno " + std::to_string(tc_err) + ")");
+            ALPACA_LOG_ERROR("iOptron", "tcgetattr failed: " + util::errno_string(tc_err) + " (errno " +
+                                            std::to_string(tc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -1258,7 +1262,8 @@ private:
         ALPACA_LOG_INFO("iOptron", "Setting terminal attributes...");
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
             int tc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "tcsetattr failed: " + std::string(std::strerror(tc_err)) + " (errno " + std::to_string(tc_err) + ")");
+            ALPACA_LOG_ERROR("iOptron", "tcsetattr failed: " + util::errno_string(tc_err) + " (errno " +
+                                            std::to_string(tc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -1269,8 +1274,8 @@ private:
         ALPACA_LOG_INFO("iOptron", "Setting to blocking mode...");
         if (!util::clear_nonblocking(serial_fd_)) {
             int fc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "Clearing O_NONBLOCK failed: " + std::string(std::strerror(fc_err)) +
-                                            " (errno " + std::to_string(fc_err) + ")");
+            ALPACA_LOG_ERROR("iOptron", "Clearing O_NONBLOCK failed: " + util::errno_string(fc_err) + " (errno " +
+                                            std::to_string(fc_err) + ")");
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
