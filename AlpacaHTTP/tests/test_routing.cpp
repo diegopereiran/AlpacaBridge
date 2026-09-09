@@ -1197,6 +1197,73 @@ int main() {
 #endif
     }
 
+    // --- Gemini Power & Data Hubs Advanced 3 Switch routing/config persistence test ---
+#ifdef ALPACACORE_ENABLE_GEMINI
+    {
+        nlohmann::json remove_body = {{"vendor", "gemini"}, {"deviceType", "switch"}, {"deviceNumber", 9408}};
+        (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+    }
+#endif
+
+    {
+        // Serial mode with an explicit (dummy) port avoids the auto-detect scan
+        // and registers the driver without opening a real device.
+        nlohmann::json configure_body = {
+            {"vendor", "gemini"},         {"deviceType", "switch"},  {"deviceNumber", 9408}, {"switchType", "pdh-adv3"},
+            {"connectionType", "serial"}, {"portPath", "/dev/null"}, {"baudRate", 19200}};
+
+        const auto configure_response =
+            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_json = nlohmann::json::parse(configure_response.body());
+
+#ifdef ALPACACORE_ENABLE_GEMINI
+        EXPECT(configure_json.value("ErrorNumber", -1) == 0);
+
+        const auto configured_response = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto configured_json = nlohmann::json::parse(configured_response.body());
+        EXPECT(configured_json.value("ErrorNumber", -1) == 0);
+
+        bool found_switch = false;
+        for (const auto& entry : configured_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Switch" && entry.value("DeviceNumber", -1) == 9408) {
+                EXPECT(entry.value("Vendor", "") == "gemini");
+                EXPECT(entry.contains("Config"));
+                const auto& cfg = entry["Config"];
+                EXPECT(cfg.value("vendor", "") == "gemini");
+                EXPECT(cfg.value("deviceType", "") == "switch");
+                EXPECT(cfg.value("switchType", "") == "pdh-adv3");
+                EXPECT(cfg.value("connectionType", "") == "serial");
+                EXPECT(cfg.value("portPath", "") == "/dev/null");
+                EXPECT(cfg.value("baudRate", -1) == 19200);
+                found_switch = true;
+                break;
+            }
+        }
+        EXPECT(found_switch);
+
+        // MaxSwitch is a static capability that reports without hardware (the
+        // Advanced 3 exposes 15 outputs/modes + 9 telemetry values).
+        const auto maxswitch_response = route_request(router, "GET", "/api/v1/switch/9408/maxswitch");
+        const auto maxswitch_json = nlohmann::json::parse(maxswitch_response.body());
+        EXPECT(maxswitch_json.value("ErrorNumber", -1) == 0);
+        EXPECT(maxswitch_json.value("Value", -1) == 24);
+
+        // An unknown switchType must be rejected with a clear error.
+        nlohmann::json bad_body = {
+            {"vendor", "gemini"}, {"deviceType", "switch"}, {"deviceNumber", 9409}, {"switchType", "not-a-backend"}};
+        const auto bad_response = route_request(router, "POST", "/management/v1/configuredevice", bad_body.dump());
+        const auto bad_json = nlohmann::json::parse(bad_response.body());
+        EXPECT(bad_json.value("ErrorNumber", 0) != 0);
+
+        nlohmann::json remove_body = {{"vendor", "gemini"}, {"deviceType", "switch"}, {"deviceNumber", 9408}};
+        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        const auto remove_json = nlohmann::json::parse(remove_response.body());
+        EXPECT(remove_json.value("ErrorNumber", -1) == 0);
+#else
+        EXPECT(configure_json.value("ErrorNumber", 0) != 0);
+#endif
+    }
+
     // =====================================================================
     // Issue #102 back-fill: config save->load round-trips for every
     // (vendor, deviceType) that persists fields. Each block POSTs distinctive
@@ -1557,6 +1624,26 @@ int main() {
         EXPECT(cfg.value("connectionType", "") == "auto");
         EXPECT(cfg.value("boxIndex", -1) == 1);
         remove_device(router, "wandererastro", "switch", 9620);
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_GEMINI
+    {
+        // gemini / switch (Power & Data Hubs Advanced 3) -- auto mode persists
+        // switchType and hubIndex through sanitize_device_config.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "gemini"},
+                                           {"deviceType", "switch"},
+                                           {"deviceNumber", 9625},
+                                           {"switchType", "pdh-adv3"},
+                                           {"connectionType", "auto"},
+                                           {"hubIndex", 1}},
+                                          "Switch", 9625);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("switchType", "") == "pdh-adv3");
+        EXPECT(cfg.value("connectionType", "") == "auto");
+        EXPECT(cfg.value("hubIndex", -1) == 1);
+        remove_device(router, "gemini", "switch", 9625);
     }
 #endif
 
