@@ -41,9 +41,25 @@ struct SkyWatcherPortInfo {
     std::string port_path;
     std::string device_id;
     std::string firmware_version;  // motor board version, e.g. "3.39"
+    // Baud the probe actually succeeded at. Synta EQ boards reached over the
+    // mount's built-in USB port or an EQDIR cable are real UART bridges and
+    // answer at 115200 (EQM-35 Pro) or 9600; the Wave's STM32 CDC-ACM port
+    // ignores baud entirely. Auto-detect MUST carry this into ConnectionInfo.
+    int baud_rate = 9600;
+    std::uint8_t mount_code = 0;
+    std::string model_name;
 };
 
 std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports();
+
+// Auto-detect probes (exposed for the pty-backed tests). probe_skywatcher_port
+// opens @p port_path at @p baud_rate, sends ":e1" and returns the raw payload
+// ("" on no answer, a port held in the cross-vendor registry, or a SynScan
+// hand controller answering the echo guard at a non-9600 rate).
+// probe_skywatcher_port_any_baud tries kProbeBauds in order (9600 first) and
+// decodes the answer into @p info_out / @p baud_out.
+std::string probe_skywatcher_port(const std::string& port_path, int baud_rate);
+bool probe_skywatcher_port_any_baud(const std::string& port_path, MotorBoardInfo& info_out, int& baud_out);
 
 struct SkyWatcherHostInfo {
     std::string host;
@@ -125,12 +141,12 @@ public:
     // ":I". with_readback=false skips the diagnostic ":i" comparison (one extra
     // serial round-trip) for callers on a timing-critical path.
     void set_step_period(int axis, uint32_t t1_preset, bool with_readback = true);
-    void start_motion(int axis);                                // ":J"
-    void stop_motion(int axis);                                 // ":K"
-    void instant_stop(int axis);                                // ":L"
-    void set_autoguide_speed(int axis, int speed_code);         // ":P" 0=1x..4=0.125x
-    uint32_t get_feature(int axis, uint32_t inquiry);           // ":q" (features / home index)
-    void set_feature(int axis, uint32_t command);               // ":W" (reset home index etc.)
+    void start_motion(int axis);                         // ":J"
+    void stop_motion(int axis);                          // ":K"
+    void instant_stop(int axis);                         // ":L"
+    void set_autoguide_speed(int axis, int speed_code);  // ":P" 0=1x..4=0.125x
+    uint32_t get_feature(int axis, uint32_t inquiry);    // ":q" (features / home index)
+    void set_feature(int axis, uint32_t command);        // ":W" (reset home index etc.)
 
     // Nibble-swapped hex encode/decode per the MC data format
     // (0x123456 <-> "563412", 0x12 <-> "12").
