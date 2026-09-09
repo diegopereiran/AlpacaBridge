@@ -269,6 +269,13 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     // not create: the 9600 attempt of probe_skywatcher_port_any_baud() below
     // never trips it, the 115200 attempt (Synta EQ boards over their own USB
     // port) always runs it first. See util/synscan_handset_probe.h.
+    // The echo guard below opens the port itself, before the open()/re-check
+    // pair further down, so it needs its own look at the cross-vendor
+    // registry: the caller's check happened before the 9600 attempt, and
+    // another vendor's connect may have claimed the port since.
+    if (alpacacore::util::is_serial_port_in_use(port_path)) {
+        return "";
+    }
     if (baud_rate != 9600 && util::port_answers_synscan_echo(port_path)) {
         ALPACA_LOG_INFO("SkyWatcher", "Skipping " + port_path + ": a SynScan hand controller answered the echo test");
         return "";
