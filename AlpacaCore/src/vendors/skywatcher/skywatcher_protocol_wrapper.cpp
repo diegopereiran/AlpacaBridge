@@ -182,14 +182,16 @@ namespace {
 // board version string on success, empty on failure.
 std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     // A SynScan hand controller shares the adapter classes this scan targets
-    // and speaks its own protocol at 9600. Ask for its echo first and leave
-    // the port alone if it answers: a SynScan V4 handset (fw 04.40.00) stops
-    // answering serial entirely after receiving bytes at the wrong rate and
-    // only a power-cycle brings it back, so a motor-controller probe at any
-    // other baud would silently disable the handset for the whole session
-    // (EQM-35 Pro rig, 2026-09 - the "hand-controller commands time out"
-    // report). See util/synscan_handset_probe.h.
-    if (util::port_answers_synscan_echo(port_path)) {
+    // and speaks its own protocol at 9600. It is only put at risk by a probe
+    // at some OTHER rate: one motor-controller probe at 115200 is enough to
+    // stop it answering serial entirely, and only a power-cycle brings it
+    // back (EQM-35 Pro rig, 2026-09 - the "hand-controller commands time
+    // out" report). No caller currently probes at anything but 9600, so
+    // gate on the baud actually being used rather than paying the guard's
+    // full timeout on every port for a hazard that baud does not create; a
+    // future 115200 (or other) caller is still covered. See
+    // util/synscan_handset_probe.h.
+    if (baud_rate != 9600 && util::port_answers_synscan_echo(port_path)) {
         ALPACA_LOG_INFO("SkyWatcher", "Skipping " + port_path + ": a SynScan hand controller answered the echo test");
         return "";
     }

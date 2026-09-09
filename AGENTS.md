@@ -773,6 +773,15 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   take the mutex and rely on the router rule. Regression tests:
   `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
   `AlpacaCore/tests/test_synscan_async_park.cpp`.
+  **Known trade-off:** while a task is in flight, `Connected` reports false
+  for every client, including one whose `PUT connected` reply already came
+  back at the 8 s deadline with the connect still proceeding — a Platform 6
+  client that treats that combination as a hard failure gives up on a
+  connect that may still succeed moments later. Accepted because the
+  alternative (reading `get_connected()` directly) is the phantom-link bug
+  this rule fixes; there is no per-driver signal yet for which
+  `get_connected()` implementations are safe to read mid-task (the 30
+  lock-free ones) versus which aren't (the six above).
 - **`Connected` is per-client, refcounted in the router — never wire an
   endpoint straight to `device->connect()`/`disconnect()`** (issue #160).
   Alpaca is designed for several clients sharing one device (imaging app +
@@ -1411,7 +1420,7 @@ Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi 
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
 
-- **The serial probe asks for a SynScan handset echo first and skips the port if one answers** (`util/synscan_handset_probe.h`, 2026-09): a SynScan V4 hand controller (fw 04.40.00, built-in PL2303 `067b:23a3`) shares the Prolific adapter class this scan targets, and it stops answering serial ENTIRELY after receiving bytes at the wrong rate — one motor-controller probe at 115200 is enough — until it is power-cycled (unplugging the mount is not enough when the handset runs on USB power from the SBC). On the EQM-35 Pro rig this was the whole "hand-controller commands time out" report: the handset had been wedged by this probe at service start. The guard is at the top of `probe_skywatcher_port()` so every caller and every baud is covered; the same hazard applies to any other scan that sends non-9600 traffic to Prolific-class ports (the iOptron iEAF/iAFS2/3 and iEFW handshakes at 115200 are the known ones — not yet guarded).
+- **The serial probe asks for a SynScan handset echo first and skips the port if one answers** (`util/synscan_handset_probe.h`, 2026-09): a SynScan V4 hand controller (fw 04.40.00, built-in PL2303 `067b:23a3`) shares the Prolific adapter class this scan targets, and it stops answering serial ENTIRELY after receiving bytes at the wrong rate — one motor-controller probe at 115200 is enough — until it is power-cycled (unplugging the mount is not enough when the handset runs on USB power from the SBC). On the EQM-35 Pro rig this was the whole "hand-controller commands time out" report: the handset had been wedged by this probe at service start. The guard is at the top of `probe_skywatcher_port()`, gated on the caller's baud not being 9600 (the rate that is safe for a handset to receive) so it costs nothing on the only baud any caller currently probes at while still covering every future non-9600 caller; the same hazard applies to any other scan that sends non-9600 traffic to Prolific-class ports (the iOptron iEAF/iAFS2/3 and iEFW handshakes at 115200 are the known ones — not yet guarded).
 - **All pointing math lives in the driver.** The MC protocol only counts steps: the driver
   owns RA/Dec <-> axis-angle conversion (CPR read at connect via `:a`, timer frequency
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate

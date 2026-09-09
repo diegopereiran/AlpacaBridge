@@ -2247,7 +2247,27 @@ Response Router::dispatch_device_method(
                             alpacacore::AlpacaError::NotConnected);
                     }
                     // Still connecting at the deadline: reply now, the client
-                    // observes completion through Connecting/Connected.
+                    // observes completion through Connecting/Connected. Until
+                    // the task ends, GET connected reports false for THIS
+                    // client too (device_connected above is gated on
+                    // get_connecting()) — a client that reads Connected
+                    // immediately after this reply sees false even though the
+                    // connect is proceeding normally and may still succeed.
+                    // This is a real behaviour change from reading
+                    // get_connected() directly (issue #130's fix trades a
+                    // false "true" — a phantom link reported while a driver's
+                    // connect sequence is still blocked on its own state
+                    // mutex — for a possibly stale "false"): a Platform 6
+                    // client that treats "PUT connected timed out, then GET
+                    // connected is false" as a hard failure and gives up will
+                    // now do so even on a connect that finishes moments
+                    // later. Accepted for this fix: the router has no
+                    // general way to tell a driver whose get_connected() is
+                    // lock-free (SynScan, and 30 others — safe to read
+                    // mid-task) from one that blocks on the connect mutex
+                    // (the other five telescopes — unsafe to read mid-task,
+                    // the root cause here) without a per-driver capability
+                    // flag, which is future work.
                 } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
                            (device->get_connecting() || device->get_connected())) {
                     // Last client out: tear down the upstream link. While other

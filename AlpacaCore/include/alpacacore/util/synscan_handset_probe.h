@@ -50,14 +50,59 @@
 namespace alpacacore::util {
 
 /**
+ * @brief Send the SynScan protocol echo command ("K" + byte) on an already-
+ *        open, already-configured (9600 8N1, non-canonical) fd and wait up
+ *        to @p timeout_ms for the exact reply (the same byte followed by
+ *        '#'). Leaves the fd open; the caller owns it before and after.
+ *
+ * Strict, and tolerant of noise ahead of the real reply: only an exact
+ * `#`-terminated token that is the echoed byte followed by '#' counts as a
+ * handset. A `#`-terminated token that does NOT match (a stale reply still
+ * draining from a command sent before this probe opened the port - e.g. this
+ * scan running right after a service restart, with the driver's last query
+ * still in flight) is discarded and reading continues until the deadline,
+ * not treated as "not a handset": mistaking a live handset for a silent one
+ * is the false negative this whole guard exists to prevent, since the caller
+ * then proceeds to probe the port at another baud and can wedge it. Only
+ * real silence, or nothing but non-echo tokens for the whole window, counts
+ * as "not a handset".
+ *
+ * @param timeout_ms How long to wait for the echo before concluding "not a
+ *        handset". A live handset answers in well under 200 ms (16-135 ms
+ *        measured on hardware).
+ */
+inline bool exchange_synscan_echo_on_fd(int fd, int timeout_ms) {
+    constexpr char kEchoByte = 'B';
+    const char cmd[] = {'K', kEchoByte};
+    if (!write_all(fd, cmd, sizeof(cmd))) {
+        return false;
+    }
+
+    std::string token;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        char ch = 0;
+        const ssize_t r = read(fd, &ch, 1);
+        if (r == 1) {
+            token.push_back(ch);
+            if (ch == '#') {
+                if (token.size() == 2 && token[0] == kEchoByte) {
+                    return true;
+                }
+                token.clear();  // not our echo — keep listening past it, not away from it
+            } else if (token.size() > 8) {
+                token.clear();  // runaway garbage ahead of '#', not our echo either
+            }
+        } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
+            break;
+        }
+    }
+    return false;
+}
+
+/**
  * @brief True if a SynScan hand controller answers its protocol echo on
  *        @p port_path at 9600 8N1 within @p timeout_ms.
- *
- * Strict: only the exact echo (the sent byte followed by '#') counts, so a
- * port that answers something else is not mistaken for a handset. A silent
- * port returns false after the timeout - a wedged handset therefore looks
- * like no handset, which is the honest answer (it will not respond to
- * anything until it is power-cycled).
  *
  * @param timeout_ms How long to wait for the echo before concluding "not a
  *        handset". A live handset answers in well under 200 ms (16-135 ms
@@ -89,29 +134,9 @@ inline bool port_answers_synscan_echo(const std::string& port_path, int timeout_
     }
     tcflush(fd, TCIOFLUSH);
 
-    constexpr char kEchoByte = 'B';
-    const char cmd[] = {'K', kEchoByte};
-    if (!write_all(fd, cmd, sizeof(cmd))) {
-        close(fd);
-        return false;
-    }
-
-    std::string reply;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline && reply.size() < 8) {
-        char ch = 0;
-        const ssize_t r = read(fd, &ch, 1);
-        if (r == 1) {
-            reply.push_back(ch);
-            if (ch == '#') {
-                break;
-            }
-        } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
-            break;
-        }
-    }
+    const bool answered = exchange_synscan_echo_on_fd(fd, timeout_ms);
     close(fd);
-    return reply.size() >= 2 && reply[reply.size() - 2] == kEchoByte && reply.back() == '#';
+    return answered;
 }
 
 }  // namespace alpacacore::util

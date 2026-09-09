@@ -14,6 +14,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -21,6 +22,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
@@ -88,34 +90,12 @@ std::string probe_synscan_port(const std::string& port_path) {
     }
     tcflush(fd, TCIOFLUSH);
 
-    const char echo_cmd[] = {'K', 0x42};
-    if (!util::write_all(fd, echo_cmd, 2)) {
-        close(fd);
-        return "";
-    }
-
-    char resp[4] = {};
-    int total = 0;
-    auto start = std::chrono::steady_clock::now();
-    while (total < 2) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 3) {
-            break;
-        }
-        char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
-        if (r == 1) {
-            resp[total++] = ch;
-            if (ch == '#') break;
-        } else if (r == 0) {
-            continue;
-        } else {
-            break;
-        }
-    }
-
-    if (total < 2 || resp[0] != 0x42 || resp[1] != '#') {
+    // Echo check ("K" + byte -> byte + "#"), shared with the Sky-Watcher
+    // scan's handset guard (util/synscan_handset_probe.h) so the two probes
+    // agree on what counts as a handset — including tolerating a stale
+    // '#'-terminated reply ahead of the real one instead of mistaking it for
+    // silence.
+    if (!util::exchange_synscan_echo_on_fd(fd, 3000)) {
         close(fd);
         return "";
     }
@@ -130,8 +110,8 @@ std::string probe_synscan_port(const std::string& port_path) {
     }
 
     char ver_resp[8] = {};
-    total = 0;
-    start = std::chrono::steady_clock::now();
+    int total = 0;
+    auto start = std::chrono::steady_clock::now();
     while (total < 7) {
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - start).count();
@@ -905,6 +885,20 @@ private:
         if (serial_fd_ < 0) {
             return false;
         }
+        // Exclusive access: without this, any other scan on this process that
+        // opens the same node (e.g. the Sky-Watcher auto-detect probe, which
+        // shares Prolific/FTDI/CP210x adapter classes with a SynScan handset)
+        // can open this fd's port concurrently, flush our pending reply out
+        // from under a read in flight, and write its own probe bytes onto the
+        // wire — corrupting whatever query this driver is mid-flight on. Not
+        // a substitute for the handset-echo guard those scans run first (this
+        // only protects a port already claimed by a connected driver, not one
+        // a scan reaches before any driver has opened it), and it does not
+        // stop another process or a root process from opening the node — but
+        // it closes the same-process, common-user race. Ignored on failure:
+        // some pty/virtual-serial back ends used in tests don't support it,
+        // and a mount that already works without it should keep working.
+        (void)ioctl(serial_fd_, TIOCEXCL);
         termios tty{};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
