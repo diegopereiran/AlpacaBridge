@@ -90,12 +90,12 @@
 11:41:23.772 RightAscension                      OK       +12:23:01.64
 11:41:23.777 RightAscensionRate Read             OK       0.00
 11:41:23.783 RightAscensionRate Write            OK       CanSetRightAscensionRate is False and a NotImplementedException error was generated as expected
-11:41:23.790 SiteElevation Read                  OK       80
+11:41:23.790 SiteElevation Read                  OK       100
 11:41:23.800 SiteElevation Write                 OK       Invalid Value exception generated as expected on set site elevation < -300m
 11:41:23.805 SiteElevation Write                 OK       Invalid Value exception generated as expected on set site elevation > 10,000m
-11:41:23.809 SiteElevation Write                 OK       Current value 80m written successfully
+11:41:23.809 SiteElevation Write                 OK       Current value 100m written successfully
 11:41:23.816 SiteElevation Write                 OK       Test value 2385 set and read correctly
-11:41:23.820 SiteElevation Write                 OK       Successfully restored original site elevation: 80.
+11:41:23.820 SiteElevation Write                 OK       Successfully restored original site elevation: 100.
 11:41:23.824 SiteLatitude Read                   OK       -37:00:00.0
 11:41:23.830 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude < -90 degrees
 11:41:23.834 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude > 90 degrees
