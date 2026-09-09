@@ -71,6 +71,22 @@ constexpr double kMinInPlacePulseRateDegPerSec = 0.05 * kSiderealDegPerSec;
 // pulse that would dominate the pulse itself, so those rely on the ":J" kick
 // alone.
 constexpr int kMinPulseForRateVerifyMs = 1500;
+// verify_live_rate_or_rekick timing. kRateVerifyMaxWindow is the ceiling
+// used by callers with no duration budget to respect (the RightAscensionRate
+// /TrackingRate background task, and the pulse's own end-of-pulse restore
+// check, which runs after the axis already stopped and so only adds
+// latency, never overshoot). The pulse DISPATCH check is different: it
+// samples while the axis is already running at the pulse rate, and its
+// result only ever SHRINKS the remaining hold (never extends it -- see the
+// call site), so a window bigger than the pulse's own duration would let
+// the axis run at the pulse rate for longer than commanded. That call site
+// caps its window at (duration - kRateVerifySettle) instead of this ceiling
+// (bot review round 1 on open-astro/AlpacaBridge#248: a low-guide-rate pulse
+// right at kMinPulseForRateVerifyMs could stretch to ~3.15 s, over 2x its
+// commanded duration).
+constexpr auto kRateVerifySettle = std::chrono::milliseconds(150);
+constexpr auto kRateVerifyMinWindow = std::chrono::milliseconds(300);
+constexpr auto kRateVerifyMaxWindow = std::chrono::milliseconds(3000);
 // AutoHome (home index sensor) constants — SynScan/EQMod ":q"/":W" extended
 // commands. Indexer reads: 0 = armed below the index, 0xFFFFFF = armed above,
 // anything else = the count at which the sensor edge latched.
@@ -1061,7 +1077,17 @@ public:
                 // Runs unlocked (samples position across a short window):
                 // never hold mutex_ across a sleep -- see stop_axis_and_wait_locked.
                 const auto verify_start = std::chrono::steady_clock::now();
-                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, pulse_task_cancel_);
+                // Bounded by the pulse's own duration budget, not the full
+                // kRateVerifyMaxWindow: this check samples the axis WHILE it
+                // is already running at the pulse rate, and its cost below
+                // can only shrink the remaining hold, never extend it -- so
+                // a window bigger than the pulse itself would let the axis
+                // overshoot its commanded on-time (round-1 review finding).
+                const auto dispatch_max_window = std::chrono::milliseconds(duration) > kRateVerifySettle
+                                                     ? std::chrono::milliseconds(duration) - kRateVerifySettle
+                                                     : std::chrono::milliseconds(0);
+                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, pulse_task_cancel_,
+                                           dispatch_max_window);
                 verify_elapsed = std::chrono::steady_clock::now() - verify_start;
             }
             auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec, pulse_restart]() {
@@ -1829,8 +1855,12 @@ private:
         return std::abs(o - std::abs(expected_cps)) < std::abs(o - std::abs(previous_cps));
     }
 
+    // max_window bounds how far the sample window may stretch to resolve a
+    // small rate delta (see kRateVerifyMaxWindow above for why the pulse
+    // dispatch call passes something tighter than the default).
     void verify_live_rate_or_rekick(int channel, double previous_rate_deg_per_sec, double expected_rate_deg_per_sec,
-                                    std::atomic<bool>& cancel) {
+                                    std::atomic<bool>& cancel,
+                                    std::chrono::milliseconds max_window = kRateVerifyMaxWindow) {
         if (previous_rate_deg_per_sec == expected_rate_deg_per_sec) {
             return;  // nothing changed, nothing to verify
         }
@@ -1849,27 +1879,26 @@ private:
         // 3.5% off sidereal (1.1 counts) and Solar 0.27% (0.09) -- seen on
         // hardware 2026-09-10 as a spurious "did not take" + resend on a
         // TrackingRate=Lunar write. Stretch the window as far as needed, up
-        // to kMaxWindow; past that (Solar) the change is below what this
-        // check can see, so leave it to the ":J" kick alone.
-        constexpr auto kSettle = std::chrono::milliseconds(150);
-        constexpr auto kMinWindow = std::chrono::milliseconds(300);
-        constexpr auto kMaxWindow = std::chrono::milliseconds(3000);
+        // to max_window; past that the change is below what this check can
+        // resolve within its budget, so leave it to the ":J" kick alone.
+        const auto effective_max_window = std::min(max_window, kRateVerifyMaxWindow);
         constexpr double kMinResolvableDeltaCounts = 4.0;
         const double delta_counts_per_sec = std::abs(expected_counts_per_sec - previous_counts_per_sec);
         const double needed_s = delta_counts_per_sec > 0.0 ? kMinResolvableDeltaCounts / delta_counts_per_sec : 1e9;
-        if (needed_s > std::chrono::duration<double>(kMaxWindow).count()) {
+        if (needed_s > std::chrono::duration<double>(effective_max_window).count()) {
             ALPACA_LOG_INFO("SkyWatcher", "Axis " + std::to_string(channel) + " rate change of " +
                                               std::to_string(delta_counts_per_sec) +
                                               " counts/s is below the rate-applied check's resolution; relying "
                                               "on the :J re-latch alone");
             return;
         }
-        const auto window = std::max(
-            kMinWindow, std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<double>(needed_s)));
+        const auto window =
+            std::clamp(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::duration<double>(needed_s)),
+                       kRateVerifyMinWindow, effective_max_window);
         uint32_t before = 0;
         uint32_t after = 0;
         try {
-            if (!task_wait_for(kSettle, cancel)) {
+            if (!task_wait_for(kRateVerifySettle, cancel)) {
                 return;  // cancelled by a reaper — it owns the axis now
             }
             before = protocol.inquire_position(channel);
