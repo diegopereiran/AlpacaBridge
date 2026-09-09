@@ -206,6 +206,15 @@ else
   record FAIL "unicode scan"
 fi
 
+# --- gate 2b: [stress] concurrency-suite registration ----------------------
+
+section "Stress-test registration"
+if python3 scripts/check_stress_registration.py; then
+  record PASS "stress-test registration"
+else
+  record FAIL "stress-test registration"
+fi
+
 # --- gate 3: build + unit tests, vendor-neutral ----------------------------
 
 section "Build + tests (vendors OFF)"
