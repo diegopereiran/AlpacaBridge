@@ -132,8 +132,12 @@ TEST_CASE("Gemini PDH Advanced 3 switch - concurrent connect/disconnect/operate 
 
     // Prove the fake actually connects before storming it -- otherwise this
     // silently degrades into a fail-fast test that never reaches the reader
-    // thread (the PR #3 lesson recorded in the SynScan stress file).
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // thread (the PR #3 lesson recorded in the SynScan stress file). 10 s,
+    // the harness default, not 5: the PDH's handshake retry ladder is
+    // 0.1s + 2s + 1s of sleeps plus up to 3 x kRequestTimeoutMs (2.5s) ~=
+    // 10.6s worst case, so a 5s budget left no margin for a single slow
+    // reply on the fake's very first attempt.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_connected(false);
 
     alpacacore::test::run_lifecycle_stress(*driver, pdh_switch_operate);
@@ -159,7 +163,9 @@ TEST_CASE("Gemini Flat Panel Pro - concurrent connect/disconnect/operate stress"
     FakeGeminiFlatPanel panel;
     auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, panel.slave_path(), 9600);
 
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // 10 s, same margin argument as the PDH case above: the flat panel's
+    // handshake retry ladder is the same shape.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_connected(false);
 
     alpacacore::test::run_lifecycle_stress(*driver, flatpanel_operate);
