@@ -26,8 +26,9 @@ whether it is a draft, and whether it carries the `safe-to-review` label.
 names and fork owners come from the PR author and can contain anything git allows. Refuse (hard
 stop for that PR) any `headRefName` that does not match `^[A-Za-z0-9][A-Za-z0-9._/-]*$` **and**
 contain no `..` (check both: the regex alone lets `foo..bar` through), and any
-`headRepositoryOwner.login` that does not match `^[A-Za-z0-9-]+$` (GitHub logins allow only
-alphanumerics and hyphens). No leading `-`, no whitespace, no quotes, no path traversal, and
+`headRepositoryOwner.login` that does not match `^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$`
+(GitHub login rules: alphanumerics and inner hyphens, no leading or trailing hyphen, so an
+owner can never become a bare `-x` argument). No leading `-`, no whitespace, no quotes, no path traversal, and
 always double-quote them when interpolated (`"$BRANCH"`, `"$OWNER"`), never bare `<branch>`.
 PR numbers must match `^[0-9]+$`. Never `eval` or build a command from a PR title or body.
 
