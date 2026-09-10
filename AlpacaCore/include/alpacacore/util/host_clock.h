@@ -58,6 +58,7 @@ public:
 
     using IsSynchronizedFn = std::function<bool()>;
     using SetTimeFn = std::function<bool(std::chrono::system_clock::time_point, std::string& error)>;
+    using HasRtcFn = std::function<bool()>;
 
     // Same window the /management/v1/synctime endpoint enforces.
     static constexpr std::int64_t kMinEpoch = 946684800;   // 2000-01-01T00:00:00Z
@@ -66,9 +67,12 @@ public:
     // jitter; stepping for sub-second deltas would only inject that noise.
     static constexpr std::chrono::milliseconds kMinStep{1000};
 
-    HostClock() : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time) {}
-    HostClock(IsSynchronizedFn is_synchronized, SetTimeFn set_time)
-        : is_synchronized_(std::move(is_synchronized)), set_time_(std::move(set_time)) {}
+    HostClock()
+        : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time, &HostClock::host_booted_from_rtc) {
+    }
+    HostClock(
+        IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; })
+        : is_synchronized_(std::move(is_synchronized)), set_time_(std::move(set_time)), has_rtc_(std::move(has_rtc)) {}
 
     void set_enabled(bool enabled) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -95,13 +99,60 @@ public:
     }
 
     // "ntp" (kernel-disciplined), "client" (this process stepped it from a
-    // UTCDate write), or "none" (undisciplined and never stepped).
+    // UTCDate write), "rtc" (undisciplined and never stepped, but the kernel
+    // loaded the clock from a hardware RTC at boot -- open-astro#292), or
+    // "none". The RTC read is done outside mutex_: on an I2C RTC it is a bus
+    // transaction, and step_from_client() must not queue behind it.
     std::string source() const {
         if (synchronized()) {
             return "ntp";
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stepped_) {
+                return "client";
+            }
+        }
+        return has_rtc() ? "rtc" : "none";
+    }
+
+    // True when the kernel loaded system time from a hardware RTC at boot and
+    // that RTC is not obviously dead. This is a statement about where the
+    // clock CAME FROM, not about how accurate it is: nothing on an NTP-less
+    // host verifies or rewrites the RTC, so it may still be wrong or drifting.
+    // Reporting only -- the stepping decision never looks at it.
+    bool has_rtc() const { return has_rtc_(); }
+
+    // Kernel truth, evaluated once per process (positively; a miss is re-probed
+    // in case the RTC registers late): the /sys/class/rtc device whose hctosys
+    // attribute reads 1 is the one the kernel set the clock from at boot, and
+    // its since_epoch reading must be after kMinPlausibleEpoch. A battery-less
+    // Raspberry Pi 5 RTC hands the kernel 2000-01-01 and must not count.
+    static bool host_booted_from_rtc();
+
+    // A sanity floor, not an accuracy check: comfortably after the dead-RTC
+    // defaults (1970 and 2000-01-01) and before any real deployment.
+    static constexpr std::int64_t kMinPlausibleEpoch = 1577836800;  // 2020-01-01T00:00:00Z
+
+    /**
+     * A step was attempted and refused by the kernel (no CAP_SYS_TIME).
+     * Latched, because it means no client will ever correct this clock, which
+     * a caller cannot infer from enabled() alone.
+     */
+    bool step_ever_failed() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return stepped_ ? "client" : "none";
+        return step_failed_;
+    }
+
+    /**
+     * The same refusal, observed by a path that sets the clock itself rather
+     * than through step_from_client() (the /management/v1/synctime endpoint).
+     * Without this an operator who only ever presses Sync Time on a host with
+     * no CAP_SYS_TIME never trips the latch.
+     */
+    void mark_step_failed() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        step_failed_ = true;
     }
 
     bool stepped_by_client() const {
@@ -144,6 +195,8 @@ public:
         if (!set_time_(requested, error)) {
             r.outcome = Outcome::Failed;
             r.error = error;
+            std::lock_guard<std::mutex> lock(mutex_);
+            step_failed_ = true;
             return r;
         }
         {
@@ -210,9 +263,11 @@ public:
 private:
     IsSynchronizedFn is_synchronized_;
     SetTimeFn set_time_;
+    HasRtcFn has_rtc_;
     mutable std::mutex mutex_;
     bool enabled_ = true;
     mutable bool stepped_ = false;
+    bool step_failed_ = false;
 };
 
 }  // namespace alpacacore::util
