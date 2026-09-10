@@ -1311,8 +1311,7 @@ async function loadServerInfo() {
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
         const profileName = resolveDescriptionValue(desc, ['ProfileName', 'profileName', 'profile_name']) || '';
         // open-astro#289: host-clock state. "ntp" = kernel-disciplined,
-        // "client" = stepped from a client's UTCDate write, "rtc" = booted from a
-        // hardware RTC (kernel still reports unsynchronised), "none" = neither.
+        // "client" = stepped from a client's UTCDate write, "none" = neither.
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
         const clockText = clockStateText(desc);
@@ -1415,25 +1414,26 @@ async function loadServerInfo() {
 
 // Text for the Clock row from the description's clock fields (open-astro#289/#292).
 function clockStateText(desc) {
-    const clockSynchronized = resolveDescriptionValue(desc, ['ClockSynchronized']) === true;
-    const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
-    if (clockSynchronized) {
+    const synchronized = resolveDescriptionValue(desc, ['ClockSynchronized']) === true;
+    const source = resolveDescriptionValue(desc, ['ClockSource']) || '';
+    if (synchronized) {
         return 'Synchronized (NTP)';
     }
-    if (clockSource === 'client') {
+    if (source === 'client') {
         return 'Set from a client\'s UTCDate this session (no NTP)';
     }
-    if (clockSource === 'rtc') {
-        return 'Hardware RTC (no NTP; its absolute accuracy is unverified). A client\'s UTCDate still corrects drift beyond 1 s.';
+    if (source === 'rtc') {
+        return 'From the hardware RTC at boot (no NTP; its accuracy is unverified). A client\'s UTCDate or Sync Time still corrects it.';
     }
-    if (clockSource === 'none') {
+    if (source === 'none') {
         return 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.';
     }
     return 'Unknown';
 }
 
-// Re-read only the Clock row (not the whole panel, which would discard an
-// unsaved Location/Profile Name edit) after something changed the clock.
+// Re-read only the Clock row after something changed the clock. Not
+// loadServerInfo(), which rebuilds the panel and would discard an unsaved
+// Location or Profile Name edit.
 async function refreshClockRow() {
     const el = document.getElementById('server-clock-state');
     if (!el) {
@@ -1686,7 +1686,7 @@ async function syncTime() {
             const serverTime = new Date((result.Value * 1000) + Math.floor(roundTripMs / 2));
             refreshServerClockOffset();
             alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
-            refreshClockRow();  // the source is now "client" (open-astro#292); only that row, after the dialog
+            refreshClockRow();  // the source is now "client" (open-astro#292); that row only, after the dialog
         } else {
             alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
         }

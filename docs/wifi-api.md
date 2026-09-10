@@ -198,47 +198,21 @@ client address. `GET /management/v1/description` reports the state:
 `rtc` | `none`) and `SyncSystemClockFromClients`; `PUT` the last one as a boolean to
 opt out (persisted as `sync_system_clock_from_clients` under `server:` in the
 config file). A telescope connecting while the clock is `none` logs a WARN
-(also while `rtc` if `SyncSystemClockFromClients` is off, since nothing will
-correct a drifting RTC). A Sync Time press (`PUT /management/v1/synctime`)
+(and while `rtc` too if `SyncSystemClockFromClients` is off, since then
+nothing will correct it). A Sync Time press (`PUT /management/v1/synctime`)
 counts as a client step: `ClockSource` reads `client` afterwards.
-`rtc` means the kernel loaded system time from a hardware RTC at boot (the
-`/sys/class/rtc/rtc*` device whose `hctosys` reads 1; a present-but-unread
-RTC does not count), that RTC's own current reading
-(`since_epoch`, memoised for 1 s) is not earlier than the build day (under
-`SOURCE_DATE_EPOCH`, as in a Debian package build, that is the changelog
-date, so the floor is weaker than the build itself), and the
-system clock still agrees with it to within 5 seconds (the reading is 1 s
-granular and up to 1 s stale, so a few seconds is measurement noise; beyond
-that the system clock has measurably left its own source, and 1 s is already
-15 arcsec of RA). Both free-run without NTP and an SoC timebase drifts
-seconds per day, so on a long-running NTP-less host the state flips from
-`rtc` to `none` after roughly two days of uptime; the telescope connect
-message then says the clock no longer agrees with the RTC, and a client
-`UTCDate` write or a Sync Time press corrects it. Returning to `rtc` needs
-the skew back inside 3 seconds, so a clock parked on the threshold does not
-alternate between the two states on consecutive polls. The comparison
-subtracts the known one-sided lag of the reading (the RTC's whole-second
-counter plus the memo), so the window is symmetric in true error rather than
-in the measurement. The RTC is judged, not the system clock:
-a Pi 5's on-board RTC exists without a battery and reads 2000-01-01 after a
-power cut, while userspace may already have restored a recent system time;
-that host reads `none`. Loading an RTC is a plain clock set,
-so the kernel still reports the clock unsynchronised, but the time is
-normally right to seconds. A client `UTCDate`
-that disagrees by more than 1 s still steps the clock (that is what corrects
-RTC drift in the field); the kernel only writes system time back into the RTC
-while NTP-disciplined, so such a step does not update the RTC itself.
 
-Footnotes. `rtc` states that the clock came from the RTC, not that the RTC is
-accurate: nothing on an NTP-less host verifies or rewrites it, so the
-telescope connect line says so. A working RTC still reads `none` whenever the
-kernel was not the one that loaded it: an RTC kept in local time
-(`timedatectl set-local-rtc 1`, dual-boot machines), because systemd corrects
-the system clock in userspace afterwards and the agreement check then fails;
-a userspace `hwclock --hctosys` under a non-systemd or busybox init; and a
-kernel built without `CONFIG_RTC_HCTOSYS`. All are the safe direction, and
-none is a bug. Finally, `rtc` is a new value on a published field: an older client that
-switches on `ClockSource` should treat any unknown value as "not NTP".
+`rtc` means the kernel loaded system time from a hardware RTC at boot: the
+`/sys/class/rtc/rtc*` device whose `hctosys` reads 1, whose `since_epoch` is
+after 2020-01-01 (a battery-less Raspberry Pi 5 RTC reads 2000-01-01 and does
+not count). It is a statement about where the clock came from, not about how
+accurate it is: nothing on an NTP-less host verifies or rewrites the RTC, so
+it may still be wrong or drifting, and the telescope connect line says so.
+A working RTC reads `none` whenever the kernel was not the one that loaded it:
+a userspace `hwclock --hctosys` under a non-systemd init, or a kernel without
+`CONFIG_RTC_HCTOSYS`. `rtc` is a new value on a published field, so an older
+client that switches on `ClockSource` should treat any unknown value as
+"not NTP".
 
 ## Feature detection
 

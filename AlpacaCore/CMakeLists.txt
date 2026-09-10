@@ -109,21 +109,6 @@ target_include_directories(alpacacore PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# Build-time floor for util::HostClock::build_time() (open-astro#292): the
-# configure-time epoch. string(TIMESTAMP) honours SOURCE_DATE_EPOCH, so a
-# reproducible package build gets a reproducible value and no __DATE__ is
-# compiled in (dpkg's -Wdate-time stays quiet).
-string(TIMESTAMP ALPACACORE_BUILD_EPOCH "%s" UTC)
-# Scoped to the one file that reads it, so a re-configure (new timestamp)
-# does not recompile the whole library. Guarded so a platform where "%s" is
-# empty -- or a bogus/zero SOURCE_DATE_EPOCH, which would silently move the
-# floor to 1970 and accept a dead RTC's 2000-01-01 -- falls through to the
-# __DATE__ fallback instead. 946684800 = 2000-01-01T00:00:00Z.
-if(ALPACACORE_BUILD_EPOCH MATCHES "^[0-9]+$" AND ALPACACORE_BUILD_EPOCH GREATER 946684800)
-    set_source_files_properties(src/core/util/host_clock.cpp
-        PROPERTIES COMPILE_DEFINITIONS ALPACACORE_BUILD_EPOCH=${ALPACACORE_BUILD_EPOCH})
-endif()
-
 # Create namespace alias for consistent target naming
 add_library(AlpacaCore::alpacacore ALIAS alpacacore)
 

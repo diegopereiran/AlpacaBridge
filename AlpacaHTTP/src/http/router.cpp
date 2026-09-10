@@ -2274,28 +2274,19 @@ Response Router::dispatch_device_method(
                     // UTCDate write will fix it; say so in case none comes.
                     if (device->get_device_type() == alpacacore::DeviceType::Telescope && !host_clock_.synchronized() &&
                         !host_clock_.stepped_by_client()) {
-                        // One observation for both branches (open-astro#292).
-                        const auto rtc_state = host_clock_.rtc_state();
-                        const bool rtc = rtc_state == alpacacore::util::HostClock::RtcState::Ok;
-                        const bool diverged = rtc_state == alpacacore::util::HostClock::RtcState::Diverged;
+                        // open-astro#292: a clock loaded from a hardware RTC at
+                        // boot is usually right to seconds, so it is INFO -- but
+                        // still a WARN when nothing is allowed to correct it.
+                        const bool rtc = host_clock_.has_rtc();
                         const std::string msg =
                             "Telescope " + std::to_string(device->get_device_number()) +
-                            (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's absolute accuracy is "
-                                   "unverified, nothing has checked it since it was last set; not yet set by a "
-                                   "client); "
-                             : diverged
-                                 ? " connecting with a host clock that no longer agrees with the hardware RTC "
-                                   "(drift or a manual set; no NTP, not yet set by a client); "
-                                 : " connecting with an undisciplined host clock (no NTP, not yet set by a client); ") +
-                            "goto/LST math runs on it until a client writes UTCDate" +
-                            (host_clock_.enabled()
-                                 ? ""
-                                 : " (syncSystemClockFromClients is off: clients will not correct it; "
-                                   "use the web UI's Sync Time)");
-                        // open-astro#292: an RTC-backed clock is usually right to
-                        // seconds; that is information, not a warning -- unless
-                        // nothing is allowed to correct it, which is the case
-                        // most worth a warning on a drifting RTC.
+                            (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's accuracy is "
+                                   "unverified, nothing has checked it since it was last set)"
+                                 : " connecting with an undisciplined host clock (no NTP, not yet set by a client)") +
+                            "; goto/LST math runs on it until a client writes UTCDate" +
+                            (host_clock_.enabled() ? ""
+                                                   : " (syncSystemClockFromClients is off: clients will not correct "
+                                                     "it; use the web UI's Sync Time)");
                         if (rtc && host_clock_.enabled()) {
                             util::log_info(msg);
                         } else {
@@ -6717,9 +6708,8 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         return response;
     }
 
-    // open-astro#292: the clock now comes from the client that pressed Sync
-    // Time, so ClockSource reads "client" rather than "rtc"/"none" and the UI
-    // stops asking for the button that was just pressed.
+    // open-astro#292: the clock now came from the client that pressed Sync
+    // Time, so ClockSource must read "client" rather than "rtc"/"none".
     host_clock_.note_external_step();
     util::log_info("System clock set to epoch " + std::to_string(epoch_seconds) + " by " + request.remote_address() +
                    " via /management/v1/synctime");

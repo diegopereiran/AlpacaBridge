@@ -13,7 +13,6 @@
 #include <alpacacore/util/host_clock.h>
 
 #include <chrono>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,7 +27,7 @@ namespace {
 struct Fake {
     bool synchronized = false;
     bool set_ok = true;
-    std::optional<system_clock::time_point> rtc_time;  // what the RTC itself reads
+    bool rtc = false;  // the kernel loaded the clock from a plausible RTC at boot
     std::vector<system_clock::time_point> sets;
 
     HostClock clock() {
@@ -40,7 +39,7 @@ struct Fake {
                              }
                              return set_ok;
                          },
-                         [this] { return rtc_time; });
+                         [this] { return rtc; });
     }
 };
 
@@ -155,86 +154,32 @@ TEST_CASE("HostClock - a refused clock_settime is reported, not thrown", "[util]
 TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is unchanged (#292)",
           "[util][hostclock][unit]") {
     Fake f;
-    // Anchored to the library's build day, never to the host's own clock: the
-    // suite also runs on NTP-less SBCs whose clock is behind a fresh package.
-    const auto rtc_now = HostClock::build_time() + hours(24);
-    f.rtc_time = rtc_now;  // an RTC keeping real time
+    f.rtc = true;
     auto c = f.clock();
-    // Booted from the RTC: the kernel still says unsynchronised, but the
-    // state is not "none".
+    // Booted from the RTC: the kernel still reports the clock undisciplined
+    // (loading an RTC is a plain clock set), but the state is not "none".
     CHECK_FALSE(c.synchronized());
-    CHECK(c.has_rtc(rtc_now));
-    CHECK(c.source(rtc_now) == "rtc");
-    CHECK(c.rtc_state(rtc_now) == HostClock::RtcState::Ok);
-    // The RTC's own reading is judged, not the system clock: a battery-less
-    // Pi 5 RTC reads 2000-01-01 while userspace may already have restored a
-    // recent system time. It is not keeping time: report "none".
-    const auto y2000 = system_clock::time_point(seconds(946684800));
-    f.rtc_time = y2000;
-    CHECK_FALSE(c.has_rtc(y2000));
-    // The floor is exclusive: a reading that exactly equals build_time() is
-    // still "none" (a host built while its own clock read 2000-01-01).
-    f.rtc_time = HostClock::build_time();
-    CHECK_FALSE(c.has_rtc(HostClock::build_time()));
-    f.rtc_time = y2000;
-    CHECK(c.source(y2000) == "none");
-    CHECK(c.rtc_state(y2000) == HostClock::RtcState::None);
-    CHECK(HostClock::build_time() > y2000);
-    f.rtc_time = std::nullopt;  // no RTC was used at boot
-    CHECK(c.source(rtc_now) == "none");
-    CHECK_FALSE(c.rtc_diverged(rtc_now));  // no RTC is not "diverged"
-    f.rtc_time = y2000;
-    CHECK_FALSE(c.rtc_diverged(y2000));  // an implausible RTC is not "diverged" either
-    // The system clock must still agree with the RTC: a later date -s, a
-    // restored saved timestamp, or simply free-running drift between the two
-    // oscillators. The window is seconds, not minutes: 1 s of clock error is
-    // 15 arcsec of RA.
-    f.rtc_time = rtc_now;
-    CHECK_FALSE(c.has_rtc(rtc_now + seconds(30)));
-    CHECK(c.rtc_diverged(rtc_now + seconds(30)));
-    CHECK(c.source(rtc_now + seconds(30)) == "none");
-    CHECK_FALSE(c.has_rtc(rtc_now - seconds(30)));
-    CHECK(c.rtc_diverged(rtc_now - seconds(30)));
-    CHECK_FALSE(c.rtc_diverged(rtc_now));
-    // The reading lags true RTC time by 0-2 s (whole-second counter, plus the
-    // memo), so a clock in perfect agreement measures 0-2 s fast. Half the lag
-    // is subtracted, which is what makes the window symmetric in TRUE error:
-    // ~5 s late and ~5 s early both fall just outside it.
-    CHECK(c.has_rtc(rtc_now + seconds(1)));  // a perfectly agreeing clock, mid-lag
-    CHECK(c.has_rtc(rtc_now + seconds(2)));  // and at the stale end of the lag
-    CHECK(c.has_rtc(rtc_now + milliseconds(5900)));
-    CHECK_FALSE(c.has_rtc(rtc_now + milliseconds(6100)));  // ~5 s truly late
-    CHECK_FALSE(c.rtc_diverged(rtc_now));                  // clear the latch again
-    CHECK(c.has_rtc(rtc_now - milliseconds(3900)));
-    CHECK_FALSE(c.has_rtc(rtc_now - milliseconds(4100)));  // ~5 s truly early
-    CHECK_FALSE(c.rtc_diverged(rtc_now));
-    // Hysteresis: once diverged, coming back needs the tighter window, so a
-    // clock parked on the threshold cannot flap between "rtc" and "none".
-    CHECK(c.rtc_diverged(rtc_now + seconds(7)));   // latch set
-    CHECK_FALSE(c.has_rtc(rtc_now + seconds(5)));  // inside the wide window, still latched
-    CHECK_FALSE(c.has_rtc(rtc_now + seconds(4)));
-    // ...but the recovery window sits above the residual +-1 s of measurement
-    // noise, so a clock that genuinely agrees always gets out of the latch.
-    CHECK(c.has_rtc(rtc_now + milliseconds(1500)));
-    CHECK(c.has_rtc(rtc_now + seconds(5)));  // wide window again
-    // An implausible or missing reading drops the latch, so the next plausible
-    // one is judged under the full window rather than a stale decision.
-    CHECK(c.rtc_diverged(rtc_now + seconds(7)));
-    f.rtc_time = std::nullopt;
-    CHECK(c.rtc_state(rtc_now) == HostClock::RtcState::None);
-    f.rtc_time = rtc_now;
-    CHECK(c.has_rtc(rtc_now + milliseconds(5500)));  // would fail under the latched window
-    // A client that agrees with the RTC changes nothing.
+    CHECK(c.has_rtc());
+    CHECK(c.source() == "rtc");
+    // The label is about provenance only: it never changes the stepping rule,
+    // so a client more than a second off still corrects the clock, and the
+    // source then becomes "client" -- that IS where the time came from.
     CHECK(c.step_from_client(kNow + milliseconds(300), kNow).outcome == Outcome::SkippedSmall);
-    CHECK(c.source(rtc_now) == "rtc");
-    // A client that disagrees by more than a second still wins (it is what
-    // corrects RTC drift in the field), and the source becomes "client".
+    CHECK(c.source() == "rtc");
     CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Stepped);
     CHECK(f.sets.size() == 1);
-    CHECK(c.source(rtc_now) == "client");
-    // NTP outranks the RTC label.
+    CHECK(c.source() == "client");
+    // NTP outranks both.
     f.synchronized = true;
-    CHECK(c.source(rtc_now) == "ntp");
+    CHECK(c.source() == "ntp");
+    // No RTC, and NTP having taken over already forgot the client step (that
+    // rule comes from the base branch), so this reads "none".
+    f.synchronized = false;
+    f.rtc = false;
+    CHECK_FALSE(c.has_rtc());
+    CHECK(c.source() == "none");
+    Fake g;
+    CHECK(g.clock().source() == "none");
     // The two-argument constructor means "no RTC probe": never "rtc".
     HostClock no_probe([] { return false; }, [](system_clock::time_point, std::string&) { return true; });
     CHECK_FALSE(no_probe.has_rtc());
@@ -244,54 +189,29 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
 TEST_CASE("HostClock - an external clock set (synctime endpoint) is recorded as a client step",
           "[util][hostclock][unit]") {
     Fake f;
-    const auto rtc_now = HostClock::build_time() + hours(24);
-    f.rtc_time = rtc_now;
+    f.rtc = true;
     auto c = f.clock();
-    CHECK(c.source(rtc_now) == "rtc");
+    CHECK(c.source() == "rtc");
     CHECK_FALSE(c.stepped_by_client());
     c.note_external_step();
     CHECK(c.stepped_by_client());
-    CHECK(c.source(rtc_now) == "client");
+    CHECK(c.source() == "client");
     CHECK(f.sets.empty());  // nothing was set through this object
-    // NTP taking over still clears it.
+    // NTP taking over still clears it, and the RTC label returns underneath.
     f.synchronized = true;
-    CHECK(c.source(rtc_now) == "ntp");
+    CHECK(c.source() == "ntp");
     f.synchronized = false;
-    CHECK(c.source(rtc_now) == "rtc");
+    CHECK(c.source() == "rtc");
 }
 
-TEST_CASE("HostClock - the __DATE__ day parser used by build_time()'s fallback", "[util][hostclock][unit]") {
-    // build_time() normally uses the CMake-injected epoch, so this parser is
-    // the branch that would otherwise be compiled for the first time in the
-    // field. Exercised directly instead.
-    const auto day = [](long long d) { return system_clock::time_point(seconds(d * 86400)); };
-    CHECK(HostClock::day_from_date_string("Jan  1 1970") == day(0));
-    CHECK(HostClock::day_from_date_string("Jan  2 1970") == day(1));
-    CHECK(HostClock::day_from_date_string("Dec 31 1969") == day(-1));
-    CHECK(HostClock::day_from_date_string("Jan  1 2000") == system_clock::time_point(seconds(946684800)));
-    CHECK(HostClock::day_from_date_string("Mar  1 2000") == system_clock::time_point(seconds(951868800)));  // leap year
-    CHECK(HostClock::day_from_date_string("Mar  1 1900") ==
-          system_clock::time_point(seconds(-2203891200)));  // not a leap year
-    CHECK(HostClock::day_from_date_string("Sep 10 2026") == system_clock::time_point(seconds(1788998400)));
-    CHECK(HostClock::day_from_date_string("Dec 31 2026") == system_clock::time_point(seconds(1798675200)));
-    // Space-padded single-digit day, every month in order.
-    const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-    auto previous = system_clock::time_point::min();
-    for (const char* m : months) {
-        const std::string d = std::string(m) + "  1 2026";
-        const auto tp = HostClock::day_from_date_string(d.c_str());
-        CHECK(tp > previous);
-        previous = tp;
+TEST_CASE("HostClock - the real kernel RTC probe is callable and self-consistent", "[util][hostclock][unit]") {
+    HostClock real;
+    const bool probe = HostClock::host_booted_from_rtc();
+    CHECK(real.has_rtc() == probe);
+    CHECK(HostClock::host_booted_from_rtc() == probe);  // stable across calls
+    if (!real.synchronized() && !real.stepped_by_client()) {
+        CHECK(real.source() == (probe ? "rtc" : "none"));
     }
-    // Garbage is inert, never a floor in the future.
-    CHECK(HostClock::day_from_date_string(nullptr) == system_clock::time_point{});
-    CHECK(HostClock::day_from_date_string("nope") == system_clock::time_point{});
-    CHECK(HostClock::day_from_date_string("Zzz 99 0000") == system_clock::time_point{});
-    // A month token that matches the table off a 3-char boundary is not a month.
-    CHECK(HostClock::day_from_date_string("rMa  1 2026") == HostClock::day_from_date_string("Jan  1 2026"));
-    CHECK(HostClock::day_from_date_string("ebM  1 2026") == HostClock::day_from_date_string("Jan  1 2026"));
-    // And the real build floor is a sane day boundary.
-    CHECK(HostClock::build_time().time_since_epoch().count() % (86400LL * system_clock::period::den) == 0);
 }
 
 TEST_CASE("HostClock - outcome names are stable log text", "[util][hostclock][unit]") {
@@ -310,18 +230,7 @@ TEST_CASE("HostClock - default construction queries the real kernel without step
     HostClock real;
     const bool s = real.synchronized();
     CHECK((s == true || s == false));
-    CHECK((real.source() == "ntp" || real.source() == "rtc" || real.source() == "none"));
-    const auto rtc = HostClock::host_rtc_time();
-    // Only the implications: the agreement clause depends on this host's
-    // RTC (a local-time RTC is hours off UTC and reads "none", by design).
-    if (!rtc.has_value()) {
-        CHECK_FALSE(real.has_rtc());
-        CHECK(real.rtc_state() == HostClock::RtcState::None);
-    }
-    if (real.has_rtc()) {
-        CHECK(rtc.has_value());
-        CHECK(rtc.value() >= HostClock::build_time());
-    }
+    CHECK((real.source() == "ntp" || real.source() == "none"));
     real.set_enabled(false);  // never call clock_settime from a unit test
     CHECK(real.step_from_client(kNow, kNow).outcome == Outcome::SkippedDisabled);
 }
