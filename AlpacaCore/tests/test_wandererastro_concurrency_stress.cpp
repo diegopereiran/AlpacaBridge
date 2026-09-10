@@ -31,7 +31,6 @@
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/rotator_driver.h>
 #include <alpacacore/switch_driver.h>
-#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
