@@ -103,9 +103,11 @@ TEST_CASE("Player One switch - concurrent connect/disconnect/operate stress", "[
         call([&] { static_cast<void>(sw.get_can_write(0)); });
         call([&] { static_cast<void>(sw.get_switch(0)); });
         call([&] { static_cast<void>(sw.get_switch_value(0)); });
-        // On a host with a real Player One camera attached, this drives the
-        // physical dew heater to 1% repeatedly for the storm's duration --
-        // intended, but worth knowing before running [stress] on a live rig.
+        // On a host with a real Player One camera attached, this drives
+        // switch 0 (DewHeater when the camera reports heater_power, else Fan
+        // -- build_elements_locked() pushes Fan first when no heater is
+        // present) to 1% repeatedly for the storm's duration -- intended,
+        // but worth knowing before running [stress] on a live rig.
         call([&] { sw.set_switch_value(0, 1.0); });
         call([&] { static_cast<void>(sw.get_switch_name(0)); });
         call([&] { static_cast<void>(sw.get_switch_description(0)); });
