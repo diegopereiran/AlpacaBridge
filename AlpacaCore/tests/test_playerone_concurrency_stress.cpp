@@ -17,8 +17,11 @@
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/switch_driver.h>
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
+#include <alpacacore/vendor/playerone/playerone_switch_driver.h>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -72,4 +75,42 @@ TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[
 TEST_CASE("Player One camera - destruction races an in-flight connect", "[playerone][camera][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::playerone::create_playerone_camera(0, 0); });
+}
+
+// The cooling/thermal Switch driver shares the camera's SDK handle, so on a
+// hardware-free host it fails fast at the same enumeration; with a camera
+// attached the same cases exercise the full connect path.
+TEST_CASE("Player One switch - concurrent connect/disconnect/operate stress", "[playerone][switch][stress]") {
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0);
+
+    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+        auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
+        // Wrapped per call: with no camera attached every one of these throws
+        // NotConnected, and the harness only swallows the callback as a
+        // whole -- a single outer catch would let the first throw skip all
+        // the rest, leaving them unexercised.
+        auto call = [](auto&& fn) {
+            try {
+                fn();
+            } catch (const alpacacore::AlpacaException&) {
+            }
+        };
+        call([&] { static_cast<void>(sw.get_max_switch()); });
+        call([&] { static_cast<void>(sw.get_can_write(0)); });
+        call([&] { static_cast<void>(sw.get_switch(0)); });
+        call([&] { static_cast<void>(sw.get_switch_value(0)); });
+        call([&] { sw.set_switch_value(0, 1.0); });
+        call([&] { static_cast<void>(sw.get_switch_name(0)); });
+        call([&] { static_cast<void>(sw.get_switch_description(0)); });
+        call([&] { static_cast<void>(sw.get_device_state()); });
+    });
+
+    static_cast<void>(driver->get_connected());
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}
+
+TEST_CASE("Player One switch - destruction races an in-flight connect", "[playerone][switch][stress]") {
+    alpacacore::test::run_destruction_during_connect_stress(
+        []() { return alpacacore::vendor::playerone::create_playerone_switch(0, 0); });
 }
