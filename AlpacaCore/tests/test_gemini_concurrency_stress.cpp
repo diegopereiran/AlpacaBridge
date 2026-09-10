@@ -30,7 +30,6 @@
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/switch_driver.h>
-#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
