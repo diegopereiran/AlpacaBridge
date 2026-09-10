@@ -10,10 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Connect/disconnect/operate concurrency stress for the Player One Phoenix
-// filter wheel (issue #101). Same rationale as the ZWO EFW stress file: no
-// fake seam, so hardware-free hosts storm the failure path and the
-// AsyncConnectable machinery; hosts with a wheel exercise the full connect.
+// Connect/disconnect/operate concurrency stress for the Player One drivers --
+// Phoenix filter wheel, camera, and thermal switch (issue #101). Same
+// rationale as the ZWO EFW stress file: no fake seam, so hardware-free hosts
+// storm the failure path and the AsyncConnectable machinery; hosts with the
+// hardware attached exercise the full connect.
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -77,22 +78,26 @@ TEST_CASE("Player One camera - destruction races an in-flight connect", "[player
         []() { return alpacacore::vendor::playerone::create_playerone_camera(0, 0); });
 }
 
-// The cooling/thermal Switch driver shares the camera's SDK handle, so on a
-// hardware-free host it fails fast at the same enumeration; with a camera
+// The thermal Switch driver (DewHeater + Fan; cooling deliberately lives on
+// the Camera interface, see AGENTS.md) shares the camera's SDK handle, so on
+// a hardware-free host it fails fast at the same enumeration; with a camera
 // attached the same cases exercise the full connect path.
 TEST_CASE("Player One switch - concurrent connect/disconnect/operate stress", "[playerone][switch][stress]") {
     auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0);
 
     alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
-        // Wrapped per call: with no camera attached every one of these throws
-        // NotConnected, and the harness only swallows the callback as a
-        // whole -- a single outer catch would let the first throw skip all
-        // the rest, leaving them unexercised.
+        // Wrapped per call: with no camera attached most of these throw
+        // NotConnected (get_max_switch and get_device_state answer without
+        // the device), and the harness only swallows the callback as a whole
+        // -- a single outer catch would let the first throw skip all the
+        // rest, leaving them unexercised. std::exception, not just
+        // AlpacaException: anything escaping the SDK layer would otherwise
+        // unwind past the remaining calls too.
         auto call = [](auto&& fn) {
             try {
                 fn();
-            } catch (const alpacacore::AlpacaException&) {
+            } catch (const std::exception&) {
             }
         };
         call([&] { static_cast<void>(sw.get_max_switch()); });
