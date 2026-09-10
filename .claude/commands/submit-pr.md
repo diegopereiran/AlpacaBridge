@@ -207,7 +207,7 @@ Confirm the push succeeded before proceeding.
 - Examples:
   - `Add ToupTek camera driver with HTTP/UI integration`
   - `Fix iOptron HEM27 Wi-Fi pulse guide timing`
-  - `Validate SynScan HEQ5 PRO ConformU 4.3.0 on arm64`
+  - `Validate SynScan HEQ5 PRO on arm64 (ConformU <version used>)`
 
 ### PR body
 
@@ -231,7 +231,7 @@ Group by component using bold tags:
 ## Test plan
 - [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck
 - [ ] Unit tests pass (`cd build && ctest`)
-- [ ] ConformU 4.3.0 passes on Linux arm64
+- [ ] ConformU (latest release — see `/conformu`) passes on Linux arm64
 - [ ] Web UI configuration works in browser
 - [ ] Device connects and operates correctly
 (Include only items relevant to this PR)
@@ -267,24 +267,34 @@ EOF
 
 After submission, display the PR URL to the user.
 
-## Step 8 — Watch for the review bot (poll every minute) — MAINTAINER ONLY
+## Step 8 — Watch for the review bot (poll every minute)
 
-**The automated review bot only runs for the maintainer (@joeytroy).** External/fork contributors
-must not execute against the bot. Determine which flow applies from the Step 2 repo detection and
-the authenticated user (`gh api user --jq .login`):
+The bot (`.github/workflows/claude-review.yml`) runs automatically on every push to a **same-repo**
+PR branch. On a **fork** PR it runs only once a maintainer applies the `safe-to-review` label
+(`pull_request_target`, gated per-PR — see AGENTS.md § "Review bot on fork PRs" for why). It is
+NOT limited to any one maintainer's own PRs; a fork contributor listed in `allowed_non_write_users`
+in that workflow gets reviewed the same way once labeled. Determine which flow applies from the
+Step 2 repo detection:
 
-- **Maintainer** (direct contributor, login `joeytroy`): follow this step and Step 9 as written.
-- **External/fork contributor** (anyone else): do NOT poll for a bot review — none will come.
-  Instead, after creating the PR, post a comment tagging the maintainer so they can kick off a
-  local agent review:
+- **Same-repo PR** (origin = `open-astro/AlpacaBridge`): the bot is already running. Follow this
+  step and Step 9 as written — poll immediately.
+- **Fork PR**: check whether `safe-to-review` is already on the PR:
 
   ```bash
-  gh pr comment <number> --body "@joeytroy this PR is ready for review — please kick off a local agent review when you have a chance."
+  gh pr view <number> --json labels --jq '.labels[].name'
   ```
 
-  Then skip Step 9 entirely (verdicts, fixes-per-round, merging, and follow-up issues are the
-  maintainer's side) and go to Step 10. Remind the user the maintainer will review and respond
-  on the PR.
+  - **Label present**: the bot is running (or has already posted). Follow this step and Step 9 as
+    written.
+  - **Label absent**: do NOT poll yet — nothing will happen until a maintainer applies the label.
+    Post a comment asking for it instead of asking someone to review by hand:
+
+    ```bash
+    gh pr comment <number> --body "This PR is from a fork — could a maintainer apply the \`safe-to-review\` label so the review bot runs?"
+    ```
+
+    Then go to Step 10 and tell the user the PR is waiting on that label; once it's applied, resume
+    this step and poll as normal.
 
 Every PR gets an automated review from the `claude` bot (`.github/workflows/claude-review.yml`).
 It posts a PR comment ending in a verdict line: `✅ Approved` or `⚠️ Issues found`. After creating
