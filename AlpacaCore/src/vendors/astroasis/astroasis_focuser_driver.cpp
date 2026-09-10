@@ -145,15 +145,13 @@ public:
     int get_max_step() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_max_step();
+        return max_step_locked();
     }
 
     int get_max_increment() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        // Duplicated from get_max_step() rather than calling it: mutex_ is
-        // not recursive, so calling a sibling locked method here deadlocks.
-        return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_max_step();
+        return max_step_locked();
     }
 
     int get_position() const override {
@@ -199,7 +197,7 @@ public:
     void move(int position) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        int max_step = protocol_.get_max_step();
+        int max_step = max_step_locked();
         // ConformU requires graceful clamping, not exceptions.
         if (position < 0) {
             position = 0;
@@ -215,6 +213,10 @@ private:
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
     }
+
+    // Caller must hold mutex_. Single source for the SDK call so
+    // get_max_step()/get_max_increment()/move() can't drift apart.
+    int max_step_locked() const { return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_max_step(); }
 
     int device_number_;
     std::string hid_path_;

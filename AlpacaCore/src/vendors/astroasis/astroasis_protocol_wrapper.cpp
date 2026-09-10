@@ -16,6 +16,7 @@
 #include <hidapi.h>
 
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -76,6 +77,13 @@ public:
 
     void connect(const std::string& hid_path) {
         std::lock_guard<std::mutex> lock(mutex_);
+        // The caller (the driver's own mutex_, AsyncConnectable obligations
+        // 4/5) is what actually guarantees a single in-flight connect; this
+        // just makes that invariant local instead of only living in the
+        // caller's head. Deliberately not a runtime guard: overwriting
+        // device_ here would silently close a live, working connection
+        // rather than surfacing the caller bug that let this be reached.
+        assert(!device_ && "Impl::connect() called while already connected");
         hid_init();
         device_ = hid_open_path(hid_path.c_str());
         if (!device_) {
