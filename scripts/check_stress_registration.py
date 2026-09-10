@@ -70,12 +70,20 @@ ALLOWLIST = {
     ("gemini", "switch"),
     ("playerone", "switch"),
     # QHY: registering these needs an injectable SDK seam first. A [stress]
-    # storm has to connect, and connecting calls InitQHYCCDResource(), which
-    # registers a libusb hotplug callback -- under ThreadSanitizer that dies
-    # with a DEADLYSIGNAL before the first case finishes (evidence: the
-    # sanitizers-tsan run on the PR that tried it). No suppression helps; the
-    # process is gone. The plain arm64 build runs the same cases fine, so this
-    # is specifically the SDK blob vs TSan, not the drivers. See #271.
+    # storm has to connect, and connecting calls InitQHYCCDResource()
+    # (qhy_sdk_wrapper.cpp, Impl::ensure_resource) which registers a libusb
+    # hotplug callback. Under ThreadSanitizer that kills the process on the
+    # first connect:
+    #     QHYCCD||EnableQHYCCDMessage| set gl_msgEnable from:  1  to: 0
+    #     ThreadSanitizer:DEADLYSIGNAL
+    #         #6 Catch::RunContext::handleFatalErrorCondition(...)
+    #         #7 libusb_hotplug_register_callback
+    # tsan_suppressions.txt already carries called_from_lib:libqhyccd* and it
+    # does NOT help: a suppression mutes a race REPORT, and this is a fatal
+    # signal -- the process is already gone. The plain arm64 build runs the
+    # same cases fine, so this is the SDK blob against TSan's interceptors,
+    # not the drivers. Note QHY has no automated connect coverage of any kind
+    # today, not just no [stress] coverage. See #271.
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
     ("wandererastro", "covercalibrator"),
