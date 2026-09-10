@@ -16,9 +16,11 @@
 // and never listening, so every connect fails fast at curl's connect() with
 // no network round trip, and it can never reach a real WeeWX instance the
 // way a plausible-looking host or port could. That still storms the
-// AsyncConnectable machinery, the connect-failure cleanup, and the poll
-// thread's start/stop; the connected surface is never reached here,
-// whatever is running on the host.
+// AsyncConnectable machinery and the connect-failure unwind. It does NOT
+// reach the poll thread: set_connected(true) throws out of fetch_snapshot()
+// before start_polling() is called, so poll_running_ stays false for the
+// whole run. The connected surface needs a fake HTTP seam this driver does
+// not have.
 
 #include <alpacacore/observingconditions_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -50,14 +52,17 @@ TEST_CASE("WeeWX observing conditions - concurrent connect/disconnect/operate st
 
     alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
         auto& oc = static_cast<alpacacore::ObservingConditionsDriver&>(d);
-        // Every call throws NotConnected on this unreachable URL, and the
-        // harness only swallows the exception from the callback as a whole --
-        // so without per-call handling the first throw would skip every
-        // getter below it and they would never be exercised at all.
+        // The sensor getters throw NotConnected on this unreachable URL
+        // (AveragePeriod answers without the device, DeviceState swallows
+        // internally), and the harness only swallows the exception from the
+        // callback as a whole -- so without per-call handling the first
+        // throw would skip every call below it and they would never be
+        // exercised at all. std::exception rather than AlpacaException:
+        // anything else escaping curl teardown would unwind just the same.
         auto call = [](auto&& fn) {
             try {
                 fn();
-            } catch (const alpacacore::AlpacaException&) {
+            } catch (const std::exception&) {
             }
         };
         call([&] { static_cast<void>(oc.get_temperature()); });
