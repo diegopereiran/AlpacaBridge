@@ -42,9 +42,11 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
         focuser.halt();
     });
 
-    // Still alive and coherent after the storm (Connected reflects whether a
-    // physical focuser is attached; both outcomes are valid here).
-    static_cast<void>(driver->get_connected());
+    // Still alive and coherent after the storm. Unlike the SVBONY/ZWO
+    // fail-fast cases, Connected can only be false here: the sentinel path
+    // never resolves to a real HID node, so no connect in the storm ever
+    // succeeds.
+    CHECK(driver->get_connected() == false);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
 }

@@ -103,8 +103,11 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Astroasis", "Focuser connected");
         } else {
-            protocol_.disconnect();
+            // Clear driver state BEFORE the SDK close (AGENTS.md concurrency
+            // checklist): a throwing close must not leave the driver
+            // half-connected.
             connected_.store(false);
+            protocol_.disconnect();
             ALPACA_LOG_INFO("Astroasis", "Focuser disconnected");
         }
     }
@@ -148,6 +151,8 @@ public:
     int get_max_increment() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        // Duplicated from get_max_step() rather than calling it: mutex_ is
+        // not recursive, so calling a sibling locked method here deadlocks.
         return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_max_step();
     }
 

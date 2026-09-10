@@ -76,15 +76,6 @@ public:
 
     void connect(const std::string& hid_path) {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Defense in depth: the driver's own mutex (AsyncConnectable
-        // obligations 4/5) is what actually prevents a redundant connect from
-        // reaching here, but close any handle already open first so a caller
-        // bug can't leak a fd instead of just being a wasted reconnect.
-        if (device_) {
-            hid_close(device_);
-            device_ = nullptr;
-            connected_ = false;
-        }
         hid_init();
         device_ = hid_open_path(hid_path.c_str());
         if (!device_) {
