@@ -69,6 +69,9 @@ if(TARGET alpacacore_ioptron)
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
         list(APPEND TEST_SOURCES test_ioptron_switch.cpp)
+        # PowerBox Switch [stress] coverage (#271); separate file for the
+        # same reason as test_ioptron_switch.cpp above.
+        list(APPEND TEST_SOURCES test_ioptron_switch_concurrency_stress.cpp)
     endif()
 endif()
 if(TARGET alpacacore_onstep)
