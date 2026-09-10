@@ -12,10 +12,13 @@
 
 // Connect/disconnect/operate concurrency stress for the Astroasis Oasis
 // Focuser (issue #101). No fake seam exists for the hidapi-backed protocol
-// wrapper, so on a hardware-free host every connect fails fast at USB HID
-// enumeration -- which still storms the AsyncConnectable machinery and the
-// failure-path cleanup. With a focuser attached the same test exercises the
-// full connect path.
+// wrapper, so this connects against the deliberately-nonexistent
+// "/dev/hidraw-alpacabridge-absent" (not the unit tests' "/dev/hidraw0",
+// which can exist on a dev box and would risk hid_open_path matching an
+// unrelated HID device -- hid_open_path does not check VID:PID). Every
+// connect fails fast at that open, which still storms the AsyncConnectable
+// machinery and the failure-path cleanup; this test never exercises the
+// real connect path, regardless of what hardware is attached.
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>

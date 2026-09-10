@@ -83,6 +83,7 @@ public:
         if (device_) {
             hid_close(device_);
             device_ = nullptr;
+            connected_ = false;
         }
         hid_init();
         device_ = hid_open_path(hid_path.c_str());
@@ -108,6 +109,7 @@ public:
         } catch (...) {
             hid_close(device_);
             device_ = nullptr;
+            connected_ = false;
             throw;
         }
 
