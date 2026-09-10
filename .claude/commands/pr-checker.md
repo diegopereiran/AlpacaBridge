@@ -24,9 +24,11 @@ whether it is a draft, and whether it carries the `safe-to-review` label.
 
 **Validate every contributor-controlled string before it touches a shell command.** Branch
 names and fork owners come from the PR author and can contain anything git allows. Refuse (hard
-stop for that PR) any `headRefName` or `headRepositoryOwner.login` that does not match
-`^[A-Za-z0-9][A-Za-z0-9._/-]*$` **and** containing no `..` (check both: the regex alone lets
-`foo..bar` through), i.e. no leading `-`, no whitespace, no quotes, no path traversal, and
+stop for that PR) any `headRefName` that does not match `^[A-Za-z0-9][A-Za-z0-9._/-]*$` **and**
+contain no `..` (check both: the regex alone lets `foo..bar` through), and any
+`headRepositoryOwner.login` that does not match `^[A-Za-z0-9](?:-?[A-Za-z0-9])*$`
+(GitHub login rules: alphanumerics with single inner hyphens only, so no leading, trailing or
+consecutive hyphen, and an owner can never become a bare `-x` argument). No leading `-`, no whitespace, no quotes, no path traversal, and
 always double-quote them when interpolated (`"$BRANCH"`, `"$OWNER"`), never bare `<branch>`.
 PR numbers must match `^[0-9]+$`. Never `eval` or build a command from a PR title or body.
 
@@ -63,8 +65,22 @@ Checks to make before waiting on anything:
    ```bash
    gh api -X PUT repos/open-astro/AlpacaBridge/pulls/<N>/update-branch
    ```
-   A 422 "merge conflict" means resolve locally on the head branch (Step 3 mechanics) and push.
-   It is fine to do this while a review is still in flight: the run on the old head is cancelled
+   **Check the result before polling for a verdict**: `update-branch` returns HTTP 422 on a
+   merge conflict, and a chain that ignores that then waits 30 minutes for a verdict that never
+   comes (PRs #270 and #272 both stalled this way on 2026-09-10). GitHub recomputes
+   mergeability asynchronously, so the first read after the call is usually `UNKNOWN`; poll
+   until it settles and treat a timeout as a conflict, never as "fine":
+   ```bash
+   for i in $(seq 1 12); do   # up to 2 min
+     m=$(gh pr view <N> --json mergeable --jq .mergeable)   # MERGEABLE | CONFLICTING | UNKNOWN
+     [ "$m" != "UNKNOWN" ] && break; sleep 10
+   done
+   echo "$m"
+   ```
+   `CONFLICTING` (or still `UNKNOWN` after the loop) -> resolve locally on the head branch now
+   (Step 3 mechanics: fetch the fork, `git merge origin/main`, keep both sides when two PRs
+   added adjacent CI jobs or gates, validate syntax, push), then poll. `MERGEABLE` -> Step 2.
+   It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
    Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (not
@@ -168,8 +184,28 @@ Keep a running tally of rounds per PR and report it in the wrap-up.
 
 ### `✅ Approved`
 
-**Stop pushing to this branch.** Approval is the terminal state; non-blocking notes in an approval
-are not commits. Then:
+**Cleanup rounds until clean, then merge.** Approvals usually carry "minor / non-blocking" notes.
+Leaving them is how leftovers accumulate (nine PRs on 2026-09-10 left six: dead includes, a
+regex edge case, a missing rename flag, an untested name suffix). Handle them like this:
+
+1. Classify each note. **Mechanical** = a change a reviewer would accept without discussion and
+   that stays inside the PR's files and purpose: unused include, missing test for a string the
+   PR added, regex edge case, a missing `--find-renames`, a comment fix. **Judgment** = changes a
+   default or behaviour, widens scope, needs hardware, or contradicts the PR author's stated
+   intent. Judgment notes are listed in the wrap-up for the user, never pushed.
+2. Fix **all** mechanical notes in ONE commit, push once, poll again.
+3. Repeat step 2 for every approval that still carries mechanical notes, until an approval has
+   **none**, then merge. **Hard cap: 3 cleanup rounds per PR.** After the third, merge on the
+   next approval whatever notes it carries and list them in the wrap-up. PR #99 (2026-07-01)
+   took 46 rounds because post-approval pushes were unbounded and trickled one nit at a time;
+   the cap keeps that closed while normal PRs come out fully clean.
+4. `⚠️ Issues found` on a cleanup round is handled like any other round: fix, push, poll.
+   Counting against the cap: a round whose findings are genuine defects does **not** count
+   (it is a fix round, not a cleanup round). A round whose findings are only nits **does**
+   count as one cleanup round.
+5. If the approval has **no** mechanical notes, skip straight to the merge below.
+
+Then:
 
 ```bash
 gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft) mergeable=\(.mergeable) state=\(.mergeStateStatus)"'
@@ -199,6 +235,13 @@ read in full, and the **Hard stops** below, which override this authorization.
 
 After a merge, every remaining PR in the queue is now behind main: run Step 1.3 on the **next** PR
 right away so its refresh round starts while you tidy up.
+
+**Contributor pushes during the loop are read, not just merged.** Whenever a fork head moves
+between the verdict you acted on and the merge, diff it against the last reviewed head
+(`git diff <reviewed-sha>..<new-head> --stat` and the hunks) and put a one-line summary per
+commit in the wrap-up. The bot re-reviews them, but the maintainer should know what landed
+beyond the PR as opened (PR #272 gained an unrelated cppcheck-scoping commit mid-run on
+2026-09-10).
 
 ## Keep looping: what is NOT a reason to stop
 
@@ -246,7 +289,9 @@ Before the report, prune what the loop created locally: `git checkout main && gi
 anything unmerged, which is the point), and `git worktree remove <path>` for any worktree.
 Confirm `git branch -r` on origin shows no merged head branches left behind.
 
-One table: PR, title, rounds, final verdict, merge SHA (or "left open: reason"). Then a single
-line naming anything the next session should know (e.g. an `update-branch` still running on a
+One table: PR, title, rounds, final verdict, merge SHA (or "left open: reason"). Under it: any
+judgment notes left unpushed, any notes from the post-cleanup approval, and any contributor
+commits that landed mid-run, one line each. Then a single line naming anything the next session
+should know (e.g. an `update-branch` still running on a
 PR outside the list). Update memory only if the loop mechanics themselves changed (new bot login,
 new label, new stall trick); the per-PR outcome does not belong in memory.
