@@ -19,7 +19,6 @@
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/switch_driver.h>
-#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
 #include <alpacacore/vendor/playerone/playerone_switch_driver.h>
