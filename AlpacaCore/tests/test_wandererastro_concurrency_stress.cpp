@@ -142,6 +142,10 @@ TEST_CASE("WandererAstro cover calibrator - destruction races an in-flight conne
           "[wandererastro][covercalibrator][stress]") {
     FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
     const std::string port = cover.slave_path();
+    // 25, not the harness default 100: each iteration pays a full successful
+    // connect on the fake, which means waiting out one 300 ms frame interval --
+    // 100 iterations would add ~30 s to sanitizers-tsan before the TSan
+    // slowdown, with no step timeout to bound it.
     alpacacore::test::run_destruction_during_connect_stress(
         [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, port); }, 25);
 }
@@ -173,6 +177,8 @@ TEST_CASE("WandererAstro filter wheel - destruction races an in-flight connect",
           "[wandererastro][filterwheel][stress]") {
     FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
     const std::string port = wheel.slave_path();
+    // 25, same reason as the cover calibrator above: each iteration waits
+    // out a 300 ms frame interval on a full successful connect.
     alpacacore::test::run_destruction_during_connect_stress(
         [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, port); }, 25);
 }
@@ -198,6 +204,9 @@ TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stre
 TEST_CASE("WandererAstro box switch - destruction races an in-flight connect", "[wandererastro][switch][stress]") {
     FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(500));
     const std::string port = box.slave_path();
+    // 25, same reason, sharper here: each iteration waits out a 500 ms frame
+    // interval, so 100 (the harness default) would add ~50 s before TSan's
+    // slowdown, on a job with no step timeout.
     alpacacore::test::run_destruction_during_connect_stress(
         [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, port); }, 25);
 }
