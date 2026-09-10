@@ -177,24 +177,24 @@ Keep a running tally of rounds per PR and report it in the wrap-up.
 
 ### `✅ Approved`
 
-**One cleanup round, then merge.** Approvals usually carry "minor / non-blocking" notes. Leaving
-them is how leftovers accumulate (nine PRs on 2026-09-10 left six: dead includes, a regex edge
-case, a missing rename flag, an untested name suffix). Handle them like this:
+**Cleanup rounds until clean, then merge.** Approvals usually carry "minor / non-blocking" notes.
+Leaving them is how leftovers accumulate (nine PRs on 2026-09-10 left six: dead includes, a
+regex edge case, a missing rename flag, an untested name suffix). Handle them like this:
 
 1. Classify each note. **Mechanical** = a change a reviewer would accept without discussion and
    that stays inside the PR's files and purpose: unused include, missing test for a string the
    PR added, regex edge case, a missing `--find-renames`, a comment fix. **Judgment** = changes a
    default or behaviour, widens scope, needs hardware, or contradicts the PR author's stated
    intent. Judgment notes are listed in the wrap-up for the user, never pushed.
-2. Fix **all** mechanical notes in ONE commit, push once, poll again. This is the only
-   post-approval push allowed: **cap = one cleanup round per PR.** PR #99 (2026-07-01) took 46
-   rounds because pushes past approval were unbounded and trickled one nit at a time.
-3. On the next verdict: `✅ Approved` -> merge, even if it carries new notes (list them in the
-   wrap-up). `⚠️ Issues found` on a cleanup round is almost always a nit the cleanup exposed:
-   fix it in one more commit only if it is a genuine defect in the cleanup itself; otherwise
-   revert the offending cleanup hunk and merge on the following approval. Never enter a
-   second cleanup cycle.
-4. If the approval has **no** mechanical notes, skip straight to the merge below.
+2. Fix **all** mechanical notes in ONE commit, push once, poll again.
+3. Repeat step 2 for every approval that still carries mechanical notes, until an approval has
+   **none**, then merge. **Hard cap: 3 cleanup rounds per PR.** After the third, merge on the
+   next approval whatever notes it carries and list them in the wrap-up. PR #99 (2026-07-01)
+   took 46 rounds because post-approval pushes were unbounded and trickled one nit at a time;
+   the cap keeps that closed while normal PRs come out fully clean.
+4. `⚠️ Issues found` on a cleanup round is handled like any other round (fix, push, poll) and
+   does not count against the cap unless the findings are themselves only nits.
+5. If the approval has **no** mechanical notes, skip straight to the merge below.
 
 Then:
 
