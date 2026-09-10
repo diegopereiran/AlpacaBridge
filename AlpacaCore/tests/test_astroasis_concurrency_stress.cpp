@@ -26,7 +26,7 @@
 using alpacacore::AlpacaDriver;
 
 TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[astroasis][focuser][stress]") {
-    auto driver = alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw0");
+    auto driver = alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-alpacabridge-absent");
 
     alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
         auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
@@ -48,5 +48,5 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
 
 TEST_CASE("Astroasis focuser - destruction races an in-flight connect", "[astroasis][focuser][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
-        []() { return alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw0"); });
+        []() { return alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-alpacabridge-absent"); });
 }
