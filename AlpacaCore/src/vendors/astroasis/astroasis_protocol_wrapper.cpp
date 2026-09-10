@@ -16,7 +16,6 @@
 #include <hidapi.h>
 
 #include <array>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -80,12 +79,13 @@ public:
         // The caller (the driver's own mutex_, AsyncConnectable obligations
         // 4/5) is what actually guarantees a single in-flight connect; this
         // makes that invariant local instead of only living in the caller's
-        // head. A throw, not a silent guard that closes and reopens: an
-        // assert alone vanishes under NDEBUG (the shipped .deb build), which
-        // would let this reach hid_open_path and silently leak the existing
-        // handle -- exactly the bug this PR's driver mutex exists to
-        // prevent, just with the diagnostic compiled out.
-        assert(!device_ && "Impl::connect() called while already connected");
+        // head. A throw, not a silent guard that closes and reopens: closing
+        // and reopening would mask the caller bug that let this be reached
+        // (silently leaking the existing handle's caller-visible state)
+        // instead of surfacing it. Not an assert: this file has no other
+        // <cassert> use, and an assert here would abort the whole process in
+        // every NDEBUG-undefined build (CI, dev, the TSan job) -- worse than
+        // the bug it guards against.
         if (device_) {
             throw AlpacaException("Astroasis focuser: connect() called while already connected (caller bug)",
                                   AlpacaError::DriverException);

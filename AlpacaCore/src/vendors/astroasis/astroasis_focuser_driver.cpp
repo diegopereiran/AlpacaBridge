@@ -161,7 +161,10 @@ public:
     }
 
     double get_step_size() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // No mutex_: touches nothing it guards -- ensure_connected() is
+        // already a lock-free atomic read, and every path here throws
+        // unconditionally, so taking the lock would only add a stall behind
+        // an in-flight connect's full HID handshake for no protection.
         ensure_connected();
         // TODO: the vendor protocol does not expose step size in microns
         // (mechanical, varies by focuser model).
@@ -173,7 +176,7 @@ public:
     bool get_temp_comp() const override { return false; }
 
     void set_temp_comp(bool) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // No mutex_: same reasoning as get_step_size() above.
         ensure_connected();
         throw AlpacaException("Temperature compensation not supported", AlpacaError::PropertyNotImplemented);
     }
