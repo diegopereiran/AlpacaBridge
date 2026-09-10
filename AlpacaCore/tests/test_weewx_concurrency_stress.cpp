@@ -23,7 +23,6 @@
 // not have.
 
 #include <alpacacore/observingconditions_driver.h>
-#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 
 #include <chrono>
