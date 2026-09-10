@@ -31,7 +31,9 @@ std::chrono::system_clock::time_point HostClock::day_from_date_string(const char
         return std::chrono::system_clock::time_point{};
     }
     const char* m = std::strstr(kMonths, std::string(date, 3).c_str());
-    const int month = m != nullptr ? static_cast<int>((m - kMonths) / 3) + 1 : 1;
+    // Only a match on a 3-char boundary is a month ("rMa" hits the table at
+    // offset 11 and must not read as April).
+    const int month = (m != nullptr && (m - kMonths) % 3 == 0) ? static_cast<int>((m - kMonths) / 3) + 1 : 1;
     const int parsed_day = std::atoi(date + 4);
     const int day = (parsed_day >= 1 && parsed_day <= 31) ? parsed_day : 1;
     const int year = std::atoi(date + 7);
@@ -78,7 +80,7 @@ std::optional<std::chrono::system_clock::time_point> HostClock::host_rtc_time() 
     std::lock_guard<std::mutex> lock(cache_mutex);
     const auto now = std::chrono::steady_clock::now();
     // A reading is refreshed every second; "no RTC here" is re-probed far less
-    // often, since it means re-opening up to 8 nonexistent sysfs paths and the
+    // often, since it means re-scanning /sys/class/rtc and the
     // answer almost never changes after boot.
     const auto ttl = cached.has_value() ? std::chrono::seconds(1) : std::chrono::seconds(30);
     if (cached_at != std::chrono::steady_clock::time_point{} && now - cached_at < ttl) {

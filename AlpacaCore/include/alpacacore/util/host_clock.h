@@ -204,7 +204,7 @@ public:
     }
 
     // The RTC the kernel set system time from at boot (its hctosys attribute
-    // reads 1; searched across /sys/class/rtc/rtc0..rtc7, found once), read
+    // reads 1; /sys/class/rtc is enumerated once to find it), read
     // through its since_epoch attribute and memoised (one second for a
     // reading, thirty for "no RTC here") so an I2C transaction never runs on
     // every HTTP request or device connect.
@@ -315,7 +315,10 @@ private:
     // The RTC reads a time at or after this library's build day (an RTC that
     // lost its battery reads 2000-01-01).
     static bool rtc_plausible(const std::optional<std::chrono::system_clock::time_point>& t) {
-        return t.has_value() && *t >= build_time();
+        // Strictly after: a host whose own clock was reset to 2000-01-01 by a
+        // dead RTC could otherwise produce a __DATE__ floor that its RTC's
+        // 2000-01-01 reading exactly meets.
+        return t.has_value() && *t > build_time();
     }
     // The label describes the SYSTEM clock's provenance, so the two must
     // still agree within kRtcAgreement: a later setter that bypassed this
@@ -338,7 +341,8 @@ public:
     // Parse a __DATE__-shaped string ("Mmm dd yyyy") to 00:00 UTC of that day.
     // Always compiled and unit-tested, so build_time()'s fallback branch is
     // never first exercised in the field; pure arithmetic, no timegm(). An
-    // unrecognised month reads as January and a day outside 1-31 as the 1st,
+    // unrecognised month (no aligned match in the month table) reads as
+    // January and a day outside 1-31 as the 1st,
     // so a malformed string can only move the floor earlier within its year;
     // a missing string or an unparseable year yields the epoch.
     static std::chrono::system_clock::time_point day_from_date_string(const char* date);

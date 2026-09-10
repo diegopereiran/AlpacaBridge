@@ -172,6 +172,11 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
     const auto y2000 = system_clock::time_point(seconds(946684800));
     f.rtc_time = y2000;
     CHECK_FALSE(c.has_rtc(y2000));
+    // The floor is exclusive: a reading that exactly equals build_time() is
+    // still "none" (a host built while its own clock read 2000-01-01).
+    f.rtc_time = HostClock::build_time();
+    CHECK_FALSE(c.has_rtc(HostClock::build_time()));
+    f.rtc_time = y2000;
     CHECK(c.source(y2000) == "none");
     CHECK(c.rtc_state(y2000) == HostClock::RtcState::None);
     CHECK(HostClock::build_time() > y2000);
@@ -282,6 +287,9 @@ TEST_CASE("HostClock - the __DATE__ day parser used by build_time()'s fallback",
     CHECK(HostClock::day_from_date_string(nullptr) == system_clock::time_point{});
     CHECK(HostClock::day_from_date_string("nope") == system_clock::time_point{});
     CHECK(HostClock::day_from_date_string("Zzz 99 0000") == system_clock::time_point{});
+    // A month token that matches the table off a 3-char boundary is not a month.
+    CHECK(HostClock::day_from_date_string("rMa  1 2026") == HostClock::day_from_date_string("Jan  1 2026"));
+    CHECK(HostClock::day_from_date_string("ebM  1 2026") == HostClock::day_from_date_string("Jan  1 2026"));
     // And the real build floor is a sane day boundary.
     CHECK(HostClock::build_time().time_since_epoch().count() % (86400LL * system_clock::period::den) == 0);
 }
