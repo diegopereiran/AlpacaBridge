@@ -289,13 +289,17 @@ git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 # ... apply fixes ...
 # Gates then push then poll as ONE background chain (see "Keep looping").
 # run_gates is the step 5 gate set for the files this round touched, written
-# out as a function so a multi-command set chains like a single one: the full
-# pre-flight only when runtime C++ changed across vendors, the four Python
-# gates alone on a docs/skill-only branch, the per-file gates in between.
-run_gates() { ./scripts/ci_preflight.sh; }
-# docs/skill-only:
-# run_gates() { python3 scripts/check_docs_drift.py && python3 .github/scripts/check-unicode.py \
-#   && python3 scripts/check_stress_registration.py && python3 scripts/check_conformu_reports.py origin/main; }
+# out as a function so a multi-command set chains like a single one. The
+# branch type picks the body, so the block runs as pasted: the four Python
+# gates on a docs/skill-only branch, the full pre-flight when runtime C++
+# changed across vendors. Narrow the C++ body to step 5's per-file gates
+# when only one vendor or one script changed.
+if git diff origin/main...HEAD --name-only | grep -qE '\.(c|cc|cpp|cxx|h|hh|hpp|hxx|js|sh|yml|yaml)$'; then
+  run_gates() { ./scripts/ci_preflight.sh; }
+else
+  run_gates() { python3 scripts/check_docs_drift.py && python3 .github/scripts/check-unicode.py \
+    && python3 scripts/check_stress_registration.py && python3 scripts/check_conformu_reports.py origin/main; }
+fi
 run_gates > "$LOG" 2>&1 \
   && git fetch "$REMOTE" "$BRANCH" \
   && [ -z "$(git log --oneline "HEAD..$REMOTE/$BRANCH")" ] \
@@ -409,7 +413,7 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   are the four Python checks (docs drift, unicode, stress registration, ConformU reports).
   Run those, commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
-  pre-flight, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
+  run the step 5 gates, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
 - **Waiting is never a stopping point.** Every wait (step 5 gates, verdict poll, CI checks,
   update-branch) runs as ONE background chain that continues into the next action on its own:
   `run_gates && push && poll` for a fix round, `update-branch && poll && merge` for a refresh.
