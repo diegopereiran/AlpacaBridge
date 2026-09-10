@@ -189,13 +189,23 @@ public:
 
     // Model comes from the ":e" mount-code byte captured at connect. Falls back
     // to the generic name while disconnected. Served from the narrow firmware
-    // mutex so it stays inside ConformU's 0.1 s FAST target.
+    // mutex so it stays inside ConformU's 0.1 s FAST target. The "(EQMOD)"
+    // suffix disambiguates from the synscan driver's get_name(), which
+    // resolves to the identical model string for a mount reachable over both
+    // its hand controller and its own USB/EQDIR port (hardware-confirmed
+    // 2026-09-10: both connections reported plain "Sky-Watcher EQM-35 Pro"
+    // for the same physical mount, indistinguishable in a client's chooser).
+    // "EQMOD" is the ecosystem's name for the direct motor-controller path
+    // (INDI "EQMod Mount" covers its AZ-GTi/Star Adventurer variants too;
+    // ASCOM "EQMOD"), and it holds for every transport this driver speaks --
+    // built-in USB, EQDIR cable, a handset in PC Direct Mode, and Wi-Fi --
+    // which "USB"/"EQDIR" would not.
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (model_cache_.empty()) {
-            return "Sky-Watcher Mount";
+            return "Sky-Watcher Mount (EQMOD)";
         }
-        return "Sky-Watcher " + model_cache_;
+        return "Sky-Watcher " + model_cache_ + " (EQMOD)";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
@@ -317,11 +327,15 @@ public:
             }
             protocol.disconnect();
             connected_ = false;
-            {
-                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_.clear();
-                model_cache_.clear();
-            }
+            // Identity (model/firmware) is left as last known-good: a clean
+            // disconnect doesn't change what mount this is, and clearing it
+            // here made the web UI / configureddevices listing revert to a
+            // generic name for any not-currently-connected device even after
+            // a successful identify -- unlike the synscan driver, which
+            // never clears mount_model_id_ on disconnect. The connect
+            // sequence's own ":e" failure handler above still clears both on
+            // a failed re-identify, so a genuinely different or unreachable
+            // board on reconnect is never shown under a stale name.
             reset_runtime_state_locked();
         }
     }
