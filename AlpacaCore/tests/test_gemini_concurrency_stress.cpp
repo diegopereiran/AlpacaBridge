@@ -22,9 +22,13 @@
 //     status cache while the Alpaca getters read it.
 //   - Flat Panel Pro CoverCalibrator over fake_gemini_flatpanel.h. This one
 //     is strictly request/response -- no reader thread, and set_connected
-//     (false) reaps nothing. What the storm races here are its
-//     cover_task_thread_ / calibrator_task_thread_ workers, which the
-//     DESTRUCTOR reaps (reap_calibrator_task(true)), not a disconnect.
+//     (false) reaps nothing. What the storm races here is its
+//     calibrator_task_thread_, which the DESTRUCTOR reaps
+//     (reap_calibrator_task(true)), not a disconnect. The cover task is NOT
+//     covered: the operate callback issues no open/close/halt_cover, so
+//     cover_task_thread_ is never constructed and reap_cover_task(true)
+//     always takes its !joinable() early exit. Adding a cover call would
+//     widen this past a registration PR; it is a follow-up.
 //
 // The focuser has no fake, so it takes the accepted fail-fast bar (the
 // ZWO/iOptron precedent): a serial path that cannot exist, so every connect
