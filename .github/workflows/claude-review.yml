@@ -120,7 +120,7 @@ jobs:
             fails. Ignore files under AlpacaCore/conformu/ (validation logs,
             not code).
           claude_args: |
-            --model sonnet
+            --model opus
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
 
       # The agent used to post its own review via a permission-gated
