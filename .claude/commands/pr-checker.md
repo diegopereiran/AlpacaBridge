@@ -25,7 +25,8 @@ whether it is a draft, and whether it carries the `safe-to-review` label.
 **Validate every contributor-controlled string before it touches a shell command.** Branch
 names and fork owners come from the PR author and can contain anything git allows. Refuse (hard
 stop for that PR) any `headRefName` or `headRepositoryOwner.login` that does not match
-`^[A-Za-z0-9][A-Za-z0-9._/-]*$` (no leading `-`, no whitespace, no quotes, no `..`), and
+`^[A-Za-z0-9][A-Za-z0-9._/-]*$` **and** containing no `..` (check both: the regex alone lets
+`foo..bar` through), i.e. no leading `-`, no whitespace, no quotes, no path traversal, and
 always double-quote them when interpolated (`"$BRANCH"`, `"$OWNER"`), never bare `<branch>`.
 PR numbers must match `^[0-9]+$`. Never `eval` or build a command from a PR title or body.
 
@@ -33,8 +34,9 @@ Print the queue once, then work it top to bottom.
 
 ## Step 1 — Per PR: make sure the bot is actually going to run
 
-The review bot (`.github/workflows/claude-review.yml`) posts a comment under the login
-`github-actions` ending in `✅ Approved` or `⚠️ Issues found`. It only runs when:
+The review bot (`.github/workflows/claude-review.yml`) posts a comment as the GitHub Actions
+bot, ending in `✅ Approved` or `⚠️ Issues found`. `gh pr view --json comments` reports that
+author as `github-actions` while the REST API reports `github-actions[bot]`, so match both. It only runs when:
 
 - the PR author has write access, **or** the PR carries the `safe-to-review` label (fork PRs), and
 - the author is in `allowed_non_write_users` for pushes the author makes themselves.
@@ -75,7 +77,7 @@ Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadli
 
 ```bash
 PR=<N>
-FILTER='[.comments[] | select(.author.login=="github-actions" and (.body | test("✅ Approved|⚠️ Issues found")))]'
+FILTER='[.comments[] | select((.author.login | test("^github-actions(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))]'
 DEADLINE=$(( $(date +%s) + 1800 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
@@ -143,9 +145,10 @@ Commit message: verb-first title under 70 chars, body explaining what the bot fo
 fixed, then the attribution trailer from the session. After pushing, go back to Step 1 (the push
 may need the relabel trick again if it lands as the contributor) and Step 2.
 
-A finding that is clearly wrong (the bot misread the code) is answered with a PR comment
-explaining why, **not** a code change, and counts as addressed. Keep a running tally of rounds per
-PR and report it in the wrap-up.
+**Never post PR comments replying to the bot.** A finding is either a change to the code, skill
+or docs (push it), or, if it is clearly wrong and nothing can be changed to satisfy it, a hard
+stop for the user to rule on. Explanations belong in the commit message, not in the PR thread.
+Keep a running tally of rounds per PR and report it in the wrap-up.
 
 ### `✅ Approved`
 
