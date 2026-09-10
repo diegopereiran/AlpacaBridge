@@ -201,9 +201,10 @@ is the permission skip, and otherwise treat it as a broken workflow (**Hard stop
 
 The bot's comment has two sections (`claude-review.yml` prompt): **Defects**, which are what made
 the verdict a rejection, and **Notes**, which never block. Fix **every Defect** on this PR, in this
-PR, in **one batched push** (one commit per Defect, see "Prove it before you push" below); do not defer a Defect to a follow-up issue and do not decline one
-as low priority unless the user says so. Handle the **Notes** by the classification rules in the
-`✅ Approved` section below: a mechanical note goes into the same commit, a judgment note or one
+PR, in **one batched push** (one commit per Defect, see "Prove it before you push" below); do not
+defer a Defect to a follow-up issue and do not decline one as low priority unless the user says
+so. Handle the **Notes** by the classification rules in the `✅ Approved` section below: a
+mechanical note goes into the same round's push, a judgment note or one
 the bot marks "out of scope, open an issue" goes to the wrap-up and is never pushed. A note is
 never a reason for a second push. Each push restarts a full fresh review (PR #99 took 46 rounds
 when pushes trickled; PR #282 reached 29 commits when notes were fixed as if they were defects).
@@ -215,9 +216,9 @@ finding, adopt it (reset your local branch to their head) and just poll again.
 
 ### Prove it before you push (test-first, per finding)
 
-Run `git fetch --prune origin` before anything below: every `origin/main` in this section and
-in "Keep looping" is only as fresh as the last fetch, and a loop that merges PRs back to back
-makes it stale within the run. A stale `origin/main` moves the merge base backwards, and
+Run `git fetch --prune origin` before anything below: every `origin/main` in this section is
+only as fresh as the last fetch, and a loop that merges PRs back to back makes it stale within
+the run. A stale `origin/main` moves the merge base backwards, and
 `git-clang-format` then reports lines merged from main that the PR never touched, a false
 hard block.
 
@@ -412,6 +413,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 
 ## Hard stops (the only reasons to hand back to the user)
 
+- A Defect that cannot be reproduced by the "Prove it before you push" step 1 probe, and for
+  which no change would satisfy it: quote the finding and the probe, hand back for a ruling.
 - The bot rejects (`⚠️ Issues found`) with an empty Defects section. The prompt derives the
   sign-off from Defects, so this is a workflow bug, not a review; quote the comment and hand
   back rather than fixing Notes to satisfy it.
