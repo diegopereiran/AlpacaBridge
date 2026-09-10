@@ -60,7 +60,10 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // across a full udev/libusb bus scan (unavoidable: devs is hidapi-owned memory
 // that must be copied out before hid_free_enumeration), so a by-index device
 // creation on an HTTP thread can stall another focuser's connect/disconnect for
-// tens of milliseconds on a busy USB tree. Bounded, never a deadlock. (2) A
+// tens of milliseconds on a busy USB tree -- and, since AstroasisFocuserDriver
+// holds its own mutex_ across protocol_.connect()/disconnect(), every property
+// read on that focuser queued behind them for the same duration. Bounded,
+// never a deadlock. (2) A
 // function-local static is destroyed at exit, before any static-lifetime object
 // constructed earlier -- unreachable today because every driver is heap-owned
 // and torn down first; a static-lifetime driver calling hidapi from its
@@ -249,7 +252,10 @@ public:
     }
 
 private:
-    // Caller must hold mutex_. Closes under hid_global_mutex() and clears
+    // Caller must hold mutex_ and must NOT hold hid_global_mutex() -- it is
+    // non-recursive, so widening a global-lock scope over a call site of this
+    // (verified by mutation: all of connect()) self-deadlocks right here.
+    // Closes under hid_global_mutex() and clears
     // device_ so the two close sites (the connect handshake's failure path and
     // disconnect()) cannot drift apart on either the lock or the clear.
     void close_device_locked() {
