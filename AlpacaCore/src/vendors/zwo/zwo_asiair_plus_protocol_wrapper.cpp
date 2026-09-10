@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>

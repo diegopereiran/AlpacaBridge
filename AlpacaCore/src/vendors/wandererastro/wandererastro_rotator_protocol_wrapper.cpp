@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <filesystem>
 #include <mutex>

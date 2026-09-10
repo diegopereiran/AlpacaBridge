@@ -23,6 +23,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>

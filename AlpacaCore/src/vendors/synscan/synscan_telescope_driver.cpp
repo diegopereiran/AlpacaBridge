@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <ctime>
 #include <limits>
 #include <mutex>

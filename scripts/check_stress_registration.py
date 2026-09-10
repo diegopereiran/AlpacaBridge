@@ -37,9 +37,11 @@ STRESS_TEST_GLOB_PREFIX = "AlpacaCore/tests/test_"
 STRESS_TEST_GLOB_SUFFIX = "_concurrency_stress.cpp"
 
 DEVICE_TYPE_RE = re.compile(r"DeviceType::([A-Za-z]+)")
-# The description is matched as a full string literal (escapes allowed) so a
-# comma inside it cannot cut the match short and silently drop the tags.
-TEST_CASE_TAGS_RE = re.compile(r'TEST_CASE\s*\(\s*"(?:[^"\\]|\\.)*"\s*,\s*"((?:\[[^\]]+\])+)"')
+# The description is matched as one or more adjacent string literals
+# (escapes allowed, `"a" "b"` concatenation allowed) so a comma inside it
+# cannot cut the match short and silently drop the tags.
+TEST_CASE_TAGS_RE = re.compile(
+    r'TEST_CASE\s*\(\s*(?:"(?:[^"\\]|\\.)*"\s*)+,\s*"((?:\[[^\]]+\])+)"')
 TAG_RE = re.compile(r"\[([^\]]+)\]")
 
 # (vendor, device type) pairs with no [stress] TEST_CASE yet. Seeded from the

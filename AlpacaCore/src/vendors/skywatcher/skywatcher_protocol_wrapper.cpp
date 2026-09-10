@@ -31,6 +31,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <cstddef>
 #include <filesystem>
 #endif
 

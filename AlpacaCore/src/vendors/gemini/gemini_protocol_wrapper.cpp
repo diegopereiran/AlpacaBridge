@@ -17,6 +17,7 @@
 #include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <set>
 #include <string>
