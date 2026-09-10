@@ -73,17 +73,20 @@ ALLOWLIST = {
     # storm has to connect, and connecting calls InitQHYCCDResource()
     # (qhy_sdk_wrapper.cpp, Impl::ensure_resource) which registers a libusb
     # hotplug callback. Under ThreadSanitizer that kills the process on the
-    # first connect:
+    # first connect (run:
+    # https://github.com/diegopereiran/AlpacaBridge/actions/runs/34535303596):
     #     QHYCCD||EnableQHYCCDMessage| set gl_msgEnable from:  1  to: 0
     #     ThreadSanitizer:DEADLYSIGNAL
     #         #6 Catch::RunContext::handleFatalErrorCondition(...)
     #         #7 libusb_hotplug_register_callback
-    # tsan_suppressions.txt already carries called_from_lib:libqhyccd* and it
-    # does NOT help: a suppression mutes a race REPORT, and this is a fatal
-    # signal -- the process is already gone. The plain arm64 build runs the
-    # same cases fine, so this is the SDK blob against TSan's interceptors,
-    # not the drivers. Note QHY has no automated connect coverage of any kind
-    # today, not just no [stress] coverage. See #271.
+    # scripts/tsan_suppressions.txt already carries called_from_lib:libqhyccd*
+    # and it does NOT help: a suppression mutes a race REPORT, and this is a
+    # fatal signal -- the process is already gone. The plain arm64 build runs
+    # a [qhy][stress] connect/disconnect storm fine, so this is the SDK blob
+    # against TSan's interceptors, not the drivers. QHY has no automated
+    # connect coverage of any kind today, not just no [stress] coverage --
+    # the injectable QHY SDK seam that would fix this (the FakeToupTekSDK /
+    # LockedToupTekSDK shape) closes both gaps at once. See #271.
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
     ("wandererastro", "covercalibrator"),
