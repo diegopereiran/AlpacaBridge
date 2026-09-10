@@ -225,6 +225,11 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 location_ = value;
             } else if (key == "profile_name") {
                 profile_name_ = value;
+            } else if (key == "sync_system_clock_from_clients") {
+                bool enabled = sync_system_clock_from_clients_;
+                if (parse_bool_value(value, enabled)) {
+                    sync_system_clock_from_clients_ = enabled;
+                }
             }
         }
     }

@@ -25,6 +25,7 @@
 #include <alpacacore/safetymonitor_driver.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/host_clock.h>
 
 #include <chrono>
 #include <cstddef>
@@ -61,6 +62,10 @@ public:
     void set_server_info(std::string server_name, std::string manufacturer, std::string manufacturer_version,
                          std::string location, std::string profile_name = "");
     void set_config_path(std::string config_path);
+    // open-astro#289: whether a client's Telescope.UTCDate write may step the
+    // host clock when the kernel reports it undisciplined (no NTP/RTC).
+    void set_sync_system_clock_from_clients(bool enabled) { host_clock_.set_enabled(enabled); }
+    bool sync_system_clock_from_clients() const { return host_clock_.enabled(); }
 
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
@@ -241,6 +246,8 @@ private:
     // type/number. Straggler requests that fetched the shared_ptr before a
     // removedevice must not re-insert registry/op-mutex entries for it —
     // nothing would ever reap them (PR #164 review of issue #162).
+    void add_clock_fields(nlohmann::json& desc) const;
+
     static bool device_is_current(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
 
     // Guards client_connections_ only; never held across driver calls.
@@ -264,6 +271,9 @@ private:
     std::string location_;
     std::string profile_name_;
     std::string config_path_;
+
+    // Thread-safe; owns the "has a client stepped the clock" state (#289).
+    alpacacore::util::HostClock host_clock_;
 };
 
 } // namespace alpacahttp

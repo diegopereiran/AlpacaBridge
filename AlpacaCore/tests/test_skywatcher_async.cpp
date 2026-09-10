@@ -1475,4 +1475,45 @@ TEST_CASE("SkyWatcher async - a Dec pulse leaves a pending RA rate check running
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and reported RA (#287)",
+          "[skywatcher][async]") {
+    // Before the fix get_utc_date() reported the client's offset while every
+    // LST computation used the raw host clock, so a client time-sync fixed the
+    // readback and not the pointing. Now one utc_now_locked() feeds both.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    REQUIRE(driver->get_connected());
+
+    const auto wrap24 = [](double h) {
+        h = std::fmod(h, 24.0);
+        return h < 0.0 ? h + 24.0 : h;
+    };
+    const double lst0 = driver->get_sidereal_time();
+    const double ra0 = driver->get_right_ascension();
+    const auto host_now = std::chrono::system_clock::now();
+    driver->set_utc_date(host_now + std::chrono::hours(1));
+
+    const auto reported = driver->get_utc_date();
+    const auto readback_error = std::chrono::duration_cast<std::chrono::milliseconds>(
+        reported - (std::chrono::system_clock::now() + std::chrono::hours(1)));
+    CHECK(std::abs(readback_error.count()) < 500);
+
+    // One UT hour is 1.0027379 sidereal hours.
+    const double d_lst = wrap24(driver->get_sidereal_time() - lst0);
+    CHECK(d_lst > 1.0027379 - 0.002);
+    CHECK(d_lst < 1.0027379 + 0.002);
+    // The axes have not moved (tracking off, counts fixed) so reported RA
+    // follows LST one-for-one: RA = LST - HA.
+    const double d_ra = wrap24(driver->get_right_ascension() - ra0);
+    CHECK(d_ra > 1.0027379 - 0.002);
+    CHECK(d_ra < 1.0027379 + 0.002);
+
+    // Setting the clock back to the host's time undoes it.
+    driver->set_utc_date(std::chrono::system_clock::now());
+    const double d_back = wrap24(driver->get_sidereal_time() - lst0);
+    CHECK((d_back < 0.002 || d_back > 23.998));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

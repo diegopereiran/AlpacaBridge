@@ -1310,6 +1310,18 @@ async function loadServerInfo() {
         const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || 'N/A';
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
         const profileName = resolveDescriptionValue(desc, ['ProfileName', 'profileName', 'profile_name']) || '';
+        // open-astro#289: host-clock state. "ntp" = kernel-disciplined,
+        // "client" = stepped from a client's UTCDate write, "none" = neither.
+        const clockSynchronized = resolveDescriptionValue(desc, ['ClockSynchronized']) === true;
+        const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
+        const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
+        const clockText = clockSynchronized
+            ? 'Synchronized (NTP)'
+            : clockSource === 'client'
+                ? 'Set from a client\'s UTCDate this session (no NTP)'
+                : clockSource === 'none'
+                    ? 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.'
+                    : 'Unknown';
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.
@@ -1324,6 +1336,15 @@ async function loadServerInfo() {
                 ${renderServerInfoRow('Server Name', serverName)}
                 ${renderServerInfoRow('Manufacturer', manufacturer)}
                 ${renderServerInfoRow('Version', manufacturerVersion)}
+                ${clockSource ? renderServerInfoRow('Clock', clockText) : ''}
+                ${syncFromClients === true || syncFromClients === false ? `
+                <div class="server-info-row">
+                    <span class="info-label">Clock from clients</span>
+                    <label class="info-value" title="When the host clock is not NTP-disciplined, take the time a client sends in Telescope.UTCDate (NINA, SkySafari and PHD2 send it on connect). Never overrides NTP/chrony/GPS.">
+                        <input id="server-sync-clock-toggle" type="checkbox" ${syncFromClients ? 'checked' : ''}>
+                        Take the time from the first client that connects a telescope (no NTP/RTC)
+                    </label>
+                </div>` : ''}
                 <div class="server-info-row">
                     <span class="info-label">Profile Name</span>
                     <div class="server-location">
@@ -1340,6 +1361,11 @@ async function loadServerInfo() {
                 </div>
             </div>
         `;
+
+        const syncClockToggle = document.getElementById('server-sync-clock-toggle');
+        if (syncClockToggle) {
+            syncClockToggle.addEventListener('change', () => updateSyncClockFromClients(syncClockToggle.checked));
+        }
 
         const locationInput = document.getElementById('server-location-input');
         if (locationInput) {
@@ -1490,6 +1516,29 @@ function updateHeaderProfileName(profileName) {
     const headerProfile = document.getElementById('header-profile');
     if (headerProfile) {
         headerProfile.textContent = profileName || '';
+    }
+}
+
+// open-astro#289: persist the client-clock policy through the description PUT.
+async function updateSyncClockFromClients(enabled) {
+    setServerInfoStatus('Updating clock policy...');
+    try {
+        const response = await fetch(API_BASE + '/management/v1/description', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({SyncSystemClockFromClients: !!enabled})
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        if (data.ErrorNumber !== 0) {
+            throw new Error(data.ErrorMessage || 'Unknown server error');
+        }
+        setServerInfoStatus(enabled ? 'Clients may set the clock when NTP is absent.' : 'Clients will not touch the clock.');
+    } catch (e) {
+        setServerInfoStatus('Failed to update clock policy: ' + e.message, true);
+        loadServerInfo();
     }
 }
 

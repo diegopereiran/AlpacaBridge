@@ -654,7 +654,7 @@ public:
         (void)dec;
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        double lst = compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_);
+        double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ha = wrap_hour_angle(lst - ra);
         return ha >= 0.0 ? 0 : 1;
     }
@@ -679,7 +679,7 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_);
+        return compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
     }
 
     double get_site_elevation() const override { return site_elevation_m_; }
@@ -782,20 +782,22 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        // The motor controller has no clock; the host clock is authoritative.
-        return std::chrono::system_clock::now() + utc_offset_;
+        // The motor controller has no clock; the host clock plus the
+        // client-set offset is the driver's time (see utc_now_locked()).
+        return utc_now_locked();
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         utc_offset_ = utc - std::chrono::system_clock::now();
+        invalidate_position_cache_locked();  // reported RA moves with LST
     }
 
-    // FindHome is an asynchronous initiator (ITelescopeV4). The Wave has no
-    // home sensor, but the controller's power-on index (counts 0x800000,
-    // counterweight down pointing at the pole) IS the home position, so homing
-    // is a goto to axis angles 0,0. AtHome flips true (and Slewing false) in
+    // FindHome is an asynchronous initiator (ITelescopeV4). Boards without a
+    // home index (has_home_indexer_ false) treat the controller's power-on
+    // index (counts 0x800000, counterweight down pointing at the pole) as the
+    // home position, so homing is a goto to axis angles 0,0. AtHome flips true (and Slewing false) in
     // the same locked step when the goto lands.
     void find_home() override {
         reap_slew_task();
@@ -1761,6 +1763,14 @@ private:
 
     bool hemisphere_south_locked() const { return site_latitude_ < 0.0; }
 
+    // The one time source for every LST computation (open-astro#287): the
+    // host clock plus the offset a client set through UTCDate. Before this,
+    // get_utc_date() reported the offset while goto/RA math ignored it, so a
+    // client time-sync corrected the readback and not the pointing.
+    std::chrono::system_clock::time_point utc_now_locked() const {
+        return std::chrono::system_clock::now() + utc_offset_;
+    }
+
     // ── Pointing model ──────────────────────────────────────────────────────
     // Home (counts == kHomeCounts on both axes): counterweight down, OTA at
     // the visible celestial pole. Axis angles are signed degrees from home.
@@ -1802,15 +1812,14 @@ private:
         if (hemisphere_south_locked()) {
             dec = -dec;
         }
-        double lst = compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_);
+        double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ra = wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
     }
 
     std::pair<double, double> ra_dec_to_axis_degrees_locked(double ra, double dec,
                                                             double lst_advance_hours = 0.0) const {
-        double lst =
-            compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_) + lst_advance_hours;
+        double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_) + lst_advance_hours;
         double ha = wrap_hour_angle(lst - ra);
         double dec_mech = hemisphere_south_locked() ? -dec : dec;
         double a1 = 0.0;
@@ -1829,7 +1838,7 @@ private:
 
     std::pair<double, double> compute_alt_az_locked() const {
         auto [ra, dec] = compute_ra_dec_locked();
-        double lst = compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_);
+        double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ha_rad = wrap_hour_angle(lst - ra) * kHoursToDegrees * std::numbers::pi / 180.0;
         double dec_rad = dec * std::numbers::pi / 180.0;
         double lat_rad = site_latitude_ * std::numbers::pi / 180.0;
