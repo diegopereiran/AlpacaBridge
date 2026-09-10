@@ -1659,8 +1659,21 @@ against its checklist, 2026-09-06:
   scope for this issue. The claim/release in `connect_serial()` is covered by a pty-backed
   test in `test_skywatcher_serial.cpp`; the post-`open()` re-check in `probe_skywatcher_port`
   narrows the TOCTOU window but cannot close it (in-process best-effort set, not a file lock).
-- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open; see the
-  hemisphere fixes and pending bench test elsewhere in this section.
+- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
+  Audit (2026-09-09, no hardware): unlike the RA/Dec direction bugs above, the branch that
+  drives `SideOfPier`/`DestinationSideOfPier` is chosen purely from the sign of hour angle
+  in `ra_dec_to_axis_degrees_locked()`, and `hemisphere_south_locked()` is consulted only for
+  `dec_mech` (the a2 magnitude), never for which branch is picked or which side it is labelled.
+  So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
+  OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
+  a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
+  the "pierEast" branch is the true physical east side below the equator, because there is no
+  internal contradiction to expose (whichever side the code calls pierEast, it consistently
+  slews to and reports that side). Loopback regressions asserting the flip contract on the
+  EQM-35 Pro and Wave profiles are in `test_skywatcher_async.cpp` ("Pier side across the
+  meridian"). The physical-side question stays open until the plate-solved goto-across-the-
+  meridian check on the rig (see the hemisphere fixes and pending bench test elsewhere in this
+  section).
 - [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session
   (no plate solve performed).
 - [ ] Park/unpark weights-down convention — not specifically re-verified on a classic
