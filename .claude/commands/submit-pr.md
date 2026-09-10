@@ -267,7 +267,7 @@ EOF
 
 After submission, display the PR URL to the user.
 
-## Step 8 — Watch for the review bot (poll every minute)
+## Step 8 — Watch for the review bot (poll every three minutes)
 
 The bot (`.github/workflows/claude-review.yml`) runs automatically on every push to a **same-repo**
 PR branch. On a **fork** PR it runs only once a maintainer applies the `safe-to-review` label
@@ -294,60 +294,134 @@ Step 2 repo detection:
     ```
 
     Then go to Step 10 and tell the user the PR is waiting on that label; once it's applied, resume
-    this step and poll as normal.
+    this step with the real poll (not the `BUDGET=0` pre-check: the label re-triggers the bot on
+    the same head, see the exit-code notes below).
 
-Every PR gets an automated review from the `claude` bot (`.github/workflows/claude-review.yml`).
-It posts a PR comment ending in a verdict line: `✅ Approved` or `⚠️ Issues found`. After creating
-the PR (and after **every** push, which restarts a full fresh review), watch for the next bot
-comment.
+Every PR gets an automated review (`.github/workflows/claude-review.yml`), posted by the
+workflow's own step as `github-actions`. It ends in a verdict line: `✅ Approved` or
+`⚠️ Issues found`. After creating the PR (and after **every** push, which restarts a full fresh
+review), watch for the next bot comment.
 
-Record the baseline count of bot comments, then start a background poll that exits when a new
-one arrives (do NOT foreground-sleep; run this with `run_in_background`):
+First check whether a verdict for the current head is already there (a fast review, or any delay
+between the push and starting the poll). "For the current head" means: the newest `review` check-run on the
+head SHA that was not cancelled or skipped has completed (a failed run counts: the assert step can
+fail after the verdict was posted), none is still queued or running, and the newest bot verdict
+was updated after that run started. Commit dates are not used: a commit's committer date is when it
+was made locally, so a verdict on the previous head can be newer than it. The block below applies that
+rule every three minutes (`TICK`) within a 30-minute budget, first look after one tick so a
+run just re-triggered on the same head has appeared; `BUDGET=0` gives a single immediate look
+when nothing was just re-triggered (do NOT foreground-sleep; run
+it with `run_in_background`). It is the same block as `/pr-checker` Step 2:
 
 ```bash
-PR=<number>
-# Count only genuine review comments: the bot login AND a verdict line, so an
-# unrelated comment from a same-named account can't satisfy the poll.
-FILTER='[.comments[] | select(.author.login=="claude" and (.body | test("✅ Approved|⚠️ Issues found")))]'
-BASE=$(gh pr view "$PR" --json comments --jq "$FILTER | length")
-DEADLINE=$(( $(date +%s) + 1800 ))   # 30-min bailout: don't poll forever on a broken workflow
-while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  sleep 60
-  N=$(gh pr view "$PR" --json comments --jq "$FILTER | length")
-  if [ "$N" -gt "$BASE" ]; then
-    gh pr view "$PR" --json comments --jq "$FILTER | last | .body"
-    exit 0
+PR=<number>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
+# A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
+# new check-run; a first look inside that window classifies the OLD run as final. So a
+# real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
+# is only valid when nothing was just re-triggered, and looks at once.
+if [ "${BUDGET:-1800}" -gt 0 ]; then sleep "$TICK"; fi
+while :; do
+  # Bind the verdict to the review check-run on the head SHA (filter=all so a later
+  # cancelled attempt cannot hide the finished one). Everything is fetched with
+  # --paginate: unpaginated, both endpoints return only the 30 oldest items.
+  SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
+  if [ "$SHA" != "${LAST_SHA:-}" ]; then CANCELLED_SEEN=0; LAST_SHA=$SHA; fi   # new head, new latch
+  RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
+  # Newest finished run that was not cancelled or skipped. A failed run still counts:
+  # the assert step can fail after the post step published the verdict, and nothing
+  # re-runs a failed run on its own, so it must be reported, not waited out.
+  DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.html_url)"' <<<"$RUNS")
+  RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
+  PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
+  SKIPPED=$(jq -r '[.[] | select(.conclusion == "skipped")] | length' <<<"$RUNS")
+  CANCELLED=$(jq -r '[.[] | select(.conclusion == "cancelled")] | length' <<<"$RUNS")
+  # REST, not `gh pr view --json comments`: only REST exposes updated_at. The author
+  # pattern is the workflow's own assert-step pattern. `select(. != null)` matters: with
+  # no verdict yet, `last` is null and would otherwise print the literal "null".
+  LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add // [] | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ -n "$LAST" ] \
+     && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$RUN_STARTED" +%s)" ]; then
+    printf '%s\n' "${LAST#* }"; exit 0
   fi
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ]; then
+    # Finished, nothing pending, no verdict for this head. Never wait 30 minutes for it.
+    case "$RUN_STATE" in
+      success*)
+        # The PR edits the review workflow and the action skipped it (the assert step
+        # passes it). Hand back for eyeball review; this is a hard stop, never a merge.
+        if gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
+          echo "NO VERDICT for head $SHA: this PR edits the review workflow and the action skipped it. Review it by eye." >&2; exit 2
+        fi
+        # Green run, ordinary PR, no verdict: the agent wrote its verdict to chat instead of
+        # review-comment.md (the PR #209 failure). Nothing re-runs it; report, do not wait.
+        echo "REVIEW RUN succeeded for head $SHA but published no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
+      *)
+        echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
+    esac
+  fi
+  # Only skipped runs and nothing pending: the actor gate skipped the job (fork push
+  # without the label, or an author outside allowed_non_write_users). A cancelled run
+  # beside the skipped one means a labelled run existed and was re-triggered mid-poll;
+  # that is the two-look cancelled case below, not a skip. see the fork-label rule above.
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ] && [ "$CANCELLED" = 0 ]; then
+    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (see above)." >&2; exit 3
+  fi
+  # Only cancelled runs: a superseding trigger never came. A relabel issued mid-poll
+  # cancels the in-flight run a few seconds before its replacement appears, so this
+  # state has to hold on two consecutive looks before it is reported.
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$CANCELLED" != 0 ]; then
+    if [ "${CANCELLED_SEEN:-0}" = 1 ]; then
+      echo "REVIEW CANCELLED for head $SHA and nothing replaced it: re-trigger with the relabel trick." >&2; exit 3
+    fi
+    CANCELLED_SEEN=1
+  else
+    CANCELLED_SEEN=0
+  fi
+  [ "$(date +%s)" -ge "$DEADLINE" ] && break
+  sleep "$TICK"
 done
-echo "TIMEOUT: no review-bot comment within 30 minutes — check the claude-review workflow run" >&2
-exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
 
-If the poll times out, surface the stall to the user and check the workflow
-(`gh run list --workflow=claude-review.yml --limit 3`) instead of restarting the loop blindly.
+**Exit `1` from a `BUDGET=0` pre-check is not a timeout.** Right after `gh pr create` or a push
+there is no `review` check-run yet, so the single look finds nothing and exits `1` with "after
+0 min": that means **no verdict yet**, start the real poll. Only an exit `1` from the full
+30-minute budget is a stall. **Skip the pre-check when the bot was just re-triggered on the same
+head** (the maintainer just applied `safe-to-review`, or you just ran `update-branch`): for a
+few seconds the only check-run is the old skipped or cancelled one, and the pre-check would
+report it as final. Start the real poll instead; its first look comes after one tick.
+Exit `2` (the action skipped a workflow-editing PR) and exit `3` (no run will produce a
+verdict: the newest run failed, succeeded without publishing one, the job was skipped, or every run was cancelled) both
+mean there is no verdict to act on: tell the user, and for exit `3` read the run log first. If the poll times out, surface
+the stall to the user and check the workflow (`gh run list --workflow=claude-review.yml --limit 3`)
+instead of restarting the loop blindly. `date -d` is GNU; the skills run on the Linux dev VM.
 
 While waiting, also keep an eye on CI: `gh pr checks <number>`. A red CI check should be fixed
 (and pushed) without waiting for the review verdict.
 
 ## Step 9 — Act on the review verdict
 
-Read the bot's newest review comment in full and classify every finding as **in-scope** (a real
-defect in this PR's changes) or **out-of-scope** (pre-existing, non-blocking, or beyond this PR's
-purpose). Findings under a "Notes (no action needed)" heading need no action unless clearly wrong.
+Read the bot's newest review comment in full. It has two sections (`claude-review.yml` prompt):
+**Defects**, which are what made the verdict a rejection, and **Notes**, which never block. Only
+Defects are work in this PR. A Note is a follow-up issue only when the user wants one; a Note the
+bot marks "out of scope, open an issue" is listed for the user in Step 10, never fixed here.
 
 ### Verdict: `⚠️ Issues found`
 
-1. Fix each **in-scope** finding on the branch. Batch ALL fixes into ONE commit/push — every push
-   restarts a full fresh review (PR #99 took 46 rounds; don't trickle pushes).
-2. For each **out-of-scope** finding, open a follow-up issue instead (format below).
+1. Fix each **Defect** on the branch. Batch ALL fixes into ONE commit/push — every push restarts a
+   full fresh review (PR #99 took 46 rounds; don't trickle pushes). A Note is never a reason for
+   a push on its own; a mechanical Note (a comment fix, an unused include, a missing test for a
+   string this PR added) may ride along in the same commit.
+2. A Defect that would need a wrong or unsafe change, or a product decision the user has not
+   made, goes back to the user instead of being fixed on faith.
 3. Show the user the fixes and the planned push for approval, push once, then return to Step 8
    and poll for the fresh review.
 
 ### Verdict: `✅ Approved`
 
-**Do NOT push anything further to this branch — approval is the stopping point.** Any remaining
-or newly-noticed items (including "approved, non-blocking" findings in the review itself) become
-follow-up issues, not commits. Then ask the user for approval to merge; on yes:
+**Do NOT push anything further to this branch — approval is the stopping point.** The Notes an
+approval carries are listed in Step 10; open a follow-up issue for one only when the user asks.
+Then ask the user for approval to merge; on yes:
 
 ```bash
 gh pr merge <number> --merge
@@ -359,7 +433,7 @@ Match the established pattern (e.g. issues #135–#137 from PR #134). One issue 
 
 ```bash
 gh issue create --title "<component>: <concise defect summary>" --body "$(cat <<'EOF'
-From the PR #<N> review (approved, non-blocking): <full technical description of the finding,
+From the PR #<N> review (a Note, non-blocking): <full technical description of the finding,
 including file/function references and the suggested fix direction from the review comment>.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -371,5 +445,5 @@ Show the user each issue title/body for approval before creating.
 
 ## Step 10 — Wrap-up
 
-- Display the PR URL, final verdict, and any follow-up issues opened
+- Display the PR URL, final verdict, the Notes the final review carried, and any follow-up issues opened
 - If AGENTS.md wasn't updated: "Consider updating AGENTS.md with any lessons learned from this work."
