@@ -37,32 +37,27 @@ git log @{u}..HEAD --oneline 2>/dev/null || echo "NO_UPSTREAM"
 
 ### ConformU report validation (HARD BLOCK)
 
-If this branch adds or modifies any ConformU files under `AlpacaCore/conformu/**`, every report must pass before the PR can be submitted. Merging a failing report misleads downstream consumers of `SUPPORTED-DRIVERS.md` into thinking a driver is validated on arm64.
+If this branch adds or modifies any ConformU files under `AlpacaCore/conformu/**` or `AlpacaHTTP/conformu/**`, every report must pass before the PR can be submitted. Merging a failing report misleads downstream consumers of `SUPPORTED-DRIVERS.md` (or `AlpacaHTTP/conformu/README.md`'s own compliance claim) into thinking a driver or endpoint is validated.
 
-Find the reports on this branch:
+This is checked here so a bad report never reaches CI in the first place, but it is **not** only a prompt-level rule anymore: the `conformu-reports` CI job runs the identical check (`scripts/check_conformu_reports.py`) on every PR and blocks the merge regardless of how the PR was opened. Run it directly instead of doing this by hand:
 
 ```bash
-git diff --name-only main..HEAD | grep -E '^AlpacaCore/conformu/.*\.(json|txt)$'
+python3 scripts/check_conformu_reports.py main
 ```
 
-If the list is empty, skip the rest of this subsection.
+If it reports "nothing to check", skip the rest of this subsection. Otherwise it prints exactly which file and which counts/lines failed — the pass criteria are:
 
-For each file in the list:
+- **JSON reports** (`*.json`) — fail if any of `ErrorCount`, `IssueCount`, `TimingIssuesCount` is non-zero.
+- **Text logs** (`*.txt`) — fail if any of these are true:
+  - a line matches `OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET`
+  - a line matches `took longer than its target response time`
+  - the file does NOT contain any of the known ConformU success phrasings (see `SUCCESS_PATTERNS` in the script — there are two, since the per-device and protocol-level ConformU checks word it differently)
 
-- **JSON reports** (`*.json`) — **fail** if any of `ErrorCount`, `IssueCount`, `TimingIssuesCount` is non-zero:
-  ```bash
-  jq -r '{ErrorCount, IssueCount, TimingIssuesCount}' <file>
-  ```
-- **Text logs** (`*.txt`) — **fail** if any of these are true:
-  - `grep -E "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET" <file>` matches
-  - `grep "took longer than its target response time" <file>` matches
-  - The file does NOT contain `Congratulations, no errors, warnings or issues found`
+If it fails, **STOP**. Do NOT push. Do NOT open the PR. Tell the user exactly which file and which counts/lines failed:
 
-If any file fails, **STOP**. Do NOT push. Do NOT open the PR. Tell the user exactly which file and which counts/lines failed:
+> "ConformU report `<file>` shows Errors=N, Issues=N, TimingIssues=N (or matching lines). The driver is not validated. Fix the driver, re-run ConformU until clean, replace the report on this branch, and try again. PR is blocked until every ConformU report on this branch passes. See `/driver-build` Step 10 for the full pass criteria."
 
-> "ConformU report `<file>` shows Errors=N, Issues=N, TimingIssues=N (or matching grep lines). The driver is not validated. Fix the driver, re-run ConformU until clean, replace the report on this branch, and try again. PR is blocked until every ConformU report on this branch passes. See `/driver-build` Step 10 for the full pass criteria."
-
-Do NOT offer to open the PR "anyway", as a draft, or with a TODO. This block exists because a green-looking PR with a failing ConformU report is the worst-case outcome — it gets merged and misadvertises the driver as validated.
+Do NOT offer to open the PR "anyway", as a draft, or with a TODO. This block exists because a green-looking PR with a failing ConformU report is the worst-case outcome — it gets merged and misadvertises the driver as validated. Catching it here just saves a CI cycle; the CI job is now the actual backstop.
 
 ## Step 2 — Detect repository setup
 
@@ -212,7 +207,7 @@ Confirm the push succeeded before proceeding.
 - Examples:
   - `Add ToupTek camera driver with HTTP/UI integration`
   - `Fix iOptron HEM27 Wi-Fi pulse guide timing`
-  - `Validate SynScan HEQ5 PRO ConformU 4.3.0 on arm64`
+  - `Validate SynScan HEQ5 PRO on arm64 (ConformU <version used>)`
 
 ### PR body
 
@@ -236,7 +231,7 @@ Group by component using bold tags:
 ## Test plan
 - [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck
 - [ ] Unit tests pass (`cd build && ctest`)
-- [ ] ConformU 4.3.0 passes on Linux arm64
+- [ ] ConformU (latest release — see `/conformu`) passes on Linux arm64
 - [ ] Web UI configuration works in browser
 - [ ] Device connects and operates correctly
 (Include only items relevant to this PR)
@@ -272,24 +267,34 @@ EOF
 
 After submission, display the PR URL to the user.
 
-## Step 8 — Watch for the review bot (poll every minute) — MAINTAINER ONLY
+## Step 8 — Watch for the review bot (poll every minute)
 
-**The automated review bot only runs for the maintainer (@joeytroy).** External/fork contributors
-must not execute against the bot. Determine which flow applies from the Step 2 repo detection and
-the authenticated user (`gh api user --jq .login`):
+The bot (`.github/workflows/claude-review.yml`) runs automatically on every push to a **same-repo**
+PR branch. On a **fork** PR it runs only once a maintainer applies the `safe-to-review` label
+(`pull_request_target`, gated per-PR — see AGENTS.md § "Review bot on fork PRs" for why). It is
+NOT limited to any one maintainer's own PRs; a fork contributor listed in `allowed_non_write_users`
+in that workflow gets reviewed the same way once labeled. Determine which flow applies from the
+Step 2 repo detection:
 
-- **Maintainer** (direct contributor, login `joeytroy`): follow this step and Step 9 as written.
-- **External/fork contributor** (anyone else): do NOT poll for a bot review — none will come.
-  Instead, after creating the PR, post a comment tagging the maintainer so they can kick off a
-  local agent review:
+- **Same-repo PR** (origin = `open-astro/AlpacaBridge`): the bot is already running. Follow this
+  step and Step 9 as written — poll immediately.
+- **Fork PR**: check whether `safe-to-review` is already on the PR:
 
   ```bash
-  gh pr comment <number> --body "@joeytroy this PR is ready for review — please kick off a local agent review when you have a chance."
+  gh pr view <number> --json labels --jq '.labels[].name'
   ```
 
-  Then skip Step 9 entirely (verdicts, fixes-per-round, merging, and follow-up issues are the
-  maintainer's side) and go to Step 10. Remind the user the maintainer will review and respond
-  on the PR.
+  - **Label present**: the bot is running (or has already posted). Follow this step and Step 9 as
+    written.
+  - **Label absent**: do NOT poll yet — nothing will happen until a maintainer applies the label.
+    Post a comment asking for it instead of asking someone to review by hand:
+
+    ```bash
+    gh pr comment <number> --body "This PR is from a fork — could a maintainer apply the \`safe-to-review\` label so the review bot runs?"
+    ```
+
+    Then go to Step 10 and tell the user the PR is waiting on that label; once it's applied, resume
+    this step and poll as normal.
 
 Every PR gets an automated review from the `claude` bot (`.github/workflows/claude-review.yml`).
 It posts a PR comment ending in a verdict line: `✅ Approved` or `⚠️ Issues found`. After creating
