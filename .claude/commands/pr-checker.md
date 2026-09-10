@@ -67,8 +67,9 @@ Checks to make before waiting on anything:
    It is fine to do this while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
-   Verify the verdict belongs to the current head: the bot comment is newer than the last commit
-   (`gh api repos/open-astro/AlpacaBridge/pulls/<N>/commits --jq '.[-1].commit.committer.date'`).
+   Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (not
+   `createdAt`; the workflow's sticky comment may be edited in place) is newer than the last
+   commit (`gh api repos/open-astro/AlpacaBridge/pulls/<N>/commits --jq '.[-1].commit.committer.date'`).
    A verdict older than the head commit is stale and must not be trusted.
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
@@ -77,15 +78,20 @@ Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadli
 
 ```bash
 PR=<N>
-FILTER='[.comments[] | select((.author.login | test("^github-actions(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))]'
 DEADLINE=$(( $(date +%s) + 1800 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
-  c=$(gh pr view "$PR" --json comments --jq "$FILTER | last | \"\(.createdAt)\n\(.body)\"")
-  head_at=$(gh api repos/open-astro/AlpacaBridge/pulls/"$PR"/commits --jq '.[-1].commit.committer.date')
-  # Only a verdict NEWER than the head commit counts: counting comments is
-  # fooled by a stale verdict on an older head, and by the contributor
-  # pushing mid-round (which restarts the review on a new head).
+  # REST, not `gh pr view --json comments`: the workflow uses a sticky comment
+  # (use_sticky_comment: true), which may be EDITED in place on later rounds,
+  # and only REST exposes updated_at. createdAt alone would call every round
+  # after the first "stale".
+  c=$(gh api "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
+        | select((.user.login | test("^github-actions(\\[bot\\])?$"))
+                 and (.body | test("✅ Approved|⚠️ Issues found")))]
+        | last | "\(.updated_at)\n\(.body)"')
+  head_at=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR/commits" --jq '.[-1].commit.committer.date')
+  # Only a verdict UPDATED after the head commit counts: anything older is a
+  # stale verdict on a previous head (or the contributor pushed mid-round).
   if [[ "$(echo "$c" | head -1)" > "$head_at" ]]; then echo "$c"; exit 0; fi
 done
 echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
@@ -96,8 +102,10 @@ lands first, but **merge strictly in ascending number order** so the update-bran
 predictable.
 
 If it times out: `gh run list --workflow=claude-review.yml --limit 5` and read the failing job.
-Known stalls: a stuck run is fixed by closing and reopening the PR (`gh pr close N && gh pr reopen N`),
-a permission skip by the relabel trick above. Do not restart the poll blindly.
+Known stalls: the workflow triggers only on `opened`, `synchronize` and `labeled` (closing and
+reopening the PR does NOT re-run it), so a stuck or cancelled run is restarted with the
+remove-and-re-add `safe-to-review` label trick from Step 1.2, which also covers the permission
+skip. Do not restart the poll blindly.
 
 While waiting, watch CI too (`gh pr checks <N>`). A red CI check gets fixed and pushed in the same
 batch as the bot findings, not on its own.
@@ -221,7 +229,7 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - A ConformU report on the branch is failing (a driver PR cannot merge with a red report; see
   `/submit-pr` Step 1).
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
-- The review workflow itself is broken (two consecutive timeouts after the relabel/close-reopen
+- The review workflow itself is broken (two consecutive timeouts after the relabel
   tricks) — report the run URL.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
