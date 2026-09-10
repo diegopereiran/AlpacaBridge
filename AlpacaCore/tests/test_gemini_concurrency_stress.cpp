@@ -51,12 +51,15 @@ namespace {
 
 // A racing disconnect makes any of these throw NotConnected, and the harness
 // only swallows the callback as a whole -- per-call guards keep one throw
-// from skipping every call below it for that whole iteration.
+// from skipping every call below it for that whole iteration. std::exception
+// rather than AlpacaException: anything else escaping the serial teardown
+// would otherwise unwind past the remaining calls, which is the exact
+// failure mode this helper exists to prevent.
 template <typename Fn>
 void call(Fn&& fn) {
     try {
         fn();
-    } catch (const alpacacore::AlpacaException&) {
+    } catch (const std::exception&) {
     }
 }
 
@@ -66,8 +69,8 @@ void pdh_switch_operate(AlpacaDriver& d) {
     call([&] { static_cast<void>(sw.get_switch_value(0)); });
     call([&] { static_cast<void>(sw.get_switch_name(0)); });
     call([&] { static_cast<void>(sw.get_can_write(1)); });
-    // Switch 1 is a writable DC port on the Advanced 3; the pass-through
-    // rail at 0 is read-only, so writing there would only ever throw.
+    // ids 0 and 1 are USB A and USB B, both writable; the always-on
+    // pass-through rail that refuses writes is id 6 ("DC1").
     call([&] { sw.set_switch_value(1, 1.0); });
     call([&] { static_cast<void>(sw.get_device_state()); });
 }
