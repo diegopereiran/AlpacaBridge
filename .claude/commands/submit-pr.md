@@ -37,7 +37,7 @@ git log @{u}..HEAD --oneline 2>/dev/null || echo "NO_UPSTREAM"
 
 ### ConformU report validation (HARD BLOCK)
 
-If this branch adds or modifies any ConformU files under `AlpacaCore/conformu/**`, every report must pass before the PR can be submitted. Merging a failing report misleads downstream consumers of `SUPPORTED-DRIVERS.md` into thinking a driver is validated on arm64.
+If this branch adds or modifies any ConformU files under `AlpacaCore/conformu/**` or `AlpacaHTTP/conformu/**`, every report must pass before the PR can be submitted. Merging a failing report misleads downstream consumers of `SUPPORTED-DRIVERS.md` (or `AlpacaHTTP/conformu/README.md`'s own compliance claim) into thinking a driver or endpoint is validated.
 
 This is checked here so a bad report never reaches CI in the first place, but it is **not** only a prompt-level rule anymore: the `conformu-reports` CI job runs the identical check (`scripts/check_conformu_reports.py`) on every PR and blocks the merge regardless of how the PR was opened. Run it directly instead of doing this by hand:
 
@@ -51,7 +51,7 @@ If it reports "nothing to check", skip the rest of this subsection. Otherwise it
 - **Text logs** (`*.txt`) — fail if any of these are true:
   - a line matches `OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET`
   - a line matches `took longer than its target response time`
-  - the file does NOT contain `Congratulations, no errors, warnings or issues found`
+  - the file does NOT contain any of the known ConformU success phrasings (see `SUCCESS_PATTERNS` in the script — there are two, since the per-device and protocol-level ConformU checks word it differently)
 
 If it fails, **STOP**. Do NOT push. Do NOT open the PR. Tell the user exactly which file and which counts/lines failed:
 

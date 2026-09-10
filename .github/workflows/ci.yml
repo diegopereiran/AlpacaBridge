@@ -486,10 +486,10 @@ jobs:
 
       - name: Reject a failing or missing ConformU report
         # /submit-pr already blocks this locally (a driver PR must ship a
-        # clean AlpacaCore/conformu/** report), but that's a prompt-only
-        # gate: a PR opened by hand, or from a fork not using the skill,
-        # bypasses it. This is the same pass/fail logic as a CI job so it
-        # can't be skipped.
+        # clean AlpacaCore/conformu/** or AlpacaHTTP/conformu/** report), but
+        # that's a prompt-only gate: a PR opened by hand, or from a fork not
+        # using the skill, bypasses it. This is the same pass/fail logic as a
+        # CI job so it can't be skipped.
         run: |
           set -euo pipefail
           git fetch --no-tags origin "$GITHUB_BASE_REF"

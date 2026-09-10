@@ -10,20 +10,28 @@ plain CI gate so a merged PR can never misadvertise a driver as validated.
 Run from the repo root, against a specific base ref to diff from:
     python3 scripts/check_conformu_reports.py <base-ref>
 
-Only files under AlpacaCore/conformu/ that changed relative to <base-ref> are
-checked -- an unrelated PR that never touches a report is a no-op. That
-mirrors the scope `/submit-pr` uses (`AlpacaCore/conformu/**`); the stray
-`AlpacaHTTP/conformu/` directory is dead weight left over from a historic
-subtree import (unreferenced anywhere else in the repo) and out of scope
-here.
+Files under BOTH AlpacaCore/conformu/ and AlpacaHTTP/conformu/ that changed
+relative to <base-ref> are checked -- an unrelated PR that never touches a
+report is a no-op. `/submit-pr`'s own scope is only `AlpacaCore/conformu/**`,
+but AlpacaHTTP/conformu/README.md states "All HTTP endpoints must pass
+ConformU protocol verification before being considered compliant" and that
+directory holds a real report -- a review of this script correctly pointed
+out that calling it dead and excluding it would leave exactly the kind of
+unguarded gap this script exists to close, so both paths are in scope.
+
+The two directories' reports come from different ConformU check types (a
+per-device driver check vs. a protocol-level check across all endpoints) and
+use different success wording -- SUCCESS_PATTERNS below covers both observed
+phrasings; if ConformU ever changes its wording again, add the new phrase
+here rather than looping this check.
 
 Pass criteria (identical to `/submit-pr`):
   - JSON reports (*.json): ErrorCount, IssueCount and TimingIssuesCount must
     all be zero.
   - Text logs (*.txt): must NOT contain a line matching
     "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET" or
-    "took longer than its target response time", AND MUST contain the line
-    "Congratulations, no errors, warnings or issues found".
+    "took longer than its target response time", AND MUST contain one of the
+    SUCCESS_PATTERNS strings.
 """
 
 import json
@@ -31,11 +39,15 @@ import re
 import subprocess
 import sys
 
-CONFORMU_PREFIX = "AlpacaCore/conformu/"
+CONFORMU_PREFIXES = ("AlpacaCore/conformu/", "AlpacaHTTP/conformu/")
 
 TIMING_OUTSIDE_RE = re.compile(r"OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET")
 TIMING_LONGER_RE = re.compile(r"took longer than its target response time")
-SUCCESS_LINE = "Congratulations, no errors, warnings or issues found"
+# Both are real, observed ConformU pass phrasings (see the module docstring).
+SUCCESS_PATTERNS = (
+    "Congratulations, no errors, warnings or issues found",
+    "Congratulations there were no errors, issues or information alerts",
+)
 
 
 def changed_conformu_files(base_ref):
@@ -47,7 +59,7 @@ def changed_conformu_files(base_ref):
         ["git", "diff", "--name-only", "--diff-filter=d", merge_base, "HEAD"],
         check=True, capture_output=True, text=True,
     ).stdout
-    return [p for p in out.splitlines() if p.startswith(CONFORMU_PREFIX)
+    return [p for p in out.splitlines() if p.startswith(CONFORMU_PREFIXES)
             and p.endswith((".json", ".txt"))]
 
 
@@ -58,9 +70,20 @@ def check_json(path):
     except (OSError, json.JSONDecodeError) as e:
         return ["%s: could not parse as JSON (%s)" % (path, e)]
 
+    if not isinstance(data, dict):
+        return ["%s: top-level JSON is a %s, not an object -- cannot check "
+                "ErrorCount/IssueCount/TimingIssuesCount" % (path, type(data).__name__)]
+
     failures = []
     for field in ("ErrorCount", "IssueCount", "TimingIssuesCount"):
-        value = data.get(field, 0)
+        # No default: a report missing one of these fields entirely (e.g.
+        # truncated/malformed) is a hard failure, not a silent pass -- the
+        # whole point of this script is to never let an unclear report
+        # through.
+        if field not in data:
+            failures.append("%s: missing required field %r" % (path, field))
+            continue
+        value = data[field]
         if value:
             failures.append("%s: %s=%s (must be 0)" % (path, field, value))
     return failures
@@ -79,10 +102,10 @@ def check_text(path):
             failures.append("%s:%d: %s" % (path, lineno, line.strip()))
         elif TIMING_LONGER_RE.search(line):
             failures.append("%s:%d: %s" % (path, lineno, line.strip()))
-    if SUCCESS_LINE not in text:
+    if not any(p in text for p in SUCCESS_PATTERNS):
         failures.append(
-            "%s: missing required line %r -- report does not confirm a "
-            "clean ASCOM validation pass" % (path, SUCCESS_LINE)
+            "%s: missing a required success line (looked for any of %r) -- "
+            "report does not confirm a clean ASCOM validation pass" % (path, SUCCESS_PATTERNS)
         )
     return failures
 
