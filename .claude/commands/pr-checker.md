@@ -288,18 +288,24 @@ git fetch "$REMOTE" "$BRANCH"
 git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 # ... apply fixes ...
 # Gates then push then poll as ONE background chain (see "Keep looping").
-# $GATES is the step 5 gate set for the files this round touched: the full
-# ./scripts/ci_preflight.sh only when runtime C++ changed across vendors, the
-# four Python gates alone on a docs/skill-only branch.
-$GATES > "$LOG" 2>&1 \
+# run_gates is the step 5 gate set for the files this round touched, written
+# out as a function so a multi-command set chains like a single one: the full
+# pre-flight only when runtime C++ changed across vendors, the four Python
+# gates alone on a docs/skill-only branch, the per-file gates in between.
+run_gates() { ./scripts/ci_preflight.sh; }
+# docs/skill-only:
+# run_gates() { python3 scripts/check_docs_drift.py && python3 .github/scripts/check-unicode.py \
+#   && python3 scripts/check_stress_registration.py && python3 scripts/check_conformu_reports.py origin/main; }
+run_gates > "$LOG" 2>&1 \
   && git fetch "$REMOTE" "$BRANCH" \
   && [ -z "$(git log --oneline "HEAD..$REMOTE/$BRANCH")" ] \
   && git push "$REMOTE" "HEAD:$BRANCH" \
   && <Step 2 poll loop>
 ```
 
-Summary lines in `$LOG` are indented (`  [PASS] ...`). A red pre-flight is a hard block ONLY
-for failures in code this branch touches; see "Keep looping" for the flake rule. A non-empty
+When the gate set is the pre-flight, its summary lines in `$LOG` are indented (`  [PASS] ...`);
+the Python gates each print their own OK line and the exit code is the signal. A red gate is a
+hard block ONLY for failures in code this branch touches; see "Keep looping" for the flake rule. A non-empty
 `git log HEAD..$REMOTE/$BRANCH` means the contributor pushed meanwhile: read their diff and
 rebase or adopt before pushing.
 
@@ -404,9 +410,9 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   Run those, commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
   pre-flight, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
-- **Waiting is never a stopping point.** Every wait (pre-flight, verdict poll, CI checks,
+- **Waiting is never a stopping point.** Every wait (step 5 gates, verdict poll, CI checks,
   update-branch) runs as ONE background chain that continues into the next action on its own:
-  `preflight && push && poll` for a fix round, `update-branch && poll && merge` for a refresh.
+  `run_gates && push && poll` for a fix round, `update-branch && poll && merge` for a refresh.
   Never end the turn with "I'll push when pre-flight finishes"; chain it. Every poll exit
   other than a verdict is non-zero (Step 2), so `poll && merge` cannot merge on an empty
   verdict; a refresh verdict can still carry new Defects, so the merge half gates on the
