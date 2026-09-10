@@ -79,8 +79,10 @@ public:
         // close does take hid_global_mutex(), so it can queue behind a
         // concurrent by-index enumeration's bus scan (bounded; see accepted
         // cost (1) on that mutex in astroasis_protocol_wrapper.cpp) — but
-        // connected_ is already stored false before it, so Connected flips
-        // without waiting.
+        // connected_ is stored false before it, so the flip never waits on
+        // THAT lock. It can still wait on this driver's mutex_, behind an
+        // in-flight get_status() HID transaction (up to kDefaultTimeoutMs) or
+        // a connect handshake; that part is pre-existing and unchanged.
         stop_connection_thread();
         try {
             set_connected(false);
