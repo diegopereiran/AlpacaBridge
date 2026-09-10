@@ -80,6 +80,27 @@ TEST_CASE("HostClock - an NTP-disciplined host is never touched", "[util][hostcl
     CHECK_FALSE(c.stepped_by_client());
 }
 
+TEST_CASE("HostClock - NTP taking over forgets an earlier client step", "[util][hostclock][unit]") {
+    // Field sequence: no NTP, a client steps the clock; later NTP appears
+    // (hotspot with internet), then disappears again. The clock is now
+    // whatever NTP left plus drift, not the client's value: the state must
+    // read "none" again and the connect-time warning must be armed again.
+    Fake f;
+    auto c = f.clock();
+    REQUIRE(c.step_from_client(kNow + minutes(5), kNow).outcome == Outcome::Stepped);
+    CHECK(c.source() == "client");
+    CHECK(c.stepped_by_client());
+    f.synchronized = true;
+    CHECK(c.source() == "ntp");
+    CHECK_FALSE(c.stepped_by_client());
+    f.synchronized = false;
+    CHECK(c.source() == "none");
+    CHECK_FALSE(c.stepped_by_client());
+    // and a fresh client step is accepted again
+    CHECK(c.step_from_client(kNow + minutes(5), kNow).outcome == Outcome::Stepped);
+    CHECK(c.source() == "client");
+}
+
 TEST_CASE("HostClock - opt-out disables the step but keeps the readout", "[util][hostclock][unit]") {
     Fake f;
     auto c = f.clock();

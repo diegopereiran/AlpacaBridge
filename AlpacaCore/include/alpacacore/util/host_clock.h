@@ -79,13 +79,24 @@ public:
     }
 
     // True when the kernel's STA_UNSYNC flag is clear (NTP/chrony/PTP have
-    // disciplined the clock). Always false on an internet-less SBC.
-    bool synchronized() const { return is_synchronized_(); }
+    // disciplined the clock). Always false on an internet-less SBC. Once a
+    // daemon has disciplined the clock, a client's earlier step no longer
+    // describes the current value: forget it, so that if discipline is lost
+    // again later the state honestly reads "none" and the connect-time
+    // warning fires again.
+    bool synchronized() const {
+        const bool s = is_synchronized_();
+        if (s) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stepped_ = false;
+        }
+        return s;
+    }
 
     // "ntp" (kernel-disciplined), "client" (this process stepped it from a
     // UTCDate write), or "none" (undisciplined and never stepped).
     std::string source() const {
-        if (is_synchronized_()) {
+        if (synchronized()) {
             return "ntp";
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -93,6 +104,9 @@ public:
     }
 
     bool stepped_by_client() const {
+        if (synchronized()) {
+            return false;
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         return stepped_;
     }
@@ -186,7 +200,7 @@ private:
     SetTimeFn set_time_;
     mutable std::mutex mutex_;
     bool enabled_ = true;
-    bool stepped_ = false;
+    mutable bool stepped_ = false;
 };
 
 }  // namespace alpacacore::util
