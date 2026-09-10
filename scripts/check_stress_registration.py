@@ -7,6 +7,7 @@ AGENTS.md requires every new or substantially-changed driver to register a
 job). Registration is manual today, and nothing failed when it was skipped.
 
 Run from the repo root:  python3 scripts/check_stress_registration.py
+Regex regression guard (no repo state needed):  python3 scripts/check_stress_registration.py --self-test
 
 Coverage is tracked per (vendor, Alpaca device type) pair, not per vendor.
 A vendor-level check (does `test_<vendor>_concurrency_stress.cpp` exist at
@@ -41,7 +42,12 @@ VENDORS_PREFIX = "AlpacaCore/src/vendors/"
 STRESS_TEST_GLOB_PREFIX = "AlpacaCore/tests/test_"
 STRESS_TEST_GLOB_SUFFIX = "_concurrency_stress.cpp"
 
-DEVICE_TYPE_RE = re.compile(r"DeviceType::([A-Za-z]+)")
+# Anchored to the actual override, not just any DeviceType:: mention in the
+# file -- a driver that referenced a different DeviceType::X earlier (a
+# comment, a switch/comparison, a helper) before its own override would
+# otherwise be silently miscategorized by a plain first-match search.
+DEVICE_TYPE_OVERRIDE_RE = re.compile(
+    r"get_device_type\s*\(\s*\)\s*const\s+override\s*\{\s*return\s+DeviceType::([A-Za-z]+)\s*;")
 # The description is matched as one or more adjacent string literals
 # (escapes allowed, `"a" "b"` concatenation allowed) so a comma inside it
 # cannot cut the match short and silently drop the tags.
@@ -84,31 +90,63 @@ def tracked_files(pattern):
     return [p for p in out.splitlines() if p]
 
 
-def driver_device_type(path):
+def device_types_in_text(text):
+    """The distinct device types text's get_device_type() override(s)
+    return, lowercased. A file with two driver classes that both return the
+    same type (e.g. gemini_flatpanel_driver.cpp) yields one value; text with
+    no matching override at all yields none. Split out from
+    driver_device_types() (file I/O) so a self-test can exercise this
+    directly against synthetic snippets.
+    """
+    return {v.lower() for v in DEVICE_TYPE_OVERRIDE_RE.findall(text)}
+
+
+def driver_device_types(path):
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
-    m = DEVICE_TYPE_RE.search(text)
-    if not m:
-        return None
-    return m.group(1).lower()
+        return device_types_in_text(fh.read())
 
 
 def find_drivers():
-    """{(vendor, device_type): [driver file paths]}"""
+    """({(vendor, device_type): [driver file paths]}, [ambiguous findings])"""
     drivers = {}
+    ambiguous = []
     for path in tracked_files(VENDORS_PREFIX + "*_driver.cpp"):
         # AlpacaCore/src/vendors/<vendor>/<name>_driver.cpp
         parts = path[len(VENDORS_PREFIX):].split("/")
         if len(parts) != 2:
             continue
         vendor = parts[0]
-        device_type = driver_device_type(path)
-        if device_type is None:
+        types = driver_device_types(path)
+        if len(types) > 1:
+            ambiguous.append(
+                "AMBIGUOUS DEVICE TYPE: %s defines get_device_type() overrides "
+                "returning disagreeing values %s -- fix the driver or this "
+                "check's DEVICE_TYPE_OVERRIDE_RE, don't guess" % (path, sorted(types))
+            )
+            continue
+        if not types:
             print("WARNING: could not determine device type for %s "
-                  "(no DeviceType::X found) -- treating as uncovered" % path)
+                  "(no get_device_type() override matched) -- treating as uncovered" % path)
             device_type = "unknown"
+        else:
+            device_type = next(iter(types))
         drivers.setdefault((vendor, device_type), []).append(path)
-    return drivers
+    return drivers, ambiguous
+
+
+def stress_tag_sets_in_text(text):
+    """[{tag, tag, ...}, ...] for every TEST_CASE in text tagged [stress].
+
+    Split out from find_registered_pairs() (which also needs the known
+    vendor/device-type vocabulary) so a self-test can exercise the raw
+    TEST_CASE_TAGS_RE/TAG_RE extraction against synthetic snippets.
+    """
+    tag_sets = []
+    for m in TEST_CASE_TAGS_RE.finditer(text):
+        tags = {t.lower() for t in TAG_RE.findall(m.group(1))}
+        if "stress" in tags:
+            tag_sets.append(tags)
+    return tag_sets
 
 
 def find_registered_pairs(known_vendors, known_device_types):
@@ -124,10 +162,7 @@ def find_registered_pairs(known_vendors, known_device_types):
     for path in tracked_files(STRESS_TEST_GLOB_PREFIX + "*" + STRESS_TEST_GLOB_SUFFIX):
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             text = fh.read()
-        for m in TEST_CASE_TAGS_RE.finditer(text):
-            tags = [t.lower() for t in TAG_RE.findall(m.group(1))]
-            if "stress" not in tags:
-                continue
+        for tags in stress_tag_sets_in_text(text):
             vendor_tags = [t for t in tags if t in known_vendors]
             dtype_tags = [t for t in tags if t in known_device_types]
             for vendor in vendor_tags:
@@ -137,12 +172,11 @@ def find_registered_pairs(known_vendors, known_device_types):
 
 
 def main():
-    drivers = find_drivers()
+    drivers, failures = find_drivers()
+    failures = list(failures)  # find_drivers' own ambiguity findings, if any
     known_vendors = {v for v, _ in drivers}
     known_device_types = {d for _, d in drivers}
     registered = find_registered_pairs(known_vendors, known_device_types)
-
-    failures = []
 
     for (vendor, dtype), paths in sorted(drivers.items()):
         covered = (vendor, dtype) in registered
@@ -180,5 +214,82 @@ def main():
     return 0
 
 
+def self_test():
+    """Regression guard for this script's own regexes, run with --self-test.
+
+    Exercises device_types_in_text() and stress_tag_sets_in_text() against
+    synthetic snippets so a future edit to either regex gets caught here
+    instead of only showing up as a silently wrong (vendor, device_type)
+    pair. Not run as part of the normal check (no repo state needed).
+    """
+    checks = []
+
+    def check(name, condition):
+        checks.append((name, condition))
+
+    # A DeviceType:: mention earlier in the file (a comment, here) must not
+    # be picked up ahead of the actual override.
+    decoy = """
+        // Historically this was DeviceType::Camera before a refactor.
+        class Foo : public FocuserDriver {
+        public:
+            DeviceType get_device_type() const override { return DeviceType::Focuser; }
+        };
+    """
+    check("decoy DeviceType:: mention is ignored", device_types_in_text(decoy) == {"focuser"})
+
+    # Two classes in one file agreeing is fine (the real gemini_flatpanel_driver.cpp shape).
+    agree = """
+        class A : public CoverCalibratorDriver {
+            DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
+        };
+        class B : public CoverCalibratorDriver {
+            DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
+        };
+    """
+    check("two classes agreeing yields one value", device_types_in_text(agree) == {"covercalibrator"})
+
+    # Two classes disagreeing must be flagged as ambiguous (len > 1), not
+    # resolved by picking whichever comes first.
+    disagree = """
+        class A : public FocuserDriver {
+            DeviceType get_device_type() const override { return DeviceType::Focuser; }
+        };
+        class B : public SwitchDriver {
+            DeviceType get_device_type() const override { return DeviceType::Switch; }
+        };
+    """
+    check("disagreeing overrides are detected as ambiguous", len(device_types_in_text(disagree)) > 1)
+
+    # No override at all.
+    check("no override yields no types", device_types_in_text("// nothing here") == set())
+
+    # A comma inside the TEST_CASE description must not cut the tag match
+    # short (the exact bug fixed for #269's non-blocking review note).
+    comma_desc = 'TEST_CASE("Foo, bar - baz", "[vendor][focuser][stress]") {}'
+    check("a comma in the description doesn't drop the tags",
+          stress_tag_sets_in_text(comma_desc) == [{"vendor", "focuser", "stress"}])
+
+    # String-literal concatenation ("a" "b") in the description.
+    concat_desc = 'TEST_CASE("Foo" " - bar", "[vendor][focuser][stress]") {}'
+    check("concatenated string literals in the description still match",
+          stress_tag_sets_in_text(concat_desc) == [{"vendor", "focuser", "stress"}])
+
+    # A TEST_CASE with no [stress] tag must not be picked up.
+    non_stress = 'TEST_CASE("Foo", "[vendor][focuser][unit]") {}'
+    check("a non-[stress] TEST_CASE is excluded", stress_tag_sets_in_text(non_stress) == [])
+
+    failed = [name for name, ok in checks if not ok]
+    for name, ok in checks:
+        print("[%s] %s" % ("PASS" if ok else "FAIL", name))
+    if failed:
+        print("\n%d/%d self-test(s) failed." % (len(failed), len(checks)))
+        return 1
+    print("\nAll %d self-test(s) passed." % len(checks))
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     sys.exit(main())
