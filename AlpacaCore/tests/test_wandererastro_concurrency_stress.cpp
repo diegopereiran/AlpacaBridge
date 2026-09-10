@@ -124,7 +124,7 @@ void rotator_operate(AlpacaDriver& d) {
 
 TEST_CASE("WandererAstro cover calibrator - concurrent connect/disconnect/operate stress",
           "[wandererastro][covercalibrator][stress]") {
-    FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(50));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path());
 
     // Proves the fake really connects, so this can't silently degrade into a
@@ -140,19 +140,22 @@ TEST_CASE("WandererAstro cover calibrator - concurrent connect/disconnect/operat
 
 TEST_CASE("WandererAstro cover calibrator - destruction races an in-flight connect",
           "[wandererastro][covercalibrator][stress]") {
-    FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
+    // 50 ms, not the unit tests' 300/500 ms: each destruction-race iteration
+    // pays a full successful connect on the fake, i.e. waits out one frame
+    // interval, and the harness default of 100 iterations at 300 ms would add
+    // ~30 s to sanitizers-tsan before the TSan slowdown, with no step timeout
+    // to bound it. The frame CONTENT is what the driver keys on, not the
+    // cadence, so a faster interval deepens the storm for free and makes the
+    // harness default affordable.
+    FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(50));
     const std::string port = cover.slave_path();
-    // 25, not the harness default 100: each iteration pays a full successful
-    // connect on the fake, which means waiting out one 300 ms frame interval --
-    // 100 iterations would add ~30 s to sanitizers-tsan before the TSan
-    // slowdown, with no step timeout to bound it.
     alpacacore::test::run_destruction_during_connect_stress(
-        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, port); }, 25);
+        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, port); });
 }
 
 TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate stress",
           "[wandererastro][filterwheel][stress]") {
-    FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(50));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
 
     // 15 s, not the cover's 5 s: settle_connected() gates whether to START
@@ -175,17 +178,16 @@ TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate st
 
 TEST_CASE("WandererAstro filter wheel - destruction races an in-flight connect",
           "[wandererastro][filterwheel][stress]") {
-    FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    // 50 ms frame interval, same reason as the cover calibrator above.
+    FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(50));
     const std::string port = wheel.slave_path();
-    // 25, same reason as the cover calibrator above: each iteration waits
-    // out a 300 ms frame interval on a full successful connect.
     alpacacore::test::run_destruction_during_connect_stress(
-        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, port); }, 25);
+        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, port); });
 }
 
 TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stress",
           "[wandererastro][switch][stress]") {
-    FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(500));
+    FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(50));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
 
     // 15 s, not the cover's 5 s: same margin argument as the filter wheel
@@ -202,13 +204,13 @@ TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stre
 }
 
 TEST_CASE("WandererAstro box switch - destruction races an in-flight connect", "[wandererastro][switch][stress]") {
-    FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(500));
+    // 50 ms frame interval, same reason as the cover calibrator above --
+    // sharper here, since the unit tests' 500 ms would have added ~50 s at
+    // the harness default.
+    FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(50));
     const std::string port = box.slave_path();
-    // 25, same reason, sharper here: each iteration waits out a 500 ms frame
-    // interval, so 100 (the harness default) would add ~50 s before TSan's
-    // slowdown, on a job with no step timeout.
     alpacacore::test::run_destruction_during_connect_stress(
-        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, port); }, 25);
+        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, port); });
 }
 
 TEST_CASE("WandererAstro rotator - concurrent connect/disconnect/operate stress", "[wandererastro][rotator][stress]") {
