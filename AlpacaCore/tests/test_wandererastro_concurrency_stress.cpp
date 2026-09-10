@@ -62,12 +62,14 @@ constexpr const char* kAbsentSerialPort = "/dev/wanderer-alpacabridge-absent";
 // A racing disconnect makes any operate call throw NotConnected (or
 // DriverException once the link-health latch trips), and the harness only
 // swallows the callback as a whole -- per-call guards keep one throw from
-// skipping every call below it for that iteration.
+// skipping every call below it for that iteration. std::exception rather
+// than AlpacaException: anything else escaping the serial teardown would
+// otherwise unwind past the remaining calls just the same.
 template <typename Fn>
 void call(Fn&& fn) {
     try {
         fn();
-    } catch (const alpacacore::AlpacaException&) {
+    } catch (const std::exception&) {
     }
 }
 
