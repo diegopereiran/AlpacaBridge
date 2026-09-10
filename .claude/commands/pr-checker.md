@@ -125,11 +125,18 @@ Mechanics for a **fork PR** (the usual case for contributor branches):
 git fetch "$REMOTE" "$BRANCH"
 git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 # ... apply fixes ...
-./scripts/ci_preflight.sh                   # HARD BLOCK: do not push red (summary lines are indented "  [PASS] ...")
-git fetch "$REMOTE" "$BRANCH"               # contributors push concurrently; re-check the head
-git log --oneline "HEAD..$REMOTE/$BRANCH"   # must be empty; if not, rebase onto it first
-git push "$REMOTE" "HEAD:$BRANCH"
+# Pre-flight then push then poll as ONE background chain (see "Keep looping"):
+./scripts/ci_preflight.sh > "$LOG" 2>&1 \
+  && git fetch "$REMOTE" "$BRANCH" \
+  && [ -z "$(git log --oneline "HEAD..$REMOTE/$BRANCH")" ] \
+  && git push "$REMOTE" "HEAD:$BRANCH" \
+  && <Step 2 poll loop>
 ```
+
+Summary lines in `$LOG` are indented (`  [PASS] ...`). A red pre-flight is a hard block ONLY
+for failures in code this branch touches; see "Keep looping" for the flake rule. A non-empty
+`git log HEAD..$REMOTE/$BRANCH` means the contributor pushed meanwhile: read their diff and
+rebase or adopt before pushing.
 
 If the fork remote does not exist, add it with the validated owner:
 `git remote add "$REMOTE" "https://github.com/$OWNER/AlpacaBridge.git"`.
@@ -180,6 +187,30 @@ read in full, and the **Hard stops** below, which override this authorization.
 
 After a merge, every remaining PR in the queue is now behind main: run Step 1.3 on the **next** PR
 right away so its refresh round starts while you tidy up.
+
+## Keep looping: what is NOT a reason to stop
+
+The loop ends only when every PR is merged or a **Hard stop** below applies. In particular:
+
+- **A pre-flight failure in code this branch does not touch** is not a stop. Re-run the failed
+  test in isolation 5 times against the built binary (`AlpacaCore/build/tests/alpacacore_tests
+  "<test name>"`). If it passes in isolation and `git diff main...HEAD --name-only` shows no
+  file that could affect it, it is a flake: re-run `ci_preflight.sh` once, push on green, and
+  record the flake (test name, failure text, pass rate) in the wrap-up for the user. Two
+  consecutive flakes on the same test still push if the isolated runs pass. Only a failure in
+  code this branch changes, or a test that fails in isolation every time, blocks the push.
+- **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/workflow changes) still runs
+  `ci_preflight.sh` once, but a failure there is by definition a flake or a pre-existing break
+  on main: apply the rule above, do not stall the PR on it.
+- **A bot round with new findings** is the normal case, not a reason to report back. Fix,
+  pre-flight, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
+- **Waiting is never a stopping point.** Every wait (pre-flight, verdict poll, CI checks,
+  update-branch) runs as ONE background chain that continues into the next action on its own:
+  `preflight && push && poll` for a fix round, `update-branch && poll && merge` for a refresh.
+  Never end the turn with "I'll push when pre-flight finishes"; chain it.
+- **A bot finding you disagree with** is still fixed or wired into the skill/docs when there is
+  any reasonable change that satisfies it. Only a finding that would require a wrong or unsafe
+  change becomes a hard stop.
 
 ## Hard stops (the only reasons to hand back to the user)
 
