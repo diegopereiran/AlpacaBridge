@@ -1310,18 +1310,11 @@ async function loadServerInfo() {
         const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || 'N/A';
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
         const profileName = resolveDescriptionValue(desc, ['ProfileName', 'profileName', 'profile_name']) || '';
-        // open-astro#289: host-clock state. "ntp" = kernel-disciplined,
-        // "client" = stepped from a client's UTCDate write, "none" = neither.
-        const clockSynchronized = resolveDescriptionValue(desc, ['ClockSynchronized']) === true;
+        // open-astro#289/#292: host-clock state; clockStateText() maps the
+        // description's ClockSource ("ntp", "client", "rtc", "none") to a label.
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
-        const clockText = clockSynchronized
-            ? 'Synchronized (NTP)'
-            : clockSource === 'client'
-                ? 'Set from a client\'s UTCDate this session (no NTP)'
-                : clockSource === 'none'
-                    ? 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.'
-                    : 'Unknown';
+        const clockText = clockStateText(desc);
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.
@@ -1336,7 +1329,7 @@ async function loadServerInfo() {
                 ${renderServerInfoRow('Server Name', serverName)}
                 ${renderServerInfoRow('Manufacturer', manufacturer)}
                 ${renderServerInfoRow('Version', manufacturerVersion)}
-                ${clockSource ? renderServerInfoRow('Clock', clockText) : ''}
+                ${clockSource ? renderServerInfoRow('Clock', clockText, 'server-clock-state') : ''}
                 ${syncFromClients === true || syncFromClients === false ? `
                 <div class="server-info-row">
                     <span class="info-label">Clock from clients</span>
@@ -1415,12 +1408,54 @@ async function loadServerInfo() {
     }
 }
 
-function renderServerInfoRow(label, value) {
+// Text for the Clock row from the description's clock fields (open-astro#289/#292).
+function clockStateText(desc) {
+    const synchronized = resolveDescriptionValue(desc, ['ClockSynchronized']) === true;
+    const source = resolveDescriptionValue(desc, ['ClockSource']) || '';
+    if (synchronized) {
+        return 'Synchronized (NTP)';
+    }
+    if (source === 'client') {
+        return 'Set from a client\'s UTCDate this session (no NTP)';
+    }
+    if (source === 'rtc') {
+        // Deliberately no "a client will correct it" promise: the connect-time
+        // line withdraws exactly that once a clock set has been refused, and
+        // ClockSource alone cannot express the difference.
+        return 'From the hardware RTC at boot (no NTP; its accuracy is unverified).';
+    }
+    if (source === 'none') {
+        return 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.';
+    }
+    return 'Unknown';
+}
+
+// Re-read only the Clock row after something changed the clock. Not
+// loadServerInfo(), which rebuilds the panel and would discard an unsaved
+// Location or Profile Name edit.
+async function refreshClockRow() {
+    const el = document.getElementById('server-clock-state');
+    if (!el) {
+        return;
+    }
+    try {
+        const response = await fetch(API_BASE + '/management/v1/description');
+        const data = await response.json();
+        if (data.ErrorNumber === 0) {
+            el.textContent = clockStateText(parseResponseValue(data.Value) || {});
+        }
+    } catch (e) {
+        // leave the row as it was; the next full refresh corrects it
+    }
+}
+
+function renderServerInfoRow(label, value, valueId) {
     const displayValue = value !== undefined && value !== null && value !== '' ? value : 'N/A';
+    const idAttr = valueId ? ` id="${escapeHtml(valueId)}"` : '';
     return `
         <div class="server-info-row">
             <span class="info-label">${escapeHtml(label)}</span>
-            <span class="info-value">${escapeHtml(String(displayValue))}</span>
+            <span class="info-value"${idAttr}>${escapeHtml(String(displayValue))}</span>
         </div>
     `;
 }
@@ -1651,6 +1686,7 @@ async function syncTime() {
             const serverTime = new Date((result.Value * 1000) + Math.floor(roundTripMs / 2));
             refreshServerClockOffset();
             alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
+            refreshClockRow();  // the source is now "client" (open-astro#292); that row only, after the dialog
         } else {
             alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
         }

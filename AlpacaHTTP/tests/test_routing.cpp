@@ -2367,7 +2367,7 @@ int main() {
         EXPECT(v.contains("ClockSynchronized") && v["ClockSynchronized"].is_boolean());
         EXPECT(v.contains("ClockSource") && v["ClockSource"].is_string());
         const std::string source = v["ClockSource"].get<std::string>();
-        EXPECT(source == "ntp" || source == "none");  // never "client" before any UTCDate write
+        EXPECT(source == "ntp" || source == "rtc" || source == "none");  // never "client" before a UTCDate write
         EXPECT(v["ClockSynchronized"].get<bool>() == (source == "ntp"));
         EXPECT(v.value("SyncSystemClockFromClients", false) == true);
         EXPECT(clock_router.sync_system_clock_from_clients());
