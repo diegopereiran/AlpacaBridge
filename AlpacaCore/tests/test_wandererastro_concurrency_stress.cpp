@@ -101,7 +101,11 @@ void box_switch_operate(AlpacaDriver& d) {
     call([&] { static_cast<void>(sw.get_switch_value(0)); });
     call([&] { static_cast<void>(sw.get_switch_name(0)); });
     call([&] { static_cast<void>(sw.get_can_write(0)); });
-    call([&] { sw.set_switch_value(0, 1.0); });
+    // Write to id 2 ("DC3-4"), not id 0: ids 0/1 are the always-on
+    // read-only rails, so a write there throws NotImplemented before
+    // reaching dispatch_write() and the write_mutex_/commanded_ path this
+    // storm is supposed to exercise would never run.
+    call([&] { sw.set_switch_value(2, 1.0); });
     call([&] { static_cast<void>(sw.get_device_state()); });
 }
 
@@ -170,7 +174,11 @@ TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stre
     FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(500));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
 
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // 15 s, not the 5 s the cover/wheel use: the box's connect waits
+    // serial_timeout_s * 1000 + 3500 = 6500 ms for its first frame, so a 5 s
+    // budget would give settle_connected a single attempt and no retry --
+    // one slow frame on a loaded TSan runner would fail the case.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     driver->set_connected(false);
 
     alpacacore::test::run_lifecycle_stress(*driver, box_switch_operate);
