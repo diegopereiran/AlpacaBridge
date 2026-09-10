@@ -11,9 +11,9 @@ Run from the repo root:  python3 scripts/check_stress_registration.py
 Coverage is tracked per (vendor, Alpaca device type) pair, not per vendor.
 A vendor-level check (does `test_<vendor>_concurrency_stress.cpp` exist at
 all?) would pass ZWO or ToupTek in full the moment any one of their drivers
-is registered -- today that would hide ZWO's un-stressed rotator, focuser
-and two ASIAIR switch drivers, and ToupTek's un-stressed focuser, behind a
-green check. Keying on device type as well catches those.
+is registered -- that would hide ZWO's un-stressed rotator, focuser and
+two ASIAIR switch drivers behind a green check. Keying on device type as
+well catches those.
 
 The device type for a driver file is read from its own
 `get_device_type() const override { return DeviceType::X; }` rather than
