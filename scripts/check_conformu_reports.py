@@ -84,7 +84,12 @@ def check_json(path):
             failures.append("%s: missing required field %r" % (path, field))
             continue
         value = data[field]
-        if value:
+        # Explicit numeric comparison, not truthiness: a real ConformU count
+        # is always an int, but `if value:` would wrongly pass a JSON `false`
+        # or `null` and wrongly fail a numeric-looking string like "0".
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            failures.append("%s: %s=%r is not a number (must be the integer 0)" % (path, field, value))
+        elif value != 0:
             failures.append("%s: %s=%s (must be 0)" % (path, field, value))
     return failures
 
