@@ -24,20 +24,22 @@ namespace alpacacore::util {
 // Preferred: the epoch CMake captured at configure time (it honours
 // SOURCE_DATE_EPOCH, so a reproducible .deb build stays reproducible and
 // -Wdate-time never sees a __DATE__). Fallback for builds that bypass the
-// CMake definition: __DATE__ ("Mmm dd yyyy") floored to the month, in this one
-// translation unit so every user sees the same value.
+// CMake definition: __DATE__ ("Mmm dd yyyy"). Both are floored to 00:00 UTC of
+// that day so the two branches behave identically and an RTC a few seconds
+// behind a just-configured build is not rejected. One translation unit, so
+// every user sees the same value.
 std::chrono::system_clock::time_point HostClock::build_time() {
     static const std::chrono::system_clock::time_point tp = [] {
 #ifdef ALPACACORE_BUILD_EPOCH
-        return std::chrono::system_clock::time_point(
-            std::chrono::seconds(static_cast<long long>(ALPACACORE_BUILD_EPOCH)));
+        const long long epoch = static_cast<long long>(ALPACACORE_BUILD_EPOCH);
+        return std::chrono::system_clock::time_point(std::chrono::seconds(epoch - (epoch % 86400)));
 #else
         static const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
         const char* d = __DATE__;
         const char* m = std::strstr(months, std::string(d, 3).c_str());
         std::tm tm{};
         tm.tm_mon = m ? static_cast<int>((m - months) / 3) : 0;
-        tm.tm_mday = 1;
+        tm.tm_mday = std::atoi(d + 4) > 0 ? std::atoi(d + 4) : 1;
         tm.tm_year = std::atoi(d + 7) - 1900;
         return std::chrono::system_clock::from_time_t(timegm(&tm));
 #endif

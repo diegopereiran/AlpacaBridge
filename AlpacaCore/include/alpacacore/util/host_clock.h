@@ -133,16 +133,7 @@ public:
     // stepping decision never looks at this.
     bool has_rtc(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
         const auto t = rtc_time_();
-        if (!t.has_value() || *t < build_time()) {
-            return false;
-        }
-        // The label describes the SYSTEM clock's provenance, so the two must
-        // still agree: a later setter that bypassed this object (manual
-        // date -s, a restored saved timestamp) leaves them diverged and the
-        // honest answer is "none". since_epoch has 1 s granularity and RTC
-        // drift is minutes per year, so minutes of tolerance is roomy.
-        const auto skew = now - *t;
-        return skew < kRtcAgreement && skew > -kRtcAgreement;
+        return rtc_plausible(t) && rtc_agrees(t, now);
     }
     static constexpr std::chrono::minutes kRtcAgreement{5};
 
@@ -151,8 +142,8 @@ public:
     // uptime (SoC timebases drift tens of ppm, seconds per day). Lets the
     // connect-time message say what actually happened.
     bool rtc_diverged(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
-        const auto t = rtc_time_();
-        return t.has_value() && *t >= build_time() && !has_rtc(now);
+        const auto t = rtc_time_();  // one observation for both halves
+        return rtc_plausible(t) && !rtc_agrees(t, now);
     }
 
     // The clock was stepped by a path that bypasses step_from_client() (the
@@ -172,9 +163,10 @@ public:
     // or when CONFIG_RTC_HCTOSYS is off. Defined in host_clock.cpp.
     static std::optional<std::chrono::system_clock::time_point> host_rtc_time();
 
-    // Build time floor of the library: the configure-time epoch injected by
-    // CMake (ALPACACORE_BUILD_EPOCH, which honours SOURCE_DATE_EPOCH for
-    // reproducible builds), falling back to __DATE__'s month when absent.
+    // Build-day floor of the library: the configure-time epoch injected by
+    // CMake (ALPACACORE_BUILD_EPOCH, floored to 00:00 UTC of that day; honours
+    // SOURCE_DATE_EPOCH, so a reproducible package build carries its
+    // changelog date instead), falling back to __DATE__'s day when absent.
     // Defined once in host_clock.cpp. Any clock earlier than this is wrong.
     static std::chrono::system_clock::time_point build_time();
 
@@ -271,6 +263,21 @@ public:
     }
 
 private:
+    // The RTC reads a time at or after this library's build day (an RTC that
+    // lost its battery reads 2000-01-01).
+    static bool rtc_plausible(const std::optional<std::chrono::system_clock::time_point>& t) {
+        return t.has_value() && *t >= build_time();
+    }
+    // The label describes the SYSTEM clock's provenance, so the two must
+    // still agree: a later setter that bypassed this object (manual date -s,
+    // a restored saved timestamp) or months of free-running drift leave them
+    // diverged and the honest answer is "none". since_epoch has 1 s
+    // granularity and RTC drift is minutes per year, so minutes is roomy.
+    static bool rtc_agrees(const std::optional<std::chrono::system_clock::time_point>& t,
+                           std::chrono::system_clock::time_point now) {
+        const auto skew = now - *t;
+        return skew < kRtcAgreement && skew > -kRtcAgreement;
+    }
     // Uncached sysfs read behind host_rtc_time(); mutates a function-local
     // static and is only safe under host_rtc_time()'s cache mutex.
     static std::optional<std::chrono::system_clock::time_point> read_host_rtc_time();

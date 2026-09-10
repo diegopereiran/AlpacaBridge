@@ -1313,18 +1313,9 @@ async function loadServerInfo() {
         // open-astro#289: host-clock state. "ntp" = kernel-disciplined,
         // "client" = stepped from a client's UTCDate write, "rtc" = booted from a
         // hardware RTC (kernel still reports unsynchronised), "none" = neither.
-        const clockSynchronized = resolveDescriptionValue(desc, ['ClockSynchronized']) === true;
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
-        const clockText = clockSynchronized
-            ? 'Synchronized (NTP)'
-            : clockSource === 'client'
-                ? 'Set from a client\'s UTCDate this session (no NTP)'
-                : clockSource === 'rtc'
-                    ? 'Hardware RTC (no NTP). A client\'s UTCDate still corrects drift beyond 1 s.'
-                    : clockSource === 'none'
-                        ? 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.'
-                        : 'Unknown';
+        const clockText = clockStateText(desc);
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.
@@ -1339,7 +1330,11 @@ async function loadServerInfo() {
                 ${renderServerInfoRow('Server Name', serverName)}
                 ${renderServerInfoRow('Manufacturer', manufacturer)}
                 ${renderServerInfoRow('Version', manufacturerVersion)}
-                ${clockSource ? renderServerInfoRow('Clock', clockText) : ''}
+                ${clockSource ? `
+                <div class="server-info-row">
+                    <span class="info-label">Clock</span>
+                    <span id="server-clock-state" class="info-value">${escapeHtml(clockText)}</span>
+                </div>` : ''}
                 ${syncFromClients === true || syncFromClients === false ? `
                 <div class="server-info-row">
                     <span class="info-label">Clock from clients</span>
@@ -1415,6 +1410,43 @@ async function loadServerInfo() {
         }
         serverInfo.innerHTML = `<p class="error">Error loading server info: ${escapeHtml(errorMsg)}</p>`;
         setServerInfoStatus('');
+    }
+}
+
+// Text for the Clock row from the description's clock fields (open-astro#289/#292).
+function clockStateText(desc) {
+    const clockSynchronized = resolveDescriptionValue(desc, ['ClockSynchronized']) === true;
+    const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
+    if (clockSynchronized) {
+        return 'Synchronized (NTP)';
+    }
+    if (clockSource === 'client') {
+        return 'Set from a client\'s UTCDate this session (no NTP)';
+    }
+    if (clockSource === 'rtc') {
+        return 'Hardware RTC (no NTP; its absolute accuracy is unverified). A client\'s UTCDate still corrects drift beyond 1 s.';
+    }
+    if (clockSource === 'none') {
+        return 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.';
+    }
+    return 'Unknown';
+}
+
+// Re-read only the Clock row (not the whole panel, which would discard an
+// unsaved Location/Profile Name edit) after something changed the clock.
+async function refreshClockRow() {
+    const el = document.getElementById('server-clock-state');
+    if (!el) {
+        return;
+    }
+    try {
+        const response = await fetch(API_BASE + '/management/v1/description');
+        const data = await response.json();
+        if (data.ErrorNumber === 0) {
+            el.textContent = clockStateText(parseResponseValue(data.Value) || {});
+        }
+    } catch (e) {
+        // leave the row as it was; the next full refresh corrects it
     }
 }
 
@@ -1653,8 +1685,8 @@ async function syncTime() {
             const roundTripMs = Date.now() - t0;
             const serverTime = new Date((result.Value * 1000) + Math.floor(roundTripMs / 2));
             refreshServerClockOffset();
-            loadServerInfo();  // the Clock row's source is now "client"; re-read it (open-astro#292)
             alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
+            refreshClockRow();  // the source is now "client" (open-astro#292); only that row, after the dialog
         } else {
             alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
         }

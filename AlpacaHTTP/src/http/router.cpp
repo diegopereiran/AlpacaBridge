@@ -2278,7 +2278,9 @@ Response Router::dispatch_device_method(
                         const bool diverged = !rtc && host_clock_.rtc_diverged();
                         const std::string msg =
                             "Telescope " + std::to_string(device->get_device_number()) +
-                            (rtc ? " connecting on the hardware RTC's time (no NTP, not yet set by a client); "
+                            (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's absolute accuracy is "
+                                   "unverified, nothing has checked it since it was last set; not yet set by a "
+                                   "client); "
                              : diverged
                                  ? " connecting with a host clock that no longer agrees with the hardware RTC by "
                                    "more than 5 minutes (drift or a manual set; no NTP, not yet set by a client); "

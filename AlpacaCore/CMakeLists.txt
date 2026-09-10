@@ -115,9 +115,12 @@ target_include_directories(alpacacore PUBLIC
 # compiled in (dpkg's -Wdate-time stays quiet).
 string(TIMESTAMP ALPACACORE_BUILD_EPOCH "%s" UTC)
 # Scoped to the one file that reads it, so a re-configure (new timestamp)
-# does not recompile the whole library.
-set_source_files_properties(src/core/util/host_clock.cpp
-    PROPERTIES COMPILE_DEFINITIONS ALPACACORE_BUILD_EPOCH=${ALPACACORE_BUILD_EPOCH})
+# does not recompile the whole library. Guarded so a platform where "%s" is
+# empty falls through to the __DATE__ fallback instead of failing to compile.
+if(ALPACACORE_BUILD_EPOCH MATCHES "^[0-9]+$")
+    set_source_files_properties(src/core/util/host_clock.cpp
+        PROPERTIES COMPILE_DEFINITIONS ALPACACORE_BUILD_EPOCH=${ALPACACORE_BUILD_EPOCH})
+endif()
 
 # Create namespace alias for consistent target naming
 add_library(AlpacaCore::alpacacore ALIAS alpacacore)

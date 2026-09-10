@@ -202,14 +202,20 @@ config file). A telescope connecting while the clock is `none` logs a WARN
 correct a drifting RTC). A Sync Time press (`PUT /management/v1/synctime`)
 counts as a client step: `ClockSource` reads `client` afterwards.
 Two footnotes: an RTC kept in local time (`timedatectl set-local-rtc 1`,
-dual-boot machines) fails the agreement check and reads `none`, which is
-the safe direction; and `rtc` is a new value on a published field, so an
+dual-boot machines) reads `none`, because systemd corrects the system clock
+in userspace after the kernel loaded the RTC as UTC and the agreement check
+then fails (a systemd behaviour, not a property of the check), which is the
+safe direction; `rtc` states that the clock came from the RTC, not that the
+RTC is accurate: nothing on an NTP-less host verifies or rewrites it, so the
+telescope connect line says so; and `rtc` is a new value on a published field, so an
 older client that switches on `ClockSource` should treat unknown values as
 "not NTP".
 `rtc` means the kernel loaded system time from a hardware RTC at boot (the
 first of `/sys/class/rtc/rtc0` to `rtc7` whose `hctosys` reads 1; a
 present-but-unread RTC does not count), that RTC's own current reading
-(`since_epoch`, memoised for 1 s) is not earlier than the build time, and the
+(`since_epoch`, memoised for 1 s) is not earlier than the build day (under
+`SOURCE_DATE_EPOCH`, as in a Debian package build, that is the changelog
+date, so the floor is weaker than the build itself), and the
 system clock still agrees with it to within 5 minutes. Both free-run without
 NTP and an SoC timebase drifts seconds per day, so on a long-running
 NTP-less host the state eventually flips from `rtc` to `none` (typically
