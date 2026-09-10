@@ -133,7 +133,8 @@ Mechanics for a **fork PR** (the usual case for contributor branches):
 git fetch "$REMOTE" "$BRANCH"
 git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 # ... apply fixes ...
-# Pre-flight then push then poll as ONE background chain (see "Keep looping"):
+# Pre-flight then push then poll as ONE background chain (see "Keep looping").
+# Skip the pre-flight step entirely for docs/skill-only branches.
 ./scripts/ci_preflight.sh > "$LOG" 2>&1 \
   && git fetch "$REMOTE" "$BRANCH" \
   && [ -z "$(git log --oneline "HEAD..$REMOTE/$BRANCH")" ] \
@@ -207,9 +208,9 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   record the flake (test name, failure text, pass rate) in the wrap-up for the user. Two
   consecutive flakes on the same test still push if the isolated runs pass. Only a failure in
   code this branch changes, or a test that fails in isolation every time, blocks the push.
-- **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/workflow changes) still runs
-  `ci_preflight.sh` once, but a failure there is by definition a flake or a pre-existing break
-  on main: apply the rule above, do not stall the PR on it.
+- **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/workflow changes; check with
+  `git diff main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
+  for the build and test gates to check, and CI runs them on the PR anyway. Commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
   pre-flight, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
 - **Waiting is never a stopping point.** Every wait (pre-flight, verdict poll, CI checks,
