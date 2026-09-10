@@ -1310,8 +1310,8 @@ async function loadServerInfo() {
         const manufacturerVersion = resolveDescriptionValue(desc, ['ManufacturerVersion', 'manufacturerVersion', 'Version', 'version']) || 'N/A';
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
         const profileName = resolveDescriptionValue(desc, ['ProfileName', 'profileName', 'profile_name']) || '';
-        // open-astro#289: host-clock state. "ntp" = kernel-disciplined,
-        // "client" = stepped from a client's UTCDate write, "none" = neither.
+        // open-astro#289/#292: host-clock state; clockStateText() maps the
+        // description's ClockSource ("ntp", "client", "rtc", "none") to a label.
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
         const clockText = clockStateText(desc);

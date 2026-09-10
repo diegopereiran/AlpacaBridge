@@ -14,6 +14,7 @@
 #include <dirent.h>
 
 #include <fstream>
+#include <memory>
 #include <string>
 
 namespace alpacacore::util {
@@ -25,12 +26,12 @@ namespace {
 // Nothing else counts: a present-but-unread RTC, a kernel without
 // CONFIG_RTC_HCTOSYS, or a userspace `hwclock --hctosys` all read as no RTC.
 bool probe_boot_rtc() {
-    DIR* dir = ::opendir("/sys/class/rtc");
+    const std::unique_ptr<DIR, int (*)(DIR*)> dir(::opendir("/sys/class/rtc"), &::closedir);
     if (dir == nullptr) {
         return false;
     }
     std::string device;
-    while (const dirent* entry = ::readdir(dir)) {
+    while (const dirent* entry = ::readdir(dir.get())) {
         const std::string name = entry->d_name;
         if (name.rfind("rtc", 0) != 0) {
             continue;
@@ -42,7 +43,6 @@ bool probe_boot_rtc() {
             break;
         }
     }
-    ::closedir(dir);
     if (device.empty()) {
         return false;
     }
