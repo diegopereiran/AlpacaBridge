@@ -51,9 +51,11 @@ jobs:
       # diff text: AGENTS.md and CLAUDE.md as project memory (root, and nested
       # copies when a file in that directory is read), .claude/ for settings
       # (hooks run shell commands inside this job, which holds the OAuth
-      # token) and skill descriptions, .mcp.json for servers. Every such file
-      # is removed from the whole tree and every tracked AGENTS.md, CLAUDE.md
-      # and .claude/ file comes back from the base branch (.mcp.json never), so a fork cannot rewrite the rubric's reference doc in
+      # token) and skill descriptions, .mcp.json for servers. Before the
+      # action runs, every such file is removed from the tree and every
+      # tracked AGENTS.md, CLAUDE.md and .claude/ file comes back from the
+      # base branch (.mcp.json never; the action later parks the PR's .claude/
+      # at .claude-pr/, as data the reviewer may read), so a fork cannot rewrite the rubric's reference doc in
       # the same PR; the PR's own changes to them are still reviewed through
       # `gh pr diff`. The repo ships no CLAUDE.md, .mcp.json or settings file.
       # The action itself already swaps .claude/ for the base copy (the PR's
@@ -76,7 +78,7 @@ jobs:
           if git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
             git ls-tree -r --name-only "$BASE_SHA" \
               | grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|\.claude/.*)$' \
-              | xargs -r git checkout "$BASE_SHA" --
+              | xargs -r git checkout "$BASE_SHA" -- || true
           fi
           git status --short
 
