@@ -48,6 +48,8 @@ endif()
 if(TARGET alpacacore_qhy)
     list(APPEND TEST_SOURCES test_qhy_camera.cpp)
     list(APPEND TEST_SOURCES test_qhy_filterwheel.cpp)
+    # camera + filter wheel [stress] coverage over the shared handle, #271
+    list(APPEND TEST_SOURCES test_qhy_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)

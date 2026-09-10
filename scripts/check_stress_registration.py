@@ -69,8 +69,6 @@ ALLOWLIST = {
     ("gemini", "focuser"),
     ("gemini", "switch"),
     ("playerone", "switch"),
-    ("qhy", "camera"),
-    ("qhy", "filterwheel"),
     ("wandererastro", "covercalibrator"),
     ("wandererastro", "filterwheel"),
     ("wandererastro", "rotator"),
