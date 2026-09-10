@@ -82,7 +82,11 @@ public:
         // connected_ is stored false before it, so the flip never waits on
         // THAT lock. It can still wait on this driver's mutex_, behind an
         // in-flight get_status() HID transaction (up to kDefaultTimeoutMs) or
-        // a connect handshake; that part is pre-existing and unchanged.
+        // a connect handshake -- that wait predates this file's hid_global_mutex(),
+        // but is now strictly larger: an in-flight connect can itself be queued
+        // on hid_global_mutex() behind a concurrent enumeration's bus scan, which
+        // widens how long disconnect() can wait on mutex_ before it ever reaches
+        // the close.
         stop_connection_thread();
         try {
             set_connected(false);
