@@ -24,7 +24,6 @@
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
-#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 
