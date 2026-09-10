@@ -33,13 +33,27 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
 
     alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
         auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
-        static_cast<void>(focuser.get_is_moving());
-        static_cast<void>(focuser.get_position());
-        static_cast<void>(focuser.get_max_step());
-        static_cast<void>(focuser.get_max_increment());
-        static_cast<void>(focuser.get_temperature());
-        focuser.move(1234);
-        focuser.halt();
+        // Every one of these throws NotConnected on this sentinel path,
+        // every time (the storm never actually connects) -- the harness
+        // only swallows the exception from the WHOLE callback per call, so
+        // without individual catches here the first throw (get_is_moving)
+        // would short-circuit the rest and every other locked getter/setter
+        // below would go completely unexercised, not just unconnected.
+        auto call = [](auto&& fn) {
+            try {
+                fn();
+            } catch (const alpacacore::AlpacaException&) {
+            }
+        };
+        call([&] { static_cast<void>(focuser.get_is_moving()); });
+        call([&] { static_cast<void>(focuser.get_position()); });
+        call([&] { static_cast<void>(focuser.get_max_step()); });
+        call([&] { static_cast<void>(focuser.get_max_increment()); });
+        call([&] { static_cast<void>(focuser.get_temperature()); });
+        call([&] { static_cast<void>(focuser.get_step_size()); });
+        call([&] { focuser.set_temp_comp(true); });
+        call([&] { focuser.move(1234); });
+        call([&] { focuser.halt(); });
     });
 
     // Still alive and coherent after the storm. Unlike the SVBONY/ZWO

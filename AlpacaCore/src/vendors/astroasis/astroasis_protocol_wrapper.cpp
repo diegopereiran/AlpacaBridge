@@ -79,11 +79,17 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         // The caller (the driver's own mutex_, AsyncConnectable obligations
         // 4/5) is what actually guarantees a single in-flight connect; this
-        // just makes that invariant local instead of only living in the
-        // caller's head. Deliberately not a runtime guard: overwriting
-        // device_ here would silently close a live, working connection
-        // rather than surfacing the caller bug that let this be reached.
+        // makes that invariant local instead of only living in the caller's
+        // head. A throw, not a silent guard that closes and reopens: an
+        // assert alone vanishes under NDEBUG (the shipped .deb build), which
+        // would let this reach hid_open_path and silently leak the existing
+        // handle -- exactly the bug this PR's driver mutex exists to
+        // prevent, just with the diagnostic compiled out.
         assert(!device_ && "Impl::connect() called while already connected");
+        if (device_) {
+            throw AlpacaException("Astroasis focuser: connect() called while already connected (caller bug)",
+                                  AlpacaError::DriverException);
+        }
         hid_init();
         device_ = hid_open_path(hid_path.c_str());
         if (!device_) {
@@ -106,9 +112,11 @@ public:
             send_command(0x11, handshake1.data(), 4, 1, kHandshakeTimeoutMs);
             send_command(0x10, nullptr, 0, 4, kDefaultTimeoutMs);
         } catch (...) {
+            // connected_ is already false here: it's only ever true when
+            // device_ != nullptr, and the throw above (not just the assert)
+            // now guarantees device_ == nullptr on entry, in every build.
             hid_close(device_);
             device_ = nullptr;
-            connected_ = false;
             throw;
         }
 
