@@ -1001,8 +1001,8 @@ TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and
 
     // A branch crossing forces the RA axis (a1) to jump by close to 180 deg
     // -- that IS a real meridian flip, not a test artifact: at
-    // kMaxMoveAxisRateDegPerSec (~3.3 deg/s) it is a ~40 s goto, not the ~15 s
-    // one-branch slew above.
+    // kMaxMoveAxisRateDegPerSec (~3.3 deg/s) it is a ~55 s goto plus ramp
+    // (measured 57 s in the loopback), not the ~15 s one-branch slew above.
     driver->slew_to_coordinates_async(east_ra, dec);
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 90000));
     // The branch must actually flip on the second goto, not just relabel the
