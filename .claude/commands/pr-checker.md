@@ -24,9 +24,10 @@ whether it is a draft, and whether it carries the `safe-to-review` label.
 
 **Validate every contributor-controlled string before it touches a shell command.** Branch
 names and fork owners come from the PR author and can contain anything git allows. Refuse (hard
-stop for that PR) any `headRefName` or `headRepositoryOwner.login` that does not match
-`^[A-Za-z0-9][A-Za-z0-9._/-]*$` **and** containing no `..` (check both: the regex alone lets
-`foo..bar` through), i.e. no leading `-`, no whitespace, no quotes, no path traversal, and
+stop for that PR) any `headRefName` that does not match `^[A-Za-z0-9][A-Za-z0-9._/-]*$` **and**
+contain no `..` (check both: the regex alone lets `foo..bar` through), and any
+`headRepositoryOwner.login` that does not match `^[A-Za-z0-9-]+$` (GitHub logins allow only
+alphanumerics and hyphens). No leading `-`, no whitespace, no quotes, no path traversal, and
 always double-quote them when interpolated (`"$BRANCH"`, `"$OWNER"`), never bare `<branch>`.
 PR numbers must match `^[0-9]+$`. Never `eval` or build a command from a PR title or body.
 
@@ -63,8 +64,16 @@ Checks to make before waiting on anything:
    ```bash
    gh api -X PUT repos/open-astro/AlpacaBridge/pulls/<N>/update-branch
    ```
-   A 422 "merge conflict" means resolve locally on the head branch (Step 3 mechanics) and push.
-   It is fine to do this while a review is still in flight: the run on the old head is cancelled
+   **Check the result immediately**: `update-branch` returns HTTP 422 on a merge conflict, and
+   a chain that ignores that then waits 30 minutes for a verdict that never comes (PRs #270 and
+   #272 both stalled this way on 2026-09-10). Right after the call:
+   ```bash
+   gh pr view <N> --json mergeable,mergeStateStatus --jq '"\(.mergeable) \(.mergeStateStatus)"'
+   ```
+   `CONFLICTING` / `DIRTY` -> resolve locally on the head branch now (Step 3 mechanics: fetch
+   the fork, `git merge origin/main`, keep both sides when two PRs added adjacent CI jobs or
+   gates, validate syntax, push), then poll. Do not wait on the verdict first.
+   It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
    Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (not
@@ -168,8 +177,26 @@ Keep a running tally of rounds per PR and report it in the wrap-up.
 
 ### `✅ Approved`
 
-**Stop pushing to this branch.** Approval is the terminal state; non-blocking notes in an approval
-are not commits. Then:
+**One cleanup round, then merge.** Approvals usually carry "minor / non-blocking" notes. Leaving
+them is how leftovers accumulate (nine PRs on 2026-09-10 left six: dead includes, a regex edge
+case, a missing rename flag, an untested name suffix). Handle them like this:
+
+1. Classify each note. **Mechanical** = a change a reviewer would accept without discussion and
+   that stays inside the PR's files and purpose: unused include, missing test for a string the
+   PR added, regex edge case, a missing `--find-renames`, a comment fix. **Judgment** = changes a
+   default or behaviour, widens scope, needs hardware, or contradicts the PR author's stated
+   intent. Judgment notes are listed in the wrap-up for the user, never pushed.
+2. Fix **all** mechanical notes in ONE commit, push once, poll again. This is the only
+   post-approval push allowed: **cap = one cleanup round per PR.** PR #99 (2026-07-01) took 46
+   rounds because pushes past approval were unbounded and trickled one nit at a time.
+3. On the next verdict: `✅ Approved` -> merge, even if it carries new notes (list them in the
+   wrap-up). `⚠️ Issues found` on a cleanup round is almost always a nit the cleanup exposed:
+   fix it in one more commit only if it is a genuine defect in the cleanup itself; otherwise
+   revert the offending cleanup hunk and merge on the following approval. Never enter a
+   second cleanup cycle.
+4. If the approval has **no** mechanical notes, skip straight to the merge below.
+
+Then:
 
 ```bash
 gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft) mergeable=\(.mergeable) state=\(.mergeStateStatus)"'
@@ -196,6 +223,13 @@ read in full, and the **Hard stops** below, which override this authorization.
 
 After a merge, every remaining PR in the queue is now behind main: run Step 1.3 on the **next** PR
 right away so its refresh round starts while you tidy up.
+
+**Contributor pushes during the loop are read, not just merged.** Whenever a fork head moves
+between the verdict you acted on and the merge, diff it against the last reviewed head
+(`git diff <reviewed-sha>..<new-head> --stat` and the hunks) and put a one-line summary per
+commit in the wrap-up. The bot re-reviews them, but the maintainer should know what landed
+beyond the PR as opened (PR #272 gained an unrelated cppcheck-scoping commit mid-run on
+2026-09-10).
 
 ## Keep looping: what is NOT a reason to stop
 
@@ -238,7 +272,9 @@ which PR was left and why.
 
 ## Wrap-up
 
-One table: PR, title, rounds, final verdict, merge SHA (or "left open: reason"). Then a single
-line naming anything the next session should know (e.g. an `update-branch` still running on a
+One table: PR, title, rounds, final verdict, merge SHA (or "left open: reason"). Under it: any
+judgment notes left unpushed, any notes from the post-cleanup approval, and any contributor
+commits that landed mid-run, one line each. Then a single line naming anything the next session
+should know (e.g. an `update-branch` still running on a
 PR outside the list). Update memory only if the loop mechanics themselves changed (new bot login,
 new label, new stall trick); the per-PR outcome does not belong in memory.
