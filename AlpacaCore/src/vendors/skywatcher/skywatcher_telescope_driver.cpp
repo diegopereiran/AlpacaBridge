@@ -1784,8 +1784,9 @@ private:
                                        std::chrono::steady_clock::now() - utc_anchor_steady_)) {
             has_utc_offset_ = false;
             utc_offset_ = {};
-            ALPACA_LOG_INFO("SkyWatcher", "Host clock was stepped after the client's UTCDate write; dropping the "
-                                          "client offset and using the host clock");
+            ALPACA_LOG_INFO("SkyWatcher",
+                            "Host clock was stepped after the client's UTCDate write; dropping the "
+                            "client offset and using the host clock");
             return system_now;
         }
         return system_now + utc_offset_;

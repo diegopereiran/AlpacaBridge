@@ -1516,8 +1516,7 @@ TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and repo
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 review)",
-          "[skywatcher][unit]") {
+TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 review)", "[skywatcher][unit]") {
     // The offset is a delta against the host clock at write time. When the
     // host clock is corrected afterwards (Sync Time, NTP, `date`), applying
     // the stale delta on top of it would move every LST-derived value by the
