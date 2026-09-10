@@ -144,6 +144,17 @@ public:
         return step_failed_;
     }
 
+    /**
+     * The same refusal, observed by a path that sets the clock itself rather
+     * than through step_from_client() (the /management/v1/synctime endpoint).
+     * Without this an operator who only ever presses Sync Time on a host with
+     * no CAP_SYS_TIME never trips the latch.
+     */
+    void mark_step_failed() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        step_failed_ = true;
+    }
+
     bool stepped_by_client() const {
         if (synchronized()) {
             return false;

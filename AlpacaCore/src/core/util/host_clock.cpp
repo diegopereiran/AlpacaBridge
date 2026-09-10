@@ -26,11 +26,11 @@ namespace {
 // attribute reads 1 (the kernel gates that on the read having succeeded).
 // Nothing else counts: a present-but-unread RTC, a kernel without
 // CONFIG_RTC_HCTOSYS, or a userspace `hwclock --hctosys` all read as no RTC.
-// Distinguishes "no device the kernel booted from" (which may still appear:
-// the RTC can register after our first probe) from "found one, but its time is
-// not usable" -- a dead RTC free-running from its own wrong value, or one whose
-// since_epoch will not read. Neither of the latter changes while we run, so
-// only the first is worth re-probing.
+// Distinguishes "no usable answer yet" -- no device, or one that did not
+// answer this time -- from "answered, and its time is wrong". Only the second
+// is permanent (a dead RTC free-runs from its own wrong value); a device can
+// register late, and an I2C read can fail transiently, so the first is
+// re-probed.
 enum class Probe : std::uint8_t { NoDevice, Implausible, Ok };
 
 Probe probe_boot_rtc() {
@@ -57,10 +57,11 @@ Probe probe_boot_rtc() {
     std::ifstream since_epoch(device + "/since_epoch");
     long long epoch = 0;
     if (!since_epoch.is_open() || !(since_epoch >> epoch)) {
-        // The hctosys device is here but will not tell us its time; that is as
-        // unchangeable as an implausible reading, so do not re-probe it (each
-        // attempt is a bus transaction on an I2C RTC).
-        return Probe::Implausible;
+        // A read that FAILS is not a value that is WRONG: an I2C RTC can
+        // return -EIO transiently. Treat it as "not answered yet" and re-probe,
+        // rather than pinning the host to "none" for the life of the process on
+        // one unlucky read at startup.
+        return Probe::NoDevice;
     }
     return epoch > HostClock::kMinPlausibleEpoch ? Probe::Ok : Probe::Implausible;
 }

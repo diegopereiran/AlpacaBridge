@@ -160,6 +160,13 @@ TEST_CASE("HostClock - a refused step latches, so callers know the clock is unco
     auto d = g.clock();
     CHECK(d.step_from_client(kNow + milliseconds(200), kNow).outcome == Outcome::SkippedSmall);
     CHECK_FALSE(d.step_ever_failed());
+    // A path that sets the clock itself (the synctime endpoint) reports its own
+    // refusal the same way, so an operator who only presses Sync Time on a host
+    // without CAP_SYS_TIME still trips the latch.
+    CHECK_FALSE(d.stepped_by_client());
+    d.mark_step_failed();
+    CHECK(d.step_ever_failed());
+    CHECK_FALSE(d.stepped_by_client());  // a refusal is not a step
 }
 
 TEST_CASE("HostClock - a refused clock_settime is reported, not thrown", "[util][hostclock][unit]") {
