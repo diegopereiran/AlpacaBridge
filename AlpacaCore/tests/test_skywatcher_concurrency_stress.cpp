@@ -15,9 +15,10 @@
 // protocol wrapper and UDP transport to FakeSkyWatcherMount, a loopback
 // motor-controller simulator with a continuous axis model, so the driver's
 // worker threads (async slew, pulse-guide, the two per-axis MoveAxis stop
-// tasks, and the RightAscensionRate live-rate-verify task from open-astro
-// #248) all spawn and get raced by disconnect/destruction exactly as they do
-// against the Wave 100i. Operations racing a disconnect are EXPECTED to
+// tasks, the RightAscensionRate live-rate-verify task from open-astro #248,
+// and the sub-floor duty-cycle worker that set_tracking toggles) all spawn
+// and get raced by disconnect/destruction exactly as they do against the
+// Wave 100i. Operations racing a disconnect are EXPECTED to
 // throw; what must never happen is a crash, hang, or TSan report.
 
 #ifndef _WIN32
@@ -25,6 +26,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 
@@ -57,13 +59,29 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(const FakeSkyWatcherMou
 // join: slew_task_thread_, pulse_task_thread_, both per-axis
 // stop_task_thread_[axis] (MoveAxis stops issued close together — the exact
 // shape of the 2026-09-06 "superseded MoveAxis stop task strands Slewing"
-// bug in AGENTS.md), and rate_verify_thread_ (open-astro #248).
+// bug in AGENTS.md), rate_verify_thread_ (open-astro #248) and the
+// duty_thread_ that set_tracking starts and stops.
+//
+// The rate-verify task only spawns on an in-place rate change: tracking must
+// be on (otherwise the setter stores the value and returns), the new rate
+// must differ from the stored one (idempotent rewrites return early), and
+// both effective rates must sit above the slow-mode floor in the same
+// direction. A quarter-sidereal offset keeps the axis continuous, and the
+// toggle alternates it with 0.0 so every call is a real change. It also has
+// to come BEFORE the slew/pulse/MoveAxis calls: while any of those owns the
+// axes the setter only stores the rate for the restore path.
+std::atomic<int> g_rate_toggle{0};
+
 void skywatcher_operate(AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
     static_cast<void>(scope.get_tracking());
     static_cast<void>(scope.get_right_ascension());
     static_cast<void>(scope.get_declination());
     static_cast<void>(scope.get_slewing());
+
+    scope.set_tracking(true);
+    const double ra_rate = (g_rate_toggle.fetch_add(1) % 2 == 0) ? 0.25 : 0.0;
+    scope.set_right_ascension_rate(ra_rate);  // in-place change spawns rate_verify_thread_ (#248)
 
     scope.slew_to_coordinates_async(5.0, 20.0);
     scope.pulse_guide(0, 50);
@@ -76,8 +94,6 @@ void skywatcher_operate(AlpacaDriver& d) {
     scope.move_axis(0, 0.0);
     scope.move_axis(1, 0.0);
 
-    scope.set_right_ascension_rate(0.0);  // spawns rate_verify_thread_ (#248)
-    scope.set_tracking(true);
     scope.set_tracking(false);
     scope.abort_slew();
 }
@@ -88,6 +104,10 @@ TEST_CASE("SkyWatcher telescope - concurrent connect/disconnect/slew/pulse/movea
           "[skywatcher][telescope][stress]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
+    // A ramped stop keeps the per-axis stop tasks polling for a while, so the
+    // racing disconnects land inside the #212 poll window instead of after a
+    // stop that the fake reported complete on its first inquire_status.
+    mount.set_stop_ramp_ms(200);
     auto driver = make_driver(mount);
 
     // Prove the fake can actually be connected to before the storm. Every
@@ -119,6 +139,7 @@ TEST_CASE("SkyWatcher telescope - destruction mid-operation (slew/pulse/stop/rat
           "[skywatcher][telescope][stress]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(200);  // keep both stop tasks alive across the reset
 
     for (int i = 0; i < 10; ++i) {
         auto driver = make_driver(mount);
@@ -127,6 +148,18 @@ TEST_CASE("SkyWatcher telescope - destruction mid-operation (slew/pulse/stop/rat
         // fake that cannot be connected to would silently reduce this to
         // destroying an idle object.
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        // Tracking on, then a non-zero rate on a fresh driver (stored rate
+        // 0.0) while the axes are still free: the in-place path spawns
+        // rate_verify_thread_. After the slew below the setter would only
+        // store the rate.
+        try {
+            driver->set_tracking(true);
+        } catch (const std::exception&) {
+        }
+        try {
+            driver->set_right_ascension_rate(0.25);
+        } catch (const std::exception&) {
+        }
         try {
             driver->slew_to_coordinates_async(5.0, 20.0);
         } catch (const std::exception&) {
@@ -143,8 +176,13 @@ TEST_CASE("SkyWatcher telescope - destruction mid-operation (slew/pulse/stop/rat
             driver->move_axis(1, 1.0);
         } catch (const std::exception&) {
         }
+        // MoveAxis(axis, 0) on a moving axis is what spawns stop_task_thread_[axis].
         try {
-            driver->set_right_ascension_rate(0.0);
+            driver->move_axis(0, 0.0);
+        } catch (const std::exception&) {
+        }
+        try {
+            driver->move_axis(1, 0.0);
         } catch (const std::exception&) {
         }
         if ((i % 2) != 0) {
