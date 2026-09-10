@@ -163,8 +163,8 @@ public:
             send_command(0x10, nullptr, 0, 4, kDefaultTimeoutMs);
         } catch (...) {
             // connected_ is already false here: it's only ever true when
-            // device_ != nullptr, and the throw above (not just the assert)
-            // now guarantees device_ == nullptr on entry, in every build.
+            // device_ != nullptr, and the already-connected throw above
+            // guarantees device_ was nullptr on entry, in every build.
             close_device_locked();
             throw;
         }
