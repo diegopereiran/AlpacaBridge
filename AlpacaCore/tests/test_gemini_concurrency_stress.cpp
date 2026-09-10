@@ -92,17 +92,29 @@ void flatpanel_operate(AlpacaDriver& d) {
     call([&] { static_cast<void>(panel.get_cover_moving()); });
     // Submit a calibrator change only when one is not already in flight.
     // Unconditional submission is what builds an unbounded thread chain
-    // here: on the background path calibrator_on() returns as soon as it
-    // spawns a task thread, each spawned thread joins its predecessor (so
-    // they all stay live), and the drain rate is one set_light() ~= 110 ms
-    // (2 commands x kCommandDelayMs) against four op threads submitting
-    // every ~200 us. It survived locally, but on a faster runner that grows
-    // until pthread_create fails or TSan hits its live-thread ceiling. The
-    // gate keeps the same coverage -- the task path still runs every time
-    // the previous one has drained -- without the pile-up.
+    // here: on the background path calibrator_on()/calibrator_off() return
+    // as soon as they spawn a task thread, each spawned thread joins its
+    // predecessor (so they all stay live), and the drain rate is one
+    // set_light() ~= 110 ms (2 commands x kCommandDelayMs) against four op
+    // threads submitting every ~200 us. This gate is a TOCTOU check, not
+    // serialization -- several op threads can observe "not changing" in the
+    // same window and all submit together, so it does not cap the chain at
+    // one command at a time, only at op_threads (4) per drain interval
+    // instead of unbounded. That is what keeps it survivable on a faster
+    // runner (pthread_create failing, or TSan's live-thread ceiling) without
+    // losing coverage of the task path.
     call([&] {
         if (!panel.get_calibrator_changing()) {
-            panel.calibrator_on(10);
+            // Alternate on/off per thread so run_calibrator_command(false, 0)
+            // and the off-behind-inline-on ordering both get stormed, not
+            // just calibrator_on().
+            thread_local bool on = true;
+            if (on) {
+                panel.calibrator_on(10);
+            } else {
+                panel.calibrator_off();
+            }
+            on = !on;
         }
     });
     call([&] { static_cast<void>(panel.get_device_state()); });
