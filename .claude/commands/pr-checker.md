@@ -257,7 +257,8 @@ For **every** Defect, in this order:
    - `scripts/*.py`: run the script itself against the real repo, plus its own probe.
    - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
      what changed): `python3 scripts/check_docs_drift.py`, `python3 .github/scripts/check-unicode.py`,
-     `python3 scripts/check_stress_registration.py`, and on a PR also
+     `python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py`
+     (the self-test first, as `ci_preflight.sh` and CI both run it), and on a PR also
      `python3 scripts/check_conformu_reports.py origin/main` (CI passes `origin/$GITHUB_BASE_REF`;
      the pre-flight passes the merge base, which differs only when `origin/main` has moved
      ahead). The exit code is the signal
@@ -298,7 +299,8 @@ if git diff origin/main...HEAD --name-only | grep -qE '\.(c|cc|cpp|cxx|h|hh|hpp|
   run_gates() { ./scripts/ci_preflight.sh; }
 else
   run_gates() { python3 scripts/check_docs_drift.py && python3 .github/scripts/check-unicode.py \
-    && python3 scripts/check_stress_registration.py && python3 scripts/check_conformu_reports.py origin/main; }
+    && python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py \
+    && python3 scripts/check_conformu_reports.py origin/main; }
 fi
 run_gates > "$LOG" 2>&1 \
   && git fetch "$REMOTE" "$BRANCH" \
