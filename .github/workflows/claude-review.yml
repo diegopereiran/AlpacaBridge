@@ -48,20 +48,25 @@ jobs:
       # as the bot whenever the action does not run (actor check, auth error),
       # and both skills merge on a bot "Approved". Remove it before the action.
       # The harness also loads files from this tree as instructions, not as
-      # diff text: AGENTS.md as project memory, .claude/ for settings (hooks
-      # run shell commands inside this job, which holds the OAuth token) and
-      # skill descriptions, .mcp.json for servers. Those come from the base
-      # branch instead, so a fork cannot rewrite the rubric's reference doc in
+      # diff text: AGENTS.md and CLAUDE.md as project memory (root, and nested
+      # copies when a file in that directory is read), .claude/ for settings
+      # (hooks run shell commands inside this job, which holds the OAuth
+      # token) and skill descriptions, .mcp.json for servers. Every such file
+      # is removed from the whole tree and the root ones come back from the
+      # base branch, so a fork cannot rewrite the rubric's reference doc in
       # the same PR; the PR's own changes to them are still reviewed through
-      # `gh pr diff`. The repo ships no .mcp.json or settings file.
+      # `gh pr diff`. The repo ships no CLAUDE.md, .mcp.json or settings file.
       - name: Replace files the harness would execute, publish or load as instructions
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          rm -rf review-comment.md .mcp.json .claude AGENTS.md
+          rm -rf review-comment.md
+          find . -path ./.git -prune -o \
+            \( -name AGENTS.md -o -name CLAUDE.md -o -name .mcp.json -o -name .claude \) \
+            -print0 | xargs -0 rm -rf
           git fetch --depth=1 origin "$BASE_SHA"
-          for f in AGENTS.md .claude; do
-            git cat-file -e "$BASE_SHA:$f" 2>/dev/null && git checkout "$BASE_SHA" -- "$f"
+          for f in AGENTS.md CLAUDE.md .claude; do
+            git cat-file -e "$BASE_SHA:$f" 2>/dev/null && git checkout "$BASE_SHA" -- "$f" || true
           done
           git status --short
 

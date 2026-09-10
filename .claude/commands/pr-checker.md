@@ -91,6 +91,10 @@ Checks to make before waiting on anything:
    prints the verdict (Step 3); `2` or `3` are the Step 3 "no verdict" cases; `1` from a
    `BUDGET=0` pass only means **no verdict yet** (the normal state right after a push): go to
    Step 2. It is not a timeout and does not count toward the "two consecutive timeouts" hard stop.
+   **Skip this check if Step 1.1, 1.2 or 1.3 just acted**: a relabel or update-branch re-triggers
+   the bot on the same head, and for a few seconds the only check-run is the old one, which the
+   pre-check would report as skipped, failed or cancelled. Go straight to Step 2, whose first
+   look comes after one tick.
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
@@ -98,6 +102,11 @@ Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadli
 
 ```bash
 PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
+# A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
+# new check-run; a first look inside that window classifies the OLD run as final. So a
+# real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
+# is only valid when nothing was just re-triggered, and looks at once.
+[ "${BUDGET:-1800}" -gt 0 ] && sleep "$TICK"
 while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
   # cancelled attempt cannot hide the finished one). Everything is fetched with
@@ -111,6 +120,7 @@ while :; do
   RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
   PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
   SKIPPED=$(jq -r '[.[] | select(.conclusion == "skipped")] | length' <<<"$RUNS")
+  CANCELLED=$(jq -r '[.[] | select(.conclusion == "cancelled")] | length' <<<"$RUNS")
   # REST, not `gh pr view --json comments`: only REST exposes updated_at. The author
   # pattern is the workflow's own assert-step pattern. `select(. != null)` matters: with
   # no verdict yet, `last` is null and would otherwise print the literal "null".
@@ -140,6 +150,10 @@ while :; do
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ]; then
     echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (Step 1)." >&2; exit 3
   fi
+  # Only cancelled runs: a superseding trigger never came. Re-trigger (relabel).
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" = 0 ] && [ "$CANCELLED" != 0 ]; then
+    echo "REVIEW CANCELLED for head $SHA and nothing replaced it: re-trigger with the relabel trick." >&2; exit 3
+  fi
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
 done
@@ -149,7 +163,7 @@ echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (revie
 Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `BUDGET=0`, just
 "not yet"). `2` = the action skipped a workflow-editing PR (hard stop). `3` = no run will
 produce a verdict for this head (the newest run failed, succeeded without publishing one, or
-the job was skipped); the message says which and carries the run URL where there is one. Every
+the job was skipped or every run was cancelled); the message says which and carries the run URL where there is one. Every
 non-zero exit prints nothing on stdout, so a chained `poll && merge` never reaches the merge.
 `date -d` is GNU; the skills run on the Linux dev VM.
 

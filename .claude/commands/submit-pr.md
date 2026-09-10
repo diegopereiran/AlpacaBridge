@@ -307,12 +307,18 @@ head SHA that was not cancelled or skipped has completed (a failed run counts: t
 fail after the verdict was posted), none is still queued or running, and the newest bot verdict
 was updated after that run started. Commit dates are not used: a commit's committer date is when it
 was made locally, so a verdict on the previous head can be newer than it. The block below applies that
-rule before its first sleep, so a verdict that is already there returns at once; otherwise it
-re-checks every three minutes (`TICK`), within a 30-minute budget (do NOT foreground-sleep; run
+rule every three minutes (`TICK`) within a 30-minute budget, first look after one tick so a
+run just re-triggered on the same head has appeared; `BUDGET=0` gives a single immediate look
+when nothing was just re-triggered (do NOT foreground-sleep; run
 it with `run_in_background`). It is the same block as `/pr-checker` Step 2:
 
 ```bash
 PR=<number>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
+# A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
+# new check-run; a first look inside that window classifies the OLD run as final. So a
+# real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
+# is only valid when nothing was just re-triggered, and looks at once.
+[ "${BUDGET:-1800}" -gt 0 ] && sleep "$TICK"
 while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
   # cancelled attempt cannot hide the finished one). Everything is fetched with
@@ -326,6 +332,7 @@ while :; do
   RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
   PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
   SKIPPED=$(jq -r '[.[] | select(.conclusion == "skipped")] | length' <<<"$RUNS")
+  CANCELLED=$(jq -r '[.[] | select(.conclusion == "cancelled")] | length' <<<"$RUNS")
   # REST, not `gh pr view --json comments`: only REST exposes updated_at. The author
   # pattern is the workflow's own assert-step pattern. `select(. != null)` matters: with
   # no verdict yet, `last` is null and would otherwise print the literal "null".
@@ -355,6 +362,10 @@ while :; do
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ]; then
     echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (see above)." >&2; exit 3
   fi
+  # Only cancelled runs: a superseding trigger never came. Re-trigger (relabel).
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" = 0 ] && [ "$CANCELLED" != 0 ]; then
+    echo "REVIEW CANCELLED for head $SHA and nothing replaced it: re-trigger with the relabel trick." >&2; exit 3
+  fi
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
 done
@@ -362,7 +373,7 @@ echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (revie
 ```
 
 Exit `2` (the action skipped a workflow-editing PR) and exit `3` (no run will produce a
-verdict: the newest run failed, succeeded without publishing one, or the job was skipped) both
+verdict: the newest run failed, succeeded without publishing one, the job was skipped, or every run was cancelled) both
 mean there is no verdict to act on: tell the user, and for exit `3` read the run log first. If the poll times out, surface
 the stall to the user and check the workflow (`gh run list --workflow=claude-review.yml --limit 3`)
 instead of restarting the loop blindly. `date -d` is GNU; the skills run on the Linux dev VM.
