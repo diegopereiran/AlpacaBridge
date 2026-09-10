@@ -22,6 +22,7 @@ server:
   manufacturer: OpenAstro.net
   location: ""
   profile_name: ""  # Friendly profile name shown in the web UI header and exposed via the management API. Env: ALPACAHTTP_PROFILE_NAME
+  sync_system_clock_from_clients: true  # On an NTP-less host, step the system clock from a client's Telescope.UTCDate write. Never touches an NTP-disciplined clock.
 
 # Device enable/disable (optional)
 # devices:

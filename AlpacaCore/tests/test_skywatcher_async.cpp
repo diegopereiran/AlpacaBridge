@@ -1475,4 +1475,65 @@ TEST_CASE("SkyWatcher async - a Dec pulse leaves a pending RA rate check running
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and reported RA (#287)",
+          "[skywatcher][async]") {
+    // Before the fix get_utc_date() reported the client's offset while every
+    // LST computation used the raw host clock, so a client time-sync fixed the
+    // readback and not the pointing. Now one utc_now_locked() feeds both.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    REQUIRE(driver->get_connected());
+
+    const auto wrap24 = [](double h) {
+        h = std::fmod(h, 24.0);
+        return h < 0.0 ? h + 24.0 : h;
+    };
+    const double lst0 = driver->get_sidereal_time();
+    const double ra0 = driver->get_right_ascension();
+    const auto host_now = std::chrono::system_clock::now();
+    driver->set_utc_date(host_now + std::chrono::hours(1));
+
+    const auto reported = driver->get_utc_date();
+    const auto readback_error = std::chrono::duration_cast<std::chrono::milliseconds>(
+        reported - (std::chrono::system_clock::now() + std::chrono::hours(1)));
+    CHECK(std::abs(readback_error.count()) < 500);
+
+    // One UT hour is 1.0027379 sidereal hours.
+    const double d_lst = wrap24(driver->get_sidereal_time() - lst0);
+    CHECK(d_lst > 1.0027379 - 0.002);
+    CHECK(d_lst < 1.0027379 + 0.002);
+    // The axes have not moved (tracking off, counts fixed) so reported RA
+    // follows LST one-for-one: RA = LST - HA.
+    const double d_ra = wrap24(driver->get_right_ascension() - ra0);
+    CHECK(d_ra > 1.0027379 - 0.002);
+    CHECK(d_ra < 1.0027379 + 0.002);
+
+    // Setting the clock back to the host's time undoes it.
+    driver->set_utc_date(std::chrono::system_clock::now());
+    const double d_back = wrap24(driver->get_sidereal_time() - lst0);
+    CHECK((d_back < 0.002 || d_back > 23.998));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 review)", "[skywatcher][unit]") {
+    // The offset is a delta against the host clock at write time. When the
+    // host clock is corrected afterwards (Sync Time, NTP, `date`), applying
+    // the stale delta on top of it would move every LST-derived value by the
+    // old error, so utc_now_locked() drops it. The rule is pure: the system
+    // clock and the steady clock must have advanced by the same amount.
+    using namespace std::chrono;
+    using alpacacore::vendor::skywatcher::detail::host_clock_stepped;
+    // Both clocks advanced together: no step.
+    CHECK_FALSE(host_clock_stepped(seconds(90), seconds(90)));
+    CHECK_FALSE(host_clock_stepped(milliseconds(90400), milliseconds(90000)));
+    // Host clock jumped 20 minutes forward (Sync Time on a slow clock) or
+    // 20 minutes back while the steady clock advanced 90 s: stepped.
+    CHECK(host_clock_stepped(seconds(90) + minutes(20), seconds(90)));
+    CHECK(host_clock_stepped(seconds(90) - minutes(20), seconds(90)));
+    // Right at the tolerance edge: 1 s drift is not a step, 1.5 s is.
+    CHECK_FALSE(host_clock_stepped(seconds(91), seconds(90)));
+    CHECK(host_clock_stepped(milliseconds(91500), seconds(90)));
+}
+
 #endif  // _WIN32

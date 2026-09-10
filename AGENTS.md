@@ -1450,7 +1450,9 @@ datagrams before each send so replies cannot get off-by-one.
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
   step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
   fast mode). The mount stores **no site or time** — site lat/long/elevation come from
-  the web UI config or the Alpaca setters, and UTCDate is host-clock backed.
+  the web UI config or the Alpaca setters. Time is the host clock plus the client-set
+  `UTCDate` offset, through one `utc_now_locked()` for every LST computation (#287); on an
+  NTP-less host the router also steps the system clock from that write (#289).
 - Pointing convention: home = counterweight down pointing at the pole, counts offset
   `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
   `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
