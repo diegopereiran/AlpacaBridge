@@ -296,16 +296,26 @@ Step 2 repo detection:
     Then go to Step 10 and tell the user the PR is waiting on that label; once it's applied, resume
     this step and poll as normal.
 
-Every PR gets an automated review from the `claude` bot (`.github/workflows/claude-review.yml`).
-It posts a PR comment ending in a verdict line: `✅ Approved` or `⚠️ Issues found`. After creating
-the PR (and after **every** push, which restarts a full fresh review), watch for the next bot
-comment.
+Every PR gets an automated review (`.github/workflows/claude-review.yml`), posted by the
+workflow's own step as `github-actions`. It ends in a verdict line: `✅ Approved` or
+`⚠️ Issues found`. After creating the PR (and after **every** push, which restarts a full fresh
+review), watch for the next bot comment.
 
-Record the baseline count of bot comments, then start a background poll that exits when a new
-one arrives (do NOT foreground-sleep; run this with `run_in_background`):
+First check whether a verdict for the current head is already there (a fast review, or any delay
+between the push and starting the poll): if the newest matching comment's REST `updated_at` is
+newer than the head commit's date, use it and skip the poll. Otherwise record the baseline count
+of bot comments and start a background poll that exits when a new one arrives (do NOT
+foreground-sleep; run this with `run_in_background`):
 
 ```bash
 PR=<number>
+# Verdict already posted for this head? (count-based polling would otherwise wait 30 min for
+# a comment that is already there)
+HEAD_DATE=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha | xargs -I{} gh api "repos/open-astro/AlpacaBridge/commits/{}" --jq .commit.committer.date)
+LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
+if [ -n "$LAST" ] && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$HEAD_DATE" +%s)" ]; then
+  printf '%s\n' "${LAST#* }"; exit 0
+fi
 # Count only genuine review comments: the bot login AND a verdict line, so an
 # unrelated comment from a same-named account can't satisfy the poll. The
 # post step comments with the workflow token, so the author is github-actions

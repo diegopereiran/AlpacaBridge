@@ -99,8 +99,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
   # REST, not `gh pr view --json comments`: only REST exposes updated_at, and
   # the poll compares that against the head commit. The post step creates a
-  # fresh comment each run, so updated_at equals created_at; an edited
-  # comment would still be handled.
+  # fresh comment each run, so `last` (newest by creation) is the newest
+  # verdict and its updated_at equals created_at.
   c=$(gh api "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
         | select((.user.login | test("^github-actions(\\[bot\\])?$"))
                  and (.body | test("✅ Approved|⚠️ Issues found")))]
