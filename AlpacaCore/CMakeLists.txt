@@ -109,6 +109,13 @@ target_include_directories(alpacacore PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
+# Build-time floor for util::HostClock::build_time() (open-astro#292): the
+# configure-time epoch. string(TIMESTAMP) honours SOURCE_DATE_EPOCH, so a
+# reproducible package build gets a reproducible value and no __DATE__ is
+# compiled in (dpkg's -Wdate-time stays quiet).
+string(TIMESTAMP ALPACACORE_BUILD_EPOCH "%s" UTC)
+target_compile_definitions(alpacacore PRIVATE ALPACACORE_BUILD_EPOCH=${ALPACACORE_BUILD_EPOCH})
+
 # Create namespace alias for consistent target naming
 add_library(AlpacaCore::alpacacore ALIAS alpacacore)
 

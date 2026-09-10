@@ -172,6 +172,13 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
     CHECK(HostClock::build_time() > y2000);  // not: <= now(), the suite also runs on hosts whose clock is behind
     f.rtc_time = std::nullopt;               // no RTC was used at boot
     CHECK(c.source() == "none");
+    // The system clock must still agree with the RTC: a later date -s or a
+    // restored saved timestamp that bypassed HostClock leaves them diverged.
+    f.rtc_time = system_clock::now();
+    CHECK_FALSE(c.has_rtc(system_clock::now() + minutes(10)));
+    CHECK_FALSE(c.has_rtc(system_clock::now() - minutes(10)));
+    CHECK(c.has_rtc(system_clock::now() + minutes(4)));
+    CHECK(c.has_rtc(system_clock::now() - minutes(4)));
     f.rtc_time = system_clock::now();
     // A client that agrees with the RTC changes nothing.
     CHECK(c.step_from_client(kNow + milliseconds(300), kNow).outcome == Outcome::SkippedSmall);
@@ -188,6 +195,24 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
     HostClock no_probe([] { return false; }, [](system_clock::time_point, std::string&) { return true; });
     CHECK_FALSE(no_probe.has_rtc());
     CHECK(no_probe.source() == "none");
+}
+
+TEST_CASE("HostClock - an external clock set (synctime endpoint) is recorded as a client step",
+          "[util][hostclock][unit]") {
+    Fake f;
+    f.rtc_time = system_clock::now();
+    auto c = f.clock();
+    CHECK(c.source() == "rtc");
+    CHECK_FALSE(c.stepped_by_client());
+    c.note_external_step();
+    CHECK(c.stepped_by_client());
+    CHECK(c.source() == "client");
+    CHECK(f.sets.empty());  // nothing was set through this object
+    // NTP taking over still clears it.
+    f.synchronized = true;
+    CHECK(c.source() == "ntp");
+    f.synchronized = false;
+    CHECK(c.source() == "rtc");
 }
 
 TEST_CASE("HostClock - outcome names are stable log text", "[util][hostclock][unit]") {

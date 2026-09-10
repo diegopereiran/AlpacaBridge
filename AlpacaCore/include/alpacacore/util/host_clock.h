@@ -123,21 +123,44 @@ public:
     // Raspberry Pi 5 RTC that handed the kernel 2000-01-01 would otherwise
     // pass once the saved timestamp was restored. Reporting only: the
     // stepping decision never looks at this.
-    bool has_rtc() const {
+    bool has_rtc(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
         const auto t = rtc_time_();
-        return t.has_value() && *t >= build_time();
+        if (!t.has_value() || *t < build_time()) {
+            return false;
+        }
+        // The label describes the SYSTEM clock's provenance, so the two must
+        // still agree: a later setter that bypassed this object (manual
+        // date -s, a restored saved timestamp) leaves them diverged and the
+        // honest answer is "none". since_epoch has 1 s granularity and RTC
+        // drift is minutes per year, so minutes of tolerance is roomy.
+        const auto skew = now - *t;
+        return skew < kRtcAgreement && skew > -kRtcAgreement;
+    }
+    static constexpr std::chrono::minutes kRtcAgreement{5};
+
+    // The clock was stepped by a path that bypasses step_from_client() (the
+    // /management/v1/synctime endpoint behind the web UI's Sync Time button):
+    // from now on the system clock's provenance is "client", not the RTC and
+    // not "none".
+    void note_external_step() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stepped_ = true;
     }
 
     // The RTC the kernel set system time from at boot (its hctosys attribute
-    // reads 1; searched across /sys/class/rtc/rtc*), read through its
-    // since_epoch attribute. nullopt when no RTC was used at boot, when the
-    // attribute is unreadable, or when CONFIG_RTC_HCTOSYS is off. Defined in
-    // host_clock.cpp with build_time().
+    // reads 1; searched across /sys/class/rtc/rtc0..rtc7, found once), read
+    // through its since_epoch attribute and memoised for one second so an
+    // I2C transaction never runs on every HTTP request or device connect.
+    // nullopt when no RTC was used at boot, when the attribute is unreadable,
+    // or when CONFIG_RTC_HCTOSYS is off. Defined in host_clock.cpp.
     static std::optional<std::chrono::system_clock::time_point> host_rtc_time();
+    // Uncached sysfs read behind host_rtc_time().
+    static std::optional<std::chrono::system_clock::time_point> read_host_rtc_time();
 
-    // Build month of the library (defined once in host_clock.cpp so __DATE__
-    // is captured in exactly one translation unit); any clock earlier than
-    // this is certainly wrong.
+    // Build time floor of the library: the configure-time epoch injected by
+    // CMake (ALPACACORE_BUILD_EPOCH, which honours SOURCE_DATE_EPOCH for
+    // reproducible builds), falling back to __DATE__'s month when absent.
+    // Defined once in host_clock.cpp. Any clock earlier than this is wrong.
     static std::chrono::system_clock::time_point build_time();
 
     bool stepped_by_client() const {

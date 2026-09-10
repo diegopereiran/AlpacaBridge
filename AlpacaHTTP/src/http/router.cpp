@@ -6707,6 +6707,13 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         return response;
     }
 
+    // open-astro#292: the clock now comes from the client that pressed Sync
+    // Time, so ClockSource reads "client" rather than "rtc"/"none" and the UI
+    // stops asking for the button that was just pressed.
+    host_clock_.note_external_step();
+    util::log_info("System clock set to epoch " + std::to_string(epoch_seconds) + " by " + request.remote_address() +
+                   " via /management/v1/synctime");
+
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;
     response.set_body(alpaca_response);
