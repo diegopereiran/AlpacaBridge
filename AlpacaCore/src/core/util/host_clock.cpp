@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/host_clock.h>
+#include <dirent.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -31,7 +32,8 @@ std::chrono::system_clock::time_point HostClock::day_from_date_string(const char
     }
     const char* m = std::strstr(kMonths, std::string(date, 3).c_str());
     const int month = m != nullptr ? static_cast<int>((m - kMonths) / 3) + 1 : 1;
-    const int day = std::atoi(date + 4) > 0 ? std::atoi(date + 4) : 1;
+    const int parsed_day = std::atoi(date + 4);
+    const int day = (parsed_day >= 1 && parsed_day <= 31) ? parsed_day : 1;
     const int year = std::atoi(date + 7);
     if (year <= 0) {
         return std::chrono::system_clock::time_point{};
@@ -90,16 +92,25 @@ std::optional<std::chrono::system_clock::time_point> HostClock::host_rtc_time() 
 std::optional<std::chrono::system_clock::time_point> HostClock::read_host_rtc_time() {
     // A found device is immutable for the process lifetime and is cached; a
     // miss is not (an early probe before the RTC registered must not stick).
+    // Enumerated rather than guessed, so an hctosys device that is not rtc0
+    // is still found and a miss costs one opendir instead of N failed opens.
     static std::string device;
     if (device.empty()) {
-        for (int i = 0; i < 8; ++i) {
-            const std::string dev = "/sys/class/rtc/rtc" + std::to_string(i);
-            std::ifstream f(dev + "/hctosys");
-            int v = 0;
-            if (f.is_open() && (f >> v) && v == 1) {
-                device = dev;
-                break;
+        if (DIR* dir = ::opendir("/sys/class/rtc")) {
+            while (const dirent* entry = ::readdir(dir)) {
+                const std::string name = entry->d_name;
+                if (name.rfind("rtc", 0) != 0) {
+                    continue;
+                }
+                const std::string dev = "/sys/class/rtc/" + name;
+                std::ifstream f(dev + "/hctosys");
+                int v = 0;
+                if (f.is_open() && (f >> v) && v == 1) {
+                    device = dev;
+                    break;
+                }
             }
+            ::closedir(dir);
         }
     }
     if (device.empty()) {

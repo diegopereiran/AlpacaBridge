@@ -150,8 +150,15 @@ public:
     static constexpr std::chrono::seconds kRtcAgreement{5};
     // Coming back from Diverged needs the skew inside a tighter window, so a
     // clock sitting on the threshold cannot flap between "rtc" and "none" on
-    // consecutive polls.
-    static constexpr std::chrono::seconds kRtcReagreement{2};
+    // consecutive polls. Strictly above the +-1 s that survives the bias
+    // correction below, so a clock that genuinely agrees can always leave.
+    static constexpr std::chrono::seconds kRtcReagreement{3};
+    // The reading lags true RTC time one-sidedly: since_epoch truncates to the
+    // RTC's whole second (0-1 s) and the memo is up to 1 s stale (0-1 s). So
+    // now - reading carries a +0..2 s bias even for a clock in perfect
+    // agreement; half of it is subtracted before comparing, leaving +-1 s of
+    // residual uncertainty and windows that are symmetric in TRUE error.
+    static constexpr std::chrono::seconds kRtcReadLag{2};
 
     // The RTC is present and plausible but the system clock no longer agrees
     // with it: after a bypassing setter, or simply after months of NTP-less
@@ -168,10 +175,17 @@ public:
     };
 
     // One RTC observation answering both questions, so a caller that needs
-    // both cannot straddle the memo boundary and see neither.
+    // both cannot straddle the memo boundary and see neither. This is the
+    // only place the hysteresis latch is updated; has_rtc() and
+    // rtc_diverged() are thin wrappers that each perform their own
+    // evaluation, so a caller that needs both should ask once, here, as the
+    // router does.
     RtcState rtc_state(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
         const auto t = rtc_time_();
         if (!rtc_plausible(t)) {
+            // No plausible reading to judge: drop the latch, so the next one
+            // is judged under the full window rather than a stale decision.
+            rtc_diverged_.store(false, std::memory_order_relaxed);
             return RtcState::None;
         }
         const auto window = rtc_diverged_.load(std::memory_order_relaxed) ? kRtcReagreement : kRtcAgreement;
@@ -313,7 +327,7 @@ private:
         if (!t.has_value()) {
             return false;
         }
-        const auto skew = now - t.value();
+        const auto skew = (now - t.value()) - kRtcReadLag / 2;
         return skew < window && skew > -window;
     }
     // Uncached sysfs read behind host_rtc_time(); mutates a function-local
@@ -323,8 +337,10 @@ private:
 public:
     // Parse a __DATE__-shaped string ("Mmm dd yyyy") to 00:00 UTC of that day.
     // Always compiled and unit-tested, so build_time()'s fallback branch is
-    // never first exercised in the field; pure arithmetic, no timegm().
-    // Unparseable input yields 1 January of the parsed year (or 1970).
+    // never first exercised in the field; pure arithmetic, no timegm(). An
+    // unrecognised month reads as January and a day outside 1-31 as the 1st,
+    // so a malformed string can only move the floor earlier within its year;
+    // a missing string or an unparseable year yields the epoch.
     static std::chrono::system_clock::time_point day_from_date_string(const char* date);
 
 private:

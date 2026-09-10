@@ -202,8 +202,8 @@ config file). A telescope connecting while the clock is `none` logs a WARN
 correct a drifting RTC). A Sync Time press (`PUT /management/v1/synctime`)
 counts as a client step: `ClockSource` reads `client` afterwards.
 `rtc` means the kernel loaded system time from a hardware RTC at boot (the
-first of `/sys/class/rtc/rtc0` to `rtc7` whose `hctosys` reads 1; a
-present-but-unread RTC does not count), that RTC's own current reading
+`/sys/class/rtc/rtc*` device whose `hctosys` reads 1; a present-but-unread
+RTC does not count), that RTC's own current reading
 (`since_epoch`, memoised for 1 s) is not earlier than the build day (under
 `SOURCE_DATE_EPOCH`, as in a Debian package build, that is the changelog
 date, so the floor is weaker than the build itself), and the
@@ -215,8 +215,11 @@ seconds per day, so on a long-running NTP-less host the state flips from
 `rtc` to `none` after roughly two days of uptime; the telescope connect
 message then says the clock no longer agrees with the RTC, and a client
 `UTCDate` write or a Sync Time press corrects it. Returning to `rtc` needs
-the skew back inside 2 seconds, so a clock parked on the threshold does not
-alternate between the two states on consecutive polls. The RTC is judged, not the system clock:
+the skew back inside 3 seconds, so a clock parked on the threshold does not
+alternate between the two states on consecutive polls. The comparison
+subtracts the known one-sided lag of the reading (the RTC's whole-second
+counter plus the memo), so the window is symmetric in true error rather than
+in the measurement. The RTC is judged, not the system clock:
 a Pi 5's on-board RTC exists without a battery and reads 2000-01-01 after a
 power cut, while userspace may already have restored a recent system time;
 that host reads `none`. Loading an RTC is a plain clock set,

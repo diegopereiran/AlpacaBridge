@@ -191,15 +191,34 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
     CHECK_FALSE(c.has_rtc(rtc_now - seconds(30)));
     CHECK(c.rtc_diverged(rtc_now - seconds(30)));
     CHECK_FALSE(c.rtc_diverged(rtc_now));
-    CHECK(c.has_rtc(rtc_now + seconds(1)));  // inside the measurement-noise window
-    CHECK(c.has_rtc(rtc_now - seconds(1)));
+    // The reading lags true RTC time by 0-2 s (whole-second counter, plus the
+    // memo), so a clock in perfect agreement measures 0-2 s fast. Half the lag
+    // is subtracted, which is what makes the window symmetric in TRUE error:
+    // ~5 s late and ~5 s early both fall just outside it.
+    CHECK(c.has_rtc(rtc_now + seconds(1)));  // a perfectly agreeing clock, mid-lag
+    CHECK(c.has_rtc(rtc_now + seconds(2)));  // and at the stale end of the lag
+    CHECK(c.has_rtc(rtc_now + milliseconds(5900)));
+    CHECK_FALSE(c.has_rtc(rtc_now + milliseconds(6100)));  // ~5 s truly late
+    CHECK_FALSE(c.rtc_diverged(rtc_now));                  // clear the latch again
+    CHECK(c.has_rtc(rtc_now - milliseconds(3900)));
+    CHECK_FALSE(c.has_rtc(rtc_now - milliseconds(4100)));  // ~5 s truly early
+    CHECK_FALSE(c.rtc_diverged(rtc_now));
     // Hysteresis: once diverged, coming back needs the tighter window, so a
     // clock parked on the threshold cannot flap between "rtc" and "none".
-    CHECK(c.rtc_diverged(rtc_now + seconds(6)));   // latch set
-    CHECK_FALSE(c.has_rtc(rtc_now + seconds(4)));  // inside 5 s, still diverged
-    CHECK_FALSE(c.has_rtc(rtc_now + seconds(3)));
-    CHECK(c.has_rtc(rtc_now + seconds(1)));  // inside 2 s: latch clears
-    CHECK(c.has_rtc(rtc_now + seconds(4)));  // and 4 s is agreement again
+    CHECK(c.rtc_diverged(rtc_now + seconds(7)));   // latch set
+    CHECK_FALSE(c.has_rtc(rtc_now + seconds(5)));  // inside the wide window, still latched
+    CHECK_FALSE(c.has_rtc(rtc_now + seconds(4)));
+    // ...but the recovery window sits above the residual +-1 s of measurement
+    // noise, so a clock that genuinely agrees always gets out of the latch.
+    CHECK(c.has_rtc(rtc_now + milliseconds(1500)));
+    CHECK(c.has_rtc(rtc_now + seconds(5)));  // wide window again
+    // An implausible or missing reading drops the latch, so the next plausible
+    // one is judged under the full window rather than a stale decision.
+    CHECK(c.rtc_diverged(rtc_now + seconds(7)));
+    f.rtc_time = std::nullopt;
+    CHECK(c.rtc_state(rtc_now) == HostClock::RtcState::None);
+    f.rtc_time = rtc_now;
+    CHECK(c.has_rtc(rtc_now + milliseconds(5500)));  // would fail under the latched window
     // A client that agrees with the RTC changes nothing.
     CHECK(c.step_from_client(kNow + milliseconds(300), kNow).outcome == Outcome::SkippedSmall);
     CHECK(c.source(rtc_now) == "rtc");
