@@ -98,7 +98,7 @@ sudo hwclock -w                          # persist the correct time to the RTC
 timedatectl status                       # expect: System clock synchronized: yes
 ```
 
-**If the SBC has no internet at all**: use the **Sync Time** button in the AlpacaBridge web portal (`http://<sbc>:6800/` → top-right server actions) — it sets the SBC's clock from the browser's time. Or use `scripts/sync-clock.sh` from an internet-connected workstation (e.g. your laptop) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
+**If the SBC has no internet at all**: connecting a telescope from a client that sends `UTCDate` (NINA, SkySafari and PHD2 all do on connect) sets the SBC's clock by itself, as long as `sync_system_clock_from_clients` is left on; the Server Info panel's Clock row shows which source the clock currently has. To set it by hand instead, use the **Sync Time** button in the AlpacaBridge web portal (`http://<sbc>:6800/` → top-right server actions) — it sets the SBC's clock from the browser's time. Or use `scripts/sync-clock.sh` from an internet-connected workstation (e.g. your laptop) whenever you connect over SSH — it pushes the workstation's current time to the SBC (and optionally persists it to the RTC with `--rtc`):
 
 ```sh
 scripts/sync-clock.sh astro@192.168.168.1 --rtc

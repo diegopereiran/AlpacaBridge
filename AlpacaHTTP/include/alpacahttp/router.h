@@ -243,6 +243,7 @@ private:
     std::shared_ptr<std::mutex> device_connection_op_mutex(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
 
     void add_clock_fields(nlohmann::json& desc) const;
+    void warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const;
 
     // True while `device` is still the DeviceRegistry's driver for its
     // type/number. Straggler requests that fetched the shared_ptr before a
