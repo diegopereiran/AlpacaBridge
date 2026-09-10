@@ -201,6 +201,11 @@ config file). A telescope connecting while the clock is `none` logs a WARN
 (also while `rtc` if `SyncSystemClockFromClients` is off, since nothing will
 correct a drifting RTC). A Sync Time press (`PUT /management/v1/synctime`)
 counts as a client step: `ClockSource` reads `client` afterwards.
+Two footnotes: an RTC kept in local time (`timedatectl set-local-rtc 1`,
+dual-boot machines) fails the agreement check and reads `none`, which is
+the safe direction; and `rtc` is a new value on a published field, so an
+older client that switches on `ClockSource` should treat unknown values as
+"not NTP".
 `rtc` means the kernel loaded system time from a hardware RTC at boot (the
 first of `/sys/class/rtc/rtc0` to `rtc7` whose `hctosys` reads 1; a
 present-but-unread RTC does not count), that RTC's own current reading

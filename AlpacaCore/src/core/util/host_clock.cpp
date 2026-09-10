@@ -64,17 +64,20 @@ std::optional<std::chrono::system_clock::time_point> HostClock::host_rtc_time() 
 }
 
 std::optional<std::chrono::system_clock::time_point> HostClock::read_host_rtc_time() {
-    static const std::string device = [] {
+    // A found device is immutable for the process lifetime and is cached; a
+    // miss is not (an early probe before the RTC registered must not stick).
+    static std::string device;
+    if (device.empty()) {
         for (int i = 0; i < 8; ++i) {
             const std::string dev = "/sys/class/rtc/rtc" + std::to_string(i);
             std::ifstream f(dev + "/hctosys");
             int v = 0;
             if (f.is_open() && (f >> v) && v == 1) {
-                return dev;
+                device = dev;
+                break;
             }
         }
-        return std::string();
-    }();
+    }
     if (device.empty()) {
         return std::nullopt;
     }

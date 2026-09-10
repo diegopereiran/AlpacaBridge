@@ -233,7 +233,15 @@ TEST_CASE("HostClock - default construction queries the real kernel without step
     CHECK((s == true || s == false));
     CHECK((real.source() == "ntp" || real.source() == "rtc" || real.source() == "none"));
     const auto rtc = HostClock::host_rtc_time();
-    CHECK(real.has_rtc() == (rtc.has_value() && *rtc >= HostClock::build_time()));
+    // Only the implications: the agreement clause depends on this host's
+    // RTC (a local-time RTC is hours off UTC and reads "none", by design).
+    if (!rtc.has_value()) {
+        CHECK_FALSE(real.has_rtc());
+    }
+    if (real.has_rtc()) {
+        CHECK(rtc.has_value());
+        CHECK(*rtc >= HostClock::build_time());
+    }
     real.set_enabled(false);  // never call clock_settime from a unit test
     CHECK(real.step_from_client(kNow, kNow).outcome == Outcome::SkippedDisabled);
 }

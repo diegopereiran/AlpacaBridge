@@ -107,11 +107,11 @@ public:
         if (synchronized()) {
             return "ntp";
         }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (stepped_) {
-                return "client";
-            }
+        // One lock across the stepped_ check and the RTC read, so a step
+        // landing in between cannot label a just-become-"client" clock "rtc".
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stepped_) {
+            return "client";
         }
         return has_rtc() ? "rtc" : "none";
     }

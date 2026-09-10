@@ -2280,8 +2280,10 @@ Response Router::dispatch_device_method(
                             (rtc ? " connecting on the hardware RTC's time (no NTP, not yet set by a client); "
                                  : " connecting with an undisciplined host clock (no NTP, not yet set by a client); ") +
                             "goto/LST math runs on it until a client writes UTCDate" +
-                            (host_clock_.enabled() ? ""
-                                                   : " (syncSystemClockFromClients is off: it will not be corrected)");
+                            (host_clock_.enabled()
+                                 ? ""
+                                 : " (syncSystemClockFromClients is off: clients will not correct it; "
+                                   "use the web UI's Sync Time)");
                         // open-astro#292: an RTC-backed clock is usually right to
                         // seconds; that is information, not a warning -- unless
                         // nothing is allowed to correct it, which is the case

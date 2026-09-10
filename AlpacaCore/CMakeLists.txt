@@ -114,7 +114,10 @@ target_include_directories(alpacacore PUBLIC
 # reproducible package build gets a reproducible value and no __DATE__ is
 # compiled in (dpkg's -Wdate-time stays quiet).
 string(TIMESTAMP ALPACACORE_BUILD_EPOCH "%s" UTC)
-target_compile_definitions(alpacacore PRIVATE ALPACACORE_BUILD_EPOCH=${ALPACACORE_BUILD_EPOCH})
+# Scoped to the one file that reads it, so a re-configure (new timestamp)
+# does not recompile the whole library.
+set_source_files_properties(src/core/util/host_clock.cpp
+    PROPERTIES COMPILE_DEFINITIONS ALPACACORE_BUILD_EPOCH=${ALPACACORE_BUILD_EPOCH})
 
 # Create namespace alias for consistent target naming
 add_library(AlpacaCore::alpacacore ALIAS alpacacore)
