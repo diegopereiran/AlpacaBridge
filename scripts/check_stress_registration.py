@@ -63,7 +63,6 @@ ALLOWLIST = {
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
     ("skywatcher", "telescope"),
-    ("touptek", "focuser"),
     ("wandererastro", "covercalibrator"),
     ("wandererastro", "filterwheel"),
     ("wandererastro", "rotator"),
