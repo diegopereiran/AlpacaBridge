@@ -747,7 +747,7 @@ TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher]
     // rig showed the direct connection reverting to a generic name after
     // every disconnect while the synscan driver kept its model (2026-09-10).
     driver->set_connected(false);
-    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (Direct USB / EQDIR)");
     firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.39");
