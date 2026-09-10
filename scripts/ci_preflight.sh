@@ -215,6 +215,15 @@ else
   record FAIL "stress-test registration"
 fi
 
+# --- gate 2c: ConformU report validation ------------------------------------
+
+section "ConformU report validation"
+if python3 scripts/check_conformu_reports.py "${MERGE_BASE}"; then
+  record PASS "ConformU report validation"
+else
+  record FAIL "ConformU report validation"
+fi
+
 # --- gate 3: build + unit tests, vendor-neutral ----------------------------
 
 section "Build + tests (vendors OFF)"
