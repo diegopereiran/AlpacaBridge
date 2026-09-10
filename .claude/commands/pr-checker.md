@@ -110,6 +110,7 @@ while :; do
   DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.html_url)"' <<<"$RUNS")
   RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
   PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
+  SKIPPED=$(jq -r '[.[] | select(.conclusion == "skipped")] | length' <<<"$RUNS")
   # REST, not `gh pr view --json comments`: only REST exposes updated_at. The author
   # pattern is the workflow's own assert-step pattern. `select(. != null)` matters: with
   # no verdict yet, `last` is null and would otherwise print the literal "null".
@@ -134,6 +135,11 @@ while :; do
         echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
     esac
   fi
+  # Only skipped runs and nothing pending: the actor gate skipped the job (fork push
+  # without the label, or an author outside allowed_non_write_users). Step 1.1/1.2.
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ]; then
+    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (Step 1)." >&2; exit 3
+  fi
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
 done
@@ -141,9 +147,9 @@ echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (revie
 ```
 
 Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `BUDGET=0`, just
-"not yet"). `2` = the action skipped a workflow-editing PR (hard stop). `3` = the newest review
-run for this head finished (failed, or succeeded without publishing a verdict); the message
-carries the conclusion and run URL. Every
+"not yet"). `2` = the action skipped a workflow-editing PR (hard stop). `3` = no run will
+produce a verdict for this head (the newest run failed, succeeded without publishing one, or
+the job was skipped); the message says which and carries the run URL where there is one. Every
 non-zero exit prints nothing on stdout, so a chained `poll && merge` never reaches the merge.
 `date -d` is GNU; the skills run on the Linux dev VM.
 
@@ -310,7 +316,7 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   verdict; a refresh verdict can still carry new Defects, so the merge half gates on the
   printed verdict's **last** line (the prompt defines the sign-off as the last line, and a
   review can quote either string in its body, as reviews of this very rubric do):
-  `poll > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && gh pr merge <N> --merge`.
+  `V=$(mktemp); poll > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && gh pr merge <N> --merge`.
 - **A Defect you disagree with** is still fixed or wired into the skill/docs when there is any
   reasonable change that satisfies it. Only a Defect that would require a wrong or unsafe change
   becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.

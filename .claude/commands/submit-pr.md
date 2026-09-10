@@ -267,7 +267,7 @@ EOF
 
 After submission, display the PR URL to the user.
 
-## Step 8 — Watch for the review bot (poll every minute)
+## Step 8 — Watch for the review bot (poll every three minutes)
 
 The bot (`.github/workflows/claude-review.yml`) runs automatically on every push to a **same-repo**
 PR branch. On a **fork** PR it runs only once a maintainer applies the `safe-to-review` label
@@ -306,67 +306,64 @@ between the push and starting the poll). "For the current head" means: the newes
 head SHA that was not cancelled or skipped has completed (a failed run counts: the assert step can
 fail after the verdict was posted), none is still queued or running, and the newest bot verdict
 was updated after that run started. Commit dates are not used: a commit's committer date is when it
-was made locally, so a verdict on the previous head can be newer than it. If the check passes, use
-that verdict and skip the poll; otherwise record the baseline count of bot comments and start a
-background poll that exits when a new one arrives (do NOT foreground-sleep; run this with
-`run_in_background`):
+was made locally, so a verdict on the previous head can be newer than it. The block below applies that
+rule before its first sleep, so a verdict that is already there returns at once; otherwise it
+re-checks every three minutes (`TICK`), within a 30-minute budget (do NOT foreground-sleep; run
+it with `run_in_background`). It is the same block as `/pr-checker` Step 2:
 
 ```bash
-PR=<number>
-# Verdict already posted for this head? Bind to the review check-run on the head SHA
-# (filter=all so a later cancelled attempt cannot hide the successful one).
-SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
-RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
-# Newest finished run that was not cancelled or skipped. A failed run still counts: the
-# assert step can fail after the post step published the verdict.
-DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.html_url)"' <<<"$RUNS")
-RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
-PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
-LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add // [] | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
-if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ -n "$LAST" ] \
-   && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$RUN_STARTED" +%s)" ]; then
-  printf '%s\n' "${LAST#* }"; exit 0
-fi
-# Finished, nothing pending, no verdict for this head: a count poll would wait 30 minutes
-# for nothing. Exit non-zero so nothing downstream mistakes silence for a verdict.
-if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ]; then
-  case "$RUN_STATE" in
-    success*)
-      # The PR edits the review workflow and the action skipped it (the assert step passes it).
-      if gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
-        echo "NO VERDICT for head $SHA: this PR edits the review workflow and the action skipped it. Review it by eye." >&2; exit 2
-      fi
-      # Green run, ordinary PR, no verdict: the agent wrote its verdict to chat instead of
-      # review-comment.md (the PR #209 failure). Nothing re-runs it; report, do not wait.
-      echo "REVIEW RUN succeeded for head $SHA but published no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
-    *)
-      echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
-  esac
-fi
-# Count only genuine review comments: the bot login AND a verdict line, so an
-# unrelated comment from a same-named account can't satisfy the poll. The
-# author pattern is the workflow's own assert-step pattern; the post step
-# comments with the workflow token, so the login is github-actions (REST
-# reports github-actions[bot]) and a filter on "claude" alone never matches.
-FILTER='[.comments[] | select((.author.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))]'
-BASE=$(gh pr view "$PR" --json comments --jq "$FILTER | length")
-DEADLINE=$(( $(date +%s) + 1800 ))   # 30-min bailout: don't poll forever on a broken workflow
-while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  sleep 60
-  N=$(gh pr view "$PR" --json comments --jq "$FILTER | length")
-  if [ "$N" -gt "$BASE" ]; then
-    gh pr view "$PR" --json comments --jq "$FILTER | last | .body"
-    exit 0
+PR=<number>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
+while :; do
+  # Bind the verdict to the review check-run on the head SHA (filter=all so a later
+  # cancelled attempt cannot hide the finished one). Everything is fetched with
+  # --paginate: unpaginated, both endpoints return only the 30 oldest items.
+  SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
+  RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
+  # Newest finished run that was not cancelled or skipped. A failed run still counts:
+  # the assert step can fail after the post step published the verdict, and nothing
+  # re-runs a failed run on its own, so it must be reported, not waited out.
+  DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.html_url)"' <<<"$RUNS")
+  RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
+  PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
+  SKIPPED=$(jq -r '[.[] | select(.conclusion == "skipped")] | length' <<<"$RUNS")
+  # REST, not `gh pr view --json comments`: only REST exposes updated_at. The author
+  # pattern is the workflow's own assert-step pattern. `select(. != null)` matters: with
+  # no verdict yet, `last` is null and would otherwise print the literal "null".
+  LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add // [] | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ -n "$LAST" ] \
+     && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$RUN_STARTED" +%s)" ]; then
+    printf '%s\n' "${LAST#* }"; exit 0
   fi
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ]; then
+    # Finished, nothing pending, no verdict for this head. Never wait 30 minutes for it.
+    case "$RUN_STATE" in
+      success*)
+        # The PR edits the review workflow and the action skipped it (the assert step
+        # passes it). Hand back for eyeball review; this is a hard stop, never a merge.
+        if gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
+          echo "NO VERDICT for head $SHA: this PR edits the review workflow and the action skipped it. Review it by eye." >&2; exit 2
+        fi
+        # Green run, ordinary PR, no verdict: the agent wrote its verdict to chat instead of
+        # review-comment.md (the PR #209 failure). Nothing re-runs it; report, do not wait.
+        echo "REVIEW RUN succeeded for head $SHA but published no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
+      *)
+        echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
+    esac
+  fi
+  # Only skipped runs and nothing pending: the actor gate skipped the job (fork push
+  # without the label, or an author outside allowed_non_write_users). see the fork-label rule above.
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ]; then
+    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (see above)." >&2; exit 3
+  fi
+  [ "$(date +%s)" -ge "$DEADLINE" ] && break
+  sleep "$TICK"
 done
-echo "TIMEOUT: no review-bot comment within 30 minutes — check the claude-review workflow run" >&2
-exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
 
-Exit `2` (the action skipped a workflow-editing PR) and exit `3` (the newest review run for
-this head failed, or succeeded without publishing a verdict; the message carries the conclusion
-and run URL) both mean there is no verdict
-to act on: tell the user, and for exit `3` read the run log first. If the poll times out, surface
+Exit `2` (the action skipped a workflow-editing PR) and exit `3` (no run will produce a
+verdict: the newest run failed, succeeded without publishing one, or the job was skipped) both
+mean there is no verdict to act on: tell the user, and for exit `3` read the run log first. If the poll times out, surface
 the stall to the user and check the workflow (`gh run list --workflow=claude-review.yml --limit 3`)
 instead of restarting the loop blindly. `date -d` is GNU; the skills run on the Linux dev VM.
 
