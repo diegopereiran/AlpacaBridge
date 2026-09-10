@@ -27,6 +27,7 @@ namespace {
 struct Fake {
     bool synchronized = false;
     bool set_ok = true;
+    bool rtc = false;  // the kernel loaded the clock from a plausible RTC at boot
     std::vector<system_clock::time_point> sets;
 
     HostClock clock() {
@@ -37,7 +38,8 @@ struct Fake {
                                  err = "EPERM";
                              }
                              return set_ok;
-                         });
+                         },
+                         [this] { return rtc; });
     }
 };
 
@@ -136,6 +138,37 @@ TEST_CASE("HostClock - sanity window and small deltas", "[util][hostclock][unit]
     CHECK(f.sets.size() == 3);
 }
 
+TEST_CASE("HostClock - a refused step latches, so callers know the clock is uncorrectable", "[util][hostclock][unit]") {
+    // Without CAP_SYS_TIME every step is refused, so no client will ever fix
+    // this clock. enabled() alone cannot tell a caller that (open-astro#292:
+    // the connect-time line must stay a WARN in that state).
+    Fake f;
+    f.rtc = true;
+    auto c = f.clock();
+    CHECK_FALSE(c.step_ever_failed());
+    f.set_ok = false;
+    CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Failed);
+    CHECK(c.step_ever_failed());
+    CHECK(c.enabled());  // the policy is still on; the kernel is the problem
+    // It stays latched even once the kernel starts accepting: the operator
+    // needs to know the host was refused at least once this session.
+    f.set_ok = true;
+    CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Stepped);
+    CHECK(c.step_ever_failed());
+    // A skipped step never latches it.
+    Fake g;
+    auto d = g.clock();
+    CHECK(d.step_from_client(kNow + milliseconds(200), kNow).outcome == Outcome::SkippedSmall);
+    CHECK_FALSE(d.step_ever_failed());
+    // A path that sets the clock itself (the synctime endpoint) reports its own
+    // refusal the same way, so an operator who only presses Sync Time on a host
+    // without CAP_SYS_TIME still trips the latch.
+    CHECK_FALSE(d.stepped_by_client());
+    d.mark_step_failed();
+    CHECK(d.step_ever_failed());
+    CHECK_FALSE(d.stepped_by_client());  // a refusal is not a step
+}
+
 TEST_CASE("HostClock - a refused clock_settime is reported, not thrown", "[util][hostclock][unit]") {
     Fake f;
     f.set_ok = false;
@@ -147,6 +180,69 @@ TEST_CASE("HostClock - a refused clock_settime is reported, not thrown", "[util]
     CHECK_FALSE(c.stepped_by_client());
     CHECK(c.source() == "none");
     CHECK(f.sets.size() == 1);
+}
+
+TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is unchanged (#292)",
+          "[util][hostclock][unit]") {
+    Fake f;
+    f.rtc = true;
+    auto c = f.clock();
+    // Booted from the RTC: the kernel still reports the clock undisciplined
+    // (loading an RTC is a plain clock set), but the state is not "none".
+    CHECK_FALSE(c.synchronized());
+    CHECK(c.has_rtc());
+    CHECK(c.source() == "rtc");
+    // The label is about provenance only: it never changes the stepping rule,
+    // so a client more than a second off still corrects the clock, and the
+    // source then becomes "client" -- that IS where the time came from.
+    CHECK(c.step_from_client(kNow + milliseconds(300), kNow).outcome == Outcome::SkippedSmall);
+    CHECK(c.source() == "rtc");
+    CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Stepped);
+    CHECK(f.sets.size() == 1);
+    CHECK(c.source() == "client");
+    // NTP outranks both.
+    f.synchronized = true;
+    CHECK(c.source() == "ntp");
+    // No RTC, and NTP having taken over already forgot the client step (that
+    // rule comes from the base branch), so this reads "none".
+    f.synchronized = false;
+    f.rtc = false;
+    CHECK_FALSE(c.has_rtc());
+    CHECK(c.source() == "none");
+    Fake g;
+    CHECK(g.clock().source() == "none");
+    // The two-argument constructor means "no RTC probe": never "rtc".
+    HostClock no_probe([] { return false; }, [](system_clock::time_point, std::string&) { return true; });
+    CHECK_FALSE(no_probe.has_rtc());
+    CHECK(no_probe.source() == "none");
+}
+
+TEST_CASE("HostClock - an external clock set (synctime endpoint) is recorded as a client step",
+          "[util][hostclock][unit]") {
+    Fake f;
+    f.rtc = true;
+    auto c = f.clock();
+    CHECK(c.source() == "rtc");
+    CHECK_FALSE(c.stepped_by_client());
+    c.mark_stepped();
+    CHECK(c.stepped_by_client());
+    CHECK(c.source() == "client");
+    CHECK(f.sets.empty());  // nothing was set through this object
+    // NTP taking over still clears it, and the RTC label returns underneath.
+    f.synchronized = true;
+    CHECK(c.source() == "ntp");
+    f.synchronized = false;
+    CHECK(c.source() == "rtc");
+}
+
+TEST_CASE("HostClock - the real kernel RTC probe is callable and self-consistent", "[util][hostclock][unit]") {
+    HostClock real;
+    const bool probe = HostClock::host_booted_from_rtc();
+    CHECK(real.has_rtc() == probe);
+    CHECK(HostClock::host_booted_from_rtc() == probe);  // stable across calls
+    if (!real.synchronized() && !real.stepped_by_client()) {
+        CHECK(real.source() == (probe ? "rtc" : "none"));
+    }
 }
 
 TEST_CASE("HostClock - outcome names are stable log text", "[util][hostclock][unit]") {

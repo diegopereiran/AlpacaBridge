@@ -1602,19 +1602,45 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
         host_clock_.stepped_by_client()) {
         return;
     }
-    util::log_warning("Telescope " + std::to_string(device.get_device_number()) +
-                      " connecting with an undisciplined host clock (no NTP, not yet set by a client); goto/LST math "
-                      "runs on it until a client writes UTCDate" +
-                      (host_clock_.enabled() ? ""
-                                             : " (syncSystemClockFromClients is off: it will not be corrected; use "
-                                               "the web UI's Sync Time)"));
+    // open-astro#292: a clock the kernel loaded from a hardware RTC at boot is
+    // usually right to seconds, so it is INFO -- but still a WARN when nothing
+    // is allowed to correct it.
+    // has_rtc() reads sysfs, which is an I2C transaction on a bus-attached RTC,
+    // and this sits on the connect initiator AGENTS.md times against the 1 s
+    // STANDARD target. Bounded: the probe settles after one success and is
+    // rate-limited to once per 30 s while no device is found.
+    const bool rtc = host_clock_.has_rtc();
+    // enabled() alone does not mean "a client will correct it": without
+    // CAP_SYS_TIME every step is refused and the clock is never corrected at
+    // all, which is the one state that must not be quiet at connect.
+    // A refused step is checked before the opt-out: Sync Time is the same
+    // clock_settime in this process, so once the kernel has refused one, that
+    // button is dead too and must not be recommended by either branch.
+    const bool refused = host_clock_.step_ever_failed();
+    const bool correctable = host_clock_.enabled() && !refused;
+    const std::string msg =
+        "Telescope " + std::to_string(device.get_device_number()) +
+        (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's accuracy is unverified, nothing has "
+               "checked it since it was last set)"
+             : " connecting with an undisciplined host clock (no NTP, not yet set by a client)") +
+        (correctable ? "; goto/LST math runs on it until a client writes UTCDate"
+         : refused   ? "; goto/LST math runs on it and nothing in this process can correct it (setting the clock was "
+                       "refused: no CAP_SYS_TIME, which the packaged systemd unit grants). Set the clock outside the "
+                       "service, e.g. scripts/sync-clock.sh over SSH"
+                   : "; goto/LST math runs on it, and syncSystemClockFromClients is off so no client will correct it. "
+                     "Use the web UI's Sync Time");
+    if (rtc && correctable) {
+        util::log_info(msg);
+    } else {
+        util::log_warning(msg);
+    }
 }
 
 // open-astro#289: clock state next to the server identity so the web UI and
 // clients can see whether pointing math is running on a trusted clock.
 void Router::add_clock_fields(nlohmann::json& desc) const {
     desc["ClockSynchronized"] = host_clock_.synchronized();
-    desc["ClockSource"] = host_clock_.source();  // "ntp" | "client" | "none"
+    desc["ClockSource"] = host_clock_.source();  // "ntp" | "client" | "rtc" | "none"
     desc["SyncSystemClockFromClients"] = host_clock_.enabled();
 }
 
@@ -6699,6 +6725,10 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     ts.tv_sec = static_cast<time_t>(epoch_seconds);
     ts.tv_nsec = 0;
     if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
+        // open-astro#292: an operator who only ever presses Sync Time would
+        // otherwise never trip the latch, and the connect line would keep
+        // claiming the clock is about to be corrected.
+        host_clock_.mark_step_failed();
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
             std::string("clock_settime failed (requires CAP_SYS_TIME): ") + alpacacore::util::errno_string(errno));
