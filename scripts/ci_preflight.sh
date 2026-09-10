@@ -209,7 +209,7 @@ fi
 # --- gate 2b: [stress] concurrency-suite registration ----------------------
 
 section "Stress-test registration"
-if python3 scripts/check_stress_registration.py; then
+if python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py; then
   record PASS "stress-test registration"
 else
   record FAIL "stress-test registration"
