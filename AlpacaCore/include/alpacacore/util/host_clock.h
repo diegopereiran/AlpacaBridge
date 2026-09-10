@@ -15,6 +15,7 @@
 #include <sys/timex.h>
 #include <time.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -133,15 +134,6 @@ public:
     // defaults (1970 and 2000-01-01) and before any real deployment.
     static constexpr std::int64_t kMinPlausibleEpoch = 1577836800;  // 2020-01-01T00:00:00Z
 
-    // The clock was set by a path that bypasses step_from_client(): the
-    // /management/v1/synctime endpoint behind the web UI's Sync Time button.
-    // Without this the source would keep reading "rtc" (or "none") for a time
-    // that came from a browser (open-astro#292).
-    void note_external_step() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stepped_ = true;
-    }
-
     bool stepped_by_client() const {
         if (synchronized()) {
             return false;
@@ -190,6 +182,17 @@ public:
         }
         r.outcome = Outcome::Stepped;
         return r;
+    }
+
+    /**
+     * Something other than a UTCDate write set the system clock through
+     * this process (the web UI's Sync Time button). clock_settime does not
+     * clear STA_UNSYNC, so without this the readout would keep saying the
+     * clock was never set and the connect-time warning would keep firing.
+     */
+    void mark_stepped() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stepped_ = true;
     }
 
     static const char* outcome_name(Outcome o) {

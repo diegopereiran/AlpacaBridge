@@ -1516,4 +1516,24 @@ TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and repo
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 review)", "[skywatcher][unit]") {
+    // The offset is a delta against the host clock at write time. When the
+    // host clock is corrected afterwards (Sync Time, NTP, `date`), applying
+    // the stale delta on top of it would move every LST-derived value by the
+    // old error, so utc_now_locked() drops it. The rule is pure: the system
+    // clock and the steady clock must have advanced by the same amount.
+    using namespace std::chrono;
+    using alpacacore::vendor::skywatcher::detail::host_clock_stepped;
+    // Both clocks advanced together: no step.
+    CHECK_FALSE(host_clock_stepped(seconds(90), seconds(90)));
+    CHECK_FALSE(host_clock_stepped(milliseconds(90400), milliseconds(90000)));
+    // Host clock jumped 20 minutes forward (Sync Time on a slow clock) or
+    // 20 minutes back while the steady clock advanced 90 s: stepped.
+    CHECK(host_clock_stepped(seconds(90) + minutes(20), seconds(90)));
+    CHECK(host_clock_stepped(seconds(90) - minutes(20), seconds(90)));
+    // Right at the tolerance edge: 1 s drift is not a step, 1.5 s is.
+    CHECK_FALSE(host_clock_stepped(seconds(91), seconds(90)));
+    CHECK(host_clock_stepped(milliseconds(91500), seconds(90)));
+}
+
 #endif  // _WIN32

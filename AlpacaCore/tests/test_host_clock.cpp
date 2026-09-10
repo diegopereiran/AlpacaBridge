@@ -193,7 +193,7 @@ TEST_CASE("HostClock - an external clock set (synctime endpoint) is recorded as 
     auto c = f.clock();
     CHECK(c.source() == "rtc");
     CHECK_FALSE(c.stepped_by_client());
-    c.note_external_step();
+    c.mark_stepped();
     CHECK(c.stepped_by_client());
     CHECK(c.source() == "client");
     CHECK(f.sets.empty());  // nothing was set through this object
@@ -233,4 +233,15 @@ TEST_CASE("HostClock - default construction queries the real kernel without step
     CHECK((real.source() == "ntp" || real.source() == "none"));
     real.set_enabled(false);  // never call clock_settime from a unit test
     CHECK(real.step_from_client(kNow, kNow).outcome == Outcome::SkippedDisabled);
+}
+
+TEST_CASE("HostClock - a manual sync marks the clock client-stepped", "[util][hostclock][unit]") {
+    // The web UI's Sync Time button sets the clock outside step_from_client;
+    // clock_settime leaves STA_UNSYNC set, so the readout must be told.
+    alpacacore::util::HostClock c([] { return false; },
+                                  [](std::chrono::system_clock::time_point, std::string&) { return true; });
+    CHECK(c.source() == "none");
+    c.mark_stepped();
+    CHECK(c.source() == "client");
+    CHECK(c.stepped_by_client());
 }

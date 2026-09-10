@@ -1593,6 +1593,35 @@ nlohmann::json Router::build_description_payload() const {
     return desc;
 }
 
+// open-astro#289: a telescope driver about to compute LST from an
+// undisciplined host clock. The first client UTCDate write will fix it; say so
+// in case none comes. Called from both connect paths (legacy PUT connected and
+// the ITelescopeV4 PUT connect initiator).
+void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const {
+    if (device.get_device_type() != alpacacore::DeviceType::Telescope || host_clock_.synchronized() ||
+        host_clock_.stepped_by_client()) {
+        return;
+    }
+    // open-astro#292: a clock the kernel loaded from a hardware RTC at boot is
+    // usually right to seconds, so it is INFO -- but still a WARN when nothing
+    // is allowed to correct it.
+    const bool rtc = host_clock_.has_rtc();
+    const std::string msg =
+        "Telescope " + std::to_string(device.get_device_number()) +
+        (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's accuracy is unverified, nothing has "
+               "checked it since it was last set)"
+             : " connecting with an undisciplined host clock (no NTP, not yet set by a client)") +
+        "; goto/LST math runs on it until a client writes UTCDate" +
+        (host_clock_.enabled() ? ""
+                               : " (syncSystemClockFromClients is off: clients will not correct it; use the web UI's "
+                                 "Sync Time)");
+    if (rtc && host_clock_.enabled()) {
+        util::log_info(msg);
+    } else {
+        util::log_warning(msg);
+    }
+}
+
 // open-astro#289: clock state next to the server identity so the web UI and
 // clients can see whether pointing math is running on a trusted clock.
 void Router::add_clock_fields(nlohmann::json& desc) const {
@@ -2269,30 +2298,7 @@ Response Router::dispatch_device_method(
                     // synchronously.  The async path + poll lets us return as
                     // soon as the handshake finishes without hard-blocking the
                     // full worst-case duration.
-                    // open-astro#289: a telescope driver about to compute LST
-                    // from an undisciplined host clock. The first client
-                    // UTCDate write will fix it; say so in case none comes.
-                    if (device->get_device_type() == alpacacore::DeviceType::Telescope && !host_clock_.synchronized() &&
-                        !host_clock_.stepped_by_client()) {
-                        // open-astro#292: a clock loaded from a hardware RTC at
-                        // boot is usually right to seconds, so it is INFO -- but
-                        // still a WARN when nothing is allowed to correct it.
-                        const bool rtc = host_clock_.has_rtc();
-                        const std::string msg =
-                            "Telescope " + std::to_string(device->get_device_number()) +
-                            (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's accuracy is "
-                                   "unverified, nothing has checked it since it was last set)"
-                                 : " connecting with an undisciplined host clock (no NTP, not yet set by a client)") +
-                            "; goto/LST math runs on it until a client writes UTCDate" +
-                            (host_clock_.enabled() ? ""
-                                                   : " (syncSystemClockFromClients is off: clients will not correct "
-                                                     "it; use the web UI's Sync Time)");
-                        if (rtc && host_clock_.enabled()) {
-                            util::log_info(msg);
-                        } else {
-                            util::log_warning(msg);
-                        }
-                    }
+                    warn_if_clock_undisciplined(*device);
                     device->connect();
                     auto deadline = std::chrono::steady_clock::now()
                                   + std::chrono::seconds(8);
@@ -2561,6 +2567,10 @@ Response Router::dispatch_device_method(
                 // get_connecting() first (see PUT connected): a mid-task
                 // connect goes to the driver, whose base class reconciles it.
                 if (device->get_connecting() || !device->get_connected()) {
+                    // Same clock check as PUT connected: Platform 7 clients
+                    // (NINA 3.x) prefer this path, so the warning has to cover
+                    // both or it never fires for them (open-astro#289).
+                    warn_if_clock_undisciplined(*device);
                     device->connect();
                 }
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
@@ -6707,12 +6717,9 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         response.set_body(alpaca_response);
         return response;
     }
-
-    // open-astro#292: the clock now came from the client that pressed Sync
-    // Time, so ClockSource must read "client" rather than "rtc"/"none".
-    host_clock_.note_external_step();
-    util::log_info("System clock set to epoch " + std::to_string(epoch_seconds) + " by " + request.remote_address() +
-                   " via /management/v1/synctime");
+    // The clock is now client-set for the management readout and the
+    // connect-time warning; clock_settime alone leaves STA_UNSYNC set.
+    host_clock_.mark_stepped();
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;
