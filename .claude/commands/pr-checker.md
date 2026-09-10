@@ -126,7 +126,10 @@ while :; do
         # passes it). Hand back for eyeball review; this is a hard stop, never a merge.
         if gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
           echo "NO VERDICT for head $SHA: this PR edits the review workflow and the action skipped it. Hard stop: review it by eye." >&2; exit 2
-        fi ;;
+        fi
+        # Green run, ordinary PR, no verdict: the agent wrote its verdict to chat instead of
+        # review-comment.md (the PR #209 failure). Nothing re-runs it; report, do not wait.
+        echo "REVIEW RUN succeeded for head $SHA but published no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
       *)
         echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
     esac
@@ -139,7 +142,8 @@ echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (revie
 
 Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `BUDGET=0`, just
 "not yet"). `2` = the action skipped a workflow-editing PR (hard stop). `3` = the newest review
-run for this head failed with no verdict; the message carries the conclusion and run URL. Every
+run for this head finished (failed, or succeeded without publishing a verdict); the message
+carries the conclusion and run URL. Every
 non-zero exit prints nothing on stdout, so a chained `poll && merge` never reaches the merge.
 `date -d` is GNU; the skills run on the Linux dev VM.
 
@@ -304,7 +308,9 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   Never end the turn with "I'll push when pre-flight finishes"; chain it. Every poll exit
   other than a verdict is non-zero (Step 2), so `poll && merge` cannot merge on an empty
   verdict; a refresh verdict can still carry new Defects, so the merge half gates on the
-  printed verdict: `poll > "$V" && grep -q '✅ Approved' "$V" && gh pr merge <N> --merge`.
+  printed verdict's **last** line (the prompt defines the sign-off as the last line, and a
+  review can quote either string in its body, as reviews of this very rubric do):
+  `poll > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && gh pr merge <N> --merge`.
 - **A Defect you disagree with** is still fixed or wired into the skill/docs when there is any
   reasonable change that satisfies it. Only a Defect that would require a wrong or unsafe change
   becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.

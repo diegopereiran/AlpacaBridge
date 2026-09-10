@@ -47,8 +47,13 @@ jobs:
       # the fork's tree. A PR that commits that file would have its text posted
       # as the bot whenever the action does not run (actor check, auth error),
       # and both skills merge on a bot "Approved". Remove it before the action.
-      - name: Drop any review-comment.md the PR ships
-        run: rm -rf review-comment.md
+      # Project settings are the other fork-controlled input the harness reads:
+      # .claude/settings.json hooks run shell commands inside this job, which
+      # holds the OAuth token. The repo ships no settings file, so nothing is
+      # lost by removing whatever a PR adds. Commands and skills stay: the
+      # review needs to read them, and they run nothing on their own.
+      - name: Drop files the PR ships that the harness would execute or publish
+        run: rm -rf review-comment.md .claude/settings.json .claude/settings.local.json
 
       - uses: anthropics/claude-code-action@d75b94d5ad426cb8546e6628b6f5f19b84e5cce1  # v1
         env:
@@ -147,6 +152,9 @@ jobs:
         run: |
           # Only the bot's comments count, and only ones touched during this
           # run, so a human "Approved" or a stale comment cannot satisfy it.
+          # The emoji forms are what the skills' polls accept; the action's own
+          # tracking comment can contain the bare words when the agent puts its
+          # verdict in chat instead of the file, and must not pass this gate.
           # The step runs under bash -e; a failed lookup must not abort before
           # the exemption below can run, so the failure reads as "no comment".
           started="$(gh run view "$GITHUB_RUN_ID" --repo "${{ github.repository }}" --json createdAt --jq .createdAt)" || started=""
@@ -154,7 +162,7 @@ jobs:
               --paginate \
               | jq -r --arg since "$started" \
                 '.[] | select(.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) | select(.updated_at >= $since) | .body' \
-              | grep -qE "Approved|Issues found"; then
+              | grep -qE "✅ Approved|⚠️ Issues found"; then
             echo "Review comment found."
             exit 0
           fi

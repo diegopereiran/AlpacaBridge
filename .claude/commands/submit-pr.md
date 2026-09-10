@@ -302,9 +302,10 @@ workflow's own step as `github-actions`. It ends in a verdict line: `✅ Approve
 review), watch for the next bot comment.
 
 First check whether a verdict for the current head is already there (a fast review, or any delay
-between the push and starting the poll). "For the current head" means: a `review` check-run on the
-head SHA completed with success, none is still queued or running, and the newest bot verdict was
-updated after that run started. Commit dates are not used: a commit's committer date is when it
+between the push and starting the poll). "For the current head" means: the newest `review` check-run on the
+head SHA that was not cancelled or skipped has completed (a failed run counts: the assert step can
+fail after the verdict was posted), none is still queued or running, and the newest bot verdict
+was updated after that run started. Commit dates are not used: a commit's committer date is when it
 was made locally, so a verdict on the previous head can be newer than it. If the check passes, use
 that verdict and skip the poll; otherwise record the baseline count of bot comments and start a
 background poll that exits when a new one arrives (do NOT foreground-sleep; run this with
@@ -334,7 +335,10 @@ if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ]; then
       # The PR edits the review workflow and the action skipped it (the assert step passes it).
       if gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
         echo "NO VERDICT for head $SHA: this PR edits the review workflow and the action skipped it. Review it by eye." >&2; exit 2
-      fi ;;
+      fi
+      # Green run, ordinary PR, no verdict: the agent wrote its verdict to chat instead of
+      # review-comment.md (the PR #209 failure). Nothing re-runs it; report, do not wait.
+      echo "REVIEW RUN succeeded for head $SHA but published no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
     *)
       echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
   esac
@@ -360,7 +364,8 @@ exit 1
 ```
 
 Exit `2` (the action skipped a workflow-editing PR) and exit `3` (the newest review run for
-this head failed; the message carries the conclusion and run URL) both mean there is no verdict
+this head failed, or succeeded without publishing a verdict; the message carries the conclusion
+and run URL) both mean there is no verdict
 to act on: tell the user, and for exit `3` read the run log first. If the poll times out, surface
 the stall to the user and check the workflow (`gh run list --workflow=claude-review.yml --limit 3`)
 instead of restarting the loop blindly. `date -d` is GNU; the skills run on the Linux dev VM.
