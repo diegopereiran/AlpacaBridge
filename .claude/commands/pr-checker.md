@@ -156,7 +156,7 @@ while :; do
   # Only cancelled runs: a superseding trigger never came. A relabel issued mid-poll
   # cancels the in-flight run a few seconds before its replacement appears, so this
   # state has to hold on two consecutive looks before it is reported.
-  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" = 0 ] && [ "$CANCELLED" != 0 ]; then
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$CANCELLED" != 0 ]; then
     if [ "${CANCELLED_SEEN:-0}" = 1 ]; then
       echo "REVIEW CANCELLED for head $SHA and nothing replaced it: re-trigger with the relabel trick." >&2; exit 3
     fi
