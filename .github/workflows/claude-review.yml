@@ -76,8 +76,8 @@ jobs:
               without the change (workflow YAML, docs and CHANGELOG have no
               test surface; do not report this for them).
             - A security hole or a leaked secret in the changed lines.
-            - A test, CI gate, or doc line the PR changed no longer says what
-              the code does.
+            - A test, CI gate, doc or skill line, changed by the PR or not,
+              that no longer says what the changed code does.
             - A crash, hang, deadlock, data race, or resource leak reachable
               from the changed lines.
             - A changed code path that misses a documented ConformU timing
@@ -100,9 +100,10 @@ jobs:
             Be concise. Use short bullet points.
 
             Write the review as two sections, "Defects" and "Notes" (either
-            may say "none"), then the sign-off line:
+            may say "none"), then the sign-off as the LAST line of the file:
               "⚠️ Issues found" if Defects is non-empty, otherwise
               "✅ Approved". A note is never a reason to withhold approval.
+            Do not quote either sign-off string anywhere else in the review.
 
             Write the full review to review-comment.md in the repository root
             with the Write tool (writes outside the workspace are denied, so

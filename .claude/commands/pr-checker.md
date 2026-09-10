@@ -205,8 +205,9 @@ regex edge case, a missing rename flag, an untested name suffix). Handle them li
    the cap keeps that closed while normal PRs come out fully clean.
 4. `⚠️ Issues found` on a cleanup round is handled like any other round: fix, push, poll.
    Counting against the cap is mechanical: a round whose Defects section is non-empty does
-   **not** count (it is a fix round, not a cleanup round). A round that only carries Notes
-   **does** count as one cleanup round.
+   **not** count (it is a fix round, not a cleanup round). A rejection that carries only Notes
+   cannot happen under the prompt (the sign-off is derived from Defects); if a misbehaving bot
+   produces one, it counts as one cleanup round.
 5. If the approval has **no** mechanical notes, skip straight to the merge below.
 
 Then:

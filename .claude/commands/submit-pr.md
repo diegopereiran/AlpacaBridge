@@ -307,8 +307,10 @@ one arrives (do NOT foreground-sleep; run this with `run_in_background`):
 ```bash
 PR=<number>
 # Count only genuine review comments: the bot login AND a verdict line, so an
-# unrelated comment from a same-named account can't satisfy the poll.
-FILTER='[.comments[] | select(.author.login=="claude" and (.body | test("✅ Approved|⚠️ Issues found")))]'
+# unrelated comment from a same-named account can't satisfy the poll. The
+# post step comments with the workflow token, so the author is github-actions
+# (REST reports github-actions[bot]); a filter on "claude" never matches.
+FILTER='[.comments[] | select((.author.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))]'
 BASE=$(gh pr view "$PR" --json comments --jq "$FILTER | length")
 DEADLINE=$(( $(date +%s) + 1800 ))   # 30-min bailout: don't poll forever on a broken workflow
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
@@ -331,23 +333,27 @@ While waiting, also keep an eye on CI: `gh pr checks <number>`. A red CI check s
 
 ## Step 9 — Act on the review verdict
 
-Read the bot's newest review comment in full and classify every finding as **in-scope** (a real
-defect in this PR's changes) or **out-of-scope** (pre-existing, non-blocking, or beyond this PR's
-purpose). Findings under a "Notes (no action needed)" heading need no action unless clearly wrong.
+Read the bot's newest review comment in full. It has two sections (`claude-review.yml` prompt):
+**Defects**, which are what made the verdict a rejection, and **Notes**, which never block. Only
+Defects are work in this PR. A Note is a follow-up issue only when the user wants one; a Note the
+bot marks "out of scope, open an issue" is listed for the user in Step 10, never fixed here.
 
 ### Verdict: `⚠️ Issues found`
 
-1. Fix each **in-scope** finding on the branch. Batch ALL fixes into ONE commit/push — every push
-   restarts a full fresh review (PR #99 took 46 rounds; don't trickle pushes).
-2. For each **out-of-scope** finding, open a follow-up issue instead (format below).
+1. Fix each **Defect** on the branch. Batch ALL fixes into ONE commit/push — every push restarts a
+   full fresh review (PR #99 took 46 rounds; don't trickle pushes). A Note is never a reason for
+   a push on its own; a mechanical Note (a comment fix, an unused include, a missing test for a
+   string this PR added) may ride along in the same commit.
+2. A Defect that would need a wrong or unsafe change, or a product decision the user has not
+   made, goes back to the user instead of being fixed on faith.
 3. Show the user the fixes and the planned push for approval, push once, then return to Step 8
    and poll for the fresh review.
 
 ### Verdict: `✅ Approved`
 
-**Do NOT push anything further to this branch — approval is the stopping point.** Any remaining
-or newly-noticed items (including "approved, non-blocking" findings in the review itself) become
-follow-up issues, not commits. Then ask the user for approval to merge; on yes:
+**Do NOT push anything further to this branch — approval is the stopping point.** The Notes an
+approval carries are listed in Step 10; open a follow-up issue for one only when the user asks.
+Then ask the user for approval to merge; on yes:
 
 ```bash
 gh pr merge <number> --merge
@@ -359,7 +365,7 @@ Match the established pattern (e.g. issues #135–#137 from PR #134). One issue 
 
 ```bash
 gh issue create --title "<component>: <concise defect summary>" --body "$(cat <<'EOF'
-From the PR #<N> review (approved, non-blocking): <full technical description of the finding,
+From the PR #<N> review (a Note, non-blocking): <full technical description of the finding,
 including file/function references and the suggested fix direction from the review comment>.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -371,5 +377,5 @@ Show the user each issue title/body for approval before creating.
 
 ## Step 10 — Wrap-up
 
-- Display the PR URL, final verdict, and any follow-up issues opened
+- Display the PR URL, final verdict, the Notes the final review carried, and any follow-up issues opened
 - If AGENTS.md wasn't updated: "Consider updating AGENTS.md with any lessons learned from this work."
