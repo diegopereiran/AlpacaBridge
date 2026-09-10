@@ -193,7 +193,13 @@ PATH_PREFIXES = (
     "AlpacaCore/", "AlpacaHTTP/", "scripts/", "docs/", ".github/",
     ".claude/", "debian/",
 )
-CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+# No newline inside a span: `[^`]` alone would let the file's fenced code
+# block pair its backticks across lines and invert every match after it,
+# silently dropping most path references (PR #281 review).
+CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+# Fewer path references than this means the span matcher broke, not that
+# AGENTS.md shrank: it has held well over 60 since 2026-08.
+MIN_AGENTS_MD_PATH_REFS = 50
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
@@ -228,10 +234,12 @@ def check_agents_md_paths_exist():
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]) + "/")
 
+    checked = 0
     for m in CODE_SPAN_RE.finditer(text):
         span = m.group(1)
         if not span.startswith(PATH_PREFIXES):
             continue
+        checked += 1
         path = TRIM_SUFFIX_RE.sub("", span)
         # Markdown anchors / fragments (`docs/x.md#section`), glob patterns,
         # and template placeholders (`AlpacaCore/src/vendors/<vendor>/...`)
@@ -255,6 +263,11 @@ def check_agents_md_paths_exist():
         if _is_gitignored(path):
             continue
         failures.append("AGENTS.md references a path that does not exist: %s" % path)
+    if checked < MIN_AGENTS_MD_PATH_REFS:
+        failures.append(
+            "only %d backticked path references found in AGENTS.md (expected >= %d): "
+            "the code-span matcher is probably broken, not the document"
+            % (checked, MIN_AGENTS_MD_PATH_REFS))
     return failures
 
 

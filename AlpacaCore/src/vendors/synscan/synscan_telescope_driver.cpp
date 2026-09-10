@@ -207,8 +207,9 @@ public:
     // two paths (INDI labels: "SynScan", "EQMod Mount"; ASCOM: "SynScan App
     // Driver", "EQMOD"), so keep them rather than "hand controller"/"direct".
     std::string get_name() const override {
-        if (mount_model_id_ >= 0) {
-            return "Sky-Watcher " + synscan_model_id_to_name(mount_model_id_) + " (SynScan)";
+        const int model_id = mount_model_id_.load();
+        if (model_id >= 0) {
+            return "Sky-Watcher " + synscan_model_id_to_name(model_id) + " (SynScan)";
         }
         return "Sky-Watcher Mount (SynScan)";
     }
@@ -1860,7 +1861,10 @@ private:
     // get_device_firmware() poll never blocks on the coarse connect lock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_cache_;
-    int mount_model_id_;
+    // Read by get_name() on the HTTP thread with no driver lock while the
+    // async connect sequence writes it under mutex_; whole-value atomic so
+    // that read is not a data race (PR #281 review).
+    std::atomic<int> mount_model_id_;
     bool use_precise_commands_;
     bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;

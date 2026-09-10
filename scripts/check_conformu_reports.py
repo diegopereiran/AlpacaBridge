@@ -56,13 +56,26 @@ def changed_conformu_files(base_ref):
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     out = subprocess.run(
-        # --find-renames: a report renamed without content changes must not
-        # show as delete+add (which would re-validate an unchanged file or,
-        # under a different rename-detection config, hide a real change).
-        ["git", "diff", "--name-only", "--find-renames", "--diff-filter=d", merge_base, "HEAD"],
+        # --name-status with explicit rename detection: a report renamed
+        # without content changes shows as a single R100 entry, which is
+        # skipped (nothing new to validate). A rename with edits (R0xx) or a
+        # plain add/modify yields the destination path and is checked.
+        # --name-only would print the destination in both cases and could
+        # not tell them apart (PR #281 review).
+        ["git", "diff", "--name-status", "--find-renames", "--diff-filter=d",
+         merge_base, "HEAD"],
         check=True, capture_output=True, text=True,
     ).stdout
-    return [p for p in out.splitlines() if p.startswith(CONFORMU_PREFIXES)
+    paths = []
+    for line in out.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        status = fields[0]
+        if status == "R100":
+            continue
+        paths.append(fields[-1])
+    return [p for p in paths if p.startswith(CONFORMU_PREFIXES)
             and p.endswith((".json", ".txt"))]
 
 
