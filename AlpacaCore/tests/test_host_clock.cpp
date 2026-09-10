@@ -261,7 +261,14 @@ TEST_CASE("HostClock - default construction queries the real kernel without step
     HostClock real;
     const bool s = real.synchronized();
     CHECK((s == true || s == false));
-    CHECK((real.source() == "ntp" || real.source() == "none"));
+    // "rtc" is what an NTP-less host with a plausible boot RTC reports, so the
+    // readout is checked against the real probe, as the RTC case above does.
+    const std::string src = real.source();
+    if (s) {
+        CHECK(src == "ntp");
+    } else {
+        CHECK(src == (HostClock::host_booted_from_rtc() ? "rtc" : "none"));
+    }
     real.set_enabled(false);  // never call clock_settime from a unit test
     CHECK(real.step_from_client(kNow, kNow).outcome == Outcome::SkippedDisabled);
 }
