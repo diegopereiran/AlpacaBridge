@@ -47,8 +47,9 @@ jobs:
           # strips the GitHub token the agent's `gh` calls need. The label is
           # the per-PR trust gate and the token carries only pull-requests: write.
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0"
-        # The action refuses to run on a PR that edits this file. The assert
-        # step below is the real gate and exempts that case.
+        # The action may skip a PR that edits this file (it did on #280, it
+        # ran on #293). The assert step below is the real gate and exempts
+        # that case.
         continue-on-error: true
         with:
           # Subscription auth: `claude setup-token`, stored as CLAUDE_CODE_OAUTH_TOKEN.
@@ -69,7 +70,9 @@ jobs:
 
             DEFECTS block the merge. Only these count:
             - The changed code gives a wrong result on a realistic input.
-            - A changed behaviour has no test that would fail without the change.
+            - A changed behaviour that is testable has no test that would fail
+              without the change (workflow YAML, docs and CHANGELOG have no
+              test surface; do not report this for them).
             - A security hole or a leaked secret in the changed lines.
             - A test, CI gate, or doc line the PR changed no longer says what
               the code does.
@@ -82,7 +85,8 @@ jobs:
             description is a NOTE that says "out of scope, open an issue",
             never a DEFECT.
 
-            Review only the lines this PR changes and what they directly call.
+            Review the lines this PR changes, what they directly call, and any
+            doc or skill text that describes the changed behaviour.
             Ignore files under AlpacaCore/conformu/ (validation logs).
             Be concise. Use short bullet points.
 
@@ -118,9 +122,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A PR that edits this workflow cannot be reviewed by the action
-          # (it requires the file to match the default branch); the
-          # maintainer reviews it by eye.
+          # A PR that edits this workflow may get no review from the action;
+          # when that happens the maintainer reviews it by eye.
           if gh pr diff "${{ github.event.pull_request.number }}" \
               --repo "${{ github.repository }}" --name-only \
               | grep -qxF ".github/workflows/claude-review.yml"; then

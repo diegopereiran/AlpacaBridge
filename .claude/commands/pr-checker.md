@@ -83,8 +83,8 @@ Checks to make before waiting on anything:
    It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
-   Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (not
-   `createdAt`; the workflow's sticky comment may be edited in place) is newer than the last
+   Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (equal
+   to `created_at` for the fresh comment the post step creates each run) is newer than the last
    commit (`gh api repos/open-astro/AlpacaBridge/pulls/<N>/commits --jq '.[-1].commit.committer.date'`).
    A verdict older than the head commit is stale and must not be trusted.
 
@@ -97,10 +97,10 @@ PR=<N>
 DEADLINE=$(( $(date +%s) + 1800 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   sleep 180
-  # REST, not `gh pr view --json comments`: the workflow uses a sticky comment
-  # (use_sticky_comment: true), which may be EDITED in place on later rounds,
-  # and only REST exposes updated_at. createdAt alone would call every round
-  # after the first "stale".
+  # REST, not `gh pr view --json comments`: only REST exposes updated_at, and
+  # the poll compares that against the head commit. The post step creates a
+  # fresh comment each run, so updated_at equals created_at; an edited
+  # comment would still be handled.
   c=$(gh api "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
         | select((.user.login | test("^github-actions(\\[bot\\])?$"))
                  and (.body | test("✅ Approved|⚠️ Issues found")))]
