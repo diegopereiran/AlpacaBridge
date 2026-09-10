@@ -1617,8 +1617,11 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
              : " connecting with an undisciplined host clock (no NTP, not yet set by a client)") +
         (correctable ? "; goto/LST math runs on it until a client writes UTCDate"
          : host_clock_.enabled()
-             ? "; goto/LST math runs on it and cannot be corrected automatically (a client's UTCDate write was "
-               "refused: the service has no CAP_SYS_TIME). Use the web UI's Sync Time"
+             // Sync Time is the same clock_settime in this process, so it fails
+             // with the same EPERM: do not send the operator to a dead button.
+             ? "; goto/LST math runs on it and nothing in this process can correct it (a client's UTCDate write was "
+               "refused: no CAP_SYS_TIME, which the packaged systemd unit grants). Set the clock outside the "
+               "service, e.g. scripts/sync-clock.sh over SSH"
              : "; goto/LST math runs on it, and syncSystemClockFromClients is off so no client will correct it. "
                "Use the web UI's Sync Time");
     if (rtc && correctable) {

@@ -1329,11 +1329,7 @@ async function loadServerInfo() {
                 ${renderServerInfoRow('Server Name', serverName)}
                 ${renderServerInfoRow('Manufacturer', manufacturer)}
                 ${renderServerInfoRow('Version', manufacturerVersion)}
-                ${clockSource ? `
-                <div class="server-info-row">
-                    <span class="info-label">Clock</span>
-                    <span id="server-clock-state" class="info-value">${escapeHtml(clockText)}</span>
-                </div>` : ''}
+                ${clockSource ? renderServerInfoRow('Clock', clockText, 'server-clock-state') : ''}
                 ${syncFromClients === true || syncFromClients === false ? `
                 <div class="server-info-row">
                     <span class="info-label">Clock from clients</span>
@@ -1450,12 +1446,13 @@ async function refreshClockRow() {
     }
 }
 
-function renderServerInfoRow(label, value) {
+function renderServerInfoRow(label, value, valueId) {
     const displayValue = value !== undefined && value !== null && value !== '' ? value : 'N/A';
+    const idAttr = valueId ? ` id="${escapeHtml(valueId)}"` : '';
     return `
         <div class="server-info-row">
             <span class="info-label">${escapeHtml(label)}</span>
-            <span class="info-value">${escapeHtml(String(displayValue))}</span>
+            <span class="info-value"${idAttr}>${escapeHtml(String(displayValue))}</span>
         </div>
     `;
 }
