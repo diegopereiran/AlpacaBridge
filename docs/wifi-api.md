@@ -195,9 +195,28 @@ NTP or RTC). It never overrides NTP/chrony/GPS, applies the same 2000-2100
 window, ignores sub-second deltas, and logs every step with the delta and the
 client address. `GET /management/v1/description` reports the state:
 `ClockSynchronized` (kernel-disciplined), `ClockSource` (`ntp` | `client` |
-`none`) and `SyncSystemClockFromClients`; `PUT` the last one as a boolean to
+`rtc` | `none`) and `SyncSystemClockFromClients`; `PUT` the last one as a boolean to
 opt out (persisted as `sync_system_clock_from_clients` under `server:` in the
-config file). A telescope connecting while the clock is `none` logs a WARN.
+config file). A telescope connecting while the clock is `none` always logs a
+WARN. On an `rtc` host the line is an INFO only while something can still
+correct the clock: it goes back to a WARN if `SyncSystemClockFromClients` is
+off, and also if a client's `UTCDate` write or a Sync Time press (`PUT
+/management/v1/synctime`) has already been refused (no `CAP_SYS_TIME`), because
+then nothing in the service can set the clock at all
+and the message says to set it from outside instead. A Sync Time press (`PUT /management/v1/synctime`)
+counts as a client step: `ClockSource` reads `client` afterwards.
+
+`rtc` means the kernel loaded system time from a hardware RTC at boot: the
+`/sys/class/rtc/rtc*` device whose `hctosys` reads 1, whose `since_epoch` is
+after 2020-01-01 (a battery-less Raspberry Pi 5 RTC reads 2000-01-01 and does
+not count). It is a statement about where the clock came from, not about how
+accurate it is: nothing on an NTP-less host verifies or rewrites the RTC, so
+it may still be wrong or drifting, and the telescope connect line says so.
+A working RTC reads `none` whenever the kernel was not the one that loaded it:
+a userspace `hwclock --hctosys` under a non-systemd init, or a kernel without
+`CONFIG_RTC_HCTOSYS`. `rtc` is a new value on a published field, so an older
+client that switches on `ClockSource` should treat any unknown value as
+"not NTP".
 
 ## Feature detection
 
