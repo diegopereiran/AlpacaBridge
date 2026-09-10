@@ -72,7 +72,10 @@ def changed_conformu_files(base_ref):
         if len(fields) < 2:
             continue
         status = fields[0]
-        if status == "R100":
+        # A pure rename is only "already validated" when the SOURCE was
+        # under a validated prefix; a report moved in from anywhere else
+        # is new to the gate and must be checked (PR #281 review).
+        if status == "R100" and fields[1].startswith(CONFORMU_PREFIXES):
             continue
         paths.append(fields[-1])
     return [p for p in paths if p.startswith(CONFORMU_PREFIXES)

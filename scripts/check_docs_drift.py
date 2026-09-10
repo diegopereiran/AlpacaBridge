@@ -193,12 +193,15 @@ PATH_PREFIXES = (
     "AlpacaCore/", "AlpacaHTTP/", "scripts/", "docs/", ".github/",
     ".claude/", "debian/",
 )
-# No newline inside a span: `[^`]` alone would let the file's fenced code
-# block pair its backticks across lines and invert every match after it,
-# silently dropping most path references (PR #281 review).
-CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
-# Fewer path references than this means the span matcher broke, not that
-# AGENTS.md shrank: it has held well over 60 since 2026-08.
+# Spans are matched only after fenced code blocks are removed (their triple
+# backticks would otherwise pair across lines and invert every later match,
+# which silently dropped 66 of 83 path references in the first cut of this
+# fix). With fences gone, pairing is consistent even for a span that wraps
+# onto the next line; such a span is skipped, since a path never wraps.
+FENCED_BLOCK_RE = re.compile(r"^```.*?^```[ \t]*$", re.S | re.M)
+CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+# Tripwire for the span matcher, not a rule about document size: if
+# AGENTS.md is legitimately trimmed below this, lower the floor.
 MIN_AGENTS_MD_PATH_REFS = 50
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
@@ -224,7 +227,7 @@ def _is_gitignored(path):
 
 def check_agents_md_paths_exist():
     failures = []
-    text = read("AGENTS.md")
+    text = FENCED_BLOCK_RE.sub("", read("AGENTS.md"))
     seen = set()
 
     tracked = set(_run_git(["ls-files"]).stdout.splitlines())
@@ -237,7 +240,7 @@ def check_agents_md_paths_exist():
     checked = 0
     for m in CODE_SPAN_RE.finditer(text):
         span = m.group(1)
-        if not span.startswith(PATH_PREFIXES):
+        if "\n" in span or not span.startswith(PATH_PREFIXES):
             continue
         checked += 1
         path = TRIM_SUFFIX_RE.sub("", span)
@@ -265,8 +268,9 @@ def check_agents_md_paths_exist():
         failures.append("AGENTS.md references a path that does not exist: %s" % path)
     if checked < MIN_AGENTS_MD_PATH_REFS:
         failures.append(
-            "only %d backticked path references found in AGENTS.md (expected >= %d): "
-            "the code-span matcher is probably broken, not the document"
+            "only %d backticked path references found in AGENTS.md (floor %d): "
+            "either the code-span matcher regressed, or AGENTS.md was trimmed "
+            "and MIN_AGENTS_MD_PATH_REFS should be lowered"
             % (checked, MIN_AGENTS_MD_PATH_REFS))
     return failures
 

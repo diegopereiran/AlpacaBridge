@@ -285,8 +285,9 @@ which PR was left and why.
 ## Wrap-up
 
 Before the report, prune what the loop created locally: `git checkout main && git pull
---ff-only`, `git branch -d <branch>` for every branch checked out during the run (`-d` refuses
-anything unmerged, which is the point), and `git worktree remove <path>` for any worktree.
+--ff-only`, `git worktree remove <path>` for any worktree first (a branch checked out in a
+worktree cannot be deleted), then `git branch -d <branch>` for every branch checked out during
+the run (`-d` refuses anything unmerged, which is the point).
 Confirm `git branch -r` on origin shows no merged head branches left behind.
 
 One table: PR, title, rounds, final verdict, merge SHA (or "left open: reason"). Under it: any
