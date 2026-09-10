@@ -1593,10 +1593,12 @@ nlohmann::json Router::build_description_payload() const {
     return desc;
 }
 
-// open-astro#289: a telescope driver about to compute LST from an
-// undisciplined host clock. The first client UTCDate write will fix it; say so
-// in case none comes. Called from both connect paths (legacy PUT connected and
-// the ITelescopeV4 PUT connect initiator).
+// open-astro#289/#292: a telescope driver about to compute LST from a clock
+// nothing has disciplined. Says which of the three states it is in and what
+// will, or will not, correct it: a client UTCDate write is still to come, or
+// setting the clock has been refused, or clients are not allowed to. Called
+// from both connect paths (legacy PUT connected and the ITelescopeV4 PUT
+// connect initiator).
 void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const {
     if (device.get_device_type() != alpacacore::DeviceType::Telescope || host_clock_.synchronized() ||
         host_clock_.stepped_by_client()) {

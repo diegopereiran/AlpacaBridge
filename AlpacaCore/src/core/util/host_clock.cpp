@@ -80,7 +80,7 @@ bool HostClock::host_booted_from_rtc() {
     // Only "no device" is re-probed, and not on every /management/v1/description poll.
     const auto now = std::chrono::steady_clock::now();
     if (last_probe != std::chrono::steady_clock::time_point{} && now - last_probe < std::chrono::seconds(30)) {
-        return false;
+        return result;  // not a literal false: #307 may add a path that unsettles a true result
     }
     last_probe = now;
     const Probe probe = probe_boot_rtc();
