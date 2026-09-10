@@ -20,8 +20,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <optional>

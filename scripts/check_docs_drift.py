@@ -187,13 +187,26 @@ def check_version_matches_readme():
 # --- check 5: AGENTS.md path references exist -------------------------------
 
 # Backtick-quoted spans that look like a repo-relative path: start with one of
-# these top-level dirs/files, contain no spaces, and are not a bare CLI flag
+# these top-level dirs/files (spaces allowed only for a verbatim tracked path), and are not a bare CLI flag
 # or a URL.
 PATH_PREFIXES = (
     "AlpacaCore/", "AlpacaHTTP/", "scripts/", "docs/", ".github/",
     ".claude/", "debian/",
 )
-CODE_SPAN_RE = re.compile(r"`([^`\s]+)`")
+# Spans are matched only after fenced code blocks are removed (their triple
+# backticks would otherwise pair across lines and invert every later match,
+# which silently dropped 66 of 83 path references in the first cut of this
+# fix). With fences gone, pairing is consistent even for a span that wraps
+# onto the next line; such a span is skipped, since a path never wraps.
+# Fences: three or more backticks or tildes, optionally indented (list items).
+FENCED_BLOCK_RE = re.compile(r"^[ \t]*(`{3,}|~{3,}).*?^[ \t]*\1[ \t]*$", re.S | re.M)
+# A double-backtick span shows a literal backtick (`` ` ``) and would break
+# single-backtick parity; it is never a path reference, so drop it first.
+DOUBLE_BACKTICK_SPAN_RE = re.compile(r"``.+?``")
+CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+# Tripwire for the span matcher, not a rule about document size: if
+# AGENTS.md is legitimately trimmed below this, lower the floor.
+MIN_AGENTS_MD_PATH_REFS = 50
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
@@ -218,20 +231,31 @@ def _is_gitignored(path):
 
 def check_agents_md_paths_exist():
     failures = []
-    text = read("AGENTS.md")
+    text = FENCED_BLOCK_RE.sub("", read("AGENTS.md"))
+    text = DOUBLE_BACKTICK_SPAN_RE.sub("", text)
+    # With fences gone every backtick must pair up; one stray backtick would
+    # invert every span after it, and the count floor below only catches a
+    # large inversion. Fail loudly on parity instead.
+    if text.count("`") % 2 != 0:
+        return ["AGENTS.md has an unbalanced backtick outside fenced blocks; "
+                "the path-reference check cannot pair code spans reliably"]
     seen = set()
 
-    tracked = set(_run_git(["ls-files"]).stdout.splitlines())
+    # core.quotePath=false: a tracked path with non-ASCII bytes must not
+    # come back quoted, or it would never match a span.
+    tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines())
     tracked_dirs = set()
     for f in tracked:
         parts = f.split("/")
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]) + "/")
 
+    checked = 0
     for m in CODE_SPAN_RE.finditer(text):
         span = m.group(1)
-        if not span.startswith(PATH_PREFIXES):
+        if "\n" in span or not span.startswith(PATH_PREFIXES):
             continue
+        checked += 1
         path = TRIM_SUFFIX_RE.sub("", span)
         # Markdown anchors / fragments (`docs/x.md#section`), glob patterns,
         # and template placeholders (`AlpacaCore/src/vendors/<vendor>/...`)
@@ -244,12 +268,26 @@ def check_agents_md_paths_exist():
 
         if path in tracked or path in tracked_dirs:
             continue
+        # A span with whitespace is validated only when it names a tracked
+        # file or directory verbatim (e.g. `AlpacaCore/conformu/Astroasis/
+        # Oasis Focuser/`, handled above). Otherwise it is SKIPPED, not
+        # failed: it may be prose (`AlpacaCore/tests/ and AlpacaHTTP/`) and
+        # cannot be told apart from a drifted spaced path. So a spaced path
+        # that later drifts stays green here; that is the accepted trade.
+        if any(ch.isspace() for ch in path):
+            continue
         # Not a tracked file or the directory of one: a generated/ignored
         # path (debian/changelog, a `.../build/` output dir) is expected to
         # be absent from a clean checkout, so it isn't a documentation error.
         if _is_gitignored(path):
             continue
         failures.append("AGENTS.md references a path that does not exist: %s" % path)
+    if checked < MIN_AGENTS_MD_PATH_REFS:
+        failures.append(
+            "only %d backticked path references found in AGENTS.md (floor %d): "
+            "either the code-span matcher regressed, or AGENTS.md was trimmed "
+            "and MIN_AGENTS_MD_PATH_REFS should be lowered"
+            % (checked, MIN_AGENTS_MD_PATH_REFS))
     return failures
 
 

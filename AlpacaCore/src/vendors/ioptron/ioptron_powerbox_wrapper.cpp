@@ -19,7 +19,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <cstring>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>

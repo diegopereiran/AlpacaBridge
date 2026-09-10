@@ -219,6 +219,9 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
   gh pr merge <N> --merge
   ```
   (merge commit, not squash, matching the repo history). Confirm `state=MERGED` afterwards.
+  The repo has `delete_branch_on_merge` enabled (2026-09-10), so an `origin` head branch is
+  deleted by GitHub on merge; verify with `git fetch --prune origin && git branch -r`. A fork
+  head branch belongs to the contributor and is never deleted from here.
 
 Because the user invoked `/pr-checker` with the instruction to merge once the bot is clean, that
 invocation **is** the merge authorization for every PR in the list. Do not ask again per PR.
@@ -280,6 +283,12 @@ State the blocker in one or two sentences, finish every other PR in the list, an
 which PR was left and why.
 
 ## Wrap-up
+
+Before the report, prune what the loop created locally: `git checkout main && git pull
+--ff-only`, `git worktree remove <path>` for any worktree first (a branch checked out in a
+worktree cannot be deleted), then `git branch -d <branch>` for every branch checked out during
+the run (`-d` refuses anything unmerged, which is the point).
+Confirm `git branch -r` on origin shows no merged head branches left behind.
 
 One table: PR, title, rounds, final verdict, merge SHA (or "left open: reason"). Under it: any
 judgment notes left unpushed, any notes from the post-cleanup approval, and any contributor
