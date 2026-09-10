@@ -1340,9 +1340,9 @@ async function loadServerInfo() {
                 ${syncFromClients === true || syncFromClients === false ? `
                 <div class="server-info-row">
                     <span class="info-label">Clock from clients</span>
-                    <label class="info-value" title="When the host clock is not NTP-disciplined, take the time a client sends in Telescope.UTCDate (NINA, SkySafari and PHD2 send it on connect). Never overrides NTP/chrony/GPS.">
+                    <label class="info-value" title="Only when the host clock is not NTP-disciplined (no internet, no RTC): the time a client sends in Telescope.UTCDate when it connects (NINA, SkySafari and PHD2 all do) sets the server clock. Never overrides NTP/chrony/GPS.">
                         <input id="server-sync-clock-toggle" type="checkbox" ${syncFromClients ? 'checked' : ''}>
-                        Take the time from the first client that connects a telescope (no NTP/RTC)
+                        Sync time from client on connect
                     </label>
                 </div>` : ''}
                 <div class="server-info-row">
