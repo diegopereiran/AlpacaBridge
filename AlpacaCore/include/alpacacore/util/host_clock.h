@@ -15,6 +15,7 @@
 #include <sys/timex.h>
 #include <time.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -151,6 +152,17 @@ public:
         }
         r.outcome = Outcome::Stepped;
         return r;
+    }
+
+    /**
+     * Something other than a UTCDate write set the system clock through
+     * this process (the web UI's Sync Time button). clock_settime does not
+     * clear STA_UNSYNC, so without this the readout would keep saying the
+     * clock was never set and the connect-time warning would keep firing.
+     */
+    void mark_stepped() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stepped_ = true;
     }
 
     static const char* outcome_name(Outcome o) {

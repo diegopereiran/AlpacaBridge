@@ -6695,6 +6695,9 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         response.set_body(alpaca_response);
         return response;
     }
+    // The clock is now client-set for the management readout and the
+    // connect-time warning; clock_settime alone leaves STA_UNSYNC set.
+    host_clock_.mark_stepped();
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;

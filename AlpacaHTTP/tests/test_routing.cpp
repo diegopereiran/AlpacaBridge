@@ -16,11 +16,13 @@
 #include <alpacacore/device_registry.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>

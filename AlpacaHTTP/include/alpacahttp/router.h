@@ -242,12 +242,12 @@ private:
     // ops queue; everything else (other devices, GETs) is unaffected.
     std::shared_ptr<std::mutex> device_connection_op_mutex(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
 
+    void add_clock_fields(nlohmann::json& desc) const;
+
     // True while `device` is still the DeviceRegistry's driver for its
     // type/number. Straggler requests that fetched the shared_ptr before a
     // removedevice must not re-insert registry/op-mutex entries for it —
     // nothing would ever reap them (PR #164 review of issue #162).
-    void add_clock_fields(nlohmann::json& desc) const;
-
     static bool device_is_current(const std::shared_ptr<alpacacore::AlpacaDriver>& device);
 
     // Guards client_connections_ only; never held across driver calls.
