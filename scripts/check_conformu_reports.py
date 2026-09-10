@@ -62,8 +62,10 @@ def changed_conformu_files(base_ref):
         # plain add/modify yields the destination path and is checked.
         # --name-only would print the destination in both cases and could
         # not tell them apart (PR #281 review).
-        ["git", "diff", "--name-status", "--find-renames", "--diff-filter=d",
-         merge_base, "HEAD"],
+        # core.quotePath=false: git would otherwise quote a path with
+        # non-ASCII bytes, and the prefix filter below would skip it.
+        ["git", "-c", "core.quotePath=false", "diff", "--name-status",
+         "--find-renames", "--diff-filter=d", merge_base, "HEAD"],
         check=True, capture_output=True, text=True,
     ).stdout
     paths = []

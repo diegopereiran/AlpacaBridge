@@ -198,7 +198,7 @@ PATH_PREFIXES = (
 # which silently dropped 66 of 83 path references in the first cut of this
 # fix). With fences gone, pairing is consistent even for a span that wraps
 # onto the next line; such a span is skipped, since a path never wraps.
-FENCED_BLOCK_RE = re.compile(r"^```.*?^```[ \t]*$", re.S | re.M)
+FENCED_BLOCK_RE = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.S | re.M)  # fences may be indented in a list
 CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # Tripwire for the span matcher, not a rule about document size: if
 # AGENTS.md is legitimately trimmed below this, lower the floor.
@@ -228,6 +228,12 @@ def _is_gitignored(path):
 def check_agents_md_paths_exist():
     failures = []
     text = FENCED_BLOCK_RE.sub("", read("AGENTS.md"))
+    # With fences gone every backtick must pair up; one stray backtick would
+    # invert every span after it, and the count floor below only catches a
+    # large inversion. Fail loudly on parity instead.
+    if text.count("`") % 2 != 0:
+        return ["AGENTS.md has an unbalanced backtick outside fenced blocks; "
+                "the path-reference check cannot pair code spans reliably"]
     seen = set()
 
     tracked = set(_run_git(["ls-files"]).stdout.splitlines())
@@ -255,9 +261,12 @@ def check_agents_md_paths_exist():
 
         if path in tracked or path in tracked_dirs:
             continue
-        # A span with whitespace is only a path when it names a tracked file
-        # or directory verbatim (e.g. `AlpacaCore/conformu/Astroasis/Oasis
-        # Focuser/`); anything else with spaces is prose, not a path claim.
+        # A span with whitespace is validated only when it names a tracked
+        # file or directory verbatim (e.g. `AlpacaCore/conformu/Astroasis/
+        # Oasis Focuser/`, handled above). Otherwise it is SKIPPED, not
+        # failed: it may be prose (`AlpacaCore/tests/ and AlpacaHTTP/`) and
+        # cannot be told apart from a drifted spaced path. So a spaced path
+        # that later drifts stays green here; that is the accepted trade.
         if any(ch.isspace() for ch in path):
             continue
         # Not a tracked file or the directory of one: a generated/ignored
