@@ -83,42 +83,106 @@ Checks to make before waiting on anything:
    It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
-   Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (not
-   `createdAt`; the workflow's sticky comment may be edited in place) is newer than the last
-   commit (`gh api repos/open-astro/AlpacaBridge/pulls/<N>/commits --jq '.[-1].commit.committer.date'`).
-   A verdict older than the head commit is stale and must not be trusted.
+   "Belongs to the current head" is the same rule as the Step 2 poll, so run **one pass** of that
+   block with `BUDGET=0` (the loop checks before it sleeps, so `BUDGET=0` is exactly one check):
+   a `review` check-run on the head SHA completed, none still queued or running, and the newest
+   bot verdict updated after that run started. Commit dates are never used: a committer date is
+   local commit time, so a verdict on the previous head can be newer than it. Exit codes: `0`
+   prints the verdict (Step 3); `2` or `3` are the Step 3 "no verdict" cases; `1` from a
+   `BUDGET=0` pass only means **no verdict yet** (the normal state right after a push): go to
+   Step 2. It is not a timeout and does not count toward the "two consecutive timeouts" hard stop.
+   **Skip this check if Step 1.1, 1.2 or 1.3 just acted**: a relabel or update-branch re-triggers
+   the bot on the same head, and for a few seconds the only check-run is the old one, which the
+   pre-check would report as skipped, failed or cancelled. Go straight to Step 2, whose first
+   look comes after one tick.
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
 Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadline:
 
 ```bash
-PR=<N>
-DEADLINE=$(( $(date +%s) + 1800 ))
-while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  sleep 180
-  # REST, not `gh pr view --json comments`: the workflow uses a sticky comment
-  # (use_sticky_comment: true), which may be EDITED in place on later rounds,
-  # and only REST exposes updated_at. createdAt alone would call every round
-  # after the first "stale".
-  c=$(gh api "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
-        | select((.user.login | test("^github-actions(\\[bot\\])?$"))
-                 and (.body | test("✅ Approved|⚠️ Issues found")))]
-        | last | "\(.updated_at)\n\(.body)"')
-  head_at=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR/commits" --jq '.[-1].commit.committer.date')
-  # Only a verdict UPDATED after the head commit counts: anything older is a
-  # stale verdict on a previous head (or the contributor pushed mid-round).
-  if [[ "$(echo "$c" | head -1)" > "$head_at" ]]; then echo "$c"; exit 0; fi
+PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
+# A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
+# new check-run; a first look inside that window classifies the OLD run as final. So a
+# real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
+# is only valid when nothing was just re-triggered, and looks at once.
+if [ "${BUDGET:-1800}" -gt 0 ]; then sleep "$TICK"; fi
+while :; do
+  # Bind the verdict to the review check-run on the head SHA (filter=all so a later
+  # cancelled attempt cannot hide the finished one). Everything is fetched with
+  # --paginate: unpaginated, both endpoints return only the 30 oldest items.
+  SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
+  if [ "$SHA" != "${LAST_SHA:-}" ]; then CANCELLED_SEEN=0; LAST_SHA=$SHA; fi   # new head, new latch
+  RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
+  # Newest finished run that was not cancelled or skipped. A failed run still counts:
+  # the assert step can fail after the post step published the verdict, and nothing
+  # re-runs a failed run on its own, so it must be reported, not waited out.
+  DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.html_url)"' <<<"$RUNS")
+  RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
+  PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
+  SKIPPED=$(jq -r '[.[] | select(.conclusion == "skipped")] | length' <<<"$RUNS")
+  CANCELLED=$(jq -r '[.[] | select(.conclusion == "cancelled")] | length' <<<"$RUNS")
+  # REST, not `gh pr view --json comments`: only REST exposes updated_at. The author
+  # pattern is the workflow's own assert-step pattern. `select(. != null)` matters: with
+  # no verdict yet, `last` is null and would otherwise print the literal "null".
+  LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add // [] | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ -n "$LAST" ] \
+     && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$RUN_STARTED" +%s)" ]; then
+    printf '%s\n' "${LAST#* }"; exit 0
+  fi
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ]; then
+    # Finished, nothing pending, no verdict for this head. Never wait 30 minutes for it.
+    case "$RUN_STATE" in
+      success*)
+        # The PR edits the review workflow and the action skipped it (the assert step
+        # passes it). Hand back for eyeball review; this is a hard stop, never a merge.
+        if gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
+          echo "NO VERDICT for head $SHA: this PR edits the review workflow and the action skipped it. Hard stop: review it by eye." >&2; exit 2
+        fi
+        # Green run, ordinary PR, no verdict: the agent wrote its verdict to chat instead of
+        # review-comment.md (the PR #209 failure). Nothing re-runs it; report, do not wait.
+        echo "REVIEW RUN succeeded for head $SHA but published no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
+      *)
+        echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
+    esac
+  fi
+  # Only skipped runs and nothing pending: the actor gate skipped the job (fork push
+  # without the label, or an author outside allowed_non_write_users). A cancelled run
+  # beside the skipped one means a labelled run existed and was re-triggered mid-poll;
+  # that is the two-look cancelled case below, not a skip. Step 1.1/1.2.
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ] && [ "$CANCELLED" = 0 ]; then
+    echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (Step 1)." >&2; exit 3
+  fi
+  # Only cancelled runs: a superseding trigger never came. A relabel issued mid-poll
+  # cancels the in-flight run a few seconds before its replacement appears, so this
+  # state has to hold on two consecutive looks before it is reported.
+  if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$CANCELLED" != 0 ]; then
+    if [ "${CANCELLED_SEEN:-0}" = 1 ]; then
+      echo "REVIEW CANCELLED for head $SHA and nothing replaced it: re-trigger with the relabel trick." >&2; exit 3
+    fi
+    CANCELLED_SEEN=1
+  else
+    CANCELLED_SEEN=0
+  fi
+  [ "$(date +%s)" -ge "$DEADLINE" ] && break
+  sleep "$TICK"
 done
-echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
+
+Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `BUDGET=0`, just
+"not yet"). `2` = the action skipped a workflow-editing PR (hard stop). `3` = no run will
+produce a verdict for this head (the newest run failed, succeeded without publishing one, or
+the job was skipped or every run was cancelled); the message says which and carries the run URL where there is one. Every
+non-zero exit prints nothing on stdout, so a chained `poll && merge` never reaches the merge.
+`date -d` is GNU; the skills run on the Linux dev VM.
 
 When several PRs are queued, poll them all in one background loop and act on whichever verdict
 lands first, but **merge strictly in ascending number order** so the update-branch dance is
 predictable.
 
-If it times out: `gh run list --workflow=claude-review.yml --limit 5` and read the failing job.
-Known stalls: the workflow triggers only on `opened`, `synchronize` and `labeled` (closing and
+On exit `3`, or a timeout: open the run URL (or `gh run list --workflow=claude-review.yml
+--limit 5`) and read the failing job. Known stalls: the workflow triggers only on `opened`, `synchronize` and `labeled` (closing and
 reopening the PR does NOT re-run it), so a stuck or cancelled run is restarted with the
 remove-and-re-add `safe-to-review` label trick from Step 1.2, which also covers the permission
 skip. Do not restart the poll blindly.
@@ -128,14 +192,21 @@ batch as the bot findings, not on its own.
 
 ## Step 3 — Act on the verdict
 
-Read the newest bot comment in full.
+Read the newest bot comment in full. A poll that exited without a verdict has no comment to act
+on and never merges: exit `2` (workflow-editing PR skipped by the action) is a **Hard stop**;
+exit `3` (review run failed) means read the run log, apply the relabel trick from Step 1.2 if it
+is the permission skip, and otherwise treat it as a broken workflow (**Hard stop** after two).
 
 ### `⚠️ Issues found`
 
-Fix **every** finding the bot raises on this PR, in this PR, in **one batched commit**. Each push
-restarts a full fresh review (PR #99 took 46 rounds when pushes trickled). Do not defer findings to
-follow-up issues and do not decline them as low priority unless the user says so; the standing
-rule is "work it in the same PR till there are no more issues."
+The bot's comment has two sections (`claude-review.yml` prompt): **Defects**, which are what made
+the verdict a rejection, and **Notes**, which never block. Fix **every Defect** on this PR, in this
+PR, in **one batched commit**; do not defer a Defect to a follow-up issue and do not decline one
+as low priority unless the user says so. Handle the **Notes** by the classification rules in the
+`✅ Approved` section below: a mechanical note goes into the same commit, a judgment note or one
+the bot marks "out of scope, open an issue" goes to the wrap-up and is never pushed. A note is
+never a reason for a second push. Each push restarts a full fresh review (PR #99 took 46 rounds
+when pushes trickled; PR #282 reached 29 commits when notes were fixed as if they were defects).
 
 **Before writing a line**, fetch the fork head: contributors watch the same bot and often push
 their own fix for the same finding within minutes (PR #258 did this twice in one session).
@@ -184,9 +255,10 @@ Keep a running tally of rounds per PR and report it in the wrap-up.
 
 ### `✅ Approved`
 
-**Cleanup rounds until clean, then merge.** Approvals usually carry "minor / non-blocking" notes.
-Leaving them is how leftovers accumulate (nine PRs on 2026-09-10 left six: dead includes, a
-regex edge case, a missing rename flag, an untested name suffix). Handle them like this:
+**At most one cleanup round, then merge.** Approvals usually carry Notes. Leaving them is how
+leftovers accumulate (nine PRs on 2026-09-10 left six: dead includes, a regex edge case, a
+missing rename flag, an untested name suffix); chasing them is how PR #282 reached 29 commits.
+Handle them like this:
 
 1. Classify each note. **Mechanical** = a change a reviewer would accept without discussion and
    that stays inside the PR's files and purpose: unused include, missing test for a string the
@@ -194,15 +266,16 @@ regex edge case, a missing rename flag, an untested name suffix). Handle them li
    default or behaviour, widens scope, needs hardware, or contradicts the PR author's stated
    intent. Judgment notes are listed in the wrap-up for the user, never pushed.
 2. Fix **all** mechanical notes in ONE commit, push once, poll again.
-3. Repeat step 2 for every approval that still carries mechanical notes, until an approval has
-   **none**, then merge. **Hard cap: 3 cleanup rounds per PR.** After the third, merge on the
-   next approval whatever notes it carries and list them in the wrap-up. PR #99 (2026-07-01)
-   took 46 rounds because post-approval pushes were unbounded and trickled one nit at a time;
-   the cap keeps that closed while normal PRs come out fully clean.
+3. Merge on the next verdict that has no Defects, whatever Notes it carries, and list those
+   Notes in the wrap-up. **Hard cap: 1 cleanup round per PR.** PR #99 (2026-07-01) took 46
+   rounds because post-approval pushes were unbounded and trickled one nit at a time, and
+   PR #282 showed that every cleanup push is fresh review surface; one round collects the
+   mechanical notes, the merge closes the loop.
 4. `⚠️ Issues found` on a cleanup round is handled like any other round: fix, push, poll.
-   Counting against the cap: a round whose findings are genuine defects does **not** count
-   (it is a fix round, not a cleanup round). A round whose findings are only nits **does**
-   count as one cleanup round.
+   Counting against the cap is mechanical: a round whose Defects section is non-empty does
+   **not** count (it is a fix round, not a cleanup round). A rejection that carries only Notes
+   cannot happen under the prompt (the sign-off is derived from Defects); if a misbehaving bot
+   produces one, it counts as one cleanup round.
 5. If the approval has **no** mechanical notes, skip straight to the merge below.
 
 Then:
@@ -262,12 +335,22 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - **Waiting is never a stopping point.** Every wait (pre-flight, verdict poll, CI checks,
   update-branch) runs as ONE background chain that continues into the next action on its own:
   `preflight && push && poll` for a fix round, `update-branch && poll && merge` for a refresh.
-  Never end the turn with "I'll push when pre-flight finishes"; chain it.
-- **A bot finding you disagree with** is still fixed or wired into the skill/docs when there is
-  any reasonable change that satisfies it. Only a finding that would require a wrong or unsafe
-  change becomes a hard stop.
+  Never end the turn with "I'll push when pre-flight finishes"; chain it. Every poll exit
+  other than a verdict is non-zero (Step 2), so `poll && merge` cannot merge on an empty
+  verdict; a refresh verdict can still carry new Defects, so the merge half gates on the
+  printed verdict's **last** line (the prompt defines the sign-off as the last line, and a
+  review can quote either string in its body, as reviews of this very rubric do):
+  (`poll` = the Step 2 block saved to a file, run as `bash poll.sh`):
+  `V=$(mktemp); bash poll.sh > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && gh pr merge <N> --merge`.
+- **A Defect you disagree with** is still fixed or wired into the skill/docs when there is any
+  reasonable change that satisfies it. Only a Defect that would require a wrong or unsafe change
+  becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.
 
 ## Hard stops (the only reasons to hand back to the user)
+
+- The bot rejects (`⚠️ Issues found`) with an empty Defects section. The prompt derives the
+  sign-off from Defects, so this is a workflow bug, not a review; quote the comment and hand
+  back rather than fixing Notes to satisfy it.
 
 - A PR's head branch name or fork owner fails the Step 0 validation, or a contributor's diff
   contains changes outside the reviewed finding that you cannot vouch for.
@@ -276,8 +359,10 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - A ConformU report on the branch is failing (a driver PR cannot merge with a red report; see
   `/submit-pr` Step 1).
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
-- The review workflow itself is broken (two consecutive timeouts after the relabel
-  tricks) — report the run URL.
+- The review action skipped a workflow-editing PR (poll exit `2`): hand it back for eyeball
+  review. A PR that edits `claude-review.yml` is never merged on an empty verdict.
+- The review workflow itself is broken (two consecutive 30-minute timeouts, or two failed runs,
+  after the relabel tricks) — report the run URL.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
 which PR was left and why.
