@@ -55,6 +55,16 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // File-local because Astroasis is the only vendor linking hidapi. If a second
 // one ever does, this must be promoted to a shared header -- two separate
 // mutexes would serialize nothing.
+//
+// Two known, accepted costs. (1) enumerate_astroasis_focusers() holds this
+// across a full udev/libusb bus scan (unavoidable: devs is hidapi-owned memory
+// that must be copied out before hid_free_enumeration), so a by-index device
+// creation on an HTTP thread can stall another focuser's connect/disconnect for
+// tens of milliseconds on a busy USB tree. Bounded, never a deadlock. (2) A
+// function-local static is destroyed at exit, before any static-lifetime object
+// constructed earlier -- unreachable today because every driver is heap-owned
+// and torn down first; a static-lifetime driver calling hidapi from its
+// destructor would need this leaked (`static auto* m = new std::mutex;`).
 std::mutex& hid_global_mutex() {
     static std::mutex m;
     return m;
@@ -120,7 +130,13 @@ public:
         }
         {
             std::lock_guard<std::mutex> hid_lock(hid_global_mutex());
-            hid_init();
+            // Checked, like the enumerate path: a failed init would otherwise
+            // surface one call later as an indistinguishable "failed to open"
+            // naming the path, which sends the reader after a cabling or
+            // permissions problem that isn't there.
+            if (hid_init() != 0) {
+                throw AlpacaException("hidapi initialization failed", AlpacaError::NotConnected);
+            }
             device_ = hid_open_path(hid_path.c_str());
         }
         if (!device_) {
