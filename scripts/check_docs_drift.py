@@ -67,12 +67,10 @@ def check_zizmor_pin_sync():
     # ci.yml has more than one `ver=`/`sha256=` shell pin (cppcheck's
     # from-source build has its own); scope to the "Install zizmor" step so
     # this doesn't accidentally read cppcheck's pin instead.
-    start = ci.find("- name: Install zizmor")
-    if start == -1:
+    ci_block = _scoped_block(ci, "- name: Install zizmor", ("- name:",))
+    if ci_block is None:
         failures.append("could not find the 'Install zizmor' step in ci.yml")
         return failures
-    end = ci.find("- name:", start + len("- name: Install zizmor"))
-    ci_block = ci[start:end if end != -1 else len(ci)]
 
     ci_ver = re.search(r"^\s*ver=([0-9.]+)\s*$", ci_block, re.MULTILINE)
     ci_sha = re.search(r"^\s*sha256=([0-9a-f]{64})\s*$", ci_block, re.MULTILINE)
@@ -105,10 +103,45 @@ def check_zizmor_pin_sync():
 SUPPRESS_RE = re.compile(r"--suppress=(\S+)")
 
 
+def _scoped_block(text, start_marker, end_markers):
+    """text from start_marker to the first of end_markers found after it (or EOF).
+
+    Used to scope a regex scan to one CI step/gate instead of the whole file,
+    the same way check_zizmor_pin_sync does -- a file-wide scan is only safe
+    while the flag being matched (--suppress=, ver=, ...) appears nowhere
+    else in the file, which is an assumption worth pinning down rather than
+    leaving implicit.
+    """
+    start = text.find(start_marker)
+    if start == -1:
+        return None
+    end = len(text)
+    for marker in end_markers:
+        pos = text.find(marker, start + len(start_marker))
+        if pos != -1:
+            end = min(end, pos)
+    return text[start:end]
+
+
 def check_cppcheck_suppress_sync():
     failures = []
-    ci = read(".github/workflows/ci.yml")
-    preflight = read("scripts/ci_preflight.sh")
+    ci_full = read(".github/workflows/ci.yml")
+    preflight_full = read("scripts/ci_preflight.sh")
+
+    # Both files currently have exactly one --suppress= invocation, so a
+    # whole-file scan happens to be equivalent to a scoped one today -- but
+    # scope explicitly anyway (mirroring check_zizmor_pin_sync) so this stays
+    # correct if a second tool with its own --suppress flag is ever added to
+    # either file.
+    ci = _scoped_block(ci_full, "- name: Analyze changed C/C++ files", ("\n  zizmor:",))
+    preflight = _scoped_block(preflight_full, 'section "cppcheck (changed files)"', ('section "',))
+    if ci is None or preflight is None:
+        failures.append(
+            "could not find the cppcheck step in ci.yml or the cppcheck "
+            "gate in ci_preflight.sh -- update this check's markers if "
+            "either file's structure changed"
+        )
+        return failures
 
     ci_suppress = SUPPRESS_RE.findall(ci)
     pf_suppress = SUPPRESS_RE.findall(preflight)
