@@ -302,24 +302,38 @@ workflow's own step as `github-actions`. It ends in a verdict line: `✅ Approve
 review), watch for the next bot comment.
 
 First check whether a verdict for the current head is already there (a fast review, or any delay
-between the push and starting the poll): if the newest matching comment's REST `updated_at` is
-newer than the head commit's date, use it and skip the poll. Otherwise record the baseline count
-of bot comments and start a background poll that exits when a new one arrives (do NOT
-foreground-sleep; run this with `run_in_background`):
+between the push and starting the poll). "For the current head" means: a `review` check-run on the
+head SHA completed with success, none is still queued or running, and the newest bot verdict was
+updated after that run started. Commit dates are not used: a commit's committer date is when it
+was made locally, so a verdict on the previous head can be newer than it. If the check passes, use
+that verdict and skip the poll; otherwise record the baseline count of bot comments and start a
+background poll that exits when a new one arrives (do NOT foreground-sleep; run this with
+`run_in_background`):
 
 ```bash
 PR=<number>
-# Verdict already posted for this head? (count-based polling would otherwise wait 30 min for
-# a comment that is already there)
-HEAD_DATE=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha | xargs -I{} gh api "repos/open-astro/AlpacaBridge/commits/{}" --jq .commit.committer.date)
+# Verdict already posted for this head? Bind to the review check-run on the head SHA
+# (filter=all so a later cancelled attempt cannot hide the successful one).
+SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
+RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
+RUN_STARTED=$(jq -r '[.[] | select(.conclusion == "success") | .started_at] | max // empty' <<<"$RUNS")
+PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
 LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
-if [ -n "$LAST" ] && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$HEAD_DATE" +%s)" ]; then
+if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ -n "$LAST" ] \
+   && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$RUN_STARTED" +%s)" ]; then
   printf '%s\n' "${LAST#* }"; exit 0
+fi
+# A successful run with no verdict for this head is a workflow-editing PR the action skipped
+# (the assert step passes it); a count poll would wait 30 minutes for nothing.
+if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] \
+   && gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
+  echo "No review posted for this head: this PR edits the review workflow, so the action skipped it. Review it by eye." >&2; exit 0
 fi
 # Count only genuine review comments: the bot login AND a verdict line, so an
 # unrelated comment from a same-named account can't satisfy the poll. The
-# post step comments with the workflow token, so the author is github-actions
-# (REST reports github-actions[bot]); a filter on "claude" never matches.
+# author pattern is the workflow's own assert-step pattern; the post step
+# comments with the workflow token, so the login is github-actions (REST
+# reports github-actions[bot]) and a filter on "claude" alone never matches.
 FILTER='[.comments[] | select((.author.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))]'
 BASE=$(gh pr view "$PR" --json comments --jq "$FILTER | length")
 DEADLINE=$(( $(date +%s) + 1800 ))   # 30-min bailout: don't poll forever on a broken workflow

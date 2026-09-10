@@ -188,9 +188,10 @@ Keep a running tally of rounds per PR and report it in the wrap-up.
 
 ### `✅ Approved`
 
-**Cleanup rounds until clean, then merge.** Approvals usually carry "minor / non-blocking" notes.
-Leaving them is how leftovers accumulate (nine PRs on 2026-09-10 left six: dead includes, a
-regex edge case, a missing rename flag, an untested name suffix). Handle them like this:
+**At most one cleanup round, then merge.** Approvals usually carry Notes. Leaving them is how
+leftovers accumulate (nine PRs on 2026-09-10 left six: dead includes, a regex edge case, a
+missing rename flag, an untested name suffix); chasing them is how PR #282 reached 29 commits.
+Handle them like this:
 
 1. Classify each note. **Mechanical** = a change a reviewer would accept without discussion and
    that stays inside the PR's files and purpose: unused include, missing test for a string the
@@ -198,11 +199,11 @@ regex edge case, a missing rename flag, an untested name suffix). Handle them li
    default or behaviour, widens scope, needs hardware, or contradicts the PR author's stated
    intent. Judgment notes are listed in the wrap-up for the user, never pushed.
 2. Fix **all** mechanical notes in ONE commit, push once, poll again.
-3. Repeat step 2 for every approval that still carries mechanical notes, until an approval has
-   **none**, then merge. **Hard cap: 3 cleanup rounds per PR.** After the third, merge on the
-   next approval whatever notes it carries and list them in the wrap-up. PR #99 (2026-07-01)
-   took 46 rounds because post-approval pushes were unbounded and trickled one nit at a time;
-   the cap keeps that closed while normal PRs come out fully clean.
+3. Merge on the next verdict that has no Defects, whatever Notes it carries, and list those
+   Notes in the wrap-up. **Hard cap: 1 cleanup round per PR.** PR #99 (2026-07-01) took 46
+   rounds because post-approval pushes were unbounded and trickled one nit at a time, and
+   PR #282 showed that every cleanup push is fresh review surface; one round collects the
+   mechanical notes, the merge closes the loop.
 4. `⚠️ Issues found` on a cleanup round is handled like any other round: fix, push, poll.
    Counting against the cap is mechanical: a round whose Defects section is non-empty does
    **not** count (it is a fix round, not a cleanup round). A rejection that carries only Notes
@@ -273,6 +274,10 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.
 
 ## Hard stops (the only reasons to hand back to the user)
+
+- The bot rejects (`⚠️ Issues found`) with an empty Defects section. The prompt derives the
+  sign-off from Defects, so this is a workflow bug, not a review; quote the comment and hand
+  back rather than fixing Notes to satisfy it.
 
 - A PR's head branch name or fork owner fails the Step 0 validation, or a contributor's diff
   contains changes outside the reviewed finding that you cannot vouch for.

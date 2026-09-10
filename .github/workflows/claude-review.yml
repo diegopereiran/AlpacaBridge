@@ -41,6 +41,13 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # The post step publishes review-comment.md from this checkout, which is
+      # the fork's tree. A PR that commits that file would have its text posted
+      # as the bot whenever the action does not run (actor check, auth error),
+      # and both skills merge on a bot "Approved". Remove it before the action.
+      - name: Drop any review-comment.md the PR ships
+        run: rm -rf review-comment.md
+
       - uses: anthropics/claude-code-action@d75b94d5ad426cb8546e6628b6f5f19b84e5cce1  # v1
         env:
           # allowed_non_write_users turns on subprocess secret scrubbing, which
@@ -88,10 +95,13 @@ jobs:
             that shows it, so the builder can reproduce it before fixing.
 
             NOTES never block. Everything else goes here: hardening,
-            alternatives, style, "correct today but fragile", follow-up ideas.
+            alternatives, "correct today but fragile", follow-up ideas.
             At most five. A change that would widen the PR beyond its
             description is a NOTE that says "out of scope, open an issue",
-            never a DEFECT.
+            never a DEFECT. A bug the PR did not introduce, even one reachable
+            from the changed lines, is a NOTE that says "pre-existing, open an
+            issue", unless the PR's change is what makes it reachable. Skip
+            style and formatting; linters and clang-format handle those.
 
             Review the lines this PR changes, what they directly call, the
             call sites of anything whose signature or contract this PR
@@ -135,8 +145,10 @@ jobs:
         run: |
           # Only the bot's comments count, and only ones touched during this
           # run, so a human "Approved" or a stale comment cannot satisfy it.
-          started="$(gh run view "$GITHUB_RUN_ID" --repo "${{ github.repository }}" --json createdAt --jq .createdAt)"
-          if gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+          # The step runs under bash -e; a failed lookup must not abort before
+          # the exemption below can run, so the failure reads as "no comment".
+          started="$(gh run view "$GITHUB_RUN_ID" --repo "${{ github.repository }}" --json createdAt --jq .createdAt)" || started=""
+          if [ -n "$started" ] && gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
               --paginate \
               | jq -r --arg since "$started" \
                 '.[] | select(.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) | select(.updated_at >= $since) | .body' \
