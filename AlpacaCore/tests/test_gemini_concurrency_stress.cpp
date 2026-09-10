@@ -90,12 +90,21 @@ void flatpanel_operate(AlpacaDriver& d) {
     call([&] { static_cast<void>(panel.get_max_brightness()); });
     call([&] { static_cast<void>(panel.get_calibrator_changing()); });
     call([&] { static_cast<void>(panel.get_cover_moving()); });
-    // One calibrator submission per iteration, not on+off: with
-    // calibrator_pending_count_ > 0 the inline fast path is never claimed,
-    // so each call spawns a task thread that joins its predecessor -- two
-    // per iteration from four op threads builds a chain of live threads for
-    // no extra coverage.
-    call([&] { panel.calibrator_on(10); });
+    // Submit a calibrator change only when one is not already in flight.
+    // Unconditional submission is what builds an unbounded thread chain
+    // here: on the background path calibrator_on() returns as soon as it
+    // spawns a task thread, each spawned thread joins its predecessor (so
+    // they all stay live), and the drain rate is one set_light() ~= 110 ms
+    // (2 commands x kCommandDelayMs) against four op threads submitting
+    // every ~200 us. It survived locally, but on a faster runner that grows
+    // until pthread_create fails or TSan hits its live-thread ceiling. The
+    // gate keeps the same coverage -- the task path still runs every time
+    // the previous one has drained -- without the pile-up.
+    call([&] {
+        if (!panel.get_calibrator_changing()) {
+            panel.calibrator_on(10);
+        }
+    });
     call([&] { static_cast<void>(panel.get_device_state()); });
 }
 
