@@ -275,7 +275,10 @@ private:
     // granularity and RTC drift is minutes per year, so minutes is roomy.
     static bool rtc_agrees(const std::optional<std::chrono::system_clock::time_point>& t,
                            std::chrono::system_clock::time_point now) {
-        const auto skew = now - *t;
+        if (!t.has_value()) {
+            return false;
+        }
+        const auto skew = now - t.value();
         return skew < kRtcAgreement && skew > -kRtcAgreement;
     }
     // Uncached sysfs read behind host_rtc_time(); mutates a function-local
