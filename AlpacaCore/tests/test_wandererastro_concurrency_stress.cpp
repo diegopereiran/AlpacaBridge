@@ -151,10 +151,15 @@ TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate st
     FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
 
-    // 15 s for the same reason as the box switch below: the wheel's own
-    // connect timeout is 5 s (serial_timeout_s = 5), so a 5 s budget is
-    // exactly one attempt with no retry margin -- one slow first attempt on
-    // a loaded TSan runner would fail the REQUIRE outright.
+    // 15 s, not the cover's 5 s: settle_connected() gates whether to START
+    // a new attempt on the deadline, not how long an in-flight one may run,
+    // so it isn't strictly "one attempt" -- but the wheel's own connect wait
+    // (serial_timeout_s * 1000 = 5000 ms exactly) leaves zero slack inside a
+    // 5 s budget: if the very first attempt is the one that's slow, there is
+    // no time left to even start a second. The cover's connect wait is only
+    // 3000 ms against the same 5 s budget (2 s of real margin), which is why
+    // it did not need raising -- this is a budget-vs-connect-time margin
+    // difference between the two drivers, not an inconsistency.
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     driver->set_connected(false);
 
@@ -177,10 +182,10 @@ TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stre
     FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(500));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
 
-    // 15 s, not the 5 s the cover/wheel use: the box's connect waits
-    // serial_timeout_s * 1000 + 3500 = 6500 ms for its first frame, so a 5 s
-    // budget would give settle_connected a single attempt and no retry --
-    // one slow frame on a loaded TSan runner would fail the case.
+    // 15 s, not the cover's 5 s: same margin argument as the filter wheel
+    // above, sharper here -- the box's connect wait is
+    // serial_timeout_s * 1000 + 3500 = 6500 ms, which already EXCEEDS a 5 s
+    // budget on its own, so the first attempt alone could exhaust it.
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     driver->set_connected(false);
 
