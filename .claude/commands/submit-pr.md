@@ -318,7 +318,7 @@ PR=<number>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
 # new check-run; a first look inside that window classifies the OLD run as final. So a
 # real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
 # is only valid when nothing was just re-triggered, and looks at once.
-[ "${BUDGET:-1800}" -gt 0 ] && sleep "$TICK"
+if [ "${BUDGET:-1800}" -gt 0 ]; then sleep "$TICK"; fi
 while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
   # cancelled attempt cannot hide the finished one). Everything is fetched with
@@ -362,9 +362,16 @@ while :; do
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" != 0 ]; then
     echo "REVIEW SKIPPED for head $SHA: no run to wait for. Apply or re-apply safe-to-review (see above)." >&2; exit 3
   fi
-  # Only cancelled runs: a superseding trigger never came. Re-trigger (relabel).
+  # Only cancelled runs: a superseding trigger never came. A relabel issued mid-poll
+  # cancels the in-flight run a few seconds before its replacement appears, so this
+  # state has to hold on two consecutive looks before it is reported.
   if [ -z "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ "$SKIPPED" = 0 ] && [ "$CANCELLED" != 0 ]; then
-    echo "REVIEW CANCELLED for head $SHA and nothing replaced it: re-trigger with the relabel trick." >&2; exit 3
+    if [ "${CANCELLED_SEEN:-0}" = 1 ]; then
+      echo "REVIEW CANCELLED for head $SHA and nothing replaced it: re-trigger with the relabel trick." >&2; exit 3
+    fi
+    CANCELLED_SEEN=1
+  else
+    CANCELLED_SEEN=0
   fi
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
