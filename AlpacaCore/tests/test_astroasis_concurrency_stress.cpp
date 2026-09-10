@@ -99,6 +99,15 @@ TEST_CASE("Astroasis focuser - enumeration races connect across instances", "[as
     using namespace alpacacore::vendor::astroasis;
 
     constexpr int kIterations = 200;
+    // Enumeration is the expensive half: each pass is a real udev/libusb bus
+    // scan, and they are now all serialized on hid_global_mutex(), so the case
+    // costs (enumerator passes x scan time). That is near-zero in a CI
+    // container with no hidraw nodes, but tens of milliseconds per scan on a
+    // dev box or SBC with a populated USB tree -- where this also runs under
+    // RUN_TSAN=1 ./scripts/ci_preflight.sh. Fewer passes cost nothing here:
+    // what is being checked is that the two paths interleave without hanging,
+    // not throughput.
+    constexpr int kEnumerationIterations = 50;
     std::atomic<bool> start{false};
     std::atomic<int> enumerations{0};
     std::atomic<int> connect_attempts{0};
@@ -127,7 +136,7 @@ TEST_CASE("Astroasis focuser - enumeration races connect across instances", "[as
         while (!start.load()) {
             std::this_thread::yield();
         }
-        for (int i = 0; i < kIterations; ++i) {
+        for (int i = 0; i < kEnumerationIterations; ++i) {
             // Read-only VID:PID bus scan; the result depends on what is
             // plugged in, so only the fact that it returns is asserted.
             static_cast<void>(enumerate_astroasis_focusers());
@@ -146,7 +155,7 @@ TEST_CASE("Astroasis focuser - enumeration races connect across instances", "[as
     }
 
     CHECK(connect_attempts.load() == 2 * kIterations);
-    CHECK(enumerations.load() == 2 * kIterations);
+    CHECK(enumerations.load() == 2 * kEnumerationIterations);
     CHECK(first.is_connected() == false);
     CHECK(second.is_connected() == false);
 }

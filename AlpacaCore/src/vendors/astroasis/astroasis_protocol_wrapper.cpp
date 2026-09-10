@@ -65,9 +65,15 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // read on that focuser queued behind them for the same duration. Bounded,
 // never a deadlock. (2) A
 // function-local static is destroyed at exit, before any static-lifetime object
-// constructed earlier -- unreachable today because every driver is heap-owned
-// and torn down first; a static-lifetime driver calling hidapi from its
-// destructor would need this leaked (`static auto* m = new std::mutex;`).
+// constructed earlier. What keeps that unreachable is NOT heap ownership: the
+// DeviceRegistry singleton is constructed at startup registration and this mutex
+// on the first hidapi call, so the mutex is destroyed FIRST, and a driver still
+// held by the registry at static-destruction time would lock a destroyed mutex
+// in ~Impl. The invariant is the explicit
+// DeviceRegistry::instance().clear() in AlpacaHTTP/examples/simple_server's
+// main(), which destroys every driver before main returns. Drop that call, or
+// give a driver static lifetime, and this mutex must be leaked instead
+// (`static auto* m = new std::mutex;`).
 std::mutex& hid_global_mutex() {
     static std::mutex m;
     return m;
