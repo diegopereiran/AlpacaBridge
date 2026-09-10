@@ -102,8 +102,8 @@ void box_switch_operate(AlpacaDriver& d) {
     call([&] { static_cast<void>(sw.get_can_write(0)); });
     // Write to id 2 ("DC3-4"), not id 0: ids 0/1 are the always-on
     // read-only rails, so a write there throws NotImplemented before
-    // reaching dispatch_write() and the write_mutex_/commanded_ path this
-    // storm is supposed to exercise would never run.
+    // reaching dispatch_write() and the state_mutex_-guarded commanded-value
+    // path this storm is supposed to exercise would never run.
     call([&] { sw.set_switch_value(2, 1.0); });
     call([&] { static_cast<void>(sw.get_device_state()); });
 }
