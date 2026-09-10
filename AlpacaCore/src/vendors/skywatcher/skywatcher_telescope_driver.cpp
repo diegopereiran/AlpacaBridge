@@ -791,6 +791,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         utc_offset_ = utc - std::chrono::system_clock::now();
+        utc_anchor_system_ = std::chrono::system_clock::now();
+        utc_anchor_steady_ = std::chrono::steady_clock::now();
+        has_utc_offset_ = true;
         invalidate_position_cache_locked();  // reported RA moves with LST
     }
 
@@ -1767,8 +1770,25 @@ private:
     // host clock plus the offset a client set through UTCDate. Before this,
     // get_utc_date() reported the offset while goto/RA math ignored it, so a
     // client time-sync corrected the readback and not the pointing.
+    // Host clock plus the client-set offset. The offset is a snapshot delta
+    // against the host clock at the time of the UTCDate write; if the host
+    // clock is stepped afterwards (Sync Time, NTP, `date`) the delta no
+    // longer describes anything, so it is dropped and the corrected host
+    // clock is used until the next UTCDate write (review of #291).
     std::chrono::system_clock::time_point utc_now_locked() const {
-        return std::chrono::system_clock::now() + utc_offset_;
+        const auto system_now = std::chrono::system_clock::now();
+        if (!has_utc_offset_) {
+            return system_now;
+        }
+        if (detail::host_clock_stepped(system_now - utc_anchor_system_,
+                                       std::chrono::steady_clock::now() - utc_anchor_steady_)) {
+            has_utc_offset_ = false;
+            utc_offset_ = {};
+            ALPACA_LOG_INFO("SkyWatcher", "Host clock was stepped after the client's UTCDate write; dropping the "
+                                          "client offset and using the host clock");
+            return system_now;
+        }
+        return system_now + utc_offset_;
     }
 
     // ── Pointing model ──────────────────────────────────────────────────────
@@ -3106,7 +3126,12 @@ private:
     double site_latitude_;
     double site_longitude_;
     double site_elevation_m_;
-    std::chrono::system_clock::duration utc_offset_{};
+    // Client UTCDate offset and the anchors utc_now_locked() uses to notice a
+    // host clock step underneath it. Mutable: the drop happens on a read.
+    mutable bool has_utc_offset_ = false;
+    mutable std::chrono::system_clock::duration utc_offset_{};
+    mutable std::chrono::system_clock::time_point utc_anchor_system_{};
+    mutable std::chrono::steady_clock::time_point utc_anchor_steady_{};
 
     mutable double cached_ra_axis_deg_ = 0.0;
     mutable double cached_dec_axis_deg_ = 0.0;
@@ -3174,6 +3199,16 @@ private:
     mutable std::atomic<bool> stop_task_cancel_[2]{false, false};  // indexed by axis
     mutable std::atomic<bool> rate_verify_cancel_{false};
 };
+
+namespace detail {
+bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
+                        std::chrono::steady_clock::duration steady_elapsed, std::chrono::milliseconds tolerance) {
+    const auto system_ms = std::chrono::duration_cast<std::chrono::milliseconds>(system_elapsed);
+    const auto steady_ms = std::chrono::duration_cast<std::chrono::milliseconds>(steady_elapsed);
+    const auto drift = system_ms - steady_ms;
+    return drift > tolerance || drift < -tolerance;
+}
+}  // namespace detail
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
                                                              std::optional<double> site_latitude_deg,
