@@ -100,6 +100,40 @@ int main() {
         ::unlink(path.c_str());
     }
 
+    // open-astro#289: sync_system_clock_from_clients under [server]. Default
+    // on; the file can turn it off; unparseable values keep the default.
+    {
+        alpacahttp::Config fresh;
+        EXPECT(fresh.sync_system_clock_from_clients() == true);
+        fresh.set_sync_system_clock_from_clients(false);
+        EXPECT(fresh.sync_system_clock_from_clients() == false);
+
+        char path_template[] = "/tmp/alpacahttp_test_clock_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  profile_name: \"Field Rig\"\n"
+                   "  sync_system_clock_from_clients: \"false\"\n";
+        }
+        ::close(fd);
+        alpacahttp::Config from_file;
+        EXPECT(from_file.load(path));
+        EXPECT(from_file.profile_name() == "Field Rig");
+        EXPECT(from_file.sync_system_clock_from_clients() == false);
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  sync_system_clock_from_clients: maybe\n";
+        }
+        alpacahttp::Config bad_value;
+        EXPECT(bad_value.load(path));
+        EXPECT(bad_value.sync_system_clock_from_clients() == true);
+        ::unlink(path.c_str());
+    }
+
     std::cout << "All configuration tests passed!\n";
     return 0;
 }

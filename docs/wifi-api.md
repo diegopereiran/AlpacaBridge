@@ -187,6 +187,18 @@ has no NTP, so the client's clock becomes the time source:
 
 Same Alpaca envelope, same trusted-LAN model as the WiFi endpoints.
 
+Since 3.6.0 the manual call is rarely needed: a client's
+`PUT /api/v1/telescope/{n}/utcdate` (NINA, SkySafari and PHD2 send it on
+connect) steps the SBC clock itself whenever the kernel reports the clock
+undisciplined (`adjtimex` `STA_UNSYNC`, the permanent state of an SBC without
+NTP or RTC). It never overrides NTP/chrony/GPS, applies the same 2000-2100
+window, ignores sub-second deltas, and logs every step with the delta and the
+client address. `GET /management/v1/description` reports the state:
+`ClockSynchronized` (kernel-disciplined), `ClockSource` (`ntp` | `client` |
+`none`) and `SyncSystemClockFromClients`; `PUT` the last one as a boolean to
+opt out (persisted as `sync_system_clock_from_clients` under `server:` in the
+config file). A telescope connecting while the clock is `none` logs a WARN.
+
 ## Feature detection
 
 - Old server (pre-3.4.0): the routes return "Endpoint not found" —

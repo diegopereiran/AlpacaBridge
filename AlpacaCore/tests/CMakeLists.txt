@@ -25,6 +25,7 @@ set(TEST_SOURCES
     test_async_connectable.cpp
     test_device_registry.cpp
     test_error_handling.cpp
+    test_host_clock.cpp
     test_poll_settle.cpp
     test_serial_by_id_scan.cpp
     test_synscan_handset_probe.cpp
@@ -59,6 +60,8 @@ endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
         test_skywatcher_async.cpp test_skywatcher_serial.cpp)
+    # Telescope [stress] coverage over the loopback UDP fake (issue #271).
+    list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp
@@ -69,6 +72,9 @@ if(TARGET alpacacore_ioptron)
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
         list(APPEND TEST_SOURCES test_ioptron_switch.cpp)
+        # PowerBox Switch [stress] coverage (#271); separate file for the
+        # same reason as test_ioptron_switch.cpp above.
+        list(APPEND TEST_SOURCES test_ioptron_switch_concurrency_stress.cpp)
     endif()
 endif()
 if(TARGET alpacacore_onstep)

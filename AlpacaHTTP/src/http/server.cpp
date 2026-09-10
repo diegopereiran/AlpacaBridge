@@ -38,6 +38,7 @@ Server::Server(const Config& config)
     router_.set_server_info(config_.server_name(), config_.manufacturer(), alpacahttp::kVersion, config_.location(),
                             config_.profile_name());
     router_.set_config_path(config_.config_path());
+    router_.set_sync_system_clock_from_clients(config_.sync_system_clock_from_clients());
 
     // The reactor's wake pipe lives as long as the Server. Non-blocking on
     // both ends: a wake is one byte, and a full pipe already means a wake is

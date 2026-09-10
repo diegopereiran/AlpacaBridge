@@ -22,9 +22,11 @@
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/focuser_driver.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
+#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
 #include "catch2_compat.h"
@@ -56,6 +58,16 @@ FakeToupTekSDK make_fake_with_wheel() {
     // reconnect's homing poll completes quickly and the stress loop gets many
     // full connect cycles (including mid-homing disconnects) per window.
     fake.wheel_position_script = {-1, 0, 0, 0};
+    return fake;
+}
+
+FakeToupTekSDK make_fake_with_focuser() {
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFocuserInfo focuser;
+    focuser.id = "fake-aaf-0";
+    focuser.name = "FakeAAF";
+    focuser.model_name = "AAF";
+    fake.focusers.push_back(focuser);
     return fake;
 }
 
@@ -174,6 +186,46 @@ TEST_CASE("ToupTek AFW - racing disconnect is never dropped (homing window)", "[
     auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", sdk);
     CHECK(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver) == false);
     CHECK(fake.ref_count("fake-afw-0") == 0);
+}
+
+TEST_CASE("ToupTek AAF focuser - concurrent connect/disconnect/operate stress", "[touptek][focuser][stress]") {
+    auto fake = make_fake_with_focuser();
+    LockedToupTekSDK sdk(fake);
+    auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", sdk);
+
+    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+        auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
+        static_cast<void>(focuser.get_is_moving());
+        static_cast<void>(focuser.get_position());
+        static_cast<void>(focuser.get_max_step());
+        static_cast<void>(focuser.get_max_increment());
+        static_cast<void>(focuser.get_temperature());
+        focuser.move(1234);
+        focuser.halt();
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, true));
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.ref_count("fake-aaf-0") == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("ToupTek AAF focuser - destruction races an in-flight connect", "[touptek][focuser][stress]") {
+    auto fake = make_fake_with_focuser();
+    LockedToupTekSDK sdk(fake);
+    alpacacore::test::run_destruction_during_connect_stress(
+        [&]() { return alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", sdk); });
+    CHECK(fake.ref_count("fake-aaf-0") == 0);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("ToupTek AAF focuser - racing disconnect is never dropped", "[touptek][focuser][stress]") {
+    auto fake = make_fake_with_focuser();
+    LockedToupTekSDK sdk(fake);
+    auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", sdk);
+    CHECK(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver) == false);
+    CHECK(fake.ref_count("fake-aaf-0") == 0);
 }
 
 TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress", "[touptek][switch][stress]") {
