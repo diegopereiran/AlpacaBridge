@@ -17,9 +17,9 @@
 
 #include <chrono>
 #include <cstdint>
-#include <fstream>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace alpacacore::util {
@@ -58,7 +58,7 @@ public:
 
     using IsSynchronizedFn = std::function<bool()>;
     using SetTimeFn = std::function<bool(std::chrono::system_clock::time_point, std::string& error)>;
-    using HasRtcFn = std::function<bool()>;
+    using RtcTimeFn = std::function<std::optional<std::chrono::system_clock::time_point>()>;
 
     // Same window the /management/v1/synctime endpoint enforces.
     static constexpr std::int64_t kMinEpoch = 946684800;   // 2000-01-01T00:00:00Z
@@ -68,11 +68,12 @@ public:
     static constexpr std::chrono::milliseconds kMinStep{1000};
 
     HostClock()
-        : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time, &HostClock::host_booted_from_rtc) {
-    }
+        : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time, &HostClock::host_rtc_time) {}
     HostClock(
-        IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; })
-        : is_synchronized_(std::move(is_synchronized)), set_time_(std::move(set_time)), has_rtc_(std::move(has_rtc)) {}
+        IsSynchronizedFn is_synchronized, SetTimeFn set_time, RtcTimeFn rtc_time = [] { return std::nullopt; })
+        : is_synchronized_(std::move(is_synchronized)),
+          set_time_(std::move(set_time)),
+          rtc_time_(std::move(rtc_time)) {}
 
     void set_enabled(bool enabled) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -102,7 +103,7 @@ public:
     // UTCDate write), "rtc" (undisciplined, never stepped, but the kernel
     // loaded system time from a hardware RTC at boot: that is a plain clock
     // set, so STA_UNSYNC stays set — open-astro#292), or "none".
-    std::string source(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
+    std::string source() const {
         if (synchronized()) {
             return "ntp";
         }
@@ -112,31 +113,27 @@ public:
                 return "client";
             }
         }
-        return has_rtc(now) ? "rtc" : "none";
+        return has_rtc() ? "rtc" : "none";
     }
 
-    // True when the system clock was loaded from a hardware RTC at boot AND
-    // the resulting time is plausible (not before this library was built). A
-    // Raspberry Pi 5 has an on-board RTC that exists without a battery and
-    // hands the kernel an epoch-ish time after a power cut; labelling that
-    // "rtc" would be worse than "none". Reporting only: the stepping decision
-    // never looks at this.
-    bool has_rtc(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
-        return has_rtc_() && now >= build_time();
+    // True when the kernel loaded system time from a hardware RTC at boot AND
+    // the RTC's OWN current reading is plausible (not before this library was
+    // built). The RTC is read, not the system clock: userspace (fake-hwclock,
+    // timesyncd) moves the system clock after boot, so a battery-less
+    // Raspberry Pi 5 RTC that handed the kernel 2000-01-01 would otherwise
+    // pass once the saved timestamp was restored. Reporting only: the
+    // stepping decision never looks at this.
+    bool has_rtc() const {
+        const auto t = rtc_time_();
+        return t.has_value() && *t >= build_time();
     }
 
-    // The kernel sets /sys/class/rtc/rtc0/hctosys to 1 on the RTC it loaded
-    // system time from at boot. Nothing else counts: a present-but-unread
-    // RTC (CONFIG_RTC_HCTOSYS off, or an unreadable attribute) is "none".
-    // Cannot change after boot, so it is probed once.
-    static bool host_booted_from_rtc() {
-        static const bool booted = [] {
-            std::ifstream f("/sys/class/rtc/rtc0/hctosys");
-            int v = 0;
-            return f.is_open() && (f >> v) && v == 1;
-        }();
-        return booted;
-    }
+    // The RTC the kernel set system time from at boot (its hctosys attribute
+    // reads 1; searched across /sys/class/rtc/rtc*), read through its
+    // since_epoch attribute. nullopt when no RTC was used at boot, when the
+    // attribute is unreadable, or when CONFIG_RTC_HCTOSYS is off. Defined in
+    // host_clock.cpp with build_time().
+    static std::optional<std::chrono::system_clock::time_point> host_rtc_time();
 
     // Build month of the library (defined once in host_clock.cpp so __DATE__
     // is captured in exactly one translation unit); any clock earlier than
@@ -238,7 +235,7 @@ public:
 private:
     IsSynchronizedFn is_synchronized_;
     SetTimeFn set_time_;
-    HasRtcFn has_rtc_;
+    RtcTimeFn rtc_time_;
     mutable std::mutex mutex_;
     bool enabled_ = true;
     mutable bool stepped_ = false;

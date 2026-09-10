@@ -198,11 +198,13 @@ client address. `GET /management/v1/description` reports the state:
 `rtc` | `none`) and `SyncSystemClockFromClients`; `PUT` the last one as a boolean to
 opt out (persisted as `sync_system_clock_from_clients` under `server:` in the
 config file). A telescope connecting while the clock is `none` logs a WARN.
-`rtc` means the kernel loaded system time from a hardware RTC at boot
-(`/sys/class/rtc/rtc0/hctosys` reads 1; a present-but-unread RTC does not
-count) and the current time is not earlier than the build's month (a Pi 5's
-on-board RTC exists without a battery and hands the kernel an epoch-ish time
-after a power cut, which reads `none`). Loading an RTC is a plain clock set,
+`rtc` means the kernel loaded system time from a hardware RTC at boot (the
+`/sys/class/rtc/rtc*` device whose `hctosys` reads 1; a present-but-unread
+RTC does not count) and that RTC's own current reading (`since_epoch`) is
+not earlier than the build's month. The RTC is judged, not the system clock:
+a Pi 5's on-board RTC exists without a battery and reads 2000-01-01 after a
+power cut, while userspace may already have restored a recent system time;
+that host reads `none`. Loading an RTC is a plain clock set,
 so the kernel still reports the clock unsynchronised, but the time is
 normally right to seconds. A client `UTCDate`
 that disagrees by more than 1 s still steps the clock (that is what corrects

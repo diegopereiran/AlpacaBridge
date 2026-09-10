@@ -15,6 +15,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
+#include <string>
 
 namespace alpacacore::util {
 
@@ -34,6 +36,31 @@ std::chrono::system_clock::time_point HostClock::build_time() {
         return std::chrono::system_clock::from_time_t(timegm(&tm));
     }();
     return tp;
+}
+
+// Which RTC (if any) the kernel loaded system time from cannot change after
+// boot, so the device is found once; its time is read on every call.
+std::optional<std::chrono::system_clock::time_point> HostClock::host_rtc_time() {
+    static const std::string device = [] {
+        for (int i = 0; i < 8; ++i) {
+            const std::string dev = "/sys/class/rtc/rtc" + std::to_string(i);
+            std::ifstream f(dev + "/hctosys");
+            int v = 0;
+            if (f.is_open() && (f >> v) && v == 1) {
+                return dev;
+            }
+        }
+        return std::string();
+    }();
+    if (device.empty()) {
+        return std::nullopt;
+    }
+    std::ifstream f(device + "/since_epoch");
+    long long epoch = 0;
+    if (!f.is_open() || !(f >> epoch) || epoch <= 0) {
+        return std::nullopt;
+    }
+    return std::chrono::system_clock::time_point(std::chrono::seconds(epoch));
 }
 
 }  // namespace alpacacore::util

@@ -13,6 +13,7 @@
 #include <alpacacore/util/host_clock.h>
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,7 +28,7 @@ namespace {
 struct Fake {
     bool synchronized = false;
     bool set_ok = true;
-    bool rtc = false;
+    std::optional<system_clock::time_point> rtc_time;  // what the RTC itself reads
     std::vector<system_clock::time_point> sets;
 
     HostClock clock() {
@@ -39,7 +40,7 @@ struct Fake {
                              }
                              return set_ok;
                          },
-                         [this] { return rtc; });
+                         [this] { return rtc_time; });
     }
 };
 
@@ -154,23 +155,27 @@ TEST_CASE("HostClock - a refused clock_settime is reported, not thrown", "[util]
 TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is unchanged (#292)",
           "[util][hostclock][unit]") {
     Fake f;
-    f.rtc = true;
+    f.rtc_time = system_clock::now();  // an RTC keeping real time
     auto c = f.clock();
     // Booted from the RTC: the kernel still says unsynchronised, but the
     // state is not "none".
     CHECK_FALSE(c.synchronized());
-    const auto now = system_clock::now();
-    CHECK(c.has_rtc(now));
-    CHECK(c.source(now) == "rtc");
-    // An RTC that handed the kernel a time before this binary was built is
-    // not keeping time (Pi 5 on-board RTC without a battery): report "none".
-    const auto y1999 = system_clock::time_point(seconds(915148800));
-    CHECK_FALSE(c.has_rtc(y1999));
-    CHECK(c.source(y1999) == "none");
-    CHECK(HostClock::build_time() > y1999);  // not: <= now(), the suite also runs on hosts whose clock is behind
+    CHECK(c.has_rtc());
+    CHECK(c.source() == "rtc");
+    // The RTC's own reading is judged, not the system clock: a battery-less
+    // Pi 5 RTC reads 2000-01-01 while userspace may already have restored a
+    // recent system time. It is not keeping time: report "none".
+    const auto y2000 = system_clock::time_point(seconds(946684800));
+    f.rtc_time = y2000;
+    CHECK_FALSE(c.has_rtc());
+    CHECK(c.source() == "none");
+    CHECK(HostClock::build_time() > y2000);  // not: <= now(), the suite also runs on hosts whose clock is behind
+    f.rtc_time = std::nullopt;               // no RTC was used at boot
+    CHECK(c.source() == "none");
+    f.rtc_time = system_clock::now();
     // A client that agrees with the RTC changes nothing.
     CHECK(c.step_from_client(kNow + milliseconds(300), kNow).outcome == Outcome::SkippedSmall);
-    CHECK(c.source(now) == "rtc");
+    CHECK(c.source() == "rtc");
     // A client that disagrees by more than a second still wins (it is what
     // corrects RTC drift in the field), and the source becomes "client".
     CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Stepped);
@@ -202,7 +207,8 @@ TEST_CASE("HostClock - default construction queries the real kernel without step
     const bool s = real.synchronized();
     CHECK((s == true || s == false));
     CHECK((real.source() == "ntp" || real.source() == "rtc" || real.source() == "none"));
-    CHECK(real.has_rtc() == (HostClock::host_booted_from_rtc() && system_clock::now() >= HostClock::build_time()));
+    const auto rtc = HostClock::host_rtc_time();
+    CHECK(real.has_rtc() == (rtc.has_value() && *rtc >= HostClock::build_time()));
     real.set_enabled(false);  // never call clock_settime from a unit test
     CHECK(real.step_from_client(kNow, kNow).outcome == Outcome::SkippedDisabled);
 }

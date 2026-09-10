@@ -2274,17 +2274,19 @@ Response Router::dispatch_device_method(
                     // UTCDate write will fix it; say so in case none comes.
                     if (device->get_device_type() == alpacacore::DeviceType::Telescope && !host_clock_.synchronized() &&
                         !host_clock_.stepped_by_client()) {
+                        const bool rtc = host_clock_.has_rtc();
                         const std::string msg =
                             "Telescope " + std::to_string(device->get_device_number()) +
-                            (host_clock_.has_rtc()
-                                 ? " connecting on the hardware RTC's time (no NTP, not yet set by a client)"
-                                 : " connecting with an undisciplined host clock (no NTP, not yet set by a client); "
-                                   "goto/LST math runs on it until a client writes UTCDate") +
+                            (rtc ? " connecting on the hardware RTC's time (no NTP, not yet set by a client); "
+                                 : " connecting with an undisciplined host clock (no NTP, not yet set by a client); ") +
+                            "goto/LST math runs on it until a client writes UTCDate" +
                             (host_clock_.enabled() ? ""
                                                    : " (syncSystemClockFromClients is off: it will not be corrected)");
                         // open-astro#292: an RTC-backed clock is usually right to
-                        // seconds; that is information, not a warning.
-                        if (host_clock_.has_rtc()) {
+                        // seconds; that is information, not a warning -- unless
+                        // nothing is allowed to correct it, which is the case
+                        // most worth a warning on a drifting RTC.
+                        if (rtc && host_clock_.enabled()) {
                             util::log_info(msg);
                         } else {
                             util::log_warning(msg);
