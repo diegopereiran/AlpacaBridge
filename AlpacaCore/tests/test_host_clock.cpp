@@ -191,8 +191,15 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
     CHECK_FALSE(c.has_rtc(rtc_now - seconds(30)));
     CHECK(c.rtc_diverged(rtc_now - seconds(30)));
     CHECK_FALSE(c.rtc_diverged(rtc_now));
-    CHECK(c.has_rtc(rtc_now + seconds(4)));  // inside the measurement-noise window
-    CHECK(c.has_rtc(rtc_now - seconds(4)));
+    CHECK(c.has_rtc(rtc_now + seconds(1)));  // inside the measurement-noise window
+    CHECK(c.has_rtc(rtc_now - seconds(1)));
+    // Hysteresis: once diverged, coming back needs the tighter window, so a
+    // clock parked on the threshold cannot flap between "rtc" and "none".
+    CHECK(c.rtc_diverged(rtc_now + seconds(6)));   // latch set
+    CHECK_FALSE(c.has_rtc(rtc_now + seconds(4)));  // inside 5 s, still diverged
+    CHECK_FALSE(c.has_rtc(rtc_now + seconds(3)));
+    CHECK(c.has_rtc(rtc_now + seconds(1)));  // inside 2 s: latch clears
+    CHECK(c.has_rtc(rtc_now + seconds(4)));  // and 4 s is agreement again
     // A client that agrees with the RTC changes nothing.
     CHECK(c.step_from_client(kNow + milliseconds(300), kNow).outcome == Outcome::SkippedSmall);
     CHECK(c.source(rtc_now) == "rtc");

@@ -212,9 +212,11 @@ granular and up to 1 s stale, so a few seconds is measurement noise; beyond
 that the system clock has measurably left its own source, and 1 s is already
 15 arcsec of RA). Both free-run without NTP and an SoC timebase drifts
 seconds per day, so on a long-running NTP-less host the state flips from
-`rtc` to `none` after a day or so of uptime; the telescope connect message
-then says the clock no longer agrees with the RTC, and a client `UTCDate`
-write or a Sync Time press corrects it. The RTC is judged, not the system clock:
+`rtc` to `none` after roughly two days of uptime; the telescope connect
+message then says the clock no longer agrees with the RTC, and a client
+`UTCDate` write or a Sync Time press corrects it. Returning to `rtc` needs
+the skew back inside 2 seconds, so a clock parked on the threshold does not
+alternate between the two states on consecutive polls. The RTC is judged, not the system clock:
 a Pi 5's on-board RTC exists without a battery and reads 2000-01-01 after a
 power cut, while userspace may already have restored a recent system time;
 that host reads `none`. Loading an RTC is a plain clock set,

@@ -15,6 +15,7 @@
 #include <sys/timex.h>
 #include <time.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -103,6 +104,8 @@ public:
     // UTCDate write), "rtc" (undisciplined, never stepped, but the kernel
     // loaded system time from a hardware RTC at boot: that is a plain clock
     // set, so STA_UNSYNC stays set — open-astro#292), or "none".
+    // "rtc" needs has_rtc(), i.e. agreement as well as provenance: a clock
+    // that has drifted away from its own RTC reports "none", not "rtc".
     std::string source(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
         if (synchronized()) {
             return "ntp";
@@ -124,24 +127,31 @@ public:
         return rtc ? "rtc" : "none";
     }
 
-    // True when the kernel loaded system time from a hardware RTC at boot AND
-    // the RTC's OWN current reading is plausible (not before this library was
-    // built). The RTC is read, not the system clock: userspace (fake-hwclock,
-    // timesyncd) moves the system clock after boot, so a battery-less
-    // Raspberry Pi 5 RTC that handed the kernel 2000-01-01 would otherwise
-    // pass once the saved timestamp was restored. Reporting only: the
-    // stepping decision never looks at this.
+    // True when all three hold: the kernel loaded system time from a hardware
+    // RTC at boot, the RTC's OWN current reading is plausible (not before this
+    // library was built), and the system clock still agrees with that reading
+    // (see kRtcAgreement -- this one goes false on a healthy RTC after enough
+    // free-running uptime, which is the point). The RTC is read, not the
+    // system clock: userspace (fake-hwclock, timesyncd) moves the system clock
+    // after boot, so a battery-less Raspberry Pi 5 RTC that handed the kernel
+    // 2000-01-01 would otherwise pass once the saved timestamp was restored.
+    // Reporting only: the stepping decision never looks at this.
     bool has_rtc(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
         return rtc_state(now) == RtcState::Ok;
     }
 
     // How much the system clock may differ from the RTC and still be called
     // its offspring. since_epoch is 1 s granular and the memo is up to 1 s
-    // stale, so ~2 s is measurement noise; beyond that the system clock has
-    // measurably walked away from its own source. Deliberately tight: this
-    // module's own relevance threshold is 1 s, because 1 s of clock error is
-    // 15 arcsec of RA on every goto.
+    // stale, so ~2 s of the measurement is noise; 5 s is that noise floor plus
+    // a small margin and no more, because this module's own relevance
+    // threshold is 1 s (1 s of clock error is 15 arcsec of RA on every goto).
+    // At a typical ~20 ppm of relative drift a free-running host crosses it
+    // after roughly two days and then honestly reports "none".
     static constexpr std::chrono::seconds kRtcAgreement{5};
+    // Coming back from Diverged needs the skew inside a tighter window, so a
+    // clock sitting on the threshold cannot flap between "rtc" and "none" on
+    // consecutive polls.
+    static constexpr std::chrono::seconds kRtcReagreement{2};
 
     // The RTC is present and plausible but the system clock no longer agrees
     // with it: after a bypassing setter, or simply after months of NTP-less
@@ -164,7 +174,10 @@ public:
         if (!rtc_plausible(t)) {
             return RtcState::None;
         }
-        return rtc_agrees(t, now) ? RtcState::Ok : RtcState::Diverged;
+        const auto window = rtc_diverged_.load(std::memory_order_relaxed) ? kRtcReagreement : kRtcAgreement;
+        const bool agrees = rtc_agrees(t, now, window);
+        rtc_diverged_.store(!agrees, std::memory_order_relaxed);
+        return agrees ? RtcState::Ok : RtcState::Diverged;
     }
 
     // The clock was stepped by a path that bypasses step_from_client() (the
@@ -178,8 +191,9 @@ public:
 
     // The RTC the kernel set system time from at boot (its hctosys attribute
     // reads 1; searched across /sys/class/rtc/rtc0..rtc7, found once), read
-    // through its since_epoch attribute and memoised for one second so an
-    // I2C transaction never runs on every HTTP request or device connect.
+    // through its since_epoch attribute and memoised (one second for a
+    // reading, thirty for "no RTC here") so an I2C transaction never runs on
+    // every HTTP request or device connect.
     // nullopt when no RTC was used at boot, when the attribute is unreadable,
     // or when CONFIG_RTC_HCTOSYS is off. Defined in host_clock.cpp.
     static std::optional<std::chrono::system_clock::time_point> host_rtc_time();
@@ -295,12 +309,12 @@ private:
     // drift between the two oscillators leaves them apart, and the honest
     // answer is then "none".
     static bool rtc_agrees(const std::optional<std::chrono::system_clock::time_point>& t,
-                           std::chrono::system_clock::time_point now) {
+                           std::chrono::system_clock::time_point now, std::chrono::seconds window) {
         if (!t.has_value()) {
             return false;
         }
         const auto skew = now - t.value();
-        return skew < kRtcAgreement && skew > -kRtcAgreement;
+        return skew < window && skew > -window;
     }
     // Uncached sysfs read behind host_rtc_time(); mutates a function-local
     // static and is only safe under host_rtc_time()'s cache mutex.
@@ -320,6 +334,9 @@ private:
     mutable std::mutex mutex_;
     bool enabled_ = true;
     mutable bool stepped_ = false;
+    // Hysteresis latch for the agreement window. Independent of mutex_: it is
+    // touched from rtc_state(), which deliberately runs unlocked.
+    mutable std::atomic<bool> rtc_diverged_{false};
 };
 
 }  // namespace alpacacore::util
