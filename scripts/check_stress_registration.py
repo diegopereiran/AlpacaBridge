@@ -77,7 +77,8 @@ ALLOWLIST = {
     # PnpEventListenerThread, which calls libusb_hotplug_register_callback
     # even when libusb_init failed -- a segfault on any host without a
     # working USB stack, independent of TSan. A [qhy][stress] connect storm
-    # registered and run locally hit exactly that signature (run:
+    # registered on an earlier head of this PR hit exactly that signature in
+    # the sanitizers-tsan CI job (run:
     # https://github.com/diegopereiran/AlpacaBridge/actions/runs/34535303596):
     #     QHYCCD||EnableQHYCCDMessage| set gl_msgEnable from:  1  to: 0
     #     ThreadSanitizer:DEADLYSIGNAL
@@ -94,7 +95,7 @@ ALLOWLIST = {
     # here. QHY has no automated connect coverage of any kind today, not
     # just no [stress] coverage -- the injectable QHY SDK seam that would
     # fix this (the FakeToupTekSDK / LockedToupTekSDK shape) closes both
-    # gaps at once. See #271.
+    # gaps at once. See open-astro/AlpacaBridge#271.
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
     ("wandererastro", "covercalibrator"),
