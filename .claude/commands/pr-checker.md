@@ -258,7 +258,9 @@ For **every** Defect, in this order:
    - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
      what changed): `python3 scripts/check_docs_drift.py`, `python3 .github/scripts/check-unicode.py`,
      `python3 scripts/check_stress_registration.py`, and on a PR also
-     `python3 scripts/check_conformu_reports.py origin/main`. The exit code is the signal
+     `python3 scripts/check_conformu_reports.py origin/main` (CI passes `origin/$GITHUB_BASE_REF`;
+     the pre-flight passes the merge base, which differs only when `origin/main` has moved
+     ahead). The exit code is the signal
      (each prints its own wording, `Docs drift check OK.`, `Unicode scan OK -- ...`, and so on).
    - shell: `shellcheck <file>`. Workflows: `zizmor --offline .github/workflows/`, resolving
      the binary the way `ensure_zizmor()` in `ci_preflight.sh` does: `command -v zizmor` if
@@ -285,9 +287,11 @@ Mechanics for a **fork PR** (the usual case for contributor branches):
 git fetch "$REMOTE" "$BRANCH"
 git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 # ... apply fixes ...
-# Pre-flight then push then poll as ONE background chain (see "Keep looping").
-# Skip the pre-flight step entirely for docs/skill-only branches.
-./scripts/ci_preflight.sh > "$LOG" 2>&1 \
+# Gates then push then poll as ONE background chain (see "Keep looping").
+# $GATES is the step 5 gate set for the files this round touched: the full
+# ./scripts/ci_preflight.sh only when runtime C++ changed across vendors, the
+# four Python gates alone on a docs/skill-only branch.
+$GATES > "$LOG" 2>&1 \
   && git fetch "$REMOTE" "$BRANCH" \
   && [ -z "$(git log --oneline "HEAD..$REMOTE/$BRANCH")" ] \
   && git push "$REMOTE" "HEAD:$BRANCH" \
@@ -385,16 +389,19 @@ beyond the PR as opened (PR #272 gained an unrelated cppcheck-scoping commit mid
 
 The loop ends only when every PR is merged or a **Hard stop** below applies. In particular:
 
-- **A pre-flight failure in code this branch does not touch** is not a stop. Re-run the failed
+- **A gate failure in code this branch does not touch** is not a stop. Re-run the failed
   test in isolation 5 times against the built binary (`AlpacaCore/build/tests/alpacacore_tests
   "<test name>"`). If it passes in isolation and `git diff main...HEAD --name-only` shows no
-  file that could affect it, it is a flake: re-run `ci_preflight.sh` once, push on green, and
+  file that could affect it, it is a flake: re-run the step 5 gate that failed once, push on
+  green, and
   record the flake (test name, failure text, pass rate) in the wrap-up for the user. Two
   consecutive flakes on the same test still push if the isolated runs pass. Only a failure in
   code this branch changes, or a test that fails in isolation every time, blocks the push.
 - **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/workflow changes; check with
   `git diff main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
-  for the build and test gates to check, and CI runs them on the PR anyway. Commit, push, poll.
+  for the build and test gates to check, and CI runs them on the PR anyway. Its step 5 gates
+  are the four Python checks (docs drift, unicode, stress registration, ConformU reports).
+  Run those, commit, push, poll.
 - **A bot round with new findings** is the normal case, not a reason to report back. Fix,
   pre-flight, push, poll, repeat. Report only in the wrap-up, or when a hard stop is hit.
 - **Waiting is never a stopping point.** Every wait (pre-flight, verdict poll, CI checks,
