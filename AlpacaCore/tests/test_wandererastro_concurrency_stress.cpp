@@ -151,7 +151,11 @@ TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate st
     FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
 
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // 15 s for the same reason as the box switch below: the wheel's own
+    // connect timeout is 5 s (serial_timeout_s = 5), so a 5 s budget is
+    // exactly one attempt with no retry margin -- one slow first attempt on
+    // a loaded TSan runner would fail the REQUIRE outright.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     driver->set_connected(false);
 
     alpacacore::test::run_lifecycle_stress(*driver, filterwheel_operate);
