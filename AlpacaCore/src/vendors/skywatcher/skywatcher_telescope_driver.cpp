@@ -317,11 +317,15 @@ public:
             }
             protocol.disconnect();
             connected_ = false;
-            {
-                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_.clear();
-                model_cache_.clear();
-            }
+            // Identity (model/firmware) is left as last known-good: a clean
+            // disconnect doesn't change what mount this is, and clearing it
+            // here made the web UI / configureddevices listing revert to a
+            // generic name for any not-currently-connected device even after
+            // a successful identify -- unlike the synscan driver, which
+            // never clears mount_model_id_ on disconnect. The connect
+            // sequence's own ":e" failure handler above still clears both on
+            // a failed re-identify, so a genuinely different or unreachable
+            // board on reconnect is never shown under a stale name.
             reset_runtime_state_locked();
         }
     }

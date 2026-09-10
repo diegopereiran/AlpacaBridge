@@ -742,7 +742,15 @@ TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher]
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.39");
 
+    // A clean disconnect must keep the last known-good identity: the web UI
+    // and configureddevices listing read these while disconnected, and the
+    // rig showed the direct connection reverting to a generic name after
+    // every disconnect while the synscan driver kept its model (2026-09-10).
     driver->set_connected(false);
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    firmware = driver->get_device_firmware();
+    REQUIRE(firmware.has_value());
+    CHECK(*firmware == "3.39");
 }
 
 TEST_CASE("SkyWatcher EQM-35 - FindHome uses the count-frame fallback", "[skywatcher][telescope][eqm35]") {
