@@ -1606,16 +1606,22 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
     // usually right to seconds, so it is INFO -- but still a WARN when nothing
     // is allowed to correct it.
     const bool rtc = host_clock_.has_rtc();
+    // enabled() alone does not mean "a client will correct it": without
+    // CAP_SYS_TIME every step is refused and the clock is never corrected at
+    // all, which is the one state that must not be quiet at connect.
+    const bool correctable = host_clock_.enabled() && !host_clock_.step_ever_failed();
     const std::string msg =
         "Telescope " + std::to_string(device.get_device_number()) +
         (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's accuracy is unverified, nothing has "
                "checked it since it was last set)"
              : " connecting with an undisciplined host clock (no NTP, not yet set by a client)") +
-        "; goto/LST math runs on it until a client writes UTCDate" +
-        (host_clock_.enabled() ? ""
-                               : " (syncSystemClockFromClients is off: clients will not correct it; use the web UI's "
-                                 "Sync Time)");
-    if (rtc && host_clock_.enabled()) {
+        (correctable ? "; goto/LST math runs on it until a client writes UTCDate"
+         : host_clock_.enabled()
+             ? "; goto/LST math runs on it and cannot be corrected automatically (a client's UTCDate write was "
+               "refused: the service has no CAP_SYS_TIME). Use the web UI's Sync Time"
+             : "; goto/LST math runs on it, and syncSystemClockFromClients is off so no client will correct it. "
+               "Use the web UI's Sync Time");
+    if (rtc && correctable) {
         util::log_info(msg);
     } else {
         util::log_warning(msg);

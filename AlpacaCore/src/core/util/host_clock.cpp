@@ -13,6 +13,7 @@
 #include <alpacacore/util/host_clock.h>
 #include <dirent.h>
 
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -25,10 +26,16 @@ namespace {
 // attribute reads 1 (the kernel gates that on the read having succeeded).
 // Nothing else counts: a present-but-unread RTC, a kernel without
 // CONFIG_RTC_HCTOSYS, or a userspace `hwclock --hctosys` all read as no RTC.
-bool probe_boot_rtc() {
+// Distinguishes "no device the kernel booted from" (which may still appear:
+// the RTC can register after our first probe) from "found one, but it is not
+// keeping time" (which cannot change: a dead RTC free-runs from its own wrong
+// value). Only the first is worth re-probing.
+enum class Probe : std::uint8_t { NoDevice, Implausible, Ok };
+
+Probe probe_boot_rtc() {
     const std::unique_ptr<DIR, int (*)(DIR*)> dir(::opendir("/sys/class/rtc"), &::closedir);
     if (dir == nullptr) {
-        return false;
+        return Probe::NoDevice;
     }
     std::string device;
     while (const dirent* entry = ::readdir(dir.get())) {
@@ -44,37 +51,39 @@ bool probe_boot_rtc() {
         }
     }
     if (device.empty()) {
-        return false;
+        return Probe::NoDevice;
     }
     std::ifstream since_epoch(device + "/since_epoch");
     long long epoch = 0;
     if (!since_epoch.is_open() || !(since_epoch >> epoch)) {
-        return false;
+        return Probe::NoDevice;
     }
-    return epoch > HostClock::kMinPlausibleEpoch;
+    return epoch > HostClock::kMinPlausibleEpoch ? Probe::Ok : Probe::Implausible;
 }
 
 }  // namespace
 
 bool HostClock::host_booted_from_rtc() {
     static std::mutex mutex;
-    static bool found = false;
-    static std::chrono::steady_clock::time_point last_miss{};
+    static bool settled = false;  // Ok or Implausible: neither can change after boot
+    static bool result = false;
+    static std::chrono::steady_clock::time_point last_probe{};
     std::lock_guard<std::mutex> lock(mutex);
-    if (found) {
-        return true;  // an RTC the kernel booted from does not go away
+    if (settled) {
+        return result;
     }
-    // A miss is not sticky (the RTC may register after the first request), but
-    // re-scanning sysfs on every /management/v1/description poll is wasteful.
+    // Only "no device" is re-probed, and not on every /management/v1/description poll.
     const auto now = std::chrono::steady_clock::now();
-    if (last_miss != std::chrono::steady_clock::time_point{} && now - last_miss < std::chrono::seconds(30)) {
+    if (last_probe != std::chrono::steady_clock::time_point{} && now - last_probe < std::chrono::seconds(30)) {
         return false;
     }
-    found = probe_boot_rtc();
-    if (!found) {
-        last_miss = now;
+    last_probe = now;
+    const Probe probe = probe_boot_rtc();
+    if (probe != Probe::NoDevice) {
+        settled = true;
+        result = probe == Probe::Ok;
     }
-    return found;
+    return result;
 }
 
 }  // namespace alpacacore::util

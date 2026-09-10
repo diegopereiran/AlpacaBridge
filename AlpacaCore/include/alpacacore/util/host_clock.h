@@ -134,6 +134,16 @@ public:
     // defaults (1970 and 2000-01-01) and before any real deployment.
     static constexpr std::int64_t kMinPlausibleEpoch = 1577836800;  // 2020-01-01T00:00:00Z
 
+    /**
+     * A step was attempted and refused by the kernel (no CAP_SYS_TIME).
+     * Latched, because it means no client will ever correct this clock, which
+     * a caller cannot infer from enabled() alone.
+     */
+    bool step_ever_failed() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return step_failed_;
+    }
+
     bool stepped_by_client() const {
         if (synchronized()) {
             return false;
@@ -174,6 +184,8 @@ public:
         if (!set_time_(requested, error)) {
             r.outcome = Outcome::Failed;
             r.error = error;
+            std::lock_guard<std::mutex> lock(mutex_);
+            step_failed_ = true;
             return r;
         }
         {
@@ -244,6 +256,7 @@ private:
     mutable std::mutex mutex_;
     bool enabled_ = true;
     mutable bool stepped_ = false;
+    bool step_failed_ = false;
 };
 
 }  // namespace alpacacore::util

@@ -138,6 +138,30 @@ TEST_CASE("HostClock - sanity window and small deltas", "[util][hostclock][unit]
     CHECK(f.sets.size() == 3);
 }
 
+TEST_CASE("HostClock - a refused step latches, so callers know the clock is uncorrectable", "[util][hostclock][unit]") {
+    // Without CAP_SYS_TIME every step is refused, so no client will ever fix
+    // this clock. enabled() alone cannot tell a caller that (open-astro#292:
+    // the connect-time line must stay a WARN in that state).
+    Fake f;
+    f.rtc = true;
+    auto c = f.clock();
+    CHECK_FALSE(c.step_ever_failed());
+    f.set_ok = false;
+    CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Failed);
+    CHECK(c.step_ever_failed());
+    CHECK(c.enabled());  // the policy is still on; the kernel is the problem
+    // It stays latched even once the kernel starts accepting: the operator
+    // needs to know the host was refused at least once this session.
+    f.set_ok = true;
+    CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Stepped);
+    CHECK(c.step_ever_failed());
+    // A skipped step never latches it.
+    Fake g;
+    auto d = g.clock();
+    CHECK(d.step_from_client(kNow + milliseconds(200), kNow).outcome == Outcome::SkippedSmall);
+    CHECK_FALSE(d.step_ever_failed());
+}
+
 TEST_CASE("HostClock - a refused clock_settime is reported, not thrown", "[util][hostclock][unit]") {
     Fake f;
     f.set_ok = false;
