@@ -32,6 +32,11 @@ struct AstroasisPortInfo {
 
 /**
  * @brief Enumerate Astroasis Oasis focusers on the USB bus (VID:PID 338F:A0F0).
+ *
+ * Safe to call from any thread, including concurrently with a connect on any
+ * number of wrapper instances: this and every other hidapi library call in the
+ * implementation are serialized on one process-wide mutex (hidapi itself
+ * guarantees only that distinct hid_device handles may be used concurrently).
  */
 std::vector<AstroasisPortInfo> enumerate_astroasis_focusers();
 

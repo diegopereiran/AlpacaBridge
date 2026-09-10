@@ -22,6 +22,11 @@
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
+#include <alpacacore/vendor/astroasis/astroasis_protocol_wrapper.h>
+
+#include <atomic>
+#include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -68,4 +73,80 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
 TEST_CASE("Astroasis focuser - destruction races an in-flight connect", "[astroasis][focuser][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-alpacabridge-absent"); });
+}
+
+// enumerate_astroasis_focusers() (the by-index factory, on an HTTP request
+// thread) racing Impl::connect() on separate wrapper instances. Both reach
+// hidapi's process-global state -- hid_init's ref-counted context, the backend
+// bus scan behind hid_enumerate/hid_open_path -- which the per-instance
+// Impl::mutex_ cannot order; hid_global_mutex() in the wrapper does.
+//
+// Be clear about what this does NOT do: it will not fail on the unlocked
+// version. libhidapi is uninstrumented, so TSan sees nothing inside it, and an
+// hid_init/hid_enumerate race does not reliably fault. The serialization is
+// correctness-by-construction, held by review against the wrapper's comment.
+//
+// Its coverage is also half a connect: with no device attached, hid_open_path
+// fails on the sentinel and connect() throws before the handshake, so the
+// hid_write/hid_read_timeout and hid_close halves are never reached (verified
+// by mutation -- holding the global lock across all of connect(), which would
+// self-deadlock in close_device_locked(), still passes here). What it does hold
+// is the pairing the finding named -- enumerate on one thread against
+// hid_init/hid_open_path on another, twice over, on distinct instances --
+// running clean and terminating: a smoke and liveness check over the paths that
+// are reachable without hardware.
+TEST_CASE("Astroasis focuser - enumeration races connect across instances", "[astroasis][focuser][stress]") {
+    using namespace alpacacore::vendor::astroasis;
+
+    constexpr int kIterations = 200;
+    std::atomic<bool> start{false};
+    std::atomic<int> enumerations{0};
+    std::atomic<int> connect_attempts{0};
+
+    // Two wrappers, each connecting to the absent sentinel path (see the file
+    // header: never a real HID node, so this cannot touch attached hardware).
+    AstroasisProtocolWrapper first;
+    AstroasisProtocolWrapper second;
+
+    auto connector = [&](AstroasisProtocolWrapper& wrapper) {
+        while (!start.load()) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < kIterations; ++i) {
+            try {
+                wrapper.connect("/dev/hidraw-alpacabridge-absent");
+            } catch (const alpacacore::AlpacaException&) {
+                // Expected every time: hid_open_path fails on the sentinel.
+            }
+            wrapper.disconnect();
+            connect_attempts.fetch_add(1);
+        }
+    };
+
+    auto enumerator = [&]() {
+        while (!start.load()) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < kIterations; ++i) {
+            // Read-only VID:PID bus scan; the result depends on what is
+            // plugged in, so only the fact that it returns is asserted.
+            static_cast<void>(enumerate_astroasis_focusers());
+            enumerations.fetch_add(1);
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.emplace_back([&] { connector(first); });
+    threads.emplace_back([&] { connector(second); });
+    threads.emplace_back(enumerator);
+    threads.emplace_back(enumerator);
+    start.store(true);
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    CHECK(connect_attempts.load() == 2 * kIterations);
+    CHECK(enumerations.load() == 2 * kIterations);
+    CHECK(first.is_connected() == false);
+    CHECK(second.is_connected() == false);
 }
