@@ -18,6 +18,7 @@
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <mutex>
 #include <string>
 
 namespace alpacacore::vendor::astroasis {
@@ -78,6 +79,13 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Driver state mutex (AsyncConnectable obligations 4/5): keeps the
+        // connected_ read+act atomic against a racing async connect task's
+        // set_connected(true) (this driver's disconnect() calls set_connected
+        // synchronously, outside the task machinery) — without it, two
+        // set_connected(true) calls can both observe connected_==false and
+        // both reach protocol_.connect(), leaking the first HID handle.
+        std::lock_guard<std::mutex> lock(mutex_);
         // See AsyncConnectable's class comment for why these gates run before
         // the idempotency check.
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
@@ -95,8 +103,11 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Astroasis", "Focuser connected");
         } else {
-            protocol_.disconnect();
+            // Clear driver state BEFORE the SDK close (AGENTS.md concurrency
+            // checklist): a throwing close must not leave the driver
+            // half-connected.
             connected_.store(false);
+            protocol_.disconnect();
             ALPACA_LOG_INFO("Astroasis", "Focuser disconnected");
         }
     }
@@ -126,26 +137,34 @@ public:
     bool get_absolute() const override { return true; }
 
     bool get_is_moving() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status().moving;
     }
 
     int get_max_step() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_max_step();
+        return max_step_locked();
     }
 
     int get_max_increment() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return get_max_step();
+        return max_step_locked();
     }
 
     int get_position() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status().position;
     }
 
     double get_step_size() const override {
+        // No mutex_: touches nothing it guards -- ensure_connected() is
+        // already a lock-free atomic read, and every path here throws
+        // unconditionally, so taking the lock would only add a stall behind
+        // an in-flight connect's full HID handshake for no protection.
         ensure_connected();
         // TODO: the vendor protocol does not expose step size in microns
         // (mechanical, varies by focuser model).
@@ -157,11 +176,13 @@ public:
     bool get_temp_comp() const override { return false; }
 
     void set_temp_comp(bool) override {
+        // No mutex_: same reasoning as get_step_size() above.
         ensure_connected();
         throw AlpacaException("Temperature compensation not supported", AlpacaError::PropertyNotImplemented);
     }
 
     double get_temperature() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         auto status = const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status();
         if (status.temperature_external_valid) {
@@ -171,13 +192,15 @@ public:
     }
 
     void halt() override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         protocol_.stop_move();
     }
 
     void move(int position) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        int max_step = protocol_.get_max_step();
+        int max_step = max_step_locked();
         // ConformU requires graceful clamping, not exceptions.
         if (position < 0) {
             position = 0;
@@ -194,10 +217,15 @@ private:
         }
     }
 
+    // Caller must hold mutex_. Single source for the SDK call so
+    // get_max_step()/get_max_increment()/move() can't drift apart.
+    int max_step_locked() const { return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_max_step(); }
+
     int device_number_;
     std::string hid_path_;
     std::atomic<bool> connected_;
     AstroasisProtocolWrapper protocol_;
+    mutable std::mutex mutex_;
 };
 
 std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path) {
