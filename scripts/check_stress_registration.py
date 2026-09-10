@@ -69,6 +69,15 @@ ALLOWLIST = {
     ("gemini", "focuser"),
     ("gemini", "switch"),
     ("playerone", "switch"),
+    # QHY: registering these needs an injectable SDK seam first. A [stress]
+    # storm has to connect, and connecting calls InitQHYCCDResource(), which
+    # registers a libusb hotplug callback -- under ThreadSanitizer that dies
+    # with a DEADLYSIGNAL before the first case finishes (evidence: the
+    # sanitizers-tsan run on the PR that tried it). No suppression helps; the
+    # process is gone. The plain arm64 build runs the same cases fine, so this
+    # is specifically the SDK blob vs TSan, not the drivers. See #271.
+    ("qhy", "camera"),
+    ("qhy", "filterwheel"),
     ("wandererastro", "covercalibrator"),
     ("wandererastro", "filterwheel"),
     ("wandererastro", "rotator"),
