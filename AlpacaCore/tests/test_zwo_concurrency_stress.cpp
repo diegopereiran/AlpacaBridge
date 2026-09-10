@@ -20,9 +20,15 @@
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/focuser_driver.h>
+#include <alpacacore/rotator_driver.h>
+#include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
+#include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
+#include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
+#include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
 #include "catch2_compat.h"
@@ -81,6 +87,82 @@ TEST_CASE("ZWO camera - concurrent connect/disconnect/operate stress", "[zwo][ca
 TEST_CASE("ZWO camera - destruction races an in-flight connect", "[zwo][camera][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0); });
+}
+
+// Focuser stress (#271): same shape as the EFW/camera cases above — no fake
+// seam exists for the EAF SDK, so on a hardware-free host every connect
+// fails fast at enumeration, which still storms the AsyncConnectable
+// machinery and the failure-path cleanup. With a focuser attached the same
+// test exercises the full connect path.
+TEST_CASE("ZWO EAF focuser - concurrent connect/disconnect/operate stress", "[zwo][focuser][stress]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0);
+
+    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+        auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
+        static_cast<void>(focuser.get_position());
+        static_cast<void>(focuser.get_temperature());
+        focuser.move(100);
+        focuser.halt();
+    });
+
+    static_cast<void>(driver->get_connected());
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}
+
+TEST_CASE("ZWO EAF focuser - destruction races an in-flight connect", "[zwo][focuser][stress]") {
+    alpacacore::test::run_destruction_during_connect_stress(
+        []() { return alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0); });
+}
+
+// Rotator stress (#271): same shape — no fake seam for the CAA SDK.
+TEST_CASE("ZWO CAA rotator - concurrent connect/disconnect/operate stress", "[zwo][rotator][stress]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0);
+
+    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+        auto& rotator = static_cast<alpacacore::RotatorDriver&>(d);
+        static_cast<void>(rotator.get_position());
+        static_cast<void>(rotator.get_reverse());
+        rotator.move(10.0);
+        rotator.halt();
+    });
+
+    static_cast<void>(driver->get_connected());
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}
+
+TEST_CASE("ZWO CAA rotator - destruction races an in-flight connect", "[zwo][rotator][stress]") {
+    alpacacore::test::run_destruction_during_connect_stress(
+        []() { return alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0); });
+}
+
+// Dew heater switch stress (#271): same shape — the dew heater switch wraps
+// a camera SDK handle (ASIGetControlValue/ASISetControlValue for the heater
+// duty cycle), so it fails fast at camera enumeration on a hardware-free
+// host exactly like the ZWO camera driver above. This is the representative
+// case for the [zwo][switch] pair: the two GPIO-backed ASIAIR switch drivers
+// (zwo_asiair_switch_driver.h, zwo_asiair_plus_switch_driver.h) are a
+// separate seam (libgpiod, not this SDK) and are not covered by this case.
+TEST_CASE("ZWO dew heater switch - concurrent connect/disconnect/operate stress", "[zwo][switch][stress]") {
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
+
+    alpacacore::test::run_lifecycle_stress(*driver, [](AlpacaDriver& d) {
+        auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
+        static_cast<void>(sw.get_max_switch());
+        static_cast<void>(sw.get_switch(0));
+        sw.set_switch(0, true);
+        static_cast<void>(sw.get_switch_value(0));
+    });
+
+    static_cast<void>(driver->get_connected());
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}
+
+TEST_CASE("ZWO dew heater switch - destruction races an in-flight connect", "[zwo][switch][stress]") {
+    alpacacore::test::run_destruction_during_connect_stress(
+        []() { return alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0); });
 }
 
 // Telescope stress (audit follow-up, 3.0.1): the ZWO mount driver's worst
