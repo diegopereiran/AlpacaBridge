@@ -112,6 +112,7 @@ while :; do
   # cancelled attempt cannot hide the finished one). Everything is fetched with
   # --paginate: unpaginated, both endpoints return only the 30 oldest items.
   SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
+  if [ "$SHA" != "${LAST_SHA:-}" ]; then CANCELLED_SEEN=0; LAST_SHA=$SHA; fi   # new head, new latch
   RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
   # Newest finished run that was not cancelled or skipped. A failed run still counts:
   # the assert step can fail after the post step published the verdict, and nothing
@@ -337,7 +338,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   verdict; a refresh verdict can still carry new Defects, so the merge half gates on the
   printed verdict's **last** line (the prompt defines the sign-off as the last line, and a
   review can quote either string in its body, as reviews of this very rubric do):
-  `V=$(mktemp); poll > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && gh pr merge <N> --merge`.
+  (`poll` = the Step 2 block saved to a file, run as `bash poll.sh`):
+  `V=$(mktemp); bash poll.sh > "$V" && [ "$(sed -e 's/[[:space:]]*$//' "$V" | grep -v '^$' | tail -n 1)" = "✅ Approved" ] && gh pr merge <N> --merge`.
 - **A Defect you disagree with** is still fixed or wired into the skill/docs when there is any
   reasonable change that satisfies it. Only a Defect that would require a wrong or unsafe change
   becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.

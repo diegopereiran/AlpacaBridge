@@ -294,7 +294,8 @@ Step 2 repo detection:
     ```
 
     Then go to Step 10 and tell the user the PR is waiting on that label; once it's applied, resume
-    this step and poll as normal.
+    this step with the real poll (not the `BUDGET=0` pre-check: the label re-triggers the bot on
+    the same head, see the exit-code notes below).
 
 Every PR gets an automated review (`.github/workflows/claude-review.yml`), posted by the
 workflow's own step as `github-actions`. It ends in a verdict line: `✅ Approved` or
@@ -324,6 +325,7 @@ while :; do
   # cancelled attempt cannot hide the finished one). Everything is fetched with
   # --paginate: unpaginated, both endpoints return only the 30 oldest items.
   SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
+  if [ "$SHA" != "${LAST_SHA:-}" ]; then CANCELLED_SEEN=0; LAST_SHA=$SHA; fi   # new head, new latch
   RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
   # Newest finished run that was not cancelled or skipped. A failed run still counts:
   # the assert step can fail after the post step published the verdict, and nothing
@@ -379,6 +381,13 @@ done
 echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
 
+**Exit `1` from a `BUDGET=0` pre-check is not a timeout.** Right after `gh pr create` or a push
+there is no `review` check-run yet, so the single look finds nothing and exits `1` with "after
+0 min": that means **no verdict yet**, start the real poll. Only an exit `1` from the full
+30-minute budget is a stall. **Skip the pre-check when the bot was just re-triggered on the same
+head** (the maintainer just applied `safe-to-review`, or you just ran `update-branch`): for a
+few seconds the only check-run is the old skipped or cancelled one, and the pre-check would
+report it as final. Start the real poll instead; its first look comes after one tick.
 Exit `2` (the action skipped a workflow-editing PR) and exit `3` (no run will produce a
 verdict: the newest run failed, succeeded without publishing one, the job was skipped, or every run was cancelled) both
 mean there is no verdict to act on: tell the user, and for exit `3` read the run log first. If the poll times out, surface
