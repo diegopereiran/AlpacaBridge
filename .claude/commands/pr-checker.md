@@ -83,34 +83,43 @@ Checks to make before waiting on anything:
    It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
-   Verify the verdict belongs to the current head: the bot comment's REST `updated_at` (equal
-   to `created_at` for the fresh comment the post step creates each run) is newer than the last
-   commit (`gh api repos/open-astro/AlpacaBridge/pulls/<N>/commits --jq '.[-1].commit.committer.date'`).
-   A verdict older than the head commit is stale and must not be trusted.
+   "Belongs to the current head" is the same rule as the Step 2 poll, so run one pass of that
+   block (`TICK=0 BUDGET=1`): a `review` check-run on the head SHA completed with success, none
+   still queued or running, and the newest bot verdict updated after that run started. Commit
+   dates are never used: a committer date is local commit time, so a verdict on the previous
+   head can be newer than it. A verdict that fails the rule is stale and must not be trusted.
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
 Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadline:
 
 ```bash
-PR=<N>
-DEADLINE=$(( $(date +%s) + 1800 ))
+PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  sleep 180
-  # REST, not `gh pr view --json comments`: only REST exposes updated_at, and
-  # the poll compares that against the head commit. The post step creates a
-  # fresh comment each run, so `last` (newest by creation) is the newest
-  # verdict and its updated_at equals created_at.
-  c=$(gh api "repos/open-astro/AlpacaBridge/issues/$PR/comments" --jq '[.[]
-        | select((.user.login | test("^github-actions(\\[bot\\])?$"))
-                 and (.body | test("✅ Approved|⚠️ Issues found")))]
-        | last | "\(.updated_at)\n\(.body)"')
-  head_at=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR/commits" --jq '.[-1].commit.committer.date')
-  # Only a verdict UPDATED after the head commit counts: anything older is a
-  # stale verdict on a previous head (or the contributor pushed mid-round).
-  if [[ "$(echo "$c" | head -1)" > "$head_at" ]]; then echo "$c"; exit 0; fi
+  sleep "$TICK"
+  # Bind the verdict to the review check-run on the head SHA (filter=all so a later
+  # cancelled attempt cannot hide the successful one). Everything is fetched with
+  # --paginate: unpaginated, both endpoints return only the 30 oldest items.
+  SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
+  RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
+  RUN_STARTED=$(jq -r '[.[] | select(.conclusion == "success") | .started_at] | max // empty' <<<"$RUNS")
+  PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
+  # REST, not `gh pr view --json comments`: only REST exposes updated_at. The author
+  # pattern is the workflow's own assert-step pattern. `select(. != null)` matters: with
+  # no verdict yet, `last` is null and would otherwise print the literal "null".
+  LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ -n "$LAST" ] \
+     && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$RUN_STARTED" +%s)" ]; then
+    printf '%s\n' "${LAST#* }"; exit 0
+  fi
+  # A successful run with no verdict for this head: the PR edits the review workflow and the
+  # action skipped it (the assert step passes it). Nothing to wait for; review it by eye.
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] \
+     && gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
+    echo "No review posted for this head: this PR edits the review workflow. Review it by eye." >&2; exit 0
+  fi
 done
-echo "TIMEOUT: no review-bot comment within 30 minutes" >&2; exit 1
+echo "TIMEOUT: no review-bot verdict for head ${SHA:-?} within $(( ${BUDGET:-1800} / 60 )) minutes" >&2; exit 1
 ```
 
 When several PRs are queued, poll them all in one background loop and act on whichever verdict
