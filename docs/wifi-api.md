@@ -195,9 +195,15 @@ NTP or RTC). It never overrides NTP/chrony/GPS, applies the same 2000-2100
 window, ignores sub-second deltas, and logs every step with the delta and the
 client address. `GET /management/v1/description` reports the state:
 `ClockSynchronized` (kernel-disciplined), `ClockSource` (`ntp` | `client` |
-`none`) and `SyncSystemClockFromClients`; `PUT` the last one as a boolean to
+`rtc` | `none`) and `SyncSystemClockFromClients`; `PUT` the last one as a boolean to
 opt out (persisted as `sync_system_clock_from_clients` under `server:` in the
 config file). A telescope connecting while the clock is `none` logs a WARN.
+`rtc` means a hardware RTC is present (`/dev/rtc0`) and the host booted from
+it: loading an RTC is a plain clock set, so the kernel still reports the clock
+unsynchronised, but the time is normally right to seconds. A client `UTCDate`
+that disagrees by more than 1 s still steps the clock (that is what corrects
+RTC drift in the field); the kernel only writes system time back into the RTC
+while NTP-disciplined, so such a step does not update the RTC itself.
 
 ## Feature detection
 

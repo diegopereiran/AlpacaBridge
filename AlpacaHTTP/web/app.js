@@ -1311,7 +1311,8 @@ async function loadServerInfo() {
         const location = resolveDescriptionValue(desc, ['Location', 'location']) || '';
         const profileName = resolveDescriptionValue(desc, ['ProfileName', 'profileName', 'profile_name']) || '';
         // open-astro#289: host-clock state. "ntp" = kernel-disciplined,
-        // "client" = stepped from a client's UTCDate write, "none" = neither.
+        // "client" = stepped from a client's UTCDate write, "rtc" = booted from a
+        // hardware RTC (kernel still reports unsynchronised), "none" = neither.
         const clockSynchronized = resolveDescriptionValue(desc, ['ClockSynchronized']) === true;
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
@@ -1319,9 +1320,11 @@ async function loadServerInfo() {
             ? 'Synchronized (NTP)'
             : clockSource === 'client'
                 ? 'Set from a client\'s UTCDate this session (no NTP)'
-                : clockSource === 'none'
-                    ? 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.'
-                    : 'Unknown';
+                : clockSource === 'rtc'
+                    ? 'Hardware RTC (no NTP). A client\'s UTCDate still corrects drift beyond 1 s.'
+                    : clockSource === 'none'
+                        ? 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.'
+                        : 'Unknown';
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.

@@ -27,6 +27,7 @@ namespace {
 struct Fake {
     bool synchronized = false;
     bool set_ok = true;
+    bool rtc = false;
     std::vector<system_clock::time_point> sets;
 
     HostClock clock() {
@@ -37,7 +38,8 @@ struct Fake {
                                  err = "EPERM";
                              }
                              return set_ok;
-                         });
+                         },
+                         [this] { return rtc; });
     }
 };
 
@@ -128,6 +130,41 @@ TEST_CASE("HostClock - a refused clock_settime is reported, not thrown", "[util]
     CHECK(f.sets.size() == 1);
 }
 
+TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is unchanged (#292)",
+          "[util][hostclock][unit]") {
+    Fake f;
+    f.rtc = true;
+    auto c = f.clock();
+    // Booted from the RTC: the kernel still says unsynchronised, but the
+    // state is not "none".
+    CHECK_FALSE(c.synchronized());
+    const auto now = system_clock::now();
+    CHECK(c.has_rtc(now));
+    CHECK(c.source(now) == "rtc");
+    // An RTC that handed the kernel a time before this binary was built is
+    // not keeping time (Pi 5 on-board RTC without a battery): report "none".
+    const auto y1999 = system_clock::time_point(seconds(915148800));
+    CHECK_FALSE(c.has_rtc(y1999));
+    CHECK(c.source(y1999) == "none");
+    CHECK(HostClock::build_time() > y1999);
+    CHECK(HostClock::build_time() <= system_clock::now());
+    // A client that agrees with the RTC changes nothing.
+    CHECK(c.step_from_client(kNow + milliseconds(300), kNow).outcome == Outcome::SkippedSmall);
+    CHECK(c.source(now) == "rtc");
+    // A client that disagrees by more than a second still wins (it is what
+    // corrects RTC drift in the field), and the source becomes "client".
+    CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Stepped);
+    CHECK(f.sets.size() == 1);
+    CHECK(c.source() == "client");
+    // NTP outranks the RTC label.
+    f.synchronized = true;
+    CHECK(c.source() == "ntp");
+    // The two-argument constructor means "no RTC probe": never "rtc".
+    HostClock no_probe([] { return false; }, [](system_clock::time_point, std::string&) { return true; });
+    CHECK_FALSE(no_probe.has_rtc());
+    CHECK(no_probe.source() == "none");
+}
+
 TEST_CASE("HostClock - outcome names are stable log text", "[util][hostclock][unit]") {
     CHECK(std::string(HostClock::outcome_name(Outcome::Stepped)) == "stepped");
     CHECK(std::string(HostClock::outcome_name(Outcome::SkippedSynchronized)).find("NTP") != std::string::npos);
@@ -144,7 +181,8 @@ TEST_CASE("HostClock - default construction queries the real kernel without step
     HostClock real;
     const bool s = real.synchronized();
     CHECK((s == true || s == false));
-    CHECK((real.source() == "ntp" || real.source() == "none"));
+    CHECK((real.source() == "ntp" || real.source() == "rtc" || real.source() == "none"));
+    CHECK(real.has_rtc() == (HostClock::host_booted_from_rtc() && system_clock::now() >= HostClock::build_time()));
     real.set_enabled(false);  // never call clock_settime from a unit test
     CHECK(real.step_from_client(kNow, kNow).outcome == Outcome::SkippedDisabled);
 }

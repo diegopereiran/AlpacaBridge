@@ -12,11 +12,16 @@
 
 #pragma once
 
+#include <sys/stat.h>
 #include <sys/timex.h>
 #include <time.h>
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -57,6 +62,7 @@ public:
 
     using IsSynchronizedFn = std::function<bool()>;
     using SetTimeFn = std::function<bool(std::chrono::system_clock::time_point, std::string& error)>;
+    using HasRtcFn = std::function<bool()>;
 
     // Same window the /management/v1/synctime endpoint enforces.
     static constexpr std::int64_t kMinEpoch = 946684800;   // 2000-01-01T00:00:00Z
@@ -65,9 +71,12 @@ public:
     // jitter; stepping for sub-second deltas would only inject that noise.
     static constexpr std::chrono::milliseconds kMinStep{1000};
 
-    HostClock() : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time) {}
-    HostClock(IsSynchronizedFn is_synchronized, SetTimeFn set_time)
-        : is_synchronized_(std::move(is_synchronized)), set_time_(std::move(set_time)) {}
+    HostClock()
+        : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time, &HostClock::host_booted_from_rtc) {
+    }
+    HostClock(
+        IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; })
+        : is_synchronized_(std::move(is_synchronized)), set_time_(std::move(set_time)), has_rtc_(std::move(has_rtc)) {}
 
     void set_enabled(bool enabled) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -83,13 +92,63 @@ public:
     bool synchronized() const { return is_synchronized_(); }
 
     // "ntp" (kernel-disciplined), "client" (this process stepped it from a
-    // UTCDate write), or "none" (undisciplined and never stepped).
-    std::string source() const {
+    // UTCDate write), "rtc" (undisciplined, never stepped, but the host booted
+    // from a hardware RTC: loading it is a plain clock set, so the kernel
+    // still reports STA_UNSYNC — open-astro#292), or "none".
+    std::string source(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
         if (is_synchronized_()) {
             return "ntp";
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        return stepped_ ? "client" : "none";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stepped_) {
+                return "client";
+            }
+        }
+        return has_rtc(now) ? "rtc" : "none";
+    }
+
+    // True when the system clock was loaded from a hardware RTC at boot AND
+    // the resulting time is plausible (not before this binary was built). A
+    // Raspberry Pi 5 has an on-board RTC that exists without a battery and
+    // hands the kernel an epoch-ish time after a power cut; labelling that
+    // "rtc" would be worse than "none". Reporting only: the stepping decision
+    // never looks at this.
+    bool has_rtc(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
+        return has_rtc_() && now >= build_time();
+    }
+
+    // The kernel sets /sys/class/rtc/rtc0/hctosys to 1 on the RTC it loaded
+    // system time from at boot. Older kernels without the attribute: fall back
+    // to device presence.
+    static bool host_booted_from_rtc() {
+        struct stat st {};
+        if (::stat("/sys/class/rtc/rtc0", &st) != 0 && ::stat("/dev/rtc0", &st) != 0) {
+            return false;
+        }
+        std::ifstream f("/sys/class/rtc/rtc0/hctosys");
+        if (!f.is_open()) {
+            return true;
+        }
+        int v = 0;
+        f >> v;
+        return v == 1;
+    }
+
+    // Compile date of this translation unit, whole-month resolution; any
+    // clock earlier than this is certainly wrong.
+    static std::chrono::system_clock::time_point build_time() {
+        static const std::chrono::system_clock::time_point tp = [] {
+            static const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+            const char* d = __DATE__;  // "Mmm dd yyyy"
+            const char* m = std::strstr(months, std::string(d, 3).c_str());
+            std::tm tm{};
+            tm.tm_mon = m ? static_cast<int>((m - months) / 3) : 0;
+            tm.tm_mday = 1;
+            tm.tm_year = std::atoi(d + 7) - 1900;
+            return std::chrono::system_clock::from_time_t(timegm(&tm));
+        }();
+        return tp;
     }
 
     bool stepped_by_client() const {
@@ -184,6 +243,7 @@ public:
 private:
     IsSynchronizedFn is_synchronized_;
     SetTimeFn set_time_;
+    HasRtcFn has_rtc_;
     mutable std::mutex mutex_;
     bool enabled_ = true;
     bool stepped_ = false;
