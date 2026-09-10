@@ -72,7 +72,12 @@ public:
 
     void disconnect() override {
         // Disconnect synchronously — closing the HID handle is trivial and
-        // ASCOM clients expect Connected to be false immediately after.
+        // ASCOM clients expect Connected to be false immediately after. The
+        // close does take hid_global_mutex(), so it can queue behind a
+        // concurrent by-index enumeration's bus scan (bounded; see accepted
+        // cost (1) on that mutex in astroasis_protocol_wrapper.cpp) — but
+        // connected_ is already stored false before it, so Connected flips
+        // without waiting.
         stop_connection_thread();
         try {
             set_connected(false);
