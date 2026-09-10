@@ -290,10 +290,10 @@ private:
         return t.has_value() && *t >= build_time();
     }
     // The label describes the SYSTEM clock's provenance, so the two must
-    // still agree: a later setter that bypassed this object (manual date -s,
-    // a restored saved timestamp) or months of free-running drift leave them
-    // diverged and the honest answer is "none". since_epoch has 1 s
-    // granularity and RTC drift is minutes per year, so minutes is roomy.
+    // still agree within kRtcAgreement: a later setter that bypassed this
+    // object (manual date -s, a restored saved timestamp) or free-running
+    // drift between the two oscillators leaves them apart, and the honest
+    // answer is then "none".
     static bool rtc_agrees(const std::optional<std::chrono::system_clock::time_point>& t,
                            std::chrono::system_clock::time_point now) {
         if (!t.has_value()) {
@@ -306,6 +306,14 @@ private:
     // static and is only safe under host_rtc_time()'s cache mutex.
     static std::optional<std::chrono::system_clock::time_point> read_host_rtc_time();
 
+public:
+    // Parse a __DATE__-shaped string ("Mmm dd yyyy") to 00:00 UTC of that day.
+    // Always compiled and unit-tested, so build_time()'s fallback branch is
+    // never first exercised in the field; pure arithmetic, no timegm().
+    // Unparseable input yields 1 January of the parsed year (or 1970).
+    static std::chrono::system_clock::time_point day_from_date_string(const char* date);
+
+private:
     IsSynchronizedFn is_synchronized_;
     SetTimeFn set_time_;
     RtcTimeFn rtc_time_;

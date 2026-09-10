@@ -201,17 +201,6 @@ config file). A telescope connecting while the clock is `none` logs a WARN
 (also while `rtc` if `SyncSystemClockFromClients` is off, since nothing will
 correct a drifting RTC). A Sync Time press (`PUT /management/v1/synctime`)
 counts as a client step: `ClockSource` reads `client` afterwards.
-Footnotes. `rtc` states that the clock came from the RTC, not that the RTC is
-accurate: nothing on an NTP-less host verifies or rewrites it, so the
-telescope connect line says so. A working RTC still reads `none` whenever the
-kernel was not the one that loaded it: an RTC kept in local time
-(`timedatectl set-local-rtc 1`, dual-boot machines), because systemd corrects
-the system clock in userspace afterwards and the agreement check then fails;
-a userspace `hwclock --hctosys` under a non-systemd or busybox init; and a
-kernel built without `CONFIG_RTC_HCTOSYS`. All are the safe direction, and
-none is a bug. Finally, and `rtc` is a new value on a published field, so an
-older client that switches on `ClockSource` should treat unknown values as
-"not NTP".
 `rtc` means the kernel loaded system time from a hardware RTC at boot (the
 first of `/sys/class/rtc/rtc0` to `rtc7` whose `hctosys` reads 1; a
 present-but-unread RTC does not count), that RTC's own current reading
@@ -234,6 +223,17 @@ normally right to seconds. A client `UTCDate`
 that disagrees by more than 1 s still steps the clock (that is what corrects
 RTC drift in the field); the kernel only writes system time back into the RTC
 while NTP-disciplined, so such a step does not update the RTC itself.
+
+Footnotes. `rtc` states that the clock came from the RTC, not that the RTC is
+accurate: nothing on an NTP-less host verifies or rewrites it, so the
+telescope connect line says so. A working RTC still reads `none` whenever the
+kernel was not the one that loaded it: an RTC kept in local time
+(`timedatectl set-local-rtc 1`, dual-boot machines), because systemd corrects
+the system clock in userspace afterwards and the agreement check then fails;
+a userspace `hwclock --hctosys` under a non-systemd or busybox init; and a
+kernel built without `CONFIG_RTC_HCTOSYS`. All are the safe direction, and
+none is a bug. Finally, `rtc` is a new value on a published field: an older client that
+switches on `ClockSource` should treat any unknown value as "not NTP".
 
 ## Feature detection
 

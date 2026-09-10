@@ -14,17 +14,42 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <fstream>
 #include <mutex>
 #include <string>
 
 namespace alpacacore::util {
 
+// "Mmm dd yyyy" (the __DATE__ shape) -> 00:00 UTC of that day. Days-from-civil
+// (Howard Hinnant's algorithm), so this needs no timegm() and no locale, and
+// it is compiled and unit-tested unconditionally -- build_time()'s fallback
+// branch must not be first exercised in the field.
+std::chrono::system_clock::time_point HostClock::day_from_date_string(const char* date) {
+    static const char* kMonths = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    if (date == nullptr || std::strlen(date) < 11) {
+        return std::chrono::system_clock::time_point{};
+    }
+    const char* m = std::strstr(kMonths, std::string(date, 3).c_str());
+    const int month = m != nullptr ? static_cast<int>((m - kMonths) / 3) + 1 : 1;
+    const int day = std::atoi(date + 4) > 0 ? std::atoi(date + 4) : 1;
+    const int year = std::atoi(date + 7);
+    if (year <= 0) {
+        return std::chrono::system_clock::time_point{};
+    }
+    // days_from_civil: era-based, exact for the whole proleptic Gregorian range.
+    const int y = year - (month <= 2 ? 1 : 0);
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = static_cast<unsigned>((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1);
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const long long days = static_cast<long long>(era) * 146097 + static_cast<long long>(doe) - 719468;
+    return std::chrono::system_clock::time_point(std::chrono::seconds(days * 86400));
+}
+
 // Preferred: the epoch CMake captured at configure time (it honours
 // SOURCE_DATE_EPOCH, so a reproducible .deb build stays reproducible and
 // -Wdate-time never sees a __DATE__). Fallback for builds that bypass the
-// CMake definition: __DATE__ ("Mmm dd yyyy"). Both are floored to 00:00 UTC of
+// CMake definition: this file's __DATE__. Both are floored to 00:00 UTC of
 // that day so the two branches behave identically and an RTC a few seconds
 // behind a just-configured build is not rejected. One translation unit, so
 // every user sees the same value.
@@ -34,14 +59,7 @@ std::chrono::system_clock::time_point HostClock::build_time() {
         const long long epoch = static_cast<long long>(ALPACACORE_BUILD_EPOCH);
         return std::chrono::system_clock::time_point(std::chrono::seconds(epoch - (epoch % 86400)));
 #else
-        static const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
-        const char* d = __DATE__;
-        const char* m = std::strstr(months, std::string(d, 3).c_str());
-        std::tm tm{};
-        tm.tm_mon = m ? static_cast<int>((m - months) / 3) : 0;
-        tm.tm_mday = std::atoi(d + 4) > 0 ? std::atoi(d + 4) : 1;
-        tm.tm_year = std::atoi(d + 7) - 1900;
-        return std::chrono::system_clock::from_time_t(timegm(&tm));
+        return day_from_date_string(__DATE__);
 #endif
     }();
     return tp;
@@ -57,7 +75,11 @@ std::optional<std::chrono::system_clock::time_point> HostClock::host_rtc_time() 
     static std::chrono::steady_clock::time_point cached_at{};
     std::lock_guard<std::mutex> lock(cache_mutex);
     const auto now = std::chrono::steady_clock::now();
-    if (cached_at != std::chrono::steady_clock::time_point{} && now - cached_at < std::chrono::seconds(1)) {
+    // A reading is refreshed every second; "no RTC here" is re-probed far less
+    // often, since it means re-opening up to 8 nonexistent sysfs paths and the
+    // answer almost never changes after boot.
+    const auto ttl = cached.has_value() ? std::chrono::seconds(1) : std::chrono::seconds(30);
+    if (cached_at != std::chrono::steady_clock::time_point{} && now - cached_at < ttl) {
         return cached;
     }
     cached = read_host_rtc_time();

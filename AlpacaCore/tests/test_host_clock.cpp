@@ -229,6 +229,37 @@ TEST_CASE("HostClock - an external clock set (synctime endpoint) is recorded as 
     CHECK(c.source(rtc_now) == "rtc");
 }
 
+TEST_CASE("HostClock - the __DATE__ day parser used by build_time()'s fallback", "[util][hostclock][unit]") {
+    // build_time() normally uses the CMake-injected epoch, so this parser is
+    // the branch that would otherwise be compiled for the first time in the
+    // field. Exercised directly instead.
+    const auto day = [](long long d) { return system_clock::time_point(seconds(d * 86400)); };
+    CHECK(HostClock::day_from_date_string("Jan  1 1970") == day(0));
+    CHECK(HostClock::day_from_date_string("Jan  2 1970") == day(1));
+    CHECK(HostClock::day_from_date_string("Dec 31 1969") == day(-1));
+    CHECK(HostClock::day_from_date_string("Jan  1 2000") == system_clock::time_point(seconds(946684800)));
+    CHECK(HostClock::day_from_date_string("Mar  1 2000") == system_clock::time_point(seconds(951868800)));  // leap year
+    CHECK(HostClock::day_from_date_string("Mar  1 1900") ==
+          system_clock::time_point(seconds(-2203891200)));  // not a leap year
+    CHECK(HostClock::day_from_date_string("Sep 10 2026") == system_clock::time_point(seconds(1788998400)));
+    CHECK(HostClock::day_from_date_string("Dec 31 2026") == system_clock::time_point(seconds(1798675200)));
+    // Space-padded single-digit day, every month in order.
+    const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    auto previous = system_clock::time_point::min();
+    for (const char* m : months) {
+        const std::string d = std::string(m) + "  1 2026";
+        const auto tp = HostClock::day_from_date_string(d.c_str());
+        CHECK(tp > previous);
+        previous = tp;
+    }
+    // Garbage is inert, never a floor in the future.
+    CHECK(HostClock::day_from_date_string(nullptr) == system_clock::time_point{});
+    CHECK(HostClock::day_from_date_string("nope") == system_clock::time_point{});
+    CHECK(HostClock::day_from_date_string("Zzz 99 0000") == system_clock::time_point{});
+    // And the real build floor is a sane day boundary.
+    CHECK(HostClock::build_time().time_since_epoch().count() % (86400LL * system_clock::period::den) == 0);
+}
+
 TEST_CASE("HostClock - outcome names are stable log text", "[util][hostclock][unit]") {
     CHECK(std::string(HostClock::outcome_name(Outcome::Stepped)) == "stepped");
     CHECK(std::string(HostClock::outcome_name(Outcome::SkippedSynchronized)).find("NTP") != std::string::npos);

@@ -2284,8 +2284,8 @@ Response Router::dispatch_device_method(
                                    "unverified, nothing has checked it since it was last set; not yet set by a "
                                    "client); "
                              : diverged
-                                 ? " connecting with a host clock that no longer agrees with the hardware RTC by "
-                                   "more than 5 minutes (drift or a manual set; no NTP, not yet set by a client); "
+                                 ? " connecting with a host clock that no longer agrees with the hardware RTC "
+                                   "(drift or a manual set; no NTP, not yet set by a client); "
                                  : " connecting with an undisciplined host clock (no NTP, not yet set by a client); ") +
                             "goto/LST math runs on it until a client writes UTCDate" +
                             (host_clock_.enabled()
