@@ -22,6 +22,13 @@ Expand ranges (`257-259` -> 257 258 259). Skip numbers that are not open PRs and
 for each PR: author, head owner/branch, whether it is a **fork PR** (head owner != `open-astro`),
 whether it is a draft, and whether it carries the `safe-to-review` label.
 
+**Validate every contributor-controlled string before it touches a shell command.** Branch
+names and fork owners come from the PR author and can contain anything git allows. Refuse (hard
+stop for that PR) any `headRefName` or `headRepositoryOwner.login` that does not match
+`^[A-Za-z0-9][A-Za-z0-9._/-]*$` (no leading `-`, no whitespace, no quotes, no `..`), and
+always double-quote them when interpolated (`"$BRANCH"`, `"$OWNER"`), never bare `<branch>`.
+PR numbers must match `^[0-9]+$`. Never `eval` or build a command from a PR title or body.
+
 Print the queue once, then work it top to bottom.
 
 ## Step 1 — Per PR: make sure the bot is actually going to run
@@ -47,8 +54,8 @@ Checks to make before waiting on anything:
    gh api -X DELETE repos/open-astro/AlpacaBridge/issues/<N>/labels/safe-to-review
    gh api -X POST   repos/open-astro/AlpacaBridge/issues/<N>/labels -f 'labels[]=safe-to-review'
    ```
-3. **Branch is behind main** (`gh api repos/open-astro/AlpacaBridge/compare/main...<owner>:<branch> --jq .behind_by`
-   is non-zero). Branch protection is strict, so it must be updated before it can merge, and
+3. **Branch is behind main** (`gh api "repos/open-astro/AlpacaBridge/compare/main...$OWNER:$BRANCH" --jq .behind_by`
+   is non-zero; `$OWNER`/`$BRANCH` validated in Step 0). Branch protection is strict, so it must be updated before it can merge, and
    updating re-runs CI + the bot. Do this **now** rather than after the verdict so you do not pay
    for two bot rounds:
    ```bash
@@ -112,18 +119,23 @@ finding, adopt it (reset your local branch to their head) and just poll again.
 Mechanics for a **fork PR** (the usual case for contributor branches):
 
 ```bash
-git fetch <fork-remote> <branch>            # e.g. remote `diego` = diegopereiran/AlpacaBridge
-git checkout -B <branch> <fork-remote>/<branch>
+# $REMOTE is a local remote name you chose (e.g. `diego`), $BRANCH the validated head name.
+git fetch "$REMOTE" "$BRANCH"
+git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 # ... apply fixes ...
 ./scripts/ci_preflight.sh                   # HARD BLOCK: do not push red (summary lines are indented "  [PASS] ...")
-git fetch <fork-remote> <branch>            # contributors push concurrently; re-check the head
-git log --oneline HEAD..<fork-remote>/<branch>   # must be empty; if not, rebase onto it first
-git push <fork-remote> HEAD:<branch>
+git fetch "$REMOTE" "$BRANCH"               # contributors push concurrently; re-check the head
+git log --oneline "HEAD..$REMOTE/$BRANCH"   # must be empty; if not, rebase onto it first
+git push "$REMOTE" "HEAD:$BRANCH"
 ```
 
-If the fork remote does not exist, add it: `git remote add <name> https://github.com/<owner>/AlpacaBridge.git`.
+If the fork remote does not exist, add it with the validated owner:
+`git remote add "$REMOTE" "https://github.com/$OWNER/AlpacaBridge.git"`.
 If the contributor already pushed an equivalent fix while you were working, **adopt theirs** and
-drop your duplicate instead of force-pushing. Never force-push a contributor's branch.
+drop your duplicate instead of force-pushing. Never force-push a contributor's branch. Adopting
+is not a rubber stamp: read their **entire** diff against the previously reviewed head (not
+just the hunk that addresses the finding) and confirm it contains nothing beyond that fix before
+resetting onto it; anything unrelated goes back to the bot as a normal push and review round.
 
 For an `open-astro` branch, the same flow against `origin`.
 
@@ -155,12 +167,21 @@ gh pr view <N> --json isDraft,mergeable,mergeStateStatus --jq '"draft=\(.isDraft
 
 Because the user invoked `/pr-checker` with the instruction to merge once the bot is clean, that
 invocation **is** the merge authorization for every PR in the list. Do not ask again per PR.
+This is the maintainer's deliberate policy for this repository (stated 2026-09-09 when the skill
+was commissioned: "merge and close once the bot says there are no outstanding issues"), not a
+convenience default: the review bot plus the full CI matrix is the review gate, and the
+maintainer runs this skill themself, interactively, so a human is in the loop at invocation time
+and can interrupt at any round. The guardrails that keep it safe are the ones above: every fork
+input validated, every finding fixed in-PR rather than waived, every adopted contributor diff
+read in full, and the **Hard stops** below, which override this authorization.
 
 After a merge, every remaining PR in the queue is now behind main: run Step 1.3 on the **next** PR
 right away so its refresh round starts while you tidy up.
 
 ## Hard stops (the only reasons to hand back to the user)
 
+- A PR's head branch name or fork owner fails the Step 0 validation, or a contributor's diff
+  contains changes outside the reviewed finding that you cannot vouch for.
 - The bot finding requires a product decision (change a default, drop a platform, alter a
   user-facing behaviour) that the PR author did not intend.
 - A ConformU report on the branch is failing (a driver PR cannot merge with a red report; see
