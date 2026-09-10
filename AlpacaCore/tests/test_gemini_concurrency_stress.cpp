@@ -14,13 +14,17 @@
 // (issue #101).
 //
 // Two of them get the full-seam treatment, because pty-backed fakes already
-// exist and drive them into the CONNECTED state, where the reader thread and
-// the background command paths actually run:
-//   - PDH Advanced 3 Switch over fake_gemini_pdh.h
-//   - Flat Panel Pro CoverCalibrator over fake_gemini_flatpanel.h
-// That is the surface worth storming here: both drivers own a serial reader
-// thread that a disconnect has to reap, and the PDH's status cache is
-// written by that thread while the Alpaca getters read it.
+// exist and drive them into the CONNECTED state, where the background work
+// actually runs -- but the two drivers are shaped differently, and the storm
+// reaches a different surface in each:
+//   - PDH Advanced 3 Switch over fake_gemini_pdh.h. This one does own a
+//     serial reader thread that a disconnect has to reap, and it writes the
+//     status cache while the Alpaca getters read it.
+//   - Flat Panel Pro CoverCalibrator over fake_gemini_flatpanel.h. This one
+//     is strictly request/response -- no reader thread, and set_connected
+//     (false) reaps nothing. What the storm races here are its
+//     cover_task_thread_ / calibrator_task_thread_ workers, which the
+//     DESTRUCTOR reaps (reap_calibrator_task(true)), not a disconnect.
 //
 // The focuser has no fake, so it takes the accepted fail-fast bar (the
 // ZWO/iOptron precedent): a serial path that cannot exist, so every connect
@@ -82,8 +86,12 @@ void flatpanel_operate(AlpacaDriver& d) {
     call([&] { static_cast<void>(panel.get_max_brightness()); });
     call([&] { static_cast<void>(panel.get_calibrator_changing()); });
     call([&] { static_cast<void>(panel.get_cover_moving()); });
+    // One calibrator submission per iteration, not on+off: with
+    // calibrator_pending_count_ > 0 the inline fast path is never claimed,
+    // so each call spawns a task thread that joins its predecessor -- two
+    // per iteration from four op threads builds a chain of live threads for
+    // no extra coverage.
     call([&] { panel.calibrator_on(10); });
-    call([&] { panel.calibrator_off(); });
     call([&] { static_cast<void>(panel.get_device_state()); });
 }
 
