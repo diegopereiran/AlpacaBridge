@@ -76,6 +76,20 @@ public:
 
     void connect(const std::string& hid_path) {
         std::lock_guard<std::mutex> lock(mutex_);
+        // The caller (the driver's own mutex_, AsyncConnectable obligations
+        // 4/5) is what actually guarantees a single in-flight connect; this
+        // makes that invariant local instead of only living in the caller's
+        // head. A throw, not a silent guard that closes and reopens: closing
+        // and reopening would mask the caller bug that let this be reached
+        // (silently leaking the existing handle's caller-visible state)
+        // instead of surfacing it. Not an assert: this file has no other
+        // <cassert> use, and an assert here would abort the whole process in
+        // every NDEBUG-undefined build (CI, dev, the TSan job) -- worse than
+        // the bug it guards against.
+        if (device_) {
+            throw AlpacaException("Astroasis focuser: connect() called while already connected (caller bug)",
+                                  AlpacaError::DriverException);
+        }
         hid_init();
         device_ = hid_open_path(hid_path.c_str());
         if (!device_) {
@@ -98,6 +112,9 @@ public:
             send_command(0x11, handshake1.data(), 4, 1, kHandshakeTimeoutMs);
             send_command(0x10, nullptr, 0, 4, kDefaultTimeoutMs);
         } catch (...) {
+            // connected_ is already false here: it's only ever true when
+            // device_ != nullptr, and the already-connected throw above
+            // guarantees device_ was nullptr on entry, in every build.
             hid_close(device_);
             device_ = nullptr;
             throw;
