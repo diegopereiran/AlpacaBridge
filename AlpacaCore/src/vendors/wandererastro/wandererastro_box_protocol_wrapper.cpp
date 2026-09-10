@@ -22,7 +22,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <optional>

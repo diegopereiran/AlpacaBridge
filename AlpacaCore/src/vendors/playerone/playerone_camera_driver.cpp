@@ -24,7 +24,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
 #include <optional>
 #include <string>

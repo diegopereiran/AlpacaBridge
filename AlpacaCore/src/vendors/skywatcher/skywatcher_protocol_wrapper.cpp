@@ -38,7 +38,6 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <cstring>
 #include <mutex>
 #include <set>
 #include <sstream>

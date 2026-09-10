@@ -19,7 +19,6 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>

@@ -187,13 +187,13 @@ def check_version_matches_readme():
 # --- check 5: AGENTS.md path references exist -------------------------------
 
 # Backtick-quoted spans that look like a repo-relative path: start with one of
-# these top-level dirs/files, contain no spaces, and are not a bare CLI flag
+# these top-level dirs/files (spaces allowed only for a verbatim tracked path), and are not a bare CLI flag
 # or a URL.
 PATH_PREFIXES = (
     "AlpacaCore/", "AlpacaHTTP/", "scripts/", "docs/", ".github/",
     ".claude/", "debian/",
 )
-CODE_SPAN_RE = re.compile(r"`([^`\s]+)`")
+CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
@@ -243,6 +243,11 @@ def check_agents_md_paths_exist():
         seen.add(path)
 
         if path in tracked or path in tracked_dirs:
+            continue
+        # A span with whitespace is only a path when it names a tracked file
+        # or directory verbatim (e.g. `AlpacaCore/conformu/Astroasis/Oasis
+        # Focuser/`); anything else with spaces is prose, not a path claim.
+        if any(ch.isspace() for ch in path):
             continue
         # Not a tracked file or the directory of one: a generated/ignored
         # path (debian/changelog, a `.../build/` output dir) is expected to

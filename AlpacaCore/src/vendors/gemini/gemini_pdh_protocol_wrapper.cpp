@@ -24,7 +24,6 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <optional>

@@ -23,7 +23,6 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
 #include <optional>
 #include <string>

@@ -75,6 +75,8 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'T':
             case 'P':  // tracking mode write / passthrough
                 return "#";
+            case 'm':  // model id: chr(model) + "#"; 50 = EQM-35 Pro
+                return std::string(1, static_cast<char>(50)) + "#";
             default:
                 return "0#";
         }
@@ -278,6 +280,22 @@ TEST_CASE("SynScan - a persistently garbled echo fails the connect rather than p
     CHECK_FALSE(driver->get_connected());
     CHECK(connect_ms < 1000);     // two quick mismatched replies, not five swallowed query timeouts
     CHECK(queries->load() == 2);  // only the two echo attempts - never firmware/model/site
+}
+
+TEST_CASE("SynScan - Name carries the model and the (SynScan) suffix once connected", "[synscan][telescope][async]") {
+    // PR #278: a mount reachable over both the hand controller and the
+    // direct motor-controller path resolves to the same model string in
+    // both drivers; the "(SynScan)" suffix is what tells them apart in a
+    // client's device list. Asserted here rather than only on hardware.
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    CHECK(driver->get_name() == "Sky-Watcher Mount (SynScan)");  // no model known yet
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (SynScan)");  // fake answers model id 50
+    REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
 }
 
 TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew ends", "[synscan][telescope][async]") {

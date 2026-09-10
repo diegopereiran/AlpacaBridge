@@ -56,7 +56,10 @@ def changed_conformu_files(base_ref):
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     out = subprocess.run(
-        ["git", "diff", "--name-only", "--diff-filter=d", merge_base, "HEAD"],
+        # --find-renames: a report renamed without content changes must not
+        # show as delete+add (which would re-validate an unchanged file or,
+        # under a different rename-detection config, hide a real change).
+        ["git", "diff", "--name-only", "--find-renames", "--diff-filter=d", merge_base, "HEAD"],
         check=True, capture_output=True, text=True,
     ).stdout
     return [p for p in out.splitlines() if p.startswith(CONFORMU_PREFIXES)
