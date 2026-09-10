@@ -12,8 +12,9 @@ Regex regression guard (no repo state needed):  python3 scripts/check_stress_reg
 Coverage is tracked per (vendor, Alpaca device type) pair, not per vendor.
 A vendor-level check (does `test_<vendor>_concurrency_stress.cpp` exist at
 all?) would pass ZWO or ToupTek in full the moment any one of their drivers
-is registered -- that would hide ToupTek's un-stressed focuser behind a
-green check. Keying on device type as well catches those.
+is registered -- while the ZWO rotator, focuser and dew-heater switch
+and the ToupTek focuser were still unregistered, that would have hidden
+them behind a green check. Keying on device type as well catches those.
 
 Known gap: the pair is the finest key the gate has, so a registered driver
 masks every other driver of the same vendor and type. The two ZWO ASIAIR
@@ -70,7 +71,6 @@ ALLOWLIST = {
     ("playerone", "switch"),
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
-    ("touptek", "focuser"),
     ("wandererastro", "covercalibrator"),
     ("wandererastro", "filterwheel"),
     ("wandererastro", "rotator"),
