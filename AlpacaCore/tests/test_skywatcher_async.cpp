@@ -958,6 +958,92 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
     driver->set_connected(false);
 }
 
+// ── Pier side across the meridian (open-astro#261) ──────────────────────────
+//
+// Audit finding (2026-09-09, no hardware): the branch that decides both the
+// dec-axis sign AND the reported pier side is chosen purely from the sign of
+// hour angle in ra_dec_to_axis_degrees_locked() / get_side_of_pier() /
+// get_destination_side_of_pier() -- hemisphere_south_locked() is consulted
+// ONLY for dec_mech (which flips the a2 magnitude, not which branch is
+// picked). So, unlike the RA-tracking-direction bug (#250) and the
+// DeclinationRate/PulseGuide sign bug (#253) -- both of which were exposed by
+// the driver's own reported coordinates moving the wrong way under motion --
+// there is no internal contradiction a loopback test can find here: whichever
+// physical side the code labels "pierEast", it reports and slews to that same
+// side consistently in both hemispheres, by construction. These tests assert
+// exactly that contract (self-consistency + flip-with-HA, the same shape
+// OnStep's ConformU-validated fix above requires: "WE", not constant) and
+// will pass whether or not the label matches the true physical side below the
+// equator. They do NOT, and cannot, confirm which side is physically correct
+// -- that needs the plate-solved goto-across-the-meridian check in #261.
+
+TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and agrees with destination",
+          "[skywatcher][telescope][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    double lst = driver->get_sidereal_time();
+    // West of the meridian (HA > 0) -> pierEast (0) on the a2 >= 0 branch.
+    double west_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
+    // East of the meridian (HA < 0) -> pierWest (1) on the a2 < 0 branch.
+    double east_ra = std::fmod(lst + 2.0, 24.0);
+    const double dec = -40.0;
+
+    REQUIRE(driver->get_destination_side_of_pier(west_ra, dec) == 0);
+    REQUIRE(driver->get_destination_side_of_pier(east_ra, dec) == 1);
+
+    driver->slew_to_coordinates_async(west_ra, dec);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+    CHECK(driver->get_side_of_pier() == 0);
+
+    // A branch crossing forces the RA axis (a1) to jump by close to 180 deg
+    // -- that IS a real meridian flip, not a test artifact: at
+    // kMaxMoveAxisRateDegPerSec (~3.3 deg/s) it is a ~55 s goto plus ramp
+    // (measured 57 s in the loopback), not the ~15 s one-branch slew above.
+    driver->slew_to_coordinates_async(east_ra, dec);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 90000));
+    // The branch must actually flip on the second goto, not just relabel the
+    // same axis position.
+    CHECK(driver->get_side_of_pier() == 1);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher northern hemisphere - SideOfPier flips with hour angle and agrees with destination",
+          "[skywatcher][telescope][hemisphere]") {
+    // Mirrors the southern-hemisphere test above with an unchanged (Wave)
+    // profile: the branch/HA-sign rule is not conditioned on hemisphere at
+    // all, so this must behave identically.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    double lst = driver->get_sidereal_time();
+    double west_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
+    double east_ra = std::fmod(lst + 2.0, 24.0);
+    const double dec = 40.0;
+
+    REQUIRE(driver->get_destination_side_of_pier(west_ra, dec) == 0);
+    REQUIRE(driver->get_destination_side_of_pier(east_ra, dec) == 1);
+
+    driver->slew_to_coordinates_async(west_ra, dec);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+    CHECK(driver->get_side_of_pier() == 0);
+
+    driver->slew_to_coordinates_async(east_ra, dec);  // ~180 deg RA jump, see sibling test
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 90000));
+    CHECK(driver->get_side_of_pier() == 1);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a step-period readback mismatch is logged, not resent and not thrown",
           "[skywatcher][async]") {
     // 6b4988b read every ":I" preset back with ":i" and resent, then threw,
