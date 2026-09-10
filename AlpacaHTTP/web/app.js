@@ -1419,7 +1419,10 @@ function clockStateText(desc) {
         return 'Set from a client\'s UTCDate this session (no NTP)';
     }
     if (source === 'rtc') {
-        return 'From the hardware RTC at boot (no NTP; its accuracy is unverified). A client\'s UTCDate or Sync Time still corrects it.';
+        // Deliberately no "a client will correct it" promise: the connect-time
+        // line withdraws exactly that once a clock set has been refused, and
+        // ClockSource alone cannot express the difference.
+        return 'From the hardware RTC at boot (no NTP; its accuracy is unverified).';
     }
     if (source === 'none') {
         return 'NOT synchronized: no NTP and no client has set it yet. Connect a telescope from NINA/SkySafari (they send UTCDate) or press Sync Time.';
