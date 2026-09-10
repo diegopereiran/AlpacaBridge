@@ -40,7 +40,7 @@ namespace alpacacore::util {
  */
 class HostClock {
 public:
-    enum class Outcome {
+    enum class Outcome : std::uint8_t {
         Stepped,              // clock_settime succeeded
         SkippedSynchronized,  // the kernel says the clock is disciplined: leave it alone
         SkippedDisabled,      // syncSystemClockFromClients is off
