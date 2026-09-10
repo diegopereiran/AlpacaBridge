@@ -2275,9 +2275,13 @@ Response Router::dispatch_device_method(
                     if (device->get_device_type() == alpacacore::DeviceType::Telescope && !host_clock_.synchronized() &&
                         !host_clock_.stepped_by_client()) {
                         const bool rtc = host_clock_.has_rtc();
+                        const bool diverged = !rtc && host_clock_.rtc_diverged();
                         const std::string msg =
                             "Telescope " + std::to_string(device->get_device_number()) +
                             (rtc ? " connecting on the hardware RTC's time (no NTP, not yet set by a client); "
+                             : diverged
+                                 ? " connecting with a host clock that no longer agrees with the hardware RTC by "
+                                   "more than 5 minutes (drift or a manual set; no NTP, not yet set by a client); "
                                  : " connecting with an undisciplined host clock (no NTP, not yet set by a client); ") +
                             "goto/LST math runs on it until a client writes UTCDate" +
                             (host_clock_.enabled()

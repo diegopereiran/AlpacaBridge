@@ -210,7 +210,12 @@ older client that switches on `ClockSource` should treat unknown values as
 first of `/sys/class/rtc/rtc0` to `rtc7` whose `hctosys` reads 1; a
 present-but-unread RTC does not count), that RTC's own current reading
 (`since_epoch`, memoised for 1 s) is not earlier than the build time, and the
-system clock still agrees with it to within 5 minutes. The RTC is judged, not the system clock:
+system clock still agrees with it to within 5 minutes. Both free-run without
+NTP and an SoC timebase drifts seconds per day, so on a long-running
+NTP-less host the state eventually flips from `rtc` to `none` (typically
+after weeks to months of uptime); the telescope connect message then says
+the clock no longer agrees with the RTC, and a client `UTCDate` write or a
+Sync Time press corrects it. The RTC is judged, not the system clock:
 a Pi 5's on-board RTC exists without a battery and reads 2000-01-01 after a
 power cut, while userspace may already have restored a recent system time;
 that host reads `none`. Loading an RTC is a plain clock set,

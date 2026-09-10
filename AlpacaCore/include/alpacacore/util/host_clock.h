@@ -107,13 +107,21 @@ public:
         if (synchronized()) {
             return "ntp";
         }
-        // One lock across the stepped_ check and the RTC read, so a step
-        // landing in between cannot label a just-become-"client" clock "rtc".
+        // The RTC read may be an I2C transaction: never hold mutex_ across it
+        // (step_from_client() would block behind a slow bus). Re-check
+        // stepped_ afterwards so a step landing meanwhile still wins.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stepped_) {
+                return "client";
+            }
+        }
+        const bool rtc = has_rtc();
         std::lock_guard<std::mutex> lock(mutex_);
         if (stepped_) {
             return "client";
         }
-        return has_rtc() ? "rtc" : "none";
+        return rtc ? "rtc" : "none";
     }
 
     // True when the kernel loaded system time from a hardware RTC at boot AND
@@ -138,6 +146,15 @@ public:
     }
     static constexpr std::chrono::minutes kRtcAgreement{5};
 
+    // The RTC is present and plausible but the system clock no longer agrees
+    // with it: after a bypassing setter, or simply after months of NTP-less
+    // uptime (SoC timebases drift tens of ppm, seconds per day). Lets the
+    // connect-time message say what actually happened.
+    bool rtc_diverged(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
+        const auto t = rtc_time_();
+        return t.has_value() && *t >= build_time() && !has_rtc(now);
+    }
+
     // The clock was stepped by a path that bypasses step_from_client() (the
     // /management/v1/synctime endpoint behind the web UI's Sync Time button):
     // from now on the system clock's provenance is "client", not the RTC and
@@ -154,8 +171,6 @@ public:
     // nullopt when no RTC was used at boot, when the attribute is unreadable,
     // or when CONFIG_RTC_HCTOSYS is off. Defined in host_clock.cpp.
     static std::optional<std::chrono::system_clock::time_point> host_rtc_time();
-    // Uncached sysfs read behind host_rtc_time().
-    static std::optional<std::chrono::system_clock::time_point> read_host_rtc_time();
 
     // Build time floor of the library: the configure-time epoch injected by
     // CMake (ALPACACORE_BUILD_EPOCH, which honours SOURCE_DATE_EPOCH for
@@ -256,6 +271,10 @@ public:
     }
 
 private:
+    // Uncached sysfs read behind host_rtc_time(); mutates a function-local
+    // static and is only safe under host_rtc_time()'s cache mutex.
+    static std::optional<std::chrono::system_clock::time_point> read_host_rtc_time();
+
     IsSynchronizedFn is_synchronized_;
     SetTimeFn set_time_;
     RtcTimeFn rtc_time_;

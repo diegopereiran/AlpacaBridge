@@ -172,10 +172,15 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
     CHECK(HostClock::build_time() > y2000);  // not: <= now(), the suite also runs on hosts whose clock is behind
     f.rtc_time = std::nullopt;               // no RTC was used at boot
     CHECK(c.source() == "none");
+    CHECK_FALSE(c.rtc_diverged());  // no RTC is not "diverged"
+    f.rtc_time = y2000;
+    CHECK_FALSE(c.rtc_diverged());  // an implausible RTC is not "diverged" either
     // The system clock must still agree with the RTC: a later date -s or a
     // restored saved timestamp that bypassed HostClock leaves them diverged.
     f.rtc_time = system_clock::now();
     CHECK_FALSE(c.has_rtc(system_clock::now() + minutes(10)));
+    CHECK(c.rtc_diverged(system_clock::now() + minutes(10)));
+    CHECK_FALSE(c.rtc_diverged(system_clock::now()));
     CHECK_FALSE(c.has_rtc(system_clock::now() - minutes(10)));
     CHECK(c.has_rtc(system_clock::now() + minutes(4)));
     CHECK(c.has_rtc(system_clock::now() - minutes(4)));

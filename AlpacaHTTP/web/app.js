@@ -1653,6 +1653,7 @@ async function syncTime() {
             const roundTripMs = Date.now() - t0;
             const serverTime = new Date((result.Value * 1000) + Math.floor(roundTripMs / 2));
             refreshServerClockOffset();
+            loadServerInfo();  // the Clock row's source is now "client"; re-read it (open-astro#292)
             alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
         } else {
             alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
