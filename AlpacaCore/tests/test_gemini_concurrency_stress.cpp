@@ -145,10 +145,15 @@ TEST_CASE("Gemini PDH Advanced 3 switch - concurrent connect/disconnect/operate 
     // Prove the fake actually connects before storming it -- otherwise this
     // silently degrades into a fail-fast test that never reaches the reader
     // thread (the PR #3 lesson recorded in the SynScan stress file). 10 s,
-    // the harness default, not 5: the PDH's handshake retry ladder is
+    // the harness default, not 5: settle_connected() checks its deadline
+    // only BEFORE each set_connected() attempt, not during one, so a single
+    // slow-but-successful first attempt is never the failure mode -- the
+    // budget only matters if that attempt actually fails and there is no
+    // time left to retry. The PDH's handshake retry ladder is
     // 0.1s + 2s + 1s of sleeps plus up to 3 x kRequestTimeoutMs (2.5s) ~=
-    // 10.6s worst case, so a 5s budget left no margin for a single slow
-    // reply on the fake's very first attempt.
+    // 10.6s worst case, so 5 s would leave no margin for that retry if a
+    // reply is ever dropped; the fake always answers today, so this is
+    // headroom, not a fix for an observed failure.
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_connected(false);
 
@@ -175,8 +180,9 @@ TEST_CASE("Gemini Flat Panel Pro - concurrent connect/disconnect/operate stress"
     FakeGeminiFlatPanel panel;
     auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, panel.slave_path(), 9600);
 
-    // 10 s, same margin argument as the PDH case above: the flat panel's
-    // handshake retry ladder is the same shape.
+    // 10 s, same reasoning as the PDH case above: the flat panel's handshake
+    // retry ladder is the same shape, and the budget is retry headroom, not
+    // a bound on a single slow-but-successful attempt.
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_connected(false);
 
