@@ -11,10 +11,12 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the iOptron
-// telescope (audit follow-up, 3.0.1). The audited detached-thread fixes on
-// this driver (async slew + pulse-guide threads racing set_connected(false)
-// and destruction) only run on a CONNECTED driver, so these tests connect
-// through a FakeMountServer: the protocol wrapper treats a successful TCP
+// telescope (audit follow-up, 3.0.1), plus the iEFW filter wheel and iEAF
+// focuser cases further down (#271, documented in their own block comment).
+// The audited detached-thread fixes on the telescope driver (async slew +
+// pulse-guide threads racing set_connected(false) and destruction) only run
+// on a CONNECTED driver, so the telescope tests connect through a
+// FakeMountServer: the protocol wrapper treats a successful TCP
 // connect as mount-connected and every post-connect query tolerates failure,
 // so a canned "0#" responder is enough to spawn the driver's worker threads
 // on a hardware-free host. Operations racing a disconnect are EXPECTED to
