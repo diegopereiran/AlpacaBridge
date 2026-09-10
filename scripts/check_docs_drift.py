@@ -241,7 +241,9 @@ def check_agents_md_paths_exist():
                 "the path-reference check cannot pair code spans reliably"]
     seen = set()
 
-    tracked = set(_run_git(["ls-files"]).stdout.splitlines())
+    # core.quotePath=false: a tracked path with non-ASCII bytes must not
+    # come back quoted, or it would never match a span.
+    tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines())
     tracked_dirs = set()
     for f in tracked:
         parts = f.split("/")

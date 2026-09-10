@@ -31,7 +31,6 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include <cstddef>
 #include <filesystem>
 #endif
 
@@ -39,6 +38,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <mutex>
 #include <set>
 #include <sstream>
