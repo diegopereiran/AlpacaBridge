@@ -88,6 +88,8 @@ endif()
 if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_focuser.cpp test_gemini_flatpanel.cpp test_gemini_flatpanel_v2.cpp test_gemini_flatpanel_pro.cpp
          test_gemini_pdh_switch.cpp)
+    # switch/covercalibrator over the pty fakes + fail-fast focuser [stress], #271
+    list(APPEND TEST_SOURCES test_gemini_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
