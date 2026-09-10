@@ -19,6 +19,11 @@
 // connect fails fast at that open, which still storms the AsyncConnectable
 // machinery and the failure-path cleanup; this test never exercises the
 // real connect path, regardless of what hardware is attached.
+//
+// The file does touch the USB bus, though: the enumeration-vs-connect case at
+// the bottom calls enumerate_astroasis_focusers() for real, which is a
+// read-only udev/libusb scan for VID:PID 338F:A0F0. It opens nothing and
+// commands nothing, on any device.
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>

@@ -61,11 +61,14 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    // Must stay lock-free: AsyncConnectable's task tail calls this while holding
-    // connection_mutex_, and taking mutex_ here would invert the documented
-    // connection_mutex_ -> mutex_ order (see async_connectable.h). Do NOT pull
-    // it under mutex_ in a sweep of the "connected_ only under mutex_"
-    // invariant -- the atomic is the exception, deliberately.
+    // Deliberately a plain atomic read, not under mutex_ -- do NOT pull it in
+    // during a sweep of the "connected_ only under mutex_" invariant. Taking
+    // the lock here would be safe (async_connectable.h explicitly allows
+    // get_connected() to take the driver mutex, and several telescope drivers
+    // do; the task tail reads it BEFORE pending_mutex_ so that stays deadlock-
+    // free), but it would buy nothing -- connected_ is one atomic -- and would
+    // cost: a Connected poll landing during an in-flight connect would block
+    // for the whole ~1.1 s HID handshake instead of answering immediately.
     bool get_connected() const override { return connected_.load(); }
 
     void connect() override { start_connection_task(true); }
