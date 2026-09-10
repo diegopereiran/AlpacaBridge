@@ -12,15 +12,11 @@
 
 #pragma once
 
-#include <sys/stat.h>
 #include <sys/timex.h>
 #include <time.h>
 
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
 #include <fstream>
 #include <functional>
 #include <mutex>
@@ -88,15 +84,26 @@ public:
     }
 
     // True when the kernel's STA_UNSYNC flag is clear (NTP/chrony/PTP have
-    // disciplined the clock). Always false on an internet-less SBC.
-    bool synchronized() const { return is_synchronized_(); }
+    // disciplined the clock). Always false on an internet-less SBC. Once a
+    // daemon has disciplined the clock, a client's earlier step no longer
+    // describes the current value: forget it, so that if discipline is lost
+    // again later the state honestly reads "none" and the connect-time
+    // warning fires again.
+    bool synchronized() const {
+        const bool s = is_synchronized_();
+        if (s) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stepped_ = false;
+        }
+        return s;
+    }
 
     // "ntp" (kernel-disciplined), "client" (this process stepped it from a
-    // UTCDate write), "rtc" (undisciplined, never stepped, but the host booted
-    // from a hardware RTC: loading it is a plain clock set, so the kernel
-    // still reports STA_UNSYNC — open-astro#292), or "none".
+    // UTCDate write), "rtc" (undisciplined, never stepped, but the kernel
+    // loaded system time from a hardware RTC at boot: that is a plain clock
+    // set, so STA_UNSYNC stays set — open-astro#292), or "none".
     std::string source(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
-        if (is_synchronized_()) {
+        if (synchronized()) {
             return "ntp";
         }
         {
@@ -109,7 +116,7 @@ public:
     }
 
     // True when the system clock was loaded from a hardware RTC at boot AND
-    // the resulting time is plausible (not before this binary was built). A
+    // the resulting time is plausible (not before this library was built). A
     // Raspberry Pi 5 has an on-board RTC that exists without a battery and
     // hands the kernel an epoch-ish time after a power cut; labelling that
     // "rtc" would be worse than "none". Reporting only: the stepping decision
@@ -119,39 +126,27 @@ public:
     }
 
     // The kernel sets /sys/class/rtc/rtc0/hctosys to 1 on the RTC it loaded
-    // system time from at boot. Older kernels without the attribute: fall back
-    // to device presence.
+    // system time from at boot. Nothing else counts: a present-but-unread
+    // RTC (CONFIG_RTC_HCTOSYS off, or an unreadable attribute) is "none".
+    // Cannot change after boot, so it is probed once.
     static bool host_booted_from_rtc() {
-        struct stat st {};
-        if (::stat("/sys/class/rtc/rtc0", &st) != 0 && ::stat("/dev/rtc0", &st) != 0) {
-            return false;
-        }
-        std::ifstream f("/sys/class/rtc/rtc0/hctosys");
-        if (!f.is_open()) {
-            return true;
-        }
-        int v = 0;
-        f >> v;
-        return v == 1;
+        static const bool booted = [] {
+            std::ifstream f("/sys/class/rtc/rtc0/hctosys");
+            int v = 0;
+            return f.is_open() && (f >> v) && v == 1;
+        }();
+        return booted;
     }
 
-    // Compile date of this translation unit, whole-month resolution; any
-    // clock earlier than this is certainly wrong.
-    static std::chrono::system_clock::time_point build_time() {
-        static const std::chrono::system_clock::time_point tp = [] {
-            static const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
-            const char* d = __DATE__;  // "Mmm dd yyyy"
-            const char* m = std::strstr(months, std::string(d, 3).c_str());
-            std::tm tm{};
-            tm.tm_mon = m ? static_cast<int>((m - months) / 3) : 0;
-            tm.tm_mday = 1;
-            tm.tm_year = std::atoi(d + 7) - 1900;
-            return std::chrono::system_clock::from_time_t(timegm(&tm));
-        }();
-        return tp;
-    }
+    // Build month of the library (defined once in host_clock.cpp so __DATE__
+    // is captured in exactly one translation unit); any clock earlier than
+    // this is certainly wrong.
+    static std::chrono::system_clock::time_point build_time();
 
     bool stepped_by_client() const {
+        if (synchronized()) {
+            return false;
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         return stepped_;
     }
@@ -246,7 +241,7 @@ private:
     HasRtcFn has_rtc_;
     mutable std::mutex mutex_;
     bool enabled_ = true;
-    bool stepped_ = false;
+    mutable bool stepped_ = false;
 };
 
 }  // namespace alpacacore::util

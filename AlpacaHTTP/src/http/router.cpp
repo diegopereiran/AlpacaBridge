@@ -1597,7 +1597,7 @@ nlohmann::json Router::build_description_payload() const {
 // clients can see whether pointing math is running on a trusted clock.
 void Router::add_clock_fields(nlohmann::json& desc) const {
     desc["ClockSynchronized"] = host_clock_.synchronized();
-    desc["ClockSource"] = host_clock_.source();  // "ntp" | "client" | "none"
+    desc["ClockSource"] = host_clock_.source();  // "ntp" | "client" | "rtc" | "none"
     desc["SyncSystemClockFromClients"] = host_clock_.enabled();
 }
 
