@@ -72,9 +72,12 @@ ALLOWLIST = {
     # QHY: registering these needs an injectable SDK seam first. Connecting
     # -- but also just enumerating (enumerate_cameras()) or reading a model
     # (get_camera_model()) -- calls Impl::ensure_resource(), which calls
-    # InitQHYCCDResource() and registers a libusb hotplug callback. Under
-    # ThreadSanitizer that kills the process the first time any of those
-    # three entry points is reached, not only on connect (run:
+    # InitQHYCCDResource(). qhy_sdk_wrapper.cpp's Impl ctor already documents
+    # why that is dangerous: the FIRST libqhyccd call spawns the SDK's
+    # PnpEventListenerThread, which calls libusb_hotplug_register_callback
+    # even when libusb_init failed -- a segfault on any host without a
+    # working USB stack, independent of TSan. A [qhy][stress] connect storm
+    # registered and run locally hit exactly that signature (run:
     # https://github.com/diegopereiran/AlpacaBridge/actions/runs/34535303596):
     #     QHYCCD||EnableQHYCCDMessage| set gl_msgEnable from:  1  to: 0
     #     ThreadSanitizer:DEADLYSIGNAL
@@ -82,18 +85,16 @@ ALLOWLIST = {
     #         #7 libusb_hotplug_register_callback
     # scripts/tsan_suppressions.txt already carries called_from_lib:libqhyccd*
     # and it does NOT help: a suppression mutes a race REPORT, and this is a
-    # fatal signal -- the process is already gone. Registering a [qhy][stress]
-    # connect/disconnect storm locally and running it passed on the plain
-    # arm64 build (no TSan) -- there is no such case in this tree today, this
-    # is a report of that experiment, not a description of what exists here.
-    # One CI run is consistent with the SDK blob's libusb hotplug path
-    # fighting TSan's interceptors, but not proof against every explanation
-    # (e.g. the runner having no USB/udev present) -- worth confirming again
-    # if this is revisited, not treated as settled.
-    # QHY has no automated connect coverage of any kind today, not just no
-    # [stress] coverage --
-    # the injectable QHY SDK seam that would fix this (the FakeToupTekSDK /
-    # LockedToupTekSDK shape) closes both gaps at once. See #271.
+    # fatal signal -- the process is already gone. Do not read "the plain
+    # arm64 build ran the same storm fine" as TSan being the differentiator:
+    # per the ctor comment, that host most likely just had a working USB
+    # stack. Any CI job that reaches ensure_resource() on a USB-less runner
+    # is at risk, TSan or not; there is no such case in this tree today, so
+    # this is a report of one experiment, not a description of what exists
+    # here. QHY has no automated connect coverage of any kind today, not
+    # just no [stress] coverage -- the injectable QHY SDK seam that would
+    # fix this (the FakeToupTekSDK / LockedToupTekSDK shape) closes both
+    # gaps at once. See #271.
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
     ("wandererastro", "covercalibrator"),
