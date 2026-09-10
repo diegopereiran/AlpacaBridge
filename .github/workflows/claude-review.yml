@@ -80,6 +80,9 @@ jobs:
               the code does.
             - A crash, hang, deadlock, data race, or resource leak reachable
               from the changed lines.
+            - A changed code path that misses a documented ConformU timing
+              target (AGENTS.md).
+            - A PR description that does not describe the diff.
             Each defect names the file, the line, and the input or scenario
             that shows it, so the builder can reproduce it before fixing.
 

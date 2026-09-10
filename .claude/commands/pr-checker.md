@@ -132,10 +132,14 @@ Read the newest bot comment in full.
 
 ### `⚠️ Issues found`
 
-Fix **every** finding the bot raises on this PR, in this PR, in **one batched commit**. Each push
-restarts a full fresh review (PR #99 took 46 rounds when pushes trickled). Do not defer findings to
-follow-up issues and do not decline them as low priority unless the user says so; the standing
-rule is "work it in the same PR till there are no more issues."
+The bot's comment has two sections (`claude-review.yml` prompt): **Defects**, which are what made
+the verdict a rejection, and **Notes**, which never block. Fix **every Defect** on this PR, in this
+PR, in **one batched commit**; do not defer a Defect to a follow-up issue and do not decline one
+as low priority unless the user says so. Handle the **Notes** by the classification rules in the
+`✅ Approved` section below: a mechanical note goes into the same commit, a judgment note or one
+the bot marks "out of scope, open an issue" goes to the wrap-up and is never pushed. A note is
+never a reason for a second push. Each push restarts a full fresh review (PR #99 took 46 rounds
+when pushes trickled; PR #282 reached 29 commits when notes were fixed as if they were defects).
 
 **Before writing a line**, fetch the fork head: contributors watch the same bot and often push
 their own fix for the same finding within minutes (PR #258 did this twice in one session).
@@ -200,9 +204,9 @@ regex edge case, a missing rename flag, an untested name suffix). Handle them li
    took 46 rounds because post-approval pushes were unbounded and trickled one nit at a time;
    the cap keeps that closed while normal PRs come out fully clean.
 4. `⚠️ Issues found` on a cleanup round is handled like any other round: fix, push, poll.
-   Counting against the cap: a round whose findings are genuine defects does **not** count
-   (it is a fix round, not a cleanup round). A round whose findings are only nits **does**
-   count as one cleanup round.
+   Counting against the cap is mechanical: a round whose Defects section is non-empty does
+   **not** count (it is a fix round, not a cleanup round). A round that only carries Notes
+   **does** count as one cleanup round.
 5. If the approval has **no** mechanical notes, skip straight to the merge below.
 
 Then:
@@ -263,9 +267,9 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   update-branch) runs as ONE background chain that continues into the next action on its own:
   `preflight && push && poll` for a fix round, `update-branch && poll && merge` for a refresh.
   Never end the turn with "I'll push when pre-flight finishes"; chain it.
-- **A bot finding you disagree with** is still fixed or wired into the skill/docs when there is
-  any reasonable change that satisfies it. Only a finding that would require a wrong or unsafe
-  change becomes a hard stop.
+- **A Defect you disagree with** is still fixed or wired into the skill/docs when there is any
+  reasonable change that satisfies it. Only a Defect that would require a wrong or unsafe change
+  becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.
 
 ## Hard stops (the only reasons to hand back to the user)
 
