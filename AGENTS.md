@@ -1607,6 +1607,21 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   connected over Alpaca with zero driver warnings. Further bring-up notes (pointing math,
   MoveAxis semantics, tracking-rate measurement, the southern-hemisphere fixes) are
   recorded against those fixes elsewhere in this section.
+- **SynScan hand controller in "PC Direct Mode" reaches this driver unchanged, 2026-09-10**
+  (open-astro#275; EQM-35 Pro, SynScan V4 handset, Raspberry Pi 3B). The handset's menu
+  setting switches its own USB port from the SynScan command set to the raw motor-controller
+  protocol, so a `skywatcher` serial device pointed at the *handset's* port (9600 baud — PC
+  Direct Mode keeps the PC-facing rate) connects exactly like the board's own port: identity
+  `EQM-35 Pro (mount code 50), firmware 3.39`, Declination bit-identical to the direct port
+  (so `:a`/`:b`/`:g` geometry relays intact), `PulseGuide` N/S +11.25" and back to the same
+  count. The #242 echo guard steps aside by itself — a handset in this mode no longer answers
+  the SynScan echo — and the SynScan driver's scan then finds nothing on that port, which is
+  correct. Caveat: command latency through the 9600-baud relay is higher and more variable
+  than the board's own port; open-loop `MoveAxis` legs of ±2 deg/s for 1 s netted ~7 arcmin
+  instead of ~2 arcsec. Driver-timed motion is unaffected. Prefer the mount's own USB port
+  or an EQDIR cable where available; PC Direct Mode is a working no-extra-hardware fallback
+  for classic mounts that have neither (the #230 audience). Docs line for
+  `SUPPORTED-DRIVERS.md` lands with the post-ConformU direct-driver docs PR.
 
 #### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
 
