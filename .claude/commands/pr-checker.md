@@ -83,11 +83,14 @@ Checks to make before waiting on anything:
    It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
-   "Belongs to the current head" is the same rule as the Step 2 poll, so run one pass of that
-   block (`TICK=0 BUDGET=1`): a `review` check-run on the head SHA completed with success, none
-   still queued or running, and the newest bot verdict updated after that run started. Commit
-   dates are never used: a committer date is local commit time, so a verdict on the previous
-   head can be newer than it. A verdict that fails the rule is stale and must not be trusted.
+   "Belongs to the current head" is the same rule as the Step 2 poll, so run **one pass** of that
+   block with `BUDGET=0` (the loop checks before it sleeps, so `BUDGET=0` is exactly one check):
+   a `review` check-run on the head SHA completed, none still queued or running, and the newest
+   bot verdict updated after that run started. Commit dates are never used: a committer date is
+   local commit time, so a verdict on the previous head can be newer than it. Exit codes: `0`
+   prints the verdict (Step 3); `2` or `3` are the Step 3 "no verdict" cases; `1` from a
+   `BUDGET=0` pass only means **no verdict yet** (the normal state right after a push): go to
+   Step 2. It is not a timeout and does not count toward the "two consecutive timeouts" hard stop.
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
@@ -95,39 +98,57 @@ Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadli
 
 ```bash
 PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
-while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  sleep "$TICK"
+while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
-  # cancelled attempt cannot hide the successful one). Everything is fetched with
+  # cancelled attempt cannot hide the finished one). Everything is fetched with
   # --paginate: unpaginated, both endpoints return only the 30 oldest items.
   SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
   RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
-  RUN_STARTED=$(jq -r '[.[] | select(.conclusion == "success") | .started_at] | max // empty' <<<"$RUNS")
+  # Newest finished run that was not cancelled or skipped. A failed run still counts:
+  # the assert step can fail after the post step published the verdict, and nothing
+  # re-runs a failed run on its own, so it must be reported, not waited out.
+  DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.html_url)"' <<<"$RUNS")
+  RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
   PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
   # REST, not `gh pr view --json comments`: only REST exposes updated_at. The author
   # pattern is the workflow's own assert-step pattern. `select(. != null)` matters: with
   # no verdict yet, `last` is null and would otherwise print the literal "null".
-  LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
+  LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add // [] | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
   if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ -n "$LAST" ] \
      && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$RUN_STARTED" +%s)" ]; then
     printf '%s\n' "${LAST#* }"; exit 0
   fi
-  # A successful run with no verdict for this head: the PR edits the review workflow and the
-  # action skipped it (the assert step passes it). Nothing to wait for; review it by eye.
-  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] \
-     && gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
-    echo "No review posted for this head: this PR edits the review workflow. Review it by eye." >&2; exit 0
+  if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ]; then
+    # Finished, nothing pending, no verdict for this head. Never wait 30 minutes for it.
+    case "$RUN_STATE" in
+      success*)
+        # The PR edits the review workflow and the action skipped it (the assert step
+        # passes it). Hand back for eyeball review; this is a hard stop, never a merge.
+        if gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
+          echo "NO VERDICT for head $SHA: this PR edits the review workflow and the action skipped it. Hard stop: review it by eye." >&2; exit 2
+        fi ;;
+      *)
+        echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
+    esac
   fi
+  [ "$(date +%s)" -ge "$DEADLINE" ] && break
+  sleep "$TICK"
 done
-echo "TIMEOUT: no review-bot verdict for head ${SHA:-?} within $(( ${BUDGET:-1800} / 60 )) minutes" >&2; exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
+
+Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `BUDGET=0`, just
+"not yet"). `2` = the action skipped a workflow-editing PR (hard stop). `3` = the newest review
+run for this head failed with no verdict; the message carries the conclusion and run URL. Every
+non-zero exit prints nothing on stdout, so a chained `poll && merge` never reaches the merge.
+`date -d` is GNU; the skills run on the Linux dev VM.
 
 When several PRs are queued, poll them all in one background loop and act on whichever verdict
 lands first, but **merge strictly in ascending number order** so the update-branch dance is
 predictable.
 
-If it times out: `gh run list --workflow=claude-review.yml --limit 5` and read the failing job.
-Known stalls: the workflow triggers only on `opened`, `synchronize` and `labeled` (closing and
+On exit `3`, or a timeout: open the run URL (or `gh run list --workflow=claude-review.yml
+--limit 5`) and read the failing job. Known stalls: the workflow triggers only on `opened`, `synchronize` and `labeled` (closing and
 reopening the PR does NOT re-run it), so a stuck or cancelled run is restarted with the
 remove-and-re-add `safe-to-review` label trick from Step 1.2, which also covers the permission
 skip. Do not restart the poll blindly.
@@ -137,7 +158,10 @@ batch as the bot findings, not on its own.
 
 ## Step 3 — Act on the verdict
 
-Read the newest bot comment in full.
+Read the newest bot comment in full. A poll that exited without a verdict has no comment to act
+on and never merges: exit `2` (workflow-editing PR skipped by the action) is a **Hard stop**;
+exit `3` (review run failed) means read the run log, apply the relabel trick from Step 1.2 if it
+is the permission skip, and otherwise treat it as a broken workflow (**Hard stop** after two).
 
 ### `⚠️ Issues found`
 
@@ -277,7 +301,10 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - **Waiting is never a stopping point.** Every wait (pre-flight, verdict poll, CI checks,
   update-branch) runs as ONE background chain that continues into the next action on its own:
   `preflight && push && poll` for a fix round, `update-branch && poll && merge` for a refresh.
-  Never end the turn with "I'll push when pre-flight finishes"; chain it.
+  Never end the turn with "I'll push when pre-flight finishes"; chain it. Every poll exit
+  other than a verdict is non-zero (Step 2), so `poll && merge` cannot merge on an empty
+  verdict; a refresh verdict can still carry new Defects, so the merge half gates on the
+  printed verdict: `poll > "$V" && grep -q '✅ Approved' "$V" && gh pr merge <N> --merge`.
 - **A Defect you disagree with** is still fixed or wired into the skill/docs when there is any
   reasonable change that satisfies it. Only a Defect that would require a wrong or unsafe change
   becomes a hard stop. A Note you disagree with is a wrap-up line, not a change.
@@ -295,8 +322,10 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - A ConformU report on the branch is failing (a driver PR cannot merge with a red report; see
   `/submit-pr` Step 1).
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
-- The review workflow itself is broken (two consecutive timeouts after the relabel
-  tricks) — report the run URL.
+- The review action skipped a workflow-editing PR (poll exit `2`): hand it back for eyeball
+  review. A PR that edits `claude-review.yml` is never merged on an empty verdict.
+- The review workflow itself is broken (two consecutive 30-minute timeouts, or two failed runs,
+  after the relabel tricks) — report the run URL.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
 which PR was left and why.

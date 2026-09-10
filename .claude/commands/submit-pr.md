@@ -316,18 +316,28 @@ PR=<number>
 # (filter=all so a later cancelled attempt cannot hide the successful one).
 SHA=$(gh api "repos/open-astro/AlpacaBridge/pulls/$PR" --jq .head.sha)
 RUNS=$(gh api --paginate "repos/open-astro/AlpacaBridge/commits/$SHA/check-runs?per_page=100&filter=all" | jq -s 'map(.check_runs[]) | map(select(.name == "review"))')
-RUN_STARTED=$(jq -r '[.[] | select(.conclusion == "success") | .started_at] | max // empty' <<<"$RUNS")
+# Newest finished run that was not cancelled or skipped. A failed run still counts: the
+# assert step can fail after the post step published the verdict.
+DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.html_url)"' <<<"$RUNS")
+RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
 PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
-LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
+LAST=$(gh api --paginate "repos/open-astro/AlpacaBridge/issues/$PR/comments?per_page=100" | jq -r -s 'add // [] | [.[] | select((.user.login | test("^(claude|github-actions)(\\[bot\\])?$")) and (.body | test("✅ Approved|⚠️ Issues found")))] | last | select(. != null) | "\(.updated_at) \(.body)"')
 if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] && [ -n "$LAST" ] \
    && [ "$(date -u -d "${LAST%% *}" +%s)" -ge "$(date -u -d "$RUN_STARTED" +%s)" ]; then
   printf '%s\n' "${LAST#* }"; exit 0
 fi
-# A successful run with no verdict for this head is a workflow-editing PR the action skipped
-# (the assert step passes it); a count poll would wait 30 minutes for nothing.
-if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ] \
-   && gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
-  echo "No review posted for this head: this PR edits the review workflow, so the action skipped it. Review it by eye." >&2; exit 0
+# Finished, nothing pending, no verdict for this head: a count poll would wait 30 minutes
+# for nothing. Exit non-zero so nothing downstream mistakes silence for a verdict.
+if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ]; then
+  case "$RUN_STATE" in
+    success*)
+      # The PR edits the review workflow and the action skipped it (the assert step passes it).
+      if gh pr diff "$PR" --name-only | grep -qxF ".github/workflows/claude-review.yml"; then
+        echo "NO VERDICT for head $SHA: this PR edits the review workflow and the action skipped it. Review it by eye." >&2; exit 2
+      fi ;;
+    *)
+      echo "REVIEW RUN ENDED ${RUN_STATE%% *} for head $SHA with no verdict: ${RUN_STATE#* }" >&2; exit 3 ;;
+  esac
 fi
 # Count only genuine review comments: the bot login AND a verdict line, so an
 # unrelated comment from a same-named account can't satisfy the poll. The
@@ -349,8 +359,11 @@ echo "TIMEOUT: no review-bot comment within 30 minutes — check the claude-revi
 exit 1
 ```
 
-If the poll times out, surface the stall to the user and check the workflow
-(`gh run list --workflow=claude-review.yml --limit 3`) instead of restarting the loop blindly.
+Exit `2` (the action skipped a workflow-editing PR) and exit `3` (the newest review run for
+this head failed; the message carries the conclusion and run URL) both mean there is no verdict
+to act on: tell the user, and for exit `3` read the run log first. If the poll times out, surface
+the stall to the user and check the workflow (`gh run list --workflow=claude-review.yml --limit 3`)
+instead of restarting the loop blindly. `date -d` is GNU; the skills run on the Linux dev VM.
 
 While waiting, also keep an eye on CI: `gh pr checks <number>`. A red CI check should be fixed
 (and pushed) without waiting for the review verdict.
