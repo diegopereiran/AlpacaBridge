@@ -116,8 +116,10 @@ target_include_directories(alpacacore PUBLIC
 string(TIMESTAMP ALPACACORE_BUILD_EPOCH "%s" UTC)
 # Scoped to the one file that reads it, so a re-configure (new timestamp)
 # does not recompile the whole library. Guarded so a platform where "%s" is
-# empty falls through to the __DATE__ fallback instead of failing to compile.
-if(ALPACACORE_BUILD_EPOCH MATCHES "^[0-9]+$")
+# empty -- or a bogus/zero SOURCE_DATE_EPOCH, which would silently move the
+# floor to 1970 and accept a dead RTC's 2000-01-01 -- falls through to the
+# __DATE__ fallback instead. 946684800 = 2000-01-01T00:00:00Z.
+if(ALPACACORE_BUILD_EPOCH MATCHES "^[0-9]+$" AND ALPACACORE_BUILD_EPOCH GREATER 946684800)
     set_source_files_properties(src/core/util/host_clock.cpp
         PROPERTIES COMPILE_DEFINITIONS ALPACACORE_BUILD_EPOCH=${ALPACACORE_BUILD_EPOCH})
 endif()

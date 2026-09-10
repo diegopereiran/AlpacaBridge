@@ -155,47 +155,55 @@ TEST_CASE("HostClock - a refused clock_settime is reported, not thrown", "[util]
 TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is unchanged (#292)",
           "[util][hostclock][unit]") {
     Fake f;
-    f.rtc_time = system_clock::now();  // an RTC keeping real time
+    // Anchored to the library's build day, never to the host's own clock: the
+    // suite also runs on NTP-less SBCs whose clock is behind a fresh package.
+    const auto rtc_now = HostClock::build_time() + hours(24);
+    f.rtc_time = rtc_now;  // an RTC keeping real time
     auto c = f.clock();
     // Booted from the RTC: the kernel still says unsynchronised, but the
     // state is not "none".
     CHECK_FALSE(c.synchronized());
-    CHECK(c.has_rtc());
-    CHECK(c.source() == "rtc");
+    CHECK(c.has_rtc(rtc_now));
+    CHECK(c.source(rtc_now) == "rtc");
+    CHECK(c.rtc_state(rtc_now) == HostClock::RtcState::Ok);
     // The RTC's own reading is judged, not the system clock: a battery-less
     // Pi 5 RTC reads 2000-01-01 while userspace may already have restored a
     // recent system time. It is not keeping time: report "none".
     const auto y2000 = system_clock::time_point(seconds(946684800));
     f.rtc_time = y2000;
-    CHECK_FALSE(c.has_rtc());
-    CHECK(c.source() == "none");
-    CHECK(HostClock::build_time() > y2000);  // not: <= now(), the suite also runs on hosts whose clock is behind
-    f.rtc_time = std::nullopt;               // no RTC was used at boot
-    CHECK(c.source() == "none");
-    CHECK_FALSE(c.rtc_diverged());  // no RTC is not "diverged"
+    CHECK_FALSE(c.has_rtc(y2000));
+    CHECK(c.source(y2000) == "none");
+    CHECK(c.rtc_state(y2000) == HostClock::RtcState::None);
+    CHECK(HostClock::build_time() > y2000);
+    f.rtc_time = std::nullopt;  // no RTC was used at boot
+    CHECK(c.source(rtc_now) == "none");
+    CHECK_FALSE(c.rtc_diverged(rtc_now));  // no RTC is not "diverged"
     f.rtc_time = y2000;
-    CHECK_FALSE(c.rtc_diverged());  // an implausible RTC is not "diverged" either
-    // The system clock must still agree with the RTC: a later date -s or a
-    // restored saved timestamp that bypassed HostClock leaves them diverged.
-    f.rtc_time = system_clock::now();
-    CHECK_FALSE(c.has_rtc(system_clock::now() + minutes(10)));
-    CHECK(c.rtc_diverged(system_clock::now() + minutes(10)));
-    CHECK_FALSE(c.rtc_diverged(system_clock::now()));
-    CHECK_FALSE(c.has_rtc(system_clock::now() - minutes(10)));
-    CHECK(c.has_rtc(system_clock::now() + minutes(4)));
-    CHECK(c.has_rtc(system_clock::now() - minutes(4)));
-    f.rtc_time = system_clock::now();
+    CHECK_FALSE(c.rtc_diverged(y2000));  // an implausible RTC is not "diverged" either
+    // The system clock must still agree with the RTC: a later date -s, a
+    // restored saved timestamp, or simply free-running drift between the two
+    // oscillators. The window is seconds, not minutes: 1 s of clock error is
+    // 15 arcsec of RA.
+    f.rtc_time = rtc_now;
+    CHECK_FALSE(c.has_rtc(rtc_now + seconds(30)));
+    CHECK(c.rtc_diverged(rtc_now + seconds(30)));
+    CHECK(c.source(rtc_now + seconds(30)) == "none");
+    CHECK_FALSE(c.has_rtc(rtc_now - seconds(30)));
+    CHECK(c.rtc_diverged(rtc_now - seconds(30)));
+    CHECK_FALSE(c.rtc_diverged(rtc_now));
+    CHECK(c.has_rtc(rtc_now + seconds(4)));  // inside the measurement-noise window
+    CHECK(c.has_rtc(rtc_now - seconds(4)));
     // A client that agrees with the RTC changes nothing.
     CHECK(c.step_from_client(kNow + milliseconds(300), kNow).outcome == Outcome::SkippedSmall);
-    CHECK(c.source() == "rtc");
+    CHECK(c.source(rtc_now) == "rtc");
     // A client that disagrees by more than a second still wins (it is what
     // corrects RTC drift in the field), and the source becomes "client".
     CHECK(c.step_from_client(kNow + seconds(40), kNow).outcome == Outcome::Stepped);
     CHECK(f.sets.size() == 1);
-    CHECK(c.source() == "client");
+    CHECK(c.source(rtc_now) == "client");
     // NTP outranks the RTC label.
     f.synchronized = true;
-    CHECK(c.source() == "ntp");
+    CHECK(c.source(rtc_now) == "ntp");
     // The two-argument constructor means "no RTC probe": never "rtc".
     HostClock no_probe([] { return false; }, [](system_clock::time_point, std::string&) { return true; });
     CHECK_FALSE(no_probe.has_rtc());
@@ -205,19 +213,20 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
 TEST_CASE("HostClock - an external clock set (synctime endpoint) is recorded as a client step",
           "[util][hostclock][unit]") {
     Fake f;
-    f.rtc_time = system_clock::now();
+    const auto rtc_now = HostClock::build_time() + hours(24);
+    f.rtc_time = rtc_now;
     auto c = f.clock();
-    CHECK(c.source() == "rtc");
+    CHECK(c.source(rtc_now) == "rtc");
     CHECK_FALSE(c.stepped_by_client());
     c.note_external_step();
     CHECK(c.stepped_by_client());
-    CHECK(c.source() == "client");
+    CHECK(c.source(rtc_now) == "client");
     CHECK(f.sets.empty());  // nothing was set through this object
     // NTP taking over still clears it.
     f.synchronized = true;
-    CHECK(c.source() == "ntp");
+    CHECK(c.source(rtc_now) == "ntp");
     f.synchronized = false;
-    CHECK(c.source() == "rtc");
+    CHECK(c.source(rtc_now) == "rtc");
 }
 
 TEST_CASE("HostClock - outcome names are stable log text", "[util][hostclock][unit]") {
@@ -242,10 +251,11 @@ TEST_CASE("HostClock - default construction queries the real kernel without step
     // RTC (a local-time RTC is hours off UTC and reads "none", by design).
     if (!rtc.has_value()) {
         CHECK_FALSE(real.has_rtc());
+        CHECK(real.rtc_state() == HostClock::RtcState::None);
     }
     if (real.has_rtc()) {
         CHECK(rtc.has_value());
-        CHECK(*rtc >= HostClock::build_time());
+        CHECK(rtc.value() >= HostClock::build_time());
     }
     real.set_enabled(false);  // never call clock_settime from a unit test
     CHECK(real.step_from_client(kNow, kNow).outcome == Outcome::SkippedDisabled);

@@ -2274,8 +2274,10 @@ Response Router::dispatch_device_method(
                     // UTCDate write will fix it; say so in case none comes.
                     if (device->get_device_type() == alpacacore::DeviceType::Telescope && !host_clock_.synchronized() &&
                         !host_clock_.stepped_by_client()) {
-                        const bool rtc = host_clock_.has_rtc();
-                        const bool diverged = !rtc && host_clock_.rtc_diverged();
+                        // One observation for both branches (open-astro#292).
+                        const auto rtc_state = host_clock_.rtc_state();
+                        const bool rtc = rtc_state == alpacacore::util::HostClock::RtcState::Ok;
+                        const bool diverged = rtc_state == alpacacore::util::HostClock::RtcState::Diverged;
                         const std::string msg =
                             "Telescope " + std::to_string(device->get_device_number()) +
                             (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's absolute accuracy is "

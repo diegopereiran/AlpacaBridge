@@ -103,7 +103,7 @@ public:
     // UTCDate write), "rtc" (undisciplined, never stepped, but the kernel
     // loaded system time from a hardware RTC at boot: that is a plain clock
     // set, so STA_UNSYNC stays set — open-astro#292), or "none".
-    std::string source() const {
+    std::string source(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
         if (synchronized()) {
             return "ntp";
         }
@@ -116,7 +116,7 @@ public:
                 return "client";
             }
         }
-        const bool rtc = has_rtc();
+        const bool rtc = rtc_state(now) == RtcState::Ok;
         std::lock_guard<std::mutex> lock(mutex_);
         if (stepped_) {
             return "client";
@@ -132,18 +132,39 @@ public:
     // pass once the saved timestamp was restored. Reporting only: the
     // stepping decision never looks at this.
     bool has_rtc(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
-        const auto t = rtc_time_();
-        return rtc_plausible(t) && rtc_agrees(t, now);
+        return rtc_state(now) == RtcState::Ok;
     }
-    static constexpr std::chrono::minutes kRtcAgreement{5};
+
+    // How much the system clock may differ from the RTC and still be called
+    // its offspring. since_epoch is 1 s granular and the memo is up to 1 s
+    // stale, so ~2 s is measurement noise; beyond that the system clock has
+    // measurably walked away from its own source. Deliberately tight: this
+    // module's own relevance threshold is 1 s, because 1 s of clock error is
+    // 15 arcsec of RA on every goto.
+    static constexpr std::chrono::seconds kRtcAgreement{5};
 
     // The RTC is present and plausible but the system clock no longer agrees
     // with it: after a bypassing setter, or simply after months of NTP-less
     // uptime (SoC timebases drift tens of ppm, seconds per day). Lets the
     // connect-time message say what actually happened.
     bool rtc_diverged(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
-        const auto t = rtc_time_();  // one observation for both halves
-        return rtc_plausible(t) && !rtc_agrees(t, now);
+        return rtc_state(now) == RtcState::Diverged;
+    }
+
+    enum class RtcState : std::uint8_t {
+        None,      // no RTC was used at boot, or its reading is implausible
+        Ok,        // the system clock still traces to a plausible RTC
+        Diverged,  // plausible RTC, but the system clock has walked away
+    };
+
+    // One RTC observation answering both questions, so a caller that needs
+    // both cannot straddle the memo boundary and see neither.
+    RtcState rtc_state(std::chrono::system_clock::time_point now = std::chrono::system_clock::now()) const {
+        const auto t = rtc_time_();
+        if (!rtc_plausible(t)) {
+            return RtcState::None;
+        }
+        return rtc_agrees(t, now) ? RtcState::Ok : RtcState::Diverged;
     }
 
     // The clock was stepped by a path that bypasses step_from_client() (the

@@ -201,13 +201,15 @@ config file). A telescope connecting while the clock is `none` logs a WARN
 (also while `rtc` if `SyncSystemClockFromClients` is off, since nothing will
 correct a drifting RTC). A Sync Time press (`PUT /management/v1/synctime`)
 counts as a client step: `ClockSource` reads `client` afterwards.
-Two footnotes: an RTC kept in local time (`timedatectl set-local-rtc 1`,
-dual-boot machines) reads `none`, because systemd corrects the system clock
-in userspace after the kernel loaded the RTC as UTC and the agreement check
-then fails (a systemd behaviour, not a property of the check), which is the
-safe direction; `rtc` states that the clock came from the RTC, not that the
-RTC is accurate: nothing on an NTP-less host verifies or rewrites it, so the
-telescope connect line says so; and `rtc` is a new value on a published field, so an
+Footnotes. `rtc` states that the clock came from the RTC, not that the RTC is
+accurate: nothing on an NTP-less host verifies or rewrites it, so the
+telescope connect line says so. A working RTC still reads `none` whenever the
+kernel was not the one that loaded it: an RTC kept in local time
+(`timedatectl set-local-rtc 1`, dual-boot machines), because systemd corrects
+the system clock in userspace afterwards and the agreement check then fails;
+a userspace `hwclock --hctosys` under a non-systemd or busybox init; and a
+kernel built without `CONFIG_RTC_HCTOSYS`. All are the safe direction, and
+none is a bug. Finally, and `rtc` is a new value on a published field, so an
 older client that switches on `ClockSource` should treat unknown values as
 "not NTP".
 `rtc` means the kernel loaded system time from a hardware RTC at boot (the
@@ -216,12 +218,14 @@ present-but-unread RTC does not count), that RTC's own current reading
 (`since_epoch`, memoised for 1 s) is not earlier than the build day (under
 `SOURCE_DATE_EPOCH`, as in a Debian package build, that is the changelog
 date, so the floor is weaker than the build itself), and the
-system clock still agrees with it to within 5 minutes. Both free-run without
-NTP and an SoC timebase drifts seconds per day, so on a long-running
-NTP-less host the state eventually flips from `rtc` to `none` (typically
-after weeks to months of uptime); the telescope connect message then says
-the clock no longer agrees with the RTC, and a client `UTCDate` write or a
-Sync Time press corrects it. The RTC is judged, not the system clock:
+system clock still agrees with it to within 5 seconds (the reading is 1 s
+granular and up to 1 s stale, so a few seconds is measurement noise; beyond
+that the system clock has measurably left its own source, and 1 s is already
+15 arcsec of RA). Both free-run without NTP and an SoC timebase drifts
+seconds per day, so on a long-running NTP-less host the state flips from
+`rtc` to `none` after a day or so of uptime; the telescope connect message
+then says the clock no longer agrees with the RTC, and a client `UTCDate`
+write or a Sync Time press corrects it. The RTC is judged, not the system clock:
 a Pi 5's on-board RTC exists without a battery and reads 2000-01-01 after a
 power cut, while userspace may already have restored a recent system time;
 that host reads `none`. Loading an RTC is a plain clock set,
