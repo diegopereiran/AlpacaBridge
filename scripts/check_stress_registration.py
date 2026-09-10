@@ -69,11 +69,12 @@ ALLOWLIST = {
     ("gemini", "focuser"),
     ("gemini", "switch"),
     ("playerone", "switch"),
-    # QHY: registering these needs an injectable SDK seam first. A [stress]
-    # storm has to connect, and connecting calls InitQHYCCDResource()
-    # (qhy_sdk_wrapper.cpp, Impl::ensure_resource) which registers a libusb
-    # hotplug callback. Under ThreadSanitizer that kills the process on the
-    # first connect (run:
+    # QHY: registering these needs an injectable SDK seam first. Connecting
+    # -- but also just enumerating (enumerate_cameras()) or reading a model
+    # (get_camera_model()) -- calls Impl::ensure_resource(), which calls
+    # InitQHYCCDResource() and registers a libusb hotplug callback. Under
+    # ThreadSanitizer that kills the process the first time any of those
+    # three entry points is reached, not only on connect (run:
     # https://github.com/diegopereiran/AlpacaBridge/actions/runs/34535303596):
     #     QHYCCD||EnableQHYCCDMessage| set gl_msgEnable from:  1  to: 0
     #     ThreadSanitizer:DEADLYSIGNAL
@@ -85,7 +86,10 @@ ALLOWLIST = {
     # connect/disconnect storm locally and running it passed on the plain
     # arm64 build (no TSan) -- there is no such case in this tree today, this
     # is a report of that experiment, not a description of what exists here.
-    # So this is the SDK blob against TSan's interceptors, not the drivers.
+    # One CI run is consistent with the SDK blob's libusb hotplug path
+    # fighting TSan's interceptors, but not proof against every explanation
+    # (e.g. the runner having no USB/udev present) -- worth confirming again
+    # if this is revisited, not treated as settled.
     # QHY has no automated connect coverage of any kind today, not just no
     # [stress] coverage --
     # the injectable QHY SDK seam that would fix this (the FakeToupTekSDK /
