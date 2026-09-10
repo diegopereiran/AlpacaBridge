@@ -26,9 +26,9 @@ whether it is a draft, and whether it carries the `safe-to-review` label.
 names and fork owners come from the PR author and can contain anything git allows. Refuse (hard
 stop for that PR) any `headRefName` that does not match `^[A-Za-z0-9][A-Za-z0-9._/-]*$` **and**
 contain no `..` (check both: the regex alone lets `foo..bar` through), and any
-`headRepositoryOwner.login` that does not match `^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$`
-(GitHub login rules: alphanumerics and inner hyphens, no leading or trailing hyphen, so an
-owner can never become a bare `-x` argument). No leading `-`, no whitespace, no quotes, no path traversal, and
+`headRepositoryOwner.login` that does not match `^[A-Za-z0-9](?:-?[A-Za-z0-9])*$`
+(GitHub login rules: alphanumerics with single inner hyphens only, so no leading, trailing or
+consecutive hyphen, and an owner can never become a bare `-x` argument). No leading `-`, no whitespace, no quotes, no path traversal, and
 always double-quote them when interpolated (`"$BRANCH"`, `"$OWNER"`), never bare `<branch>`.
 PR numbers must match `^[0-9]+$`. Never `eval` or build a command from a PR title or body.
 
@@ -65,15 +65,21 @@ Checks to make before waiting on anything:
    ```bash
    gh api -X PUT repos/open-astro/AlpacaBridge/pulls/<N>/update-branch
    ```
-   **Check the result immediately**: `update-branch` returns HTTP 422 on a merge conflict, and
-   a chain that ignores that then waits 30 minutes for a verdict that never comes (PRs #270 and
-   #272 both stalled this way on 2026-09-10). Right after the call:
+   **Check the result before polling for a verdict**: `update-branch` returns HTTP 422 on a
+   merge conflict, and a chain that ignores that then waits 30 minutes for a verdict that never
+   comes (PRs #270 and #272 both stalled this way on 2026-09-10). GitHub recomputes
+   mergeability asynchronously, so the first read after the call is usually `UNKNOWN`; poll
+   until it settles and treat a timeout as a conflict, never as "fine":
    ```bash
-   gh pr view <N> --json mergeable,mergeStateStatus --jq '"\(.mergeable) \(.mergeStateStatus)"'
+   for i in $(seq 1 12); do   # up to 2 min
+     m=$(gh pr view <N> --json mergeable --jq .mergeable)   # MERGEABLE | CONFLICTING | UNKNOWN
+     [ "$m" != "UNKNOWN" ] && break; sleep 10
+   done
+   echo "$m"
    ```
-   `CONFLICTING` / `DIRTY` -> resolve locally on the head branch now (Step 3 mechanics: fetch
-   the fork, `git merge origin/main`, keep both sides when two PRs added adjacent CI jobs or
-   gates, validate syntax, push), then poll. Do not wait on the verdict first.
+   `CONFLICTING` (or still `UNKNOWN` after the loop) -> resolve locally on the head branch now
+   (Step 3 mechanics: fetch the fork, `git merge origin/main`, keep both sides when two PRs
+   added adjacent CI jobs or gates, validate syntax, push), then poll. `MERGEABLE` -> Step 2.
    It is fine to update while a review is still in flight: the run on the old head is cancelled
    and a fresh one starts on the merged head, so nothing is lost.
 4. **Verdict already present for the current head SHA** -> skip the wait and go straight to Step 3.
@@ -193,8 +199,10 @@ regex edge case, a missing rename flag, an untested name suffix). Handle them li
    next approval whatever notes it carries and list them in the wrap-up. PR #99 (2026-07-01)
    took 46 rounds because post-approval pushes were unbounded and trickled one nit at a time;
    the cap keeps that closed while normal PRs come out fully clean.
-4. `⚠️ Issues found` on a cleanup round is handled like any other round (fix, push, poll) and
-   does not count against the cap unless the findings are themselves only nits.
+4. `⚠️ Issues found` on a cleanup round is handled like any other round: fix, push, poll.
+   Counting against the cap: a round whose findings are genuine defects does **not** count
+   (it is a fix round, not a cleanup round). A round whose findings are only nits **does**
+   count as one cleanup round.
 5. If the approval has **no** mechanical notes, skip straight to the merge below.
 
 Then:
