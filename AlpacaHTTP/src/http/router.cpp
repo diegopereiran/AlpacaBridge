@@ -2349,9 +2349,10 @@ Response Router::dispatch_device_method(
                     // lock-free (SynScan among them — safe to read mid-task)
                     // from one that blocks (the five telescopes listed in
                     // async_connectable.h, which hold the driver mutex across
-                    // the handshake, and the four wrapper-backed switches,
-                    // whose is_open() blocks for the whole wrapper open —
-                    // unsafe to read mid-task, the root cause here) without a
+                    // the handshake and are the root cause here, and the
+                    // four wrapper-backed switches, whose is_open() waits out
+                    // a local gpiod_chip_open() and so blocks for far less —
+                    // unsafe to read mid-task either way) without a
                     // per-driver capability flag, which is future work.
                 } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
                            (device->get_connecting() || device->get_connected())) {

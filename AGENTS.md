@@ -759,13 +759,17 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
 - **The router must never call `get_connected()` while `get_connecting()` is
   true — the connect side of the rule above** (SynScan hand controller,
   2026-09, issue #130). Five telescope drivers (Celestron, OnStep, Bisque,
-  iOptron, Sky-Watcher) answer `get_connected()` under the state
-  mutex that their `set_connected(true)` holds for the entire handshake --
-  and the four wrapper-backed switch drivers block the same way, since their
-  `is_open()` waits out the wrapper's own `open()` -- so
-  a `get_connected()` call from the `PUT connected` wait or from a `GET
+  iOptron, Sky-Watcher; SynScan was in this list until the #130 fix made its
+  getter lock-free) answer `get_connected()` under the state mutex that their
+  `set_connected(true)` holds for the entire handshake, so a
+  `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
-  fired (25 s on a silent handset: five 5 s query timeouts). Every router
+  fired (25 s on a silent handset: five 5 s query timeouts). The four
+  wrapper-backed switch drivers can block too — their `is_open()` waits out
+  the wrapper's `open()` — but that open is a local `gpiod_chip_open()` on a
+  device node, so the window is microseconds to milliseconds rather than a
+  multi-second serial handshake. The rule applies to both; only the five make
+  it urgent. Every router
   site now reads `get_connecting()` first and short-circuits; while a task
   is in flight `Connected` reports false. A connect request that arrives
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
