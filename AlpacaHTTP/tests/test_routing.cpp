@@ -2324,16 +2324,21 @@ int main() {
             EXPECT(desc["Value"]["ClockSynchronized"] == true);
         }
 
-        // The opt-out blocks the step without blocking the driver write.
+        // The opt-out blocks the step without blocking the driver write. The
+        // flag is set BEFORE the hooks are installed: set_host_clock_hooks()
+        // replaces the HostClock and must carry syncSystemClockFromClients
+        // over to the replacement, and this order is what proves it (with the
+        // carry-over removed the fresh clock comes back enabled and
+        // set_calls becomes 1).
         {
             alpacahttp::Router clock_router;
             int set_calls = 0;
+            clock_router.set_sync_system_clock_from_clients(false);
             clock_router.set_host_clock_hooks([] { return false; },
                                               [&](std::chrono::system_clock::time_point, std::string&) {
                                                   ++set_calls;
                                                   return true;
                                               });
-            clock_router.set_sync_system_clock_from_clients(false);
             scope->utc_writes = 0;
             route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             EXPECT(set_calls == 0);
