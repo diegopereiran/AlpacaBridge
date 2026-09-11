@@ -194,7 +194,8 @@ marks the host client-stepped, which suppresses the undisciplined-clock
 warning at the next telescope connect, so a drive-by cross-origin request
 could otherwise move the clock and hide the pointing error it causes. The
 remaining state-changing management endpoints (`restart`, `shutdown`,
-`configuredevice`, `removedevice`, `loglevel`, the `description` PUT) do not
+`configuredevice`, `removedevice`, `loglevel`, the `description` PUT and the
+`DELETE /management/v1/logfiles/<name>` that deletes a log file) do not
 carry it yet. The persisted wifi
 country lives in `/var/lib/alpacabridge/config/wifi_country` and is
 re-applied at daemon startup in `main()` before NetworkManager's boot-time

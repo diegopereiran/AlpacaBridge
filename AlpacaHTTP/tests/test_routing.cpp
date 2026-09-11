@@ -2204,7 +2204,15 @@ int main() {
             alpacahttp::Request request;
             EXPECT(request.parse(raw.str()));
             const auto response = router.route(request, 1);
-            EXPECT(response.status_code() != 403);
+            // The concrete pass path, not just "not 403": a 404 from broken
+            // routing would satisfy the negation too. 200 with the epoch
+            // window's own complaint means the guard let it through and the
+            // handler refused it on the epoch, which is what this case is
+            // for.
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find("Unix timestamp") != std::string::npos);
         }
 
         // A GET carrying a cross-origin Origin header changes nothing, so it
@@ -2217,9 +2225,11 @@ int main() {
             alpacahttp::Request request;
             EXPECT(request.parse(raw.str()));
             const auto response = router.route(request, 1);
-            EXPECT(response.status_code() != 403);
+            EXPECT(response.status_code() == 200);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            // A plausible epoch, so a served-but-empty reply cannot pass.
+            EXPECT(json["Value"].is_number_integer() && json["Value"].get<std::int64_t>() > 1600000000);
         }
     }
 
