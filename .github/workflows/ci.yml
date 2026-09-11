@@ -532,7 +532,7 @@ jobs:
         # `failures.extend(...)` line fails here rather than passing silently.
         run: python3 scripts/check_stress_registration.py --self-test
 
-      - name: Check every vendor driver has [stress] coverage or an allow-list entry
+      - name: Check [stress] coverage, and that neither stress tag is misplaced
         # AGENTS.md requires a [stress] TEST_CASE for every driver exercised
         # by the sanitizers-tsan job; this was previously enforced only by
         # code review. See scripts/check_stress_registration.py.

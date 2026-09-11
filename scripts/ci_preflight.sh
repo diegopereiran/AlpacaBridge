@@ -415,6 +415,23 @@ fi
 # the vendor threshold cannot be satisfied by an unconditional harness test.
 # The suppressions file mutes only the uninstrumented proprietary vendor
 # blobs — never our code.
+#
+# On the two greps below: each binary's own exit code, via pipefail, is the
+# pass/fail gate. The grep exists solely to catch a run that executed ZERO
+# test cases, which Catch2 reports as success. [stress] is reserved for vendor
+# driver registrations, so a case wearing it in an unconditionally-compiled
+# test file would satisfy the vendor grep on its own and make it vacuous --
+# which it silently was until the AsyncConnectable case moved to
+# [stress-guard]. Harness self-tests that need TSan but are not vendor
+# registrations (StressCallGuard, AsyncConnectable) run under [stress-guard]
+# in their own invocation, with the same zero-test guard. See the matching
+# comment in ci.yml.
+#
+# These are plain comments rather than the `# ...` command-substitution trick
+# used inside the pipeline below: that form is inert only because the
+# substitution expands to an empty string that word-splitting drops, and one
+# stray backtick, $ or trailing backslash in the prose would turn a comment
+# into a live command inside the gate itself.
 
 if [ "${RUN_TSAN:-0}" = "1" ]; then
   section "ThreadSanitizer (concurrency stress, all vendors)"
@@ -428,18 +445,7 @@ if [ "${RUN_TSAN:-0}" = "1" ]; then
      && [ -x "${TSAN_BUILD_DIR}/tests/alpacacore_tests" ] \
      && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
         "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log" \
-     `# binary exit code (pipefail) is the pass/fail gate; grep only guards zero-test runs` \
-     `# [stress] is reserved for vendor driver registrations only -- anything` \
-     `# else tagged [stress] in an unconditional test file makes this gate` \
-     `# vacuous, which it silently was until the AsyncConnectable case moved` \
-     `# to [stress-guard]. See the` \
-     `# matching comment in ci.yml -- so this threshold cannot be inflated by` \
-     `# an unconditional harness self-test masking every vendor target vanishing` \
      && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-run.log" \
-     `# Harness self-tests needing TSan but not a vendor registration (e.g.` \
-     `# the StressCallGuard and AsyncConnectable cases) run under` \
-     `# [stress-guard] instead,` \
-     `# in their own invocation with the same zero-test guard.` \
      && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
         "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress-guard]" | tee "${TSAN_BUILD_DIR}/stress-guard-run.log" \
      && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-guard-run.log"; then

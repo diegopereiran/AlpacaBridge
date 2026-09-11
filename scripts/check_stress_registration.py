@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Fail when a vendor driver has no `[stress]` concurrency-suite coverage.
+"""Fail on [stress] tag mistakes: missing vendor coverage, and misplaced tags.
+
+Three rules, not one:
+
+1. Every vendor (driver, device type) pair needs a `[stress]` TEST_CASE or an
+   ALLOWLIST entry.
+2. A `[stress-guard]`-without-`[stress]` case inside a `*_concurrency_stress.cpp`
+   file is rejected: that tag is for harness self-tests, and a registration
+   wearing it would read as registered while dropping out of the vendor count.
+3. A `[stress]` case outside those files is rejected: such a file can compile
+   unconditionally, and one case alone then satisfies the TSan job's vendor
+   zero-coverage grep and makes it vacuous.
+
 
 AGENTS.md requires every new or substantially-changed driver to register a
 `[stress]` TEST_CASE with the ThreadSanitizer concurrency suite
@@ -51,8 +63,13 @@ STRESS_TEST_GLOB_SUFFIX = "_concurrency_stress.cpp"
 # rule as "a [stress] case anywhere else under AlpacaCore/tests/", and a
 # narrower glob would leave a file not named test_* outside the check while the
 # prose said otherwise. Registration files are excluded by path in
-# find_stray_stress_cases(), not by failing to match here.
-TEST_GLOBS = ("AlpacaCore/tests/*.cpp", "AlpacaCore/tests/*.h")
+# find_stray_stress_cases(), not by failing to match here. The .hpp/.cc/.inc/
+# .ipp entries match nothing today and exist for the same reason: the prose
+# says "anywhere else under AlpacaCore/tests/", so an extension the globs miss
+# would be a silent hole rather than a documented limit.
+TEST_GLOBS = ("AlpacaCore/tests/*.cpp", "AlpacaCore/tests/*.h",
+              "AlpacaCore/tests/*.hpp", "AlpacaCore/tests/*.cc",
+              "AlpacaCore/tests/*.inc", "AlpacaCore/tests/*.ipp")
 
 # Anchored to the actual override, not just any DeviceType:: mention in the
 # file -- a driver that referenced a different DeviceType::X earlier (a

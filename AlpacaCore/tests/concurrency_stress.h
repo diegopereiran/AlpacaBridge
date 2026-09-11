@@ -222,6 +222,17 @@ private:
     std::vector<std::string> samples_;
 };
 
+// NOTE for anyone documenting this pattern in THIS header: scripts/
+// check_stress_registration.py reads AlpacaCore/tests/*.h as plain text, with
+// no comment awareness. Writing a complete Catch2 case macro into a comment
+// here -- the macro name, then a description and a bracketed tag string
+// carrying the vendor tag -- reads to that gate as a real stray registration
+// and fails CI over a case that does not exist at runtime. Describe the tags
+// in prose instead, as this paragraph does.
+//
+// That is not hypothetical: the first draft of this very comment spelled the
+// macro out as an example and failed the gate. Tracked in issue #386.
+
 /// Hammer one driver instance from many threads: async connect/disconnect,
 /// sync set_connected (the ASCOM Connected setter path — it bypasses the
 /// async task gate, which is exactly where the record/consume gates matter),
