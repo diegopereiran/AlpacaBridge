@@ -52,8 +52,10 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
  * detachable workers: the exposure, temperature and cooler-off threads join
  * with a bounded timeout and detach on expiry, and the pulse-guide thread is
  * detached by design. The telemetry thread is NOT one of them — it is joined
- * unconditionally on every path (disconnect, shutdown,
- * stop_telemetry_thread_locked), so it can never outlive the driver. Do not
+ * unconditionally on both live paths (disconnect and shutdown), so it can
+ * never outlive the driver. (stop_telemetry_thread_locked() joins it too, but
+ * that helper and its start_ counterpart have no callers anywhere — dead code
+ * tracked in issue #323; don't cite them as live paths.) Do not
  * relax that join: the capture below is what makes a DETACHED worker's SDK
  * access survivable, and telemetry does not rely on it.
  *

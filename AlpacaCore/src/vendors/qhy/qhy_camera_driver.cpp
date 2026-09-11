@@ -2441,6 +2441,15 @@ private:
 // Factory functions
 // ────────────────────────────────────────────────────────────────────────────
 
+// These default overloads resolve the singleton EAGERLY, at device-creation
+// time -- before the seam, it was first touched on the driver's first SDK
+// call. That is safe only because QHYSDKWrapper's constructor does no
+// libqhyccd work (see Impl's constructor in qhy_sdk_wrapper.cpp) and
+// InitQHYCCDResource() stays behind ensure_resource(). If that constructor
+// ever gains real work, this moves a libqhyccd call onto the
+// configure/management path, which on a USB-less host is the crash path this
+// whole seam exists to avoid. Keep the constructor trivial, or make these
+// overloads lazy.
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number,
                                                  const std::string& camera_id) {
     return create_qhy_camera(device_number, camera_id, QHYSDKWrapper::instance());
