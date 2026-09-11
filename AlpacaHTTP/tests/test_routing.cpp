@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -144,10 +145,15 @@ private:
 // TelescopeDriver member is a harmless default; only the UTCDate pair carries
 // state, so a test can assert which time_point the router handed the driver
 // and in what order relative to the clock step.
-class TelescopeClockStubDriver final : public alpacacore::TelescopeDriver, public alpacacore::AsyncConnectable {
+// Deliberately NOT an AsyncConnectable: these cases drive
+// AlpacaDriver::connect()'s synchronous default, which is all the #289
+// wiring needs, and inheriting the mixin without overriding connect(),
+// disconnect() or get_connecting() would imply coverage of the async
+// initiator that this block does not have. LockedSlowConnectStubDriver
+// below is the stub that does exercise it.
+class TelescopeClockStubDriver final : public alpacacore::TelescopeDriver {
 public:
-    explicit TelescopeClockStubDriver(int number) : AsyncConnectable("TelescopeClockStub"), number_(number) {}
-    ~TelescopeClockStubDriver() override { shutdown_connection(); }
+    explicit TelescopeClockStubDriver(int number) : number_(number) {}
 
     int get_device_number() const override { return number_; }
     std::string get_name() const override { return "Telescope Clock Stub"; }
@@ -171,6 +177,12 @@ public:
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         utc_ = utc;
         ++utc_writes;
+        if (on_utc_write) {
+            // Fires after utc_ and utc_writes are updated, so a test can
+            // sample OTHER state (the host-clock step count) as of the moment
+            // the driver was written to. It is not a pre-write hook.
+            on_utc_write();
+        }
     }
 
     alpacacore::AlignmentMode get_alignment_mode() const override { return alpacacore::AlignmentMode::GermanPolar; }
@@ -255,6 +267,7 @@ public:
     void sync_to_alt_az(double, double) override {}
 
     int utc_writes = 0;
+    std::function<void()> on_utc_write;
 
 private:
     int number_;
@@ -2265,53 +2278,84 @@ int main() {
         auto scope = std::make_shared<TelescopeClockStubDriver>(9801);
         EXPECT(registry.register_device(scope));
         const std::string base = "/api/v1/telescope/9801";
-        // 2026-09-11T12:00:00Z, comfortably inside the 2000-2100 window and
-        // far enough from the host clock to clear the 1 s step threshold.
-        const std::string client_utc_body = R"({"UTCDate":"2026-09-11T12:00:00.000Z"})";
-        const auto expected = std::chrono::system_clock::from_time_t(1789128000);  // the same instant, as time_t
+        // 2001-01-01T00:00:00Z: inside the 2000-2100 window and an instant
+        // the host clock can never be within 1 s of, so the step is never
+        // classified as too small (a literal near "today" would fail once a
+        // year, for two seconds).
+        const std::string client_utc_body = R"({"UTCDate":"2001-01-01T00:00:00.000Z"})";
+        const auto expected = std::chrono::system_clock::from_time_t(978307200);  // the same instant, as time_t
+
+        // desc["Value"] is nlohmann's const operator[], which is a JSON_ASSERT
+        // only -- under NDEBUG an error envelope (no "Value") dereferences
+        // end() instead of failing cleanly. Check the envelope, then read.
+        auto clock_field = [](const nlohmann::json& desc, const char* key) -> nlohmann::json {
+            if (desc.is_discarded() || !desc.contains("Value") || !desc["Value"].contains(key)) {
+                return nlohmann::json();
+            }
+            return desc["Value"][key];
+        };
+
+        // The five sub-blocks below share this stub, so each starts from a
+        // known count rather than inheriting the previous block's. Calling
+        // this is what makes a block order-independent; a block that forgets
+        // would assert against a carried-over number.
+        auto fresh_counts = [&] {
+            scope->utc_writes = 0;
+            scope->on_utc_write = nullptr;
+        };
 
         // An undisciplined host: the write must reach the setter exactly once,
         // carrying the client's value, and the driver must then be handed the
         // same instant.
         {
-            alpacahttp::Router clock_router;
+            // Locals first, router second: the hook lambdas capture these by
+            // reference and the router owns the lambdas, so declaring the
+            // router last means it is destroyed first and can never outlive
+            // what it captured.
             int set_calls = 0;
+            int set_calls_at_write = -1;  // set_calls as seen from inside the driver write
             std::chrono::system_clock::time_point set_to{};
+            alpacahttp::Router clock_router;
             clock_router.set_host_clock_hooks([] { return false; },
                                               [&](std::chrono::system_clock::time_point tp, std::string&) {
                                                   ++set_calls;
                                                   set_to = tp;
                                                   return true;
                                               });
-            scope->utc_writes = 0;
+            fresh_counts();
+            scope->on_utc_write = [&] { set_calls_at_write = set_calls; };
             const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
+            scope->on_utc_write = nullptr;
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
             EXPECT(set_calls == 1);
             EXPECT(set_to == expected);
             // Ordering: the clock is stepped first, then the driver is handed
-            // the same value it was stepped to.
+            // the same value it was stepped to. The stub records how many
+            // steps had happened when its write arrived; swapping the two
+            // calls in the router makes this 0.
+            EXPECT(set_calls_at_write == 1);
             EXPECT(scope->utc_writes == 1);
             EXPECT(scope->get_utc_date() == expected);
 
             // The step is now visible in the management readout.
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "client");
+            EXPECT(clock_field(desc, "ClockSource") == "client");
         }
 
         // A disciplined host (NTP/chrony/GPS) is never stepped, however wrong
         // the client is -- but the driver still receives the value, because
         // UTCDate is the client's property to set.
         {
-            alpacahttp::Router clock_router;
             int set_calls = 0;
+            alpacahttp::Router clock_router;
             clock_router.set_host_clock_hooks([] { return true; },
                                               [&](std::chrono::system_clock::time_point, std::string&) {
                                                   ++set_calls;
                                                   return true;
                                               });
-            scope->utc_writes = 0;
+            fresh_counts();
             const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
@@ -2320,29 +2364,34 @@ int main() {
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "ntp");
-            EXPECT(desc["Value"]["ClockSynchronized"] == true);
+            EXPECT(clock_field(desc, "ClockSource") == "ntp");
+            EXPECT(clock_field(desc, "ClockSynchronized") == true);
         }
 
-        // The opt-out blocks the step without blocking the driver write.
+        // The opt-out blocks the step without blocking the driver write. The
+        // flag is set BEFORE the hooks are installed: set_host_clock_hooks()
+        // replaces the HostClock and must carry syncSystemClockFromClients
+        // over to the replacement, and this order is what proves it (with the
+        // carry-over removed the fresh clock comes back enabled and
+        // set_calls becomes 1).
         {
-            alpacahttp::Router clock_router;
             int set_calls = 0;
+            alpacahttp::Router clock_router;
+            clock_router.set_sync_system_clock_from_clients(false);
             clock_router.set_host_clock_hooks([] { return false; },
                                               [&](std::chrono::system_clock::time_point, std::string&) {
                                                   ++set_calls;
                                                   return true;
                                               });
-            clock_router.set_sync_system_clock_from_clients(false);
-            scope->utc_writes = 0;
+            fresh_counts();
             route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             EXPECT(set_calls == 0);
             EXPECT(scope->utc_writes == 1);
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "none");
-            EXPECT(desc["Value"]["SyncSystemClockFromClients"] == false);
+            EXPECT(clock_field(desc, "ClockSource") == "none");
+            EXPECT(clock_field(desc, "SyncSystemClockFromClients") == false);
         }
 
         // A host with no CAP_SYS_TIME: the refusal latches, so a later reader
@@ -2355,7 +2404,7 @@ int main() {
                                                   error = "operation not permitted";
                                                   return false;
                                               });
-            scope->utc_writes = 0;
+            fresh_counts();
             const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             // A refused clock step is not a failed UTCDate write: the driver
@@ -2365,7 +2414,7 @@ int main() {
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "none");
+            EXPECT(clock_field(desc, "ClockSource") == "none");
         }
 
         // A hardware RTC the kernel booted from is reported as the source
@@ -2377,8 +2426,8 @@ int main() {
                                               [] { return true; });
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "rtc");
-            EXPECT(desc["Value"]["ClockSynchronized"] == false);
+            EXPECT(clock_field(desc, "ClockSource") == "rtc");
+            EXPECT(clock_field(desc, "ClockSynchronized") == false);
         }
 
         // Both connect paths warn when, and only when, the clock is
@@ -2387,24 +2436,59 @@ int main() {
         // clock is the whole reason #289 exists, and nothing else would catch
         // the line being dropped from one of the two paths.
         {
-            std::vector<std::string> captured;
+            // The level is captured alongside the message: warn_if_clock_undisciplined()
+            // ends in an INFO/WARN ladder (router.cpp: an RTC-booted host that a client can
+            // still correct is INFO, everything else WARN), and a test that only matched the
+            // text would pass with the ladder inverted.
+            struct CapturedLine {
+                alpacacore::logging::LogLevel level;
+                std::string message;
+            };
+            std::vector<CapturedLine> captured;
             std::mutex captured_mutex;
             auto previous_sink = alpacacore::logging::get_log_sink();
             alpacacore::logging::set_log_sink(
-                [&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+                [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
                     std::lock_guard<std::mutex> lock(captured_mutex);
-                    captured.emplace_back(message);
+                    captured.push_back({level, std::string(message)});
                 });
 
-            auto warned_about_clock = [&] {
+            auto clock_warning_level = [&]() -> std::optional<alpacacore::logging::LogLevel> {
                 std::lock_guard<std::mutex> lock(captured_mutex);
-                return std::any_of(captured.begin(), captured.end(), [](const std::string& m) {
-                    return m.find("undisciplined host clock") != std::string::npos;
-                });
+                for (const auto& line : captured) {
+                    if (line.message.find("undisciplined host clock") != std::string::npos) {
+                        return line.level;
+                    }
+                }
+                return std::nullopt;
+            };
+            auto warned_about_clock = [&] { return clock_warning_level().has_value(); };
+            // The RTC arm carries a different sentence ("connecting on the
+            // hardware RTC's time"), so it needs its own matcher.
+            auto rtc_line_level = [&]() -> std::optional<alpacacore::logging::LogLevel> {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                for (const auto& line : captured) {
+                    if (line.message.find("hardware RTC's time") != std::string::npos) {
+                        return line.level;
+                    }
+                }
+                return std::nullopt;
             };
             auto clear = [&] {
                 std::lock_guard<std::mutex> lock(captured_mutex);
                 captured.clear();
+            };
+
+            // Route and assert the request itself succeeded. Without this the
+            // two negative cases below (a disciplined host, an already-stepped
+            // one) would pass vacuously if the PUT failed before reaching
+            // warn_if_clock_undisciplined() -- a future guard throwing earlier
+            // in the handler would look exactly like "no warning was logged".
+            auto connect_ok = [&](alpacahttp::Router& router_under_test, const std::string& path,
+                                  const std::string& body) {
+                const auto response = route_request(router_under_test, "PUT", path, body);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
             };
 
             // Legacy PUT connected, undisciplined host: warns.
@@ -2415,8 +2499,10 @@ int main() {
                 clock_router.set_host_clock_hooks(
                     [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9802/connected", "Connected=true");
+                connect_ok(clock_router, "/api/v1/telescope/9802/connected", "Connected=true");
                 EXPECT(warned_about_clock());
+                // No RTC on this host, so the ladder's else arm: WARN, not INFO.
+                EXPECT(clock_warning_level() == alpacacore::logging::LogLevel::Warn);
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9802);
             }
 
@@ -2429,8 +2515,9 @@ int main() {
                 clock_router.set_host_clock_hooks(
                     [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9803/connect", "");
+                connect_ok(clock_router, "/api/v1/telescope/9803/connect", "");
                 EXPECT(warned_about_clock());
+                EXPECT(clock_warning_level() == alpacacore::logging::LogLevel::Warn);
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9803);
             }
 
@@ -2442,7 +2529,7 @@ int main() {
                 clock_router.set_host_clock_hooks(
                     [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9804/connected", "Connected=true");
+                connect_ok(clock_router, "/api/v1/telescope/9804/connected", "Connected=true");
                 EXPECT(!warned_about_clock());
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9804);
             }
@@ -2457,9 +2544,29 @@ int main() {
                     [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 route_request(clock_router, "PUT", "/api/v1/telescope/9805/utcdate", client_utc_body);
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9805/connected", "Connected=true");
+                connect_ok(clock_router, "/api/v1/telescope/9805/connected", "Connected=true");
                 EXPECT(!warned_about_clock());
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9805);
+            }
+
+            // An RTC-booted host a client can still correct is the ladder's
+            // INFO arm: the clock is undisciplined, but it came from hardware
+            // and something will fix it, so the line is informational rather
+            // than a warning. Without this the Warn assertions above cannot
+            // tell the ladder from a constant.
+            {
+                auto scope_e = std::make_shared<TelescopeClockStubDriver>(9806);
+                EXPECT(registry.register_device(scope_e));
+                alpacahttp::Router clock_router;
+                clock_router.set_host_clock_hooks(
+                    [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
+                    [] { return true; });
+                clear();
+                connect_ok(clock_router, "/api/v1/telescope/9806/connected", "Connected=true");
+                // Same phrase the WARN cases match, so the two arms are
+                // distinguished by level alone.
+                EXPECT(rtc_line_level() == alpacacore::logging::LogLevel::Info);
+                registry.unregister_device(alpacacore::DeviceType::Telescope, 9806);
             }
 
             alpacacore::logging::set_log_sink(previous_sink);

@@ -68,14 +68,18 @@ public:
     bool sync_system_clock_from_clients() const { return host_clock_->enabled(); }
 
     // Test-only seam (open-astro#302): replace the host clock with one whose
-    // two syscalls are fakes, so the #289 wiring -- the UTCDate PUT stepping
+    // three probes are fakes (adjtimex, clock_settime and the sysfs RTC
+    // read), so the #289 wiring -- the UTCDate PUT stepping
     // the clock before the driver sees the value, and the connect-time
     // warning -- can be driven in a test without touching the real system
     // clock. NOT the synctime endpoint: handle_sync_time() calls
     // clock_settime() directly and only its mark_stepped()/mark_step_failed()
     // bookkeeping goes through this object, so a test must never POST it an
     // in-range epoch even with the hooks installed. The current
-    // syncSystemClockFromClients setting carries over.
+    // syncSystemClockFromClients setting carries over; the step latches
+    // (stepped_, step_failed_) deliberately do not, since a replacement clock
+    // starts from "nothing has happened to it yet" -- which is what a test
+    // installing hooks before serving wants.
     //
     // Replaces the clock object rather than mutating it, so it must be called
     // before the router serves any request; no request path may be in flight.
