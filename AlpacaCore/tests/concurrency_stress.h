@@ -110,10 +110,17 @@ struct StressOptions {
  * Neither copyable nor movable (it owns a std::mutex) — a registration must
  * capture it by reference in the operate lambda, not by value.
  *
- * Never call report() or unexpected_count() from INSIDE a guarded call --
- * operator()'s recording path and both readers take the same non-recursive
- * mutex_, so guard([&]{ ... guard.report() ... }) self-deadlocks. Read them
- * after the storm has joined, which is the only point they mean anything.
+ * mutex_ is NOT held across fn(): operator() invokes it outside any lock and
+ * takes mutex_ only inside record(), after fn() has returned or thrown. That
+ * is deliberate -- holding it across the call would funnel every op_thread
+ * through one lock and change what the storm actually exercises. So calling
+ * report()/unexpected_count() from inside a guarded call does not deadlock,
+ * and neither does nesting guarded calls; they just lock and unlock in turn.
+ *
+ * What IS true: a read taken while the storm is still running is a torn
+ * snapshot, not a hang -- count_ and samples_ are consistent with each other
+ * at that instant but say nothing about calls still in flight. Read them
+ * after the threads join, which is the only point they mean anything.
  *
  * The constructor is explicit, so brace-init needs its own parens:
  *     StressCallGuard guard({AlpacaError::NotConnected, AlpacaError::InvalidValue});

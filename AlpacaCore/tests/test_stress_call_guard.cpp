@@ -112,7 +112,12 @@ TEST_CASE("StressCallGuard - report() caps the number of stored samples", "[unit
     CHECK(guard.unexpected_count() == 20);
     const std::string report = guard.report();
     CHECK(report.find("failure 0") != std::string::npos);
-    CHECK(report.find("more") != std::string::npos);
+    // Assert the exact overflow line, not just the word "more": a bare
+    // substring search would also be satisfied by an exception message that
+    // happened to contain it. 20 recorded, kMaxSamples kept, rest summarised.
+    CHECK(report.find("... and 12 more") != std::string::npos);
+    // The cap held: the 9th-onward samples are absent.
+    CHECK(report.find("failure 8") == std::string::npos);
 }
 
 TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "[stress-guard][unit]") {
