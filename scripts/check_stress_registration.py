@@ -71,10 +71,6 @@ TAG_RE = re.compile(r"\[([^\]]+)\]")
 ALLOWLIST = {
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
-    ("wandererastro", "covercalibrator"),
-    ("wandererastro", "filterwheel"),
-    ("wandererastro", "rotator"),
-    ("wandererastro", "switch"),
 }
 
 
