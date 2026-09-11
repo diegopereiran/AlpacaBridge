@@ -1850,20 +1850,59 @@ int main() {
     }
     {
         // skywatcher / telescope network variant: host + udpPort (UDP 11880,
-        // not tcpPort) must survive.
+        // not tcpPort) must survive. Site coordinates are mandatory on this
+        // vendor since issue #274, so they are supplied here too.
         const auto cfg = roundtrip_config(router,
                                           {{"vendor", "skywatcher"},
                                            {"deviceType", "telescope"},
                                            {"deviceNumber", 9618},
                                            {"connectionType", "network"},
                                            {"host", "192.168.4.1"},
-                                           {"udpPort", 11880}},
+                                           {"udpPort", 11880},
+                                           {"siteLatitude", -33.87},
+                                           {"siteLongitude", 151.21}},
                                           "Telescope", 9618);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("connectionType", "") == "network");
         EXPECT(cfg.value("host", "") == "192.168.4.1");
         EXPECT(cfg.value("udpPort", -1) == 11880);
+        EXPECT(cfg.value("siteLatitude", 0.0) == -33.87);
+        EXPECT(cfg.value("siteLongitude", 0.0) == 151.21);
         remove_device(router, "skywatcher", "telescope", 9618);
+    }
+    {
+        // issue #274: configuredevice is a first-class REST API independent of
+        // the web UI, and used to accept a skywatcher config with no
+        // coordinates at all. Both would then collapse to 0.0 in the driver,
+        // putting a southern rig on northern pointing math.
+        const auto reject = [&](const nlohmann::json& body) {
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        };
+        nlohmann::json base = {{"vendor", "skywatcher"},
+                               {"deviceType", "telescope"},
+                               {"deviceNumber", 9619},
+                               {"connectionType", "serial"},
+                               {"portPath", "/dev/ttyUSB7"},
+                               {"baudRate", 9600}};
+        reject(base);  // neither coordinate
+        nlohmann::json lat_only = base;
+        lat_only["siteLatitude"] = -33.87;
+        reject(lat_only);
+        nlohmann::json lon_only = base;
+        lon_only["siteLongitude"] = 151.21;
+        reject(lon_only);
+
+        // Null island is a real place: the rule is about presence, not value.
+        nlohmann::json null_island = base;
+        null_island["siteLatitude"] = 0.0;
+        null_island["siteLongitude"] = 0.0;
+        const auto ok =
+            route_request(router, "POST", "/management/v1/configuredevice", null_island.dump());
+        const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
+        EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
+        remove_device(router, "skywatcher", "telescope", 9619);
     }
 #endif
 

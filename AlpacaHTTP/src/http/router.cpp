@@ -7325,6 +7325,21 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             site_elevation = config.value("siteElevation", 0.0);
         }
 
+        // open-astro#274: /management/v1/configuredevice is a first-class REST
+        // API independent of the web UI, and used to accept a skywatcher
+        // config with no coordinates at all. The mount stores no site of its
+        // own, so both would then collapse to 0.0 and a southern rig would run
+        // northern pointing math -- silently undoing #250, #253 and #261. The
+        // check goes inline here, the same way the portPath/host checks below
+        // do, because this branch is a hand-written if/else chain per vendor
+        // rather than a schema layer.
+        if (!site_latitude.has_value() || !site_longitude.has_value()) {
+            error_message =
+                "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no "
+                "site of its own, and tracking direction, guide sign and pier side are all hemisphere-dependent";
+            return false;
+        }
+
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
 
         if (conn_type == "auto" || conn_type.empty()) {

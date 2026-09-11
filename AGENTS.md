@@ -1450,7 +1450,12 @@ datagrams before each send so replies cannot get off-by-one.
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
   step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
   fast mode). The mount stores **no site or time** — site lat/long/elevation come from
-  the web UI config or the Alpaca setters. Time is the host clock plus the client-set
+  the web UI config or the Alpaca setters. **Latitude and longitude are mandatory on this
+  vendor** (#274): `configuredevice` rejects a skywatcher config without both, and
+  `Connected = true` throws `InvalidOperation` unless each has been set explicitly, by
+  config or by its setter. `0.0` is a real coordinate, so the driver tracks whether each
+  was ever set rather than testing for the value — an unset southern rig would otherwise
+  run northern pointing math and undo #250, #253 and #261. Time is the host clock plus the client-set
   `UTCDate` offset, through one `utc_now_locked()` for every LST computation (#287); on an
   NTP-less host the router also steps the system clock from that write (#289). The offset is
   not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped underneath

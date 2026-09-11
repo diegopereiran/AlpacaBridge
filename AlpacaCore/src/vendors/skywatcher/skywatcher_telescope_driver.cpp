@@ -165,7 +165,12 @@ public:
           connection_info_(connection_info),
           site_latitude_(site_latitude_deg.value_or(0.0)),
           site_longitude_(site_longitude_deg.value_or(0.0)),
-          site_elevation_m_(site_elevation_m.value_or(0.0)) {
+          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          // open-astro#274: survive the .value_or(0.0) collapse. 0.0/0.0 is a
+          // real place, so the magic value cannot stand in for "never set";
+          // only the optionals know, and only here.
+          site_latitude_set_(site_latitude_deg.has_value()),
+          site_longitude_set_(site_longitude_deg.has_value()) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
@@ -258,6 +263,20 @@ public:
 
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         if (connected) {
+            // open-astro#274: the mount stores no site of its own, so an
+            // unconfigured device would run on 0.0/0.0. hemisphere_south_locked()
+            // is site_latitude_ < 0.0, which silently puts a southern rig on
+            // northern pointing math and undoes #250 (RA tracking direction),
+            // #253 (Dec rate and pulse-guide sign) and #261 (SideOfPier and the
+            // goto pier-side branch). Refuse rather than point wrongly.
+            if (!site_coordinates_known_locked()) {
+                throw AlpacaException(
+                    "Site latitude and longitude must be set before connecting: this mount stores no site of its "
+                    "own, and pointing math (tracking direction, guide sign, pier side) is hemisphere-dependent. "
+                    "Set them in the web UI's device configuration, or write SiteLatitude and SiteLongitude "
+                    "before Connected.",
+                    AlpacaError::InvalidOperation);
+            }
             if (!protocol.connect(connection_info_)) {
                 throw AlpacaException("Failed to connect to Sky-Watcher motor controller");
             }
@@ -702,6 +721,7 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         site_latitude_ = latitude;
+        site_latitude_set_ = true;
     }
 
     double get_site_longitude() const override {
@@ -715,6 +735,7 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         site_longitude_ = longitude;
+        site_longitude_set_ = true;
     }
 
     bool get_slewing() const override {
@@ -1763,6 +1784,12 @@ private:
         cmd_axis_rate_deg_s_[1] = 0.0;
         position_cache_valid_ = false;
     }
+
+    // True once both coordinates have a provenance: either the device config
+    // carried both, or a client wrote each through the ASCOM setters
+    // (open-astro#274). A client that writes only one leaves the other at its
+    // configured value, so the two are tracked separately.
+    bool site_coordinates_known_locked() const { return site_latitude_set_ && site_longitude_set_; }
 
     bool hemisphere_south_locked() const { return site_latitude_ < 0.0; }
 
@@ -3127,6 +3154,12 @@ private:
     double site_latitude_;
     double site_longitude_;
     double site_elevation_m_;
+    // open-astro#274: "was this coordinate ever explicitly set", tracked apart
+    // from the value because 0.0 is a legitimate coordinate. Seeded from the
+    // constructor's optionals and set by each ASCOM setter for its own axis.
+    // Declared after site_elevation_m_ to match the initialiser order.
+    bool site_latitude_set_;
+    bool site_longitude_set_;
     // Client UTCDate offset and the anchors utc_now_locked() uses to notice a
     // host clock step underneath it. Mutable: the drop happens on a read.
     mutable bool has_utc_offset_ = false;
