@@ -2532,17 +2532,110 @@ int main() {
         EXPECT(get_json["Value"].is_number_integer());
         EXPECT(get_json["Value"].get<std::int64_t>() > 1600000000);  // after 2020-09
 
-        // Out-of-range epochs are rejected without setting the clock.
+        // Out-of-range epochs are rejected without setting the clock. The
+        // status check is not redundant with ErrorNumber: a 403 from the
+        // cross-origin guard (issue #298) also carries a non-zero
+        // ErrorNumber, so without it this loop would keep passing if the
+        // guard ever started rejecting a request that carries no Origin at
+        // all -- which is every non-browser client, Ara included. That is the
+        // invariant most worth not breaking here.
         for (const auto* body : {"{\"Epoch\": 100}", "{\"Epoch\": 5000000000}", "{\"Epoch\": -1}", "{}", "not json"}) {
             const auto response = route_request(router, "POST", "/management/v1/synctime", body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(response.status_code() != 403);
         }
 
         // DELETE is not a supported method.
         const auto del_response = route_request(router, "DELETE", "/management/v1/synctime");
         const auto del_json = nlohmann::json::parse(del_response.body(), nullptr, false);
         EXPECT(!del_json.is_discarded() && del_json.value("ErrorNumber", 0) != 0);
+        // ...and without an Origin it is refused as an unsupported method, not
+        // by the guard, so the next case can attribute its 403 to the guard.
+        EXPECT(del_response.status_code() != 403);
+
+        // The guard runs before the method check, so a cross-origin DELETE is
+        // refused for being cross-origin rather than for being a DELETE. The
+        // CHANGELOG calls this out as a status change from 405 to 403; this
+        // pins it.
+        {
+            std::ostringstream raw;
+            raw << "DELETE /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n\r\n";
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 403);
+        }
+
+        // CSRF guard (issue #298): this endpoint sets the system clock and,
+        // since #291, marks the host client-stepped, so it takes the same
+        // Origin check the wifi endpoints use. A cross-origin mutating
+        // request is rejected with 403 before the body is even parsed.
+        {
+            const std::string body = "{\"Epoch\": 100}";
+            std::ostringstream raw;
+            raw << "POST /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n"
+                << "Content-Type: text/plain\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 403);
+        }
+
+        // A same-origin request passes the guard. It still fails here --
+        // the epoch is deliberately outside the handler's 2000-2100 window,
+        // so the request is refused after the guard and clock_settime is
+        // never reached. Both cases above use an out-of-range epoch for that
+        // reason: a run with CAP_SYS_TIME (sudo, a root container, a root
+        // shell on a test SBC) would otherwise set the machine's clock from
+        // a unit test, which AlpacaCore/tests/test_host_clock.cpp forbids.
+        // The distinction the case needs is still visible: 403 means the
+        // guard fired, 200 with a non-zero ErrorNumber means it did not.
+        {
+            const std::string body = "{\"Epoch\": 100}";
+            std::ostringstream raw;
+            raw << "POST /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://localhost\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            // The concrete pass path, not just "not 403": a 404 from broken
+            // routing would satisfy the negation too. 200 with the epoch
+            // window's own complaint means the guard let it through and the
+            // handler refused it on the epoch, which is what this case is
+            // for.
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find("Unix timestamp") != std::string::npos);
+        }
+
+        // A GET carrying a cross-origin Origin header changes nothing, so it
+        // is still served rather than rejected.
+        {
+            std::ostringstream raw;
+            raw << "GET /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n\r\n";
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            // A plausible epoch, so a served-but-empty reply cannot pass.
+            EXPECT(json["Value"].is_number_integer() && json["Value"].get<std::int64_t>() > 1600000000);
+        }
     }
 
     // wifi management endpoints: routing + input validation. The happy paths
