@@ -1779,7 +1779,14 @@ function formatServerClock(date) {
         // recognises (NZST rather than GMT+12) wherever the browser has one,
         // and falls back to the offset where it does not.
         const zone = localZoneLabel(date) || parts.timeZoneName || '';
-        const suffix = zone ? ` (${zone})` : '';
+        if (!zone) {
+            // An engine that accepted the options but produced no zone part
+            // would otherwise render a bare "2026-09-11 23:30:48" -- an
+            // unlabelled local time, which is the exact ambiguity this
+            // function exists to remove. Take the labelled UTC fallback.
+            throw new Error('no zone label');
+        }
+        const suffix = ` (${zone})`;
         // Pad the hour rather than trusting hour: '2-digit': some ICU
         // versions hand back a single digit for 0-9 once hourCycle forces a
         // non-default cycle, which makes the header jitter by a character on
