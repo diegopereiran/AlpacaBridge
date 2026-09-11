@@ -593,7 +593,7 @@ jobs:
           shellcheck "${scripts[@]}"
 
   javascript:
-    name: JavaScript syntax
+    name: JavaScript syntax + unit tests
     runs-on: ubuntu-24.04-arm   # syntax-only check; arch-independent
     steps:
       - name: Checkout
@@ -623,6 +623,19 @@ jobs:
           for f in "${files[@]}"; do
             node --check "$f"
           done
+
+      - name: Unit-test web UI JavaScript
+        # `node --check` parses; it does not execute. web/format.js holds the
+        # page's pure formatting helpers, whose contract includes three
+        # fallback guards -- one of them (an engine that ignores hourCycle and
+        # answers in 12-hour form) renders a plausible-looking WRONG time
+        # rather than an obvious failure. `node --test` ships with the Node
+        # the step above installs, so this needs no dependency and no
+        # package.json. Kept in sync with the javascript gate in
+        # scripts/ci_preflight.sh. See open-astro#385.
+        run: |
+          set -euo pipefail
+          node --test AlpacaHTTP/tests/web/
 
   cppcheck:
     name: cppcheck (changed files)

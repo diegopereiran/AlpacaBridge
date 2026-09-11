@@ -165,9 +165,9 @@ mapfile -t SH_FILES < <(
   } | sort -u
 )
 
-# Hand-written web UI JavaScript (served static, no build step).
+# Hand-written web UI JavaScript (served static, no build step) and its tests.
 mapfile -t JS_FILES < <(
-  printf '%s\n' "${CHANGED[@]}" | grep -E '^AlpacaHTTP/web/.*\.js$' || true
+  printf '%s\n' "${CHANGED[@]}" | grep -E '^(AlpacaHTTP/web/.*\.js|AlpacaHTTP/tests/web/.*\.js)$' || true
 )
 
 have_workflow_changes() {
@@ -347,7 +347,7 @@ fi
 
 # --- gate 8: javascript syntax (only if web JS changed) --------------------
 
-section "JavaScript syntax (node --check)"
+section "JavaScript syntax (node --check) + unit tests (node --test)"
 if [ "${#JS_FILES[@]}" -eq 0 ]; then
   echo "No web JavaScript changed -- skipping."
   record SKIP "javascript (no JS changes)"
@@ -359,8 +359,17 @@ elif ensure_tool node nodejs; then
       js_ok=0
     fi
   done
+  # node --check parses; it does not execute. The pure formatting helpers in
+  # web/format.js have a real contract with three fallback guards, one of which
+  # renders a plausible-looking WRONG time rather than an obvious failure, so
+  # they get unit tests too (open-astro#385). Kept in sync with the javascript
+  # job in .github/workflows/ci.yml.
+  if [ "${js_ok}" -eq 1 ] && ! node --test AlpacaHTTP/tests/web/; then
+    echo "Web UI JavaScript unit tests failed."
+    js_ok=0
+  fi
   if [ "${js_ok}" -eq 1 ]; then
-    echo "JavaScript syntax OK."
+    echo "JavaScript syntax and unit tests OK."
     record PASS "javascript"
   else
     record FAIL "javascript"
