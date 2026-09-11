@@ -2350,18 +2350,9 @@ Response Router::dispatch_device_method(
                     // now do so even on a connect that finishes moments
                     // later. Accepted for this fix: the router has no
                     // general way to tell a driver whose get_connected() is
-                    // lock-free (SynScan among them — safe to read mid-task)
-                    // from one that blocks (the five telescopes listed in
-                    // async_connectable.h, which hold the driver mutex across
-                    // the handshake and are the root cause here, and the
-                    // four wrapper-backed switches, whose is_open() waits on
-                    // the wrapper mutex and so blocks for local work only --
-                    // microseconds to milliseconds, not a handshake; see
-                    // async_connectable.h. Blocking is all they do: the
-                    // wrapper lock is released before pending_mutex_, so they
-                    // never nest the two and do not create the ABBA hazard
-                    // the five telescopes do -- unsafe to read mid-task
-                    // either way) without a
+                    // lock-free from one that blocks on a driver or wrapper
+                    // mutex — see async_connectable.h for which is which and
+                    // why only the telescopes create the ABBA hazard — without a
                     // per-driver capability flag, which is future work.
                 } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
                            (device->get_connecting() || device->get_connected())) {
