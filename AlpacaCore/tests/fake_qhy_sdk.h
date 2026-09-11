@@ -120,7 +120,8 @@ namespace alpacacore::test {
  *   converges over many calls (which is why the driver polls it ~1/s). No
  *   cooled-camera case exists here, but the first thermal test would assert
  *   against an instant settle that hardware can never produce. Flagged in
- *   review of #343; not separately tracked yet -- closest sibling is #337.
+ *   review of #343. Tracked in issue #390; pairs with #331, since a cooled
+ *   camera is also the first case that starts a worker thread.
  *
  * Not thread-hardened, by design — wrap it in LockedQHYSDK for the [stress]
  * suite so ThreadSanitizer reports point at driver code, not at this file.
