@@ -303,9 +303,10 @@ private:
             // (iOptron PowerBox, ToupTek PowerBox, ZWO ASIAIR and ASIAIR
             // Plus) also lock in get_connected(), via the wrapper's is_open(),
             // but release it before their set_connected reaches
-            // pending_mutex_, so they never nest the two. The read is a momentary snapshot either way (the sync
-            // setter never held both locks at once), and a stale value is
-            // benign: the deferred transitions below are idempotent.
+            // pending_mutex_, so they never nest the two. The read is a
+            // momentary snapshot either way (the sync setter never held both
+            // locks at once), and a stale value is benign: the deferred
+            // transitions below are idempotent.
             //
             // SynScan is deliberately NOT in that list: its get_connected()
             // is a bare atomic load, made lock-free by the issue #130 fix

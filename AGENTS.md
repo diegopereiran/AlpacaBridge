@@ -758,8 +758,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the wrong flag.
 - **The router must never call `get_connected()` while `get_connecting()` is
   true — the connect side of the rule above** (SynScan hand controller,
-  2026-09, issue #130). Six telescope drivers (SynScan, Celestron, OnStep,
-  Bisque, iOptron, Sky-Watcher) answer `get_connected()` under the state
+  2026-09, issue #130). Five telescope drivers (Celestron, OnStep, Bisque,
+  iOptron, Sky-Watcher) answer `get_connected()` under the state
   mutex that their `set_connected(true)` holds for the entire handshake, so
   a `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
@@ -769,8 +769,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (30 drivers already do; SynScan now does) — the other five still
-  take the mutex and rely on the router rule. Regression tests:
+  getter (30 drivers already do; SynScan was moved to one by the #130 fix) —
+  the five above still take the mutex and rely on the router rule. Regression tests:
   `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
   `AlpacaCore/tests/test_synscan_async_park.cpp`.
   **Known trade-off:** while a task is in flight, `Connected` reports false
