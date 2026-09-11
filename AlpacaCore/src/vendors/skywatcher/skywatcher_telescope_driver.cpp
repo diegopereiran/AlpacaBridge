@@ -849,7 +849,13 @@ public:
                     " ms; honouring it for the UTCDate readback but pointing by the host clock (logged once per "
                     "connection)");
         }
-        invalidate_position_cache_locked();  // reported RA moves with LST
+        // Unconditional on purpose. The cache holds only the axis angles;
+        // compute_ra_dec_locked() recomputes LST from utc_now_locked() on
+        // every read, so reported RA follows a UTCDate write with or without
+        // this call. It stays because it is cheap (one refetch of the counts)
+        // and keeps the first read after a time change on fresh hardware
+        // state, on either #301 branch.
+        invalidate_position_cache_locked();
     }
 
     // FindHome is an asynchronous initiator (ITelescopeV4). Boards without a

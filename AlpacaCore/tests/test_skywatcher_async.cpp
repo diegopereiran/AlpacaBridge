@@ -1511,7 +1511,7 @@ TEST_CASE("SkyWatcher async - a Dec pulse leaves a pending RA rate check running
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and reported RA (#287)",
+TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime only on an undisciplined host (#287, #301)",
           "[skywatcher][async]") {
     // Before #287, get_utc_date() reported the client's offset while every LST
     // computation used the raw host clock, so a client time-sync fixed the
