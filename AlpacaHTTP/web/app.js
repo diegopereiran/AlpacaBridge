@@ -1780,7 +1780,14 @@ function formatServerClock(date) {
         // and falls back to the offset where it does not.
         const zone = localZoneLabel(date) || parts.timeZoneName || '';
         const suffix = zone ? ` (${zone})` : '';
-        return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}${suffix}`;
+        // Pad the hour rather than trusting hour: '2-digit': some ICU
+        // versions hand back a single digit for 0-9 once hourCycle forces a
+        // non-default cycle, which makes the header jitter by a character on
+        // the hour. The other fields are unaffected, but pad them the same
+        // way so one rule covers the line.
+        const pad = (value) => String(value).padStart(2, '0');
+        return `${parts.year}-${pad(parts.month)}-${pad(parts.day)} ` +
+               `${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}${suffix}`;
     } catch (e) {
         // Parenthesised like the normal path, so the two read as one format
         // and the only difference an operator sees is the zone itself.
