@@ -15,6 +15,8 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -34,6 +36,19 @@ namespace detail {
 // offset described the old host clock, so it is dropped rather than applied
 // on top of the corrected one. Pure, so the rule is unit-testable without
 // stepping the test host's clock.
+// open-astro#395: the driver samples the host's clock discipline through
+// this probe instead of calling HostClock::kernel_is_synchronized() directly,
+// so a test can drive both branches of the #301 rule on any build host. The
+// default is the real adjtimex read; a test installs a lambda and restores
+// the default afterwards. Process-wide, like the protocol wrapper singleton.
+void set_host_synchronized_probe(std::function<bool()> probe);
+bool host_synchronized_probe();
+// open-astro#405: how often the pointing path re-samples discipline while a
+// client offset is armed on a host that was undisciplined at the write
+// (default 30 s; a test shortens it). Zero disables the re-sample.
+void set_host_discipline_resample_interval(std::chrono::milliseconds interval);
+std::chrono::milliseconds host_discipline_resample_interval();
+
 bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed,
                         std::chrono::milliseconds tolerance = std::chrono::milliseconds(1000));
