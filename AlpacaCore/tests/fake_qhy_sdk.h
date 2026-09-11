@@ -81,7 +81,7 @@ namespace alpacacore::test {
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
  * corresponding real guard. Each is tracked; none is relied on by the cases
- * in this branch, but the [stress] follow-up (#321) will exercise all six:
+ * in this branch, but the [stress] follow-up (#321) will exercise all seven:
  *
  * - open_camera() does not refuse a fresh open while a registered exposure
  *   worker is still live (the real one throws InvalidOperation — this is the
@@ -115,6 +115,12 @@ namespace alpacacore::test {
  *   gated by is_control_available first), but modelling "unsupported" by
  *   dropping an entry from `params` would hand the driver a plausible 0.0
  *   where hardware hands it a sentinel to reject. Tracked in issue #373.
+ * - control_temp() settles the TEC instantly: it writes the target straight
+ *   into params[CURTEMP], where the real ControlQHYCCDTemp runs a PID that
+ *   converges over many calls (which is why the driver polls it ~1/s). No
+ *   cooled-camera case exists here, but the first thermal test would assert
+ *   against an instant settle that hardware can never produce. Flagged in
+ *   review of #343; not separately tracked yet -- closest sibling is #337.
  *
  * Not thread-hardened, by design — wrap it in LockedQHYSDK for the [stress]
  * suite so ThreadSanitizer reports point at driver code, not at this file.
@@ -135,10 +141,16 @@ public:
     std::vector<QHYCameraInfo> cameras;
     // Controls the drivers probe. CFWPORT present by default so the filter
     // wheel connects; add/remove to steer capability branches.
+    //
+    // ST4PORT earns its place differently: no driver path probes it (the camera
+    // reads camera_info_.has_st4_port directly), but default_camera() sets that
+    // flag true, and leaving the fake's two capability sources disagreeing in
+    // the DEFAULT seeding pre-bakes the trap the get_chip_info() parity gap
+    // above warns about. Keep the two in step when adding a capability.
     std::set<int> controls_available{
         vendor::qhy::control::BITS16,  vendor::qhy::control::BIN1X1,      vendor::qhy::control::BIN2X2,
         vendor::qhy::control::GAIN,    vendor::qhy::control::OFFSET,      vendor::qhy::control::EXPOSURE,
-        vendor::qhy::control::CFWPORT, vendor::qhy::control::CFWSLOTSNUM,
+        vendor::qhy::control::CFWPORT, vendor::qhy::control::CFWSLOTSNUM, vendor::qhy::control::ST4PORT,
     };
     std::map<int, double> params{
         {vendor::qhy::control::GAIN, 10.0},         {vendor::qhy::control::OFFSET, 20.0},
