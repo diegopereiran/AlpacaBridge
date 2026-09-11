@@ -2299,10 +2299,14 @@ int main() {
         // carrying the client's value, and the driver must then be handed the
         // same instant.
         {
-            alpacahttp::Router clock_router;
+            // Locals first, router second: the hook lambdas capture these by
+            // reference and the router owns the lambdas, so declaring the
+            // router last means it is destroyed first and can never outlive
+            // what it captured.
             int set_calls = 0;
             int set_calls_at_write = -1;  // set_calls as seen from inside the driver write
             std::chrono::system_clock::time_point set_to{};
+            alpacahttp::Router clock_router;
             clock_router.set_host_clock_hooks([] { return false; },
                                               [&](std::chrono::system_clock::time_point tp, std::string&) {
                                                   ++set_calls;
@@ -2335,8 +2339,8 @@ int main() {
         // the client is -- but the driver still receives the value, because
         // UTCDate is the client's property to set.
         {
-            alpacahttp::Router clock_router;
             int set_calls = 0;
+            alpacahttp::Router clock_router;
             clock_router.set_host_clock_hooks([] { return true; },
                                               [&](std::chrono::system_clock::time_point, std::string&) {
                                                   ++set_calls;
@@ -2362,8 +2366,8 @@ int main() {
         // carry-over removed the fresh clock comes back enabled and
         // set_calls becomes 1).
         {
-            alpacahttp::Router clock_router;
             int set_calls = 0;
+            alpacahttp::Router clock_router;
             clock_router.set_sync_system_clock_from_clients(false);
             clock_router.set_host_clock_hooks([] { return false; },
                                               [&](std::chrono::system_clock::time_point, std::string&) {
