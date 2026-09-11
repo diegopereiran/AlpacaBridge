@@ -46,8 +46,7 @@ uint32_t alpaca_to_qhy_guide_direction(int alpaca_direction) {
 }
 
 // Return true if the bin value is supported (1-4 checked via CAM_BINnXn).
-bool bin_is_supported(const std::string& camera_id, int bin) {
-    auto& sdk = QHYSDKWrapper::instance();
+bool bin_is_supported(QHYSDK& sdk, const std::string& camera_id, int bin) {
     switch (bin) {
     case 1: return sdk.is_control_available(camera_id, control::BIN1X1);
     case 2: return sdk.is_control_available(camera_id, control::BIN2X2);
@@ -57,9 +56,9 @@ bool bin_is_supported(const std::string& camera_id, int bin) {
     }
 }
 
-int max_supported_bin(const std::string& camera_id) {
+int max_supported_bin(QHYSDK& sdk, const std::string& camera_id) {
     for (int bin = 4; bin >= 1; --bin) {
-        if (bin_is_supported(camera_id, bin)) {
+        if (bin_is_supported(sdk, camera_id, bin)) {
             return bin;
         }
     }
@@ -85,8 +84,10 @@ enum class QHYExposureStatus {
 
 class QHYCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
-    QHYCameraDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index)
+    QHYCameraDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index,
+                    QHYSDK& sdk)
         : AsyncConnectable("QHY"),
+          sdk_(sdk),
           device_number_(device_number),
           camera_id_(std::move(camera_id)),
           camera_index_(camera_index),
@@ -174,7 +175,7 @@ public:
         // The SDK version cache is empty until the first connect (the wrapper
         // must not touch libqhyccd pre-init); omit the suffix rather than
         // rendering a malformed "(SDK )".
-        const auto ver = QHYSDKWrapper::instance().get_sdk_version();
+        const auto ver = sdk_.get_sdk_version();
         return ver.empty() ? "AlpacaCore QHY Camera Driver" : "AlpacaCore QHY Camera Driver (SDK " + ver + ")";
     }
 
@@ -183,7 +184,7 @@ public:
     // Vendor SDK (library) version, surfaced in the web UI only. DriverInfo's
     // pre-existing SDK mention is left as-is but deliberately not extended.
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = QHYSDKWrapper::instance().get_sdk_version();
+        auto version = sdk_.get_sdk_version();
         if (version.empty()) {
             return std::nullopt;
         }
@@ -250,7 +251,7 @@ private:
                 }
                 if (!cancel_id.empty()) {
                     try {
-                        QHYSDKWrapper::instance().cancel_exposure(cancel_id);
+                        sdk_.cancel_exposure(cancel_id);
                     } catch (const std::exception& e) {
                         ALPACA_LOG_WARN("QHY", "cancel_exposure failed during disconnect: " + std::string(e.what()));
                     }
@@ -318,7 +319,6 @@ private:
             telemetry_power_valid_ = false;
             reset_exposure_state_locked();
             connected_.store(false);
-            auto& sdk = QHYSDKWrapper::instance();
             const std::string& id = camera_id_.value_or("");
             if (!id.empty()) {
                 // Exposure worker cancel attempted above; join_exposure_thread()
@@ -332,7 +332,7 @@ private:
                 // which matters for the next connect() -- see the
                 // exposure_thread_running_ check there.
                 try {
-                    sdk.close_camera(id);
+                    sdk_.close_camera(id);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("QHY", "close_camera failed during disconnect: " +
                         std::string(e.what()));
@@ -353,7 +353,6 @@ private:
             return; // already connected
         }
 
-        auto& sdk = QHYSDKWrapper::instance();
         const std::string& id = resolve_camera_id_locked();
 
         // A prior disconnect's join_exposure_thread() may have hit its 2s
@@ -362,7 +361,7 @@ private:
         // GetQHYCCDSingleFrame on the OLD qhyccd_handle, holding its own
         // shared_ptr<qhyccd_handle> copy (which is what keeps CloseQHYCCD
         // deferred rather than a use-after-close). disconnect() calls
-        // sdk.close_camera(id) unconditionally in that case, which erases
+        // sdk_.close_camera(id) unconditionally in that case, which erases
         // the handle map's entry for `id` once the last owner releases it.
         // open_camera() below only reuses a handle while a live map entry
         // survives; once it's erased, this connect() would OpenQHYCCD() a
@@ -382,34 +381,34 @@ private:
                 AlpacaError::InvalidOperation);
         }
 
-        sdk.open_camera(id);
+        sdk_.open_camera(id);
         // Roll back the ref-counted open if any init step throws: open_camera()
         // now shares one handle per camera_id with the CFW driver via an
         // open_count, so an unmatched open is no longer self-healed by the next
         // connect — it would pin the handle (CloseQHYCCD never firing) for the
         // life of the process. Same pattern as the filter wheel's connect path.
         try {
-            sdk.init_camera(id);
+            sdk_.init_camera(id);
 
             // Populate full camera info
             QHYCameraInfo info{};
             info.camera_id = id;
             if (!camera_info_valid_ || camera_info_.model.empty()) {
-                sdk.get_camera_model(id, info.model);
+                sdk_.get_camera_model(id, info.model);
             } else {
                 info.model = camera_info_.model;
             }
-            if (sdk.get_chip_info(id, info)) {
+            if (sdk_.get_chip_info(id, info)) {
                 camera_info_ = info;
                 camera_info_valid_ = true;
             }
 
             // Select bit depth (prefer 16-bit)
             bits_ = 8;
-            if (sdk.is_control_available(id, control::BITS16)) {
+            if (sdk_.is_control_available(id, control::BITS16)) {
                 bits_ = 16;
             }
-            sdk.set_bits_mode(id, bits_);
+            sdk_.set_bits_mode(id, bits_);
 
             // Default to full-frame 1x1 binning
             bin_x_ = 1;
@@ -418,8 +417,8 @@ private:
             start_y_ = 0;
             num_x_ = static_cast<int>(camera_info_.max_width);
             num_y_ = static_cast<int>(camera_info_.max_height);
-            sdk.set_bin_mode(id, 1, 1);
-            sdk.set_resolution(id, 0, 0, static_cast<uint32_t>(num_x_), static_cast<uint32_t>(num_y_));
+            sdk_.set_bin_mode(id, 1, 1);
+            sdk_.set_resolution(id, 0, 0, static_cast<uint32_t>(num_x_), static_cast<uint32_t>(num_y_));
 
             // Enumerate readout modes
             load_readout_modes_locked(id);
@@ -427,7 +426,7 @@ private:
             reset_exposure_state_locked();
         } catch (...) {
             try {
-                sdk.close_camera(id);
+                sdk_.close_camera(id);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Failed to roll back camera open after connect error: " + std::string(e.what()));
             }
@@ -682,13 +681,23 @@ public:
         // if it throws (e.g. thread limit), nothing was spawned to ever clear
         // the flag, so publishing it early would wedge cooler-off forever.
         auto running_flag = std::make_shared<std::atomic<bool>>(true);
-        cooler_off_thread_ = std::thread([this, running_flag]() {
+        cooler_off_thread_ = std::thread([this, running_flag, sdk = &sdk_]() {
             // Clear the in-flight flag on every exit path, including throws.
-            // Captures the shared_ptr (not `this`): if join_cooler_off_thread()
-            // times out and detaches this thread while it's still stuck inside
-            // SetQHYCCDParam below, this is the ONLY thing that runs after the
-            // blocking call returns, and it must not touch a driver that may
-            // by then be destroyed.
+            // The GUARD below holds only the shared_ptr -- the enclosing lambda
+            // does capture `this`, but the guard's destructor deliberately does
+            // not touch it: if join_cooler_off_thread() times out and detaches
+            // this thread while it's still stuck inside SetQHYCCDParam below,
+            // the destructor is the ONLY thing that runs after the blocking
+            // call returns, and it must not touch a driver that may by then be
+            // destroyed.
+            //
+            // The rest of this lambda is NOT protected that way. join_temp_thread()
+            // below is a member call that itself blocks up to 2s -- the same bound
+            // join_cooler_off_thread() waits before detaching -- so this worker can
+            // be detached while still inside it, with `this` already gone. That is
+            // a real window, not a theoretical one; it is why detachment here is
+            // bounded-and-unsafe rather than safe, and why the SDK is reached
+            // through a captured pointer instead of `sdk_`.
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
@@ -719,8 +728,7 @@ public:
                 const auto call_start = std::chrono::steady_clock::now();
                 ALPACA_LOG_INFO("QHY", "Calling SetQHYCCDParam(MANULPWM,0)...");
                 try {
-                    QHYSDKWrapper::instance().set_param(cam_id_for_pwm,
-                                                        control::MANULPWM, 0.0);
+                    sdk->set_param(cam_id_for_pwm, control::MANULPWM, 0.0);
                     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                 std::chrono::steady_clock::now() - call_start)
                                                 .count();
@@ -758,8 +766,7 @@ public:
 
     double get_exposure_max() const override {
         ensure_connected();
-        auto range = QHYSDKWrapper::instance().get_param_range(camera_id_value(),
-                                                               control::EXPOSURE);
+        auto range = sdk_.get_param_range(camera_id_value(), control::EXPOSURE);
         if (!range.available) {
             return 3600.0; // 1 hour default
         }
@@ -768,8 +775,7 @@ public:
 
     double get_exposure_min() const override {
         ensure_connected();
-        auto range = QHYSDKWrapper::instance().get_param_range(camera_id_value(),
-                                                               control::EXPOSURE);
+        auto range = sdk_.get_param_range(camera_id_value(), control::EXPOSURE);
         if (!range.available) {
             return 0.000001; // 1 µs default
         }
@@ -796,14 +802,12 @@ public:
 
     int get_gain() const override {
         ensure_connected();
-        return static_cast<int>(
-            QHYSDKWrapper::instance().get_param(camera_id_value(), control::GAIN));
+        return static_cast<int>(sdk_.get_param(camera_id_value(), control::GAIN));
     }
 
     void set_gain(int gain) override {
         ensure_connected();
-        auto range = QHYSDKWrapper::instance().get_param_range(camera_id_value(),
-                                                               control::GAIN);
+        auto range = sdk_.get_param_range(camera_id_value(), control::GAIN);
         if (range.available && (gain < static_cast<int>(range.min) ||
                                 gain > static_cast<int>(range.max))) {
             throw AlpacaException("Gain value out of range", AlpacaError::InvalidValue);
@@ -820,14 +824,13 @@ public:
         if (id.empty()) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
-        QHYSDKWrapper::instance().set_param(id, control::GAIN, static_cast<double>(gain));
+        sdk_.set_param(id, control::GAIN, static_cast<double>(gain));
         cached_gain_ = gain;
     }
 
     int get_gain_max() const override {
         ensure_connected();
-        auto range = QHYSDKWrapper::instance().get_param_range(camera_id_value(),
-                                                               control::GAIN);
+        auto range = sdk_.get_param_range(camera_id_value(), control::GAIN);
         if (!range.available) {
             throw AlpacaException("Gain range not available", AlpacaError::NotImplemented);
         }
@@ -836,8 +839,7 @@ public:
 
     int get_gain_min() const override {
         ensure_connected();
-        auto range = QHYSDKWrapper::instance().get_param_range(camera_id_value(),
-                                                               control::GAIN);
+        auto range = sdk_.get_param_range(camera_id_value(), control::GAIN);
         if (!range.available) {
             throw AlpacaException("Gain range not available", AlpacaError::NotImplemented);
         }
@@ -951,7 +953,7 @@ public:
 
     int get_max_bin_x() const override {
         ensure_connected();
-        return max_supported_bin(camera_id_value());
+        return max_supported_bin(sdk_, camera_id_value());
     }
 
     int get_max_bin_y() const override {
@@ -974,14 +976,12 @@ public:
 
     int get_offset() const override {
         ensure_connected();
-        return static_cast<int>(
-            QHYSDKWrapper::instance().get_param(camera_id_value(), control::OFFSET));
+        return static_cast<int>(sdk_.get_param(camera_id_value(), control::OFFSET));
     }
 
     void set_offset(int offset) override {
         ensure_connected();
-        auto range = QHYSDKWrapper::instance().get_param_range(camera_id_value(),
-                                                               control::OFFSET);
+        auto range = sdk_.get_param_range(camera_id_value(), control::OFFSET);
         if (range.available && (offset < static_cast<int>(range.min) ||
                                 offset > static_cast<int>(range.max))) {
             throw AlpacaException("Offset value out of range", AlpacaError::InvalidValue);
@@ -993,14 +993,13 @@ public:
         if (id.empty()) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
-        QHYSDKWrapper::instance().set_param(id, control::OFFSET, static_cast<double>(offset));
+        sdk_.set_param(id, control::OFFSET, static_cast<double>(offset));
         cached_offset_ = offset;
     }
 
     int get_offset_max() const override {
         ensure_connected();
-        auto range = QHYSDKWrapper::instance().get_param_range(camera_id_value(),
-                                                               control::OFFSET);
+        auto range = sdk_.get_param_range(camera_id_value(), control::OFFSET);
         if (!range.available) {
             throw AlpacaException("Offset range not available", AlpacaError::NotImplemented);
         }
@@ -1009,8 +1008,7 @@ public:
 
     int get_offset_min() const override {
         ensure_connected();
-        auto range = QHYSDKWrapper::instance().get_param_range(camera_id_value(),
-                                                               control::OFFSET);
+        auto range = sdk_.get_param_range(camera_id_value(), control::OFFSET);
         if (!range.available) {
             throw AlpacaException("Offset range not available", AlpacaError::NotImplemented);
         }
@@ -1075,7 +1073,7 @@ public:
         if (id.empty()) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
-        QHYSDKWrapper::instance().set_readout_mode(id, static_cast<uint32_t>(mode));
+        sdk_.set_readout_mode(id, static_cast<uint32_t>(mode));
 
         // set_readout_mode() re-runs InitQHYCCD on the same handle to fix
         // "Linearity HDR"'s slow download (see its own comment). Switching
@@ -1100,14 +1098,14 @@ public:
         // between modes where the SDK actually honors them.
         if (cached_gain_.has_value()) {
             try {
-                QHYSDKWrapper::instance().set_param(id, control::GAIN, static_cast<double>(*cached_gain_));
+                sdk_.set_param(id, control::GAIN, static_cast<double>(*cached_gain_));
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Failed to restore gain after readout mode change: " + std::string(e.what()));
             }
         }
         if (cached_offset_.has_value()) {
             try {
-                QHYSDKWrapper::instance().set_param(id, control::OFFSET, static_cast<double>(*cached_offset_));
+                sdk_.set_param(id, control::OFFSET, static_cast<double>(*cached_offset_));
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Failed to restore offset after readout mode change: " + std::string(e.what()));
             }
@@ -1115,12 +1113,11 @@ public:
 
         // After changing readout mode, refresh chip info as dimensions may change
         QHYCameraInfo updated_info;
-        if (QHYSDKWrapper::instance().get_chip_info(id, updated_info)) {
+        if (sdk_.get_chip_info(id, updated_info)) {
             int new_max_w = static_cast<int>(updated_info.max_width);
             int new_max_h = static_cast<int>(updated_info.max_height);
             try {
-                QHYSDKWrapper::instance().set_resolution(id, 0, 0,
-                    static_cast<uint32_t>(new_max_w), static_cast<uint32_t>(new_max_h));
+                sdk_.set_resolution(id, 0, 0, static_cast<uint32_t>(new_max_w), static_cast<uint32_t>(new_max_h));
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "Failed to reset ROI after readout mode change: " +
                                 std::string(e.what()));
@@ -1259,7 +1256,7 @@ public:
         // driver if the object is torn down mid-pulse (AGENTS.md: never
         // detach a thread that touches `this`; the Player One camera fixed
         // this exact bug with the same shared_ptr pattern).
-        std::thread([cam_id, qhy_dir, dur_ms, flag = pulse_guiding_]() {
+        std::thread([cam_id, qhy_dir, dur_ms, flag = pulse_guiding_, sdk = &sdk_]() {
             // guide() throws (NotConnected if a disconnect races this thread's
             // start, or any SDK failure via check_result); an exception
             // escaping a std::thread entry point calls std::terminate, so a
@@ -1267,7 +1264,7 @@ public:
             // flag must clear on every exit path or IsPulseGuiding sticks
             // true forever.
             try {
-                QHYSDKWrapper::instance().guide(cam_id, qhy_dir, dur_ms);
+                sdk->guide(cam_id, qhy_dir, dur_ms);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "PulseGuide worker failed: " + std::string(e.what()));
             } catch (...) {
@@ -1296,7 +1293,6 @@ public:
         ensure_connected();
 
         const std::string& id = camera_id_value();
-        auto& sdk = QHYSDKWrapper::instance();
 
         // Validate ROI against sensor bounds (setters defer this check to here)
         {
@@ -1351,7 +1347,7 @@ public:
         bool worker_may_still_be_running = exposure_thread_running_ && exposure_thread_running_->load();
         if (exposure_thread_.joinable() || worker_may_still_be_running) {
             try {
-                sdk.cancel_exposure(id);
+                sdk_.cancel_exposure(id);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("QHY", "cancel_exposure before re-arm failed: " + std::string(e.what()));
             }
@@ -1378,11 +1374,11 @@ public:
 
         // Apply exposure time (microseconds)
         double exposure_us = duration * 1'000'000.0;
-        sdk.set_param(id, control::EXPOSURE, exposure_us);
+        sdk_.set_param(id, control::EXPOSURE, exposure_us);
 
         // Close mechanical shutter for dark/bias frames if the camera supports it
-        if (!light && sdk.is_control_available(id, control::MECHANICALSHUTTER)) {
-            sdk.set_param(id, control::MECHANICALSHUTTER, 1.0); // 1 = closed
+        if (!light && sdk_.is_control_available(id, control::MECHANICALSHUTTER)) {
+            sdk_.set_param(id, control::MECHANICALSHUTTER, 1.0);  // 1 = closed
         }
 
         // Apply current ROI and binning (do not hold mutex_ across SDK calls)
@@ -1406,9 +1402,9 @@ public:
         // Order matches QHY's own SingleFrameMode.cpp sample (resolution
         // before bin mode) -- not confirmed load-bearing on its own, but kept
         // aligned with the only sequence QHY ships and validates.
-        sdk.set_resolution(id, start_x_u, start_y_u, num_x_u, num_y_u);
-        sdk.set_bin_mode(id, bin_x_u, bin_y_u);
-        sdk.set_bits_mode(id, bits_u);
+        sdk_.set_resolution(id, start_x_u, start_y_u, num_x_u, num_y_u);
+        sdk_.set_bin_mode(id, bin_x_u, bin_y_u);
+        sdk_.set_bits_mode(id, bits_u);
 
         {
             // Publish Working BEFORE the SDK exposure start so a concurrent
@@ -1462,7 +1458,7 @@ public:
         // members. QHYSDKWrapper::open_camera() consults this registration
         // to refuse opening a second handle for either caller (review
         // finding on PR #201).
-        sdk.register_exposure_worker(id, exposure_running);
+        sdk_.register_exposure_worker(id, exposure_running);
 
         // Launch background thread to run the WHOLE exposure sequence --
         // ExpQHYCCDSingleFrame through GetQHYCCDSingleFrame -- on one thread
@@ -1480,13 +1476,13 @@ public:
         // 4s exposure cleanly -- the one thing that sample does that this
         // driver didn't was keep Exp and Get on the SAME thread). QHY's SDK
         // appears to keep thread-affine state for a single-frame session.
-        exposure_thread_ = std::thread([this, id, exposure_running, exposure_superseded]() {
+        exposure_thread_ = std::thread([this, id, exposure_running, exposure_superseded, sdk_ptr = &sdk_]() {
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
             } running_guard{exposure_running};
 
-            auto& sdk = QHYSDKWrapper::instance();
+            auto& sdk = *sdk_ptr;
 
             ALPACA_LOG_DEBUG("QHY", "exposure worker: calling start_single_frame...");
             bool read_directly = false;
@@ -1725,7 +1721,7 @@ public:
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         // Cancel exposure (causes GetSingleFrame to return with an error)
         try {
-            QHYSDKWrapper::instance().cancel_exposure(camera_id_value());
+            sdk_.cancel_exposure(camera_id_value());
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("QHY", "cancel_exposure error: " + std::string(e.what()));
         }
@@ -1741,6 +1737,22 @@ public:
 private:
     // ── Members ──────────────────────────────────────────────────────────────
 
+    // The SDK seam (issue #321). Every background worker below that can be
+    // DETACHED still captures `this` for everything else it touches, but must
+    // reach the SDK itself through a captured raw QHYSDK*, never through
+    // `this->sdk_`. The SDK object outlives every driver built on it -- the
+    // singleton is process-scoped, and a test fake must be declared before
+    // the driver it feeds -- so a worker parked inside a blocking SDK call,
+    // which is where it spends essentially all its time, holds no reference
+    // into the driver for that whole duration. Going through `sdk_` instead
+    // would touch the driver at the moment each call returns.
+    //
+    // This NARROWS the use-after-free window; it does not close it. A
+    // detached worker that outlives the driver still dereferences `this`
+    // after the call (connected_, mutex_, the exposure_superseded re-check),
+    // and that is UB either way. Bound these workers' lifetimes; do not read
+    // the raw-pointer rule as making detachment safe.
+    QHYSDK& sdk_;
     int device_number_;
     std::optional<std::string> camera_id_;
     std::optional<int> camera_index_;
@@ -1913,7 +1925,7 @@ private:
 
     const std::string& resolve_camera_id_locked() {
         if (camera_index_.has_value() && !camera_id_.has_value()) {
-            auto cameras = QHYSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (cameras.empty()) {
                 throw AlpacaException("No QHY cameras detected", AlpacaError::NotConnected);
             }
@@ -1939,10 +1951,9 @@ private:
     void load_readout_modes_locked(const std::string& id) {
         readout_modes_.clear();
         try {
-            uint32_t num = QHYSDKWrapper::instance().get_num_readout_modes(id);
+            uint32_t num = sdk_.get_num_readout_modes(id);
             for (uint32_t i = 0; i < num; ++i) {
-                readout_modes_.push_back(
-                    QHYSDKWrapper::instance().get_readout_mode_name(id, i));
+                readout_modes_.push_back(sdk_.get_readout_mode_name(id, i));
             }
         } catch (const std::exception& e) {
             ALPACA_LOG_DEBUG("QHY", "Readout mode enumeration failed: " + std::string(e.what()));
@@ -2068,7 +2079,7 @@ private:
             }
             if (!cancel_id.empty()) {
                 try {
-                    QHYSDKWrapper::instance().cancel_exposure(cancel_id);
+                    sdk_.cancel_exposure(cancel_id);
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("QHY", "cancel_exposure failed during shutdown: " + std::string(e.what()));
                 }
@@ -2116,7 +2127,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             temp_thread_running_ = running_flag;
         }
-        std::thread t([this, id, stop_flag, running_flag]() {
+        std::thread t([this, id, stop_flag, running_flag, sdk = &sdk_]() {
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
@@ -2141,7 +2152,7 @@ private:
                 // on a multi-second exposure/readout.
                 if (connected_.load() && !exposing) {
                     try {
-                        QHYSDKWrapper::instance().control_temp(id, target);
+                        sdk->control_temp(id, target);
                     } catch (const std::exception& e) {
                         ALPACA_LOG_DEBUG("QHY", "Temp control error: " + std::string(e.what()));
                     }
@@ -2216,8 +2227,8 @@ private:
         if (id.empty()) {
             return;
         }
-        std::thread t([this, id]() {
-            auto& sdk = QHYSDKWrapper::instance();
+        std::thread t([this, id, sdk_ptr = &sdk_]() {
+            auto& sdk = *sdk_ptr;
             while (!telemetry_thread_stop_.load()) {
                 bool connected = connected_.load();
                 {
@@ -2296,16 +2307,14 @@ private:
         const std::string id = camera_id_.value_or("");
         const int max_w = static_cast<int>(camera_info_.max_width) / bin_x;
         const int max_h = static_cast<int>(camera_info_.max_height) / bin_y;
-        if (!bin_is_supported(id, bin_x)) {
+        if (!bin_is_supported(sdk_, id, bin_x)) {
             throw AlpacaException("Bin value not supported: " + std::to_string(bin_x),
                                   AlpacaError::InvalidValue);
         }
         ensure_not_exposing_locked();
         try {
-            QHYSDKWrapper::instance().set_bin_mode(id, static_cast<uint32_t>(bin_x),
-                                                   static_cast<uint32_t>(bin_y));
-            QHYSDKWrapper::instance().set_resolution(id, 0, 0,
-                static_cast<uint32_t>(max_w), static_cast<uint32_t>(max_h));
+            sdk_.set_bin_mode(id, static_cast<uint32_t>(bin_x), static_cast<uint32_t>(bin_y));
+            sdk_.set_resolution(id, 0, 0, static_cast<uint32_t>(max_w), static_cast<uint32_t>(max_h));
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("QHY", "Failed to apply binning: " + std::string(e.what()));
             return;
@@ -2439,13 +2448,31 @@ private:
 // Factory functions
 // ────────────────────────────────────────────────────────────────────────────
 
+// These default overloads resolve the singleton EAGERLY, at device-creation
+// time -- before the seam, it was first touched on the driver's first SDK
+// call. That is safe only because QHYSDKWrapper's constructor does no
+// libqhyccd work (see Impl's constructor in qhy_sdk_wrapper.cpp) and
+// InitQHYCCDResource() stays behind ensure_resource(). If that constructor
+// ever gains real work, this moves a libqhyccd call onto the
+// configure/management path, which on a USB-less host is the crash path this
+// whole seam exists to avoid. Keep the constructor trivial, or make these
+// overloads lazy -- issue #368 weighs that change, since today the constraint
+// is held by this comment and nothing mechanical.
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number,
                                                  const std::string& camera_id) {
-    return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt);
+    return create_qhy_camera(device_number, camera_id, QHYSDKWrapper::instance());
 }
 
 std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index) {
-    return std::make_unique<QHYCameraDriver>(device_number, std::nullopt, camera_index);
+    return create_qhy_camera_by_index(device_number, camera_index, QHYSDKWrapper::instance());
+}
+
+std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk) {
+    return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk);
+}
+
+std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk) {
+    return std::make_unique<QHYCameraDriver>(device_number, std::nullopt, camera_index, sdk);
 }
 
 } // namespace alpacacore::vendor::qhy
