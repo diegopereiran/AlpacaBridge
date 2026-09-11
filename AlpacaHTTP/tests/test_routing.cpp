@@ -2678,6 +2678,56 @@ int main() {
             alpacacore::logging::set_log_sink(previous_sink);
         }
 
+        // The RTC probe runs at startup and on the server's timer, never on a
+        // request path (issue #314). On a bus-attached RTC the probe is an
+        // I2C transaction that can block for the adapter timeout, and the two
+        // readers are the ITelescopeV4 connect initiator -- timed against the
+        // 1 s STANDARD target, with the connection op mutex held -- and the
+        // description endpoint the web UI polls.
+        {
+            auto probe_calls = std::make_shared<int>(0);
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [](std::chrono::system_clock::time_point, std::string&) { return true; },
+                                              [probe_calls] {
+                                                  ++*probe_calls;
+                                                  return true;
+                                              });
+            // Priming happened once, when the clock was constructed.
+            EXPECT(*probe_calls == 1);
+
+            auto scope_e = std::make_shared<TelescopeClockStubDriver>(9806);
+            EXPECT(registry.register_device(scope_e));
+
+            // Every path that reads the answer, hammered: the description
+            // endpoint the web UI polls, both connect paths, and a UTCDate
+            // write. None of them may probe.
+            for (int i = 0; i < 5; ++i) {
+                route_request(clock_router, "GET", "/management/v1/description");
+            }
+            route_request(clock_router, "PUT", "/api/v1/telescope/9806/connected", "Connected=true");
+            route_request(clock_router, "PUT", "/api/v1/telescope/9806/connected", "Connected=false");
+            route_request(clock_router, "PUT", "/api/v1/telescope/9806/connect", "");
+            route_request(clock_router, "PUT", "/api/v1/telescope/9806/utcdate", client_utc_body);
+            EXPECT(*probe_calls == 1);
+
+            // The readout still works after the clock was stepped. This asserts
+            // the "client" branch of source(), which returns before consulting
+            // has_rtc() at all -- the cached RTC answer is covered by the rtc
+            // case below, not by this line.
+            const auto desc = nlohmann::json::parse(
+                route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
+            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "client");
+            EXPECT(*probe_calls == 1);
+
+            // The off-request-path refresh the server's RTC probe thread calls is
+            // the only thing that re-probes.
+            clock_router.refresh_rtc_probe();
+            EXPECT(*probe_calls == 2);
+
+            registry.unregister_device(alpacacore::DeviceType::Telescope, 9806);
+        }
+
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9801);
     }
 

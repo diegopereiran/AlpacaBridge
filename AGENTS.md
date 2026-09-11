@@ -1010,7 +1010,10 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   deadline) has exactly one owner at a time and moves by `unique_ptr`. Rules
   this earns:
   - Never block in the reactor. Expired connections are handed to a worker
-    marked `close_only` so the graceful drain happens off the poll thread.
+    marked `close_only` so the graceful drain happens off the poll thread,
+    and the hardware-RTC probe (#314), which can sit on a wedged I2C bus for
+    about a second, runs on its own low-frequency timer thread rather than
+    between two `poll()` calls.
     The one exception is the final pass at `stop()`: after a zero-timeout
     poll hands already-arrived requests to the draining workers, every
     remaining idle socket gets `shutdown(SHUT_WR)`, one shared 100 ms
@@ -1045,7 +1048,10 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - **No server thread is ever detached.** A thread `stop()` cannot join
     because it is running on it (a handler calling `stop()` synchronously;
     no current handler does) goes into `orphaned_threads_`, and the next
-    `stop()` from another thread or the destructor joins it. So nothing
+    `stop()` from another thread or the destructor joins it. The threads this
+    covers are the accept/server thread, the reactor, the worker pool and the
+    RTC probe timer (`rtc_probe_thread_`, #314) -- the last spawns and joins
+    alongside the reactor and takes no lock `stop()` holds. So nothing
     can touch a `Server`'s members, the wake pipe included, after the
     destructor returns (review round 5). Destroying a `Server` from inside
     one of its own handlers is not supported.
@@ -1491,12 +1497,16 @@ datagrams before each send so replies cannot get off-by-one.
   the entry that is at fault. That asymmetry is the rule for any new validation in
   `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
-  run northern pointing math and undo #250, #253 and #261. Time is the host clock plus the client-set
-  `UTCDate` offset, through one `utc_now_locked()` for every LST computation (#287); on an
-  NTP-less host the router also steps the system clock from that write (#289). The offset is
-  not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped underneath
-  it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks disagreeing
-  by more than 1 s since the write, and re-armed by the next `UTCDate` write.
+  run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
+  feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
+  client-set `UTCDate` offset only when the host clock was undisciplined (no NTP) at the moment
+  of the write, so a client's clock error never steers pointing on an NTP-good host;
+  `client_utc_now_locked()` feeds the `UTCDate` readback and always honours the client's write,
+  because that property is the client's to set and ConformU reads back what it wrote (#287,
+  #351). On an NTP-less host the router also steps the system clock from that write (#289). The
+  offset is not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped
+  underneath it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks
+  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write.
 - Pointing convention: home = counterweight down pointing at the pole, counts offset
   `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
   `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
