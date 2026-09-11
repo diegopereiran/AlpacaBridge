@@ -65,8 +65,10 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
 // disciplined clock and already warns when a client disagrees by more than
 // 2 s; this makes the driver agree with that decision.
 //
-// `host_was_synchronized` is sampled once, when the client writes UTCDate, so
-// the hot path costs no syscall. Pure, so the rule is unit-testable without
+// `host_was_synchronized` is sampled when the client writes UTCDate and,
+// while an offset is armed on a host that was undisciplined then, re-sampled
+// at most once per interval on the pointing path (open-astro#405; one
+// adjtimex read, no device I/O). Pure, so the rule is unit-testable without
 // an NTP daemon.
 //
 // `offset_survives` folds in both "an offset was written" and "the host clock

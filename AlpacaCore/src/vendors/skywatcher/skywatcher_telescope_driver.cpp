@@ -817,9 +817,11 @@ public:
         utc_anchor_system_ = std::chrono::system_clock::now();
         utc_anchor_steady_ = std::chrono::steady_clock::now();
         has_utc_offset_ = true;
-        // open-astro#301: sampled once, here, so the pointing path costs no
-        // syscall. A host the kernel reports as disciplined has a better clock
-        // than the client does, and the router has already refused to step it.
+        // open-astro#301: sampled here at the write; while the host was
+        // undisciplined, resample_host_discipline_locked() re-checks it at
+        // most once per interval on the pointing path (open-astro#405). A
+        // host the kernel reports as disciplined has a better clock than the
+        // client does, and the router has already refused to step it.
         utc_offset_host_was_synchronized_ = detail::host_synchronized_probe();
         next_discipline_resample_ = std::chrono::steady_clock::now() + detail::host_discipline_resample_interval();
         if (utc_offset_host_was_synchronized_ &&
@@ -3241,7 +3243,9 @@ private:
     // a read.
     mutable bool has_utc_offset_ = false;
     // Was the host clock NTP/PTP-disciplined when the client wrote UTCDate?
-    // Sampled once, at the write (open-astro#301).
+    // Sampled at the write (open-astro#301) and, only from false to true,
+    // re-sampled on the pointing path at most once per interval (#405),
+    // which is why it is mutable.
     mutable bool utc_offset_host_was_synchronized_ = false;
     mutable std::chrono::steady_clock::time_point next_discipline_resample_{};  // open-astro#405
     mutable std::chrono::system_clock::duration utc_offset_{};
