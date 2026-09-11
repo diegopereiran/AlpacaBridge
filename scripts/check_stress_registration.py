@@ -8,9 +8,11 @@ Three rules, not one:
 2. A `[stress-guard]`-without-`[stress]` case inside a `*_concurrency_stress.cpp`
    file is rejected: that tag is for harness self-tests, and a registration
    wearing it would read as registered while dropping out of the vendor count.
-3. A `[stress]` case outside those files is rejected: such a file can compile
-   unconditionally, and one case alone then satisfies the TSan job's vendor
-   zero-coverage grep and makes it vacuous.
+3. A `[stress]` case anywhere else under `AlpacaCore/tests/` is rejected: such
+   a file can compile unconditionally, and one case alone then satisfies the
+   TSan job's vendor zero-coverage grep and makes it vacuous. The scope is that
+   directory deliberately -- `alpacacore_tests` is the only binary CI runs a
+   tag filter against.
 
 
 AGENTS.md requires every new or substantially-changed driver to register a
@@ -476,7 +478,14 @@ def self_test():
                 return [stress, core]
             if pattern in TEST_GLOBS:
                 return []
-            return [stress]
+            if pattern == STRESS_TEST_GLOB_PREFIX + "*" + STRESS_TEST_GLOB_SUFFIX:
+                return [stress]
+            # Every glob the script asks for is named above. Fail loudly on a
+            # new one rather than falling through: a silent default would hand
+            # it the registration file and the checks here would keep passing
+            # while covering less than they claim.
+            raise AssertionError(
+                "self-test fixture has no case for glob %r -- add one" % pattern)
 
         def run_main_with(stress_source, core_source=""):
             with open(stress, "w", encoding="utf-8") as fh:
