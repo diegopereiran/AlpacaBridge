@@ -23,8 +23,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -1898,6 +1900,55 @@ int main() {
         const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
         EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
         remove_device(router, "skywatcher", "telescope", 9619);
+    }
+    {
+        // issue #274, the other half: a config already on disk cannot be
+        // corrected by its caller. Dropping it at startup would keep it out of
+        // the device registry, and configureddevices -- the web UI's only
+        // source of devices -- would then not list it, leaving the operator no
+        // way to edit the very entry that is at fault. A persisted
+        // skywatcher entry with no coordinates must still be registered and
+        // still be listed; the driver's connect-time guard is what refuses it.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::parse(original, nullptr, false);
+        if (!entries.is_array()) {
+            entries = nlohmann::json::array();
+        }
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9630},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+
+        // A second Router: load_persisted_devices() is one-shot per instance,
+        // so the startup path only runs on an instance that has not read the
+        // file yet.
+        alpacahttp::Router startup_router;
+        const auto listed = route_request(startup_router, "GET", "/management/v1/configureddevices");
+        const auto listed_json = nlohmann::json::parse(listed.body(), nullptr, false);
+        EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
+        bool found = false;
+        for (const auto& entry : listed_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9630) {
+                found = true;
+            }
+        }
+        EXPECT(found);
+
+        remove_device(startup_router, "skywatcher", "telescope", 9630);
+        std::ofstream restore(persisted, std::ios::trunc);
+        restore << (original.empty() ? std::string("[]") : original);
     }
 #endif
 

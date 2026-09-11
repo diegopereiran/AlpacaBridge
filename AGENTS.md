@@ -1453,7 +1453,11 @@ datagrams before each send so replies cannot get off-by-one.
   the web UI config or the Alpaca setters. **Latitude and longitude are mandatory on this
   vendor** (#274): `configuredevice` rejects a skywatcher config without both, and
   `Connected = true` throws `InvalidOperation` unless each has been set explicitly, by
-  config or by its setter. `0.0` is a real coordinate, so the driver tracks whether each
+  config or by its setter. A config **already on disk** is registered anyway, with a WARN,
+  and left for the connect-time guard to refuse: a device dropped at startup never enters
+  the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
+  the entry that is at fault. That asymmetry is the rule for any new validation in
+  `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math and undo #250, #253 and #261. Time is the host clock plus the client-set
   `UTCDate` offset, through one `utc_now_locked()` for every LST computation (#287); on an
