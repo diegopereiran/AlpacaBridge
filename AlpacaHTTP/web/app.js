@@ -1782,7 +1782,9 @@ function formatServerClock(date) {
         const suffix = zone ? ` (${zone})` : '';
         return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}${suffix}`;
     } catch (e) {
-        return date.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+        // Parenthesised like the normal path, so the two read as one format
+        // and the only difference an operator sees is the zone itself.
+        return date.toISOString().replace('T', ' ').substring(0, 19) + ' (UTC)';
     }
 }
 
