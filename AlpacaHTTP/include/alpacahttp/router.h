@@ -75,7 +75,10 @@ public:
     // clock_settime() directly and only its mark_stepped()/mark_step_failed()
     // bookkeeping goes through this object, so a test must never POST it an
     // in-range epoch even with the hooks installed. The current
-    // syncSystemClockFromClients setting carries over.
+    // syncSystemClockFromClients setting carries over; the step latches
+    // (stepped_, step_failed_) deliberately do not, since a replacement clock
+    // starts from "nothing has happened to it yet" -- which is what a test
+    // installing hooks before serving wants.
     //
     // Replaces the clock object rather than mutating it, so it must be called
     // before the router serves any request; no request path may be in flight.

@@ -172,7 +172,10 @@ public:
         utc_ = utc;
         ++utc_writes;
         if (on_utc_write) {
-            on_utc_write();  // lets a test observe what happened BEFORE the write
+            // Fires after utc_ and utc_writes are updated, so a test can
+            // sample OTHER state (the host-clock step count) as of the moment
+            // the driver was written to. It is not a pre-write hook.
+            on_utc_write();
         }
     }
 
