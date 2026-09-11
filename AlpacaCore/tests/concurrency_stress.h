@@ -12,13 +12,24 @@
 
 #pragma once
 
+#include <alpacacore/alpaca_errors.h>
 #include <alpacacore/alpacadriver.h>
+#include <alpacacore/util/error_handling.h>
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <exception>
 #include <functional>
+#include <initializer_list>
 #include <memory>
+#include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
 #include <thread>
+#include <typeinfo>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::test {
@@ -38,13 +49,189 @@ namespace alpacacore::test {
  * driver and an `operate` callback exercising its operational surface, then
  * call the scenarios below. Every callback failure is swallowed — operations
  * racing a disconnect are EXPECTED to throw NotConnected; what must never
- * happen is a crash, a hang, or a TSan report.
+ * happen is a crash, a hang, or a TSan report. Wrap each call inside
+ * `operate` with StressCallGuard (below) rather than a local try/catch, so a
+ * fail-fast path doesn't have one throw silently skip the calls after it.
  */
 struct StressOptions {
     int lifecycle_threads = 4;                // hammer connect()/disconnect()/set_connected()
     int op_threads = 4;                       // hammer the operate callback
     std::chrono::milliseconds duration{750};  // per-scenario wall clock
 };
+
+/**
+ * Per-call guard for an operate callback (issue #322).
+ *
+ * `run_lifecycle_stress` below wraps the WHOLE operate callback in one
+ * try/catch, not each call inside it — on a fail-fast path where every call
+ * throws, the first throw skips every call after it, and the storm exercises
+ * one line instead of nine. Every open `[stress]` registration PR at the time
+ * of writing (#316-#320) therefore defined its own local
+ *
+ *     template <typename Fn> void call(Fn&& fn) { try { fn(); } catch (const std::exception&) {} }
+ *
+ * and the catch type has been argued in both directions by review, on the
+ * same PR batch, within a day: widen to `std::exception` so a non-Alpaca
+ * throw escaping teardown can't skip the rest of the callback, or narrow to
+ * `AlpacaException` so an unexpected exception type isn't silently
+ * indistinguishable from the expected `NotConnected`. Both are correct in
+ * isolation and pull in opposite directions; a bare catch can't do both, but
+ * a guard that RECORDS what it swallowed can:
+ *
+ * - An AlpacaException whose error_code() is in the expected set (NotConnected
+ *   by default — a racing disconnect is what every registration expects to
+ *   hit) is swallowed silently.
+ * - An AlpacaException with any other code is swallowed but COUNTED.
+ * - Any other std::exception is swallowed but COUNTED.
+ * - A non-std::exception throw is not caught here. run_lifecycle_stress's own
+ *   catch around the operate call is also `catch (const std::exception&)`, so
+ *   this never reaches it either — it std::terminates the whole test binary,
+ *   exactly as it would without this guard. This guard existing must not
+ *   change that.
+ *
+ * A registration ends with
+ *     INFO(guard.report());
+ *     CHECK(guard.unexpected_count() == 0);
+ * (CHECK has no message argument in Catch2 v2 or v3 -- INFO attaches
+ * guard.report() to the next assertion's failure output instead, so a
+ * failure names what it saw).
+ * The constructor's expected_codes REPLACES the default {NotConnected}, it
+ * does not add to it — pass {NotConnected, PropertyNotImplemented} (not just
+ * {PropertyNotImplemented}) where the driver's contract needs a wider set
+ * (e.g. a getter that answers without a connection), or every racing-
+ * disconnect NotConnected in the storm is counted as a regression and the
+ * case fails nondeterministically. So a widened set is a visible, complete
+ * per-file decision, not a silent default. Thread-safe: op_threads hits this
+ * concurrently.
+ *
+ * NotImplemented, PropertyNotImplemented and MethodNotImplemented all share
+ * the same numeric AlpacaError code (alpaca_errors.h) -- opting into any ONE
+ * of them for readability admits all three. Fine in practice (the three mean
+ * closely related things), but don't read the expected set as more precise
+ * than the codes actually are.
+ *
+ * Neither copyable nor movable (it owns a std::mutex) — a registration must
+ * capture it by reference in the operate lambda, not by value.
+ *
+ * mutex_ is NOT held across fn(): operator() invokes it outside any lock and
+ * takes mutex_ only inside record(), after fn() has returned or thrown. That
+ * is deliberate -- holding it across the call would funnel every op_thread
+ * through one lock and change what the storm actually exercises. So calling
+ * report()/unexpected_count() from inside a guarded call does not deadlock,
+ * and neither does nesting guarded calls; they just lock and unlock in turn.
+ *
+ * What IS true: a read taken while the storm is still running is a torn
+ * snapshot, not a hang -- count_ and samples_ are consistent with each other
+ * at that instant but say nothing about calls still in flight. Read them
+ * after the threads join, which is the only point they mean anything.
+ *
+ * The constructor is explicit, so brace-init needs its own parens:
+ *     StressCallGuard guard({AlpacaError::NotConnected, AlpacaError::InvalidValue});
+ * not `StressCallGuard guard = {...};`, which won't compile.
+ */
+class StressCallGuard {
+public:
+    explicit StressCallGuard(std::initializer_list<int> expected_codes = {AlpacaError::NotConnected})
+        : expected_codes_(expected_codes) {}
+
+    template <typename Fn>
+    void operator()(Fn&& fn) {
+        try {
+            std::forward<Fn>(fn)();
+        } catch (const AlpacaException& ex) {
+            if (is_expected(ex.error_code())) {
+                return;
+            }
+            record_alpaca(ex.error_code(), ex.what());
+        } catch (const std::exception& ex) {
+            // typeid(ex).name() is the ABI-mangled name on libstdc++ (e.g.
+            // "St12out_of_range", not "std::out_of_range") -- fine for a
+            // CHECK message, but don't mistake the prefix in a report() line
+            // for garbage output.
+            record(typeid(ex).name(), ex.what());
+        }
+    }
+
+    int unexpected_count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return count_;
+    }
+
+    /// The first few recorded "<type>: <what()>" lines, newline-joined —
+    /// meant for `INFO(guard.report());` immediately before the closing
+    /// CHECK (see the class doc: CHECK takes no message argument), not for
+    /// parsing.
+    std::string report() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::ostringstream out;
+        for (std::size_t i = 0; i < samples_.size(); ++i) {
+            if (i != 0) {
+                out << '\n';
+            }
+            out << samples_[i];
+        }
+        if (count_ > static_cast<int>(samples_.size())) {
+            out << "\n... and " << (count_ - static_cast<int>(samples_.size())) << " more";
+        }
+        return out.str();
+    }
+
+private:
+    static constexpr std::size_t kMaxSamples = 8;
+
+    bool is_expected(int code) const {
+        for (int expected : expected_codes_) {
+            if (expected == code) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Both overloads format INSIDE the lock, after the cap test, so a storm
+    // that throws long past kMaxSamples pays a counter bump and nothing else.
+    // Taking a ready-made std::string instead would move the formatting to
+    // the call site, where it happens on every throw however full the sample
+    // buffer is -- and an early return in here could not skip it, because the
+    // argument is already built by then. Under TSan that allocation is
+    // instrumented and the operate threads hit this path hard.
+    void record(const char* type, const char* what) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++count_;
+        if (samples_.size() < kMaxSamples) {
+            samples_.push_back(std::string(type) + ": " + what);
+        }
+    }
+
+    void record_alpaca(int code, const char* what) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++count_;
+        if (samples_.size() < kMaxSamples) {
+            samples_.push_back("AlpacaException(code=" + std::to_string(code) + "): " + what);
+        }
+    }
+
+    // const, not just conventionally read-only: is_expected() reads this
+    // without mutex_ (safe only because it's never written after
+    // construction), and const makes that invariant load-bearing rather than
+    // something a later "add an expect() mutator" change could quietly break
+    // into a data race.
+    const std::vector<int> expected_codes_;
+    mutable std::mutex mutex_;
+    int count_ = 0;
+    std::vector<std::string> samples_;
+};
+
+// NOTE for anyone documenting this pattern in THIS header: scripts/
+// check_stress_registration.py reads AlpacaCore/tests/*.h as plain text, with
+// no comment awareness. Writing a complete Catch2 case macro into a comment
+// here -- the macro name, then a description and a bracketed tag string
+// carrying the vendor tag -- reads to that gate as a real stray registration
+// and fails CI over a case that does not exist at runtime. Describe the tags
+// in prose instead, as this paragraph does.
+//
+// That is not hypothetical: the first draft of this very comment spelled the
+// macro out as an example and failed the gate. Tracked in issue #386.
 
 /// Hammer one driver instance from many threads: async connect/disconnect,
 /// sync set_connected (the ASCOM Connected setter path — it bypasses the
