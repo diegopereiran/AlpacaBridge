@@ -83,8 +83,10 @@ TEST_CASE("StressCallGuard - a call after an unexpected throw still keeps isolat
 }
 
 TEST_CASE("StressCallGuard - a non-std::exception throw is not intercepted", "[unit]") {
-    // Must reach the caller (and from there, run_lifecycle_stress's outer
-    // catch, or std::terminate on a raw thread) exactly as it does today.
+    // Must reach the caller exactly as it does today -- and from there,
+    // std::terminate on a raw thread (run_lifecycle_stress's own catch
+    // around the operate call is also catch(const std::exception&), so this
+    // never reaches that either).
     StressCallGuard guard;
     CHECK_THROWS_AS(guard([] { throw 42; }), int);
     CHECK(guard.unexpected_count() == 0);

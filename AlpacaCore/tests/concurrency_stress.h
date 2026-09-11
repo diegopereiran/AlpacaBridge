@@ -77,16 +77,22 @@ struct StressOptions {
  *   hit) is swallowed silently.
  * - An AlpacaException with any other code is swallowed but COUNTED.
  * - Any other std::exception is swallowed but COUNTED.
- * - A non-std::exception throw is not caught here — that already reaches
- *   run_lifecycle_stress's outer catch (or std::terminates if it escapes a
- *   raw thread), and this guard existing must not change that.
+ * - A non-std::exception throw is not caught here. run_lifecycle_stress's own
+ *   catch around the operate call is also `catch (const std::exception&)`, so
+ *   this never reaches it either — it std::terminates the whole test binary,
+ *   exactly as it would without this guard. This guard existing must not
+ *   change that.
  *
  * A registration ends with CHECK(guard.unexpected_count() == 0) (put
- * guard.report() in the CHECK's message so a failure names what it saw), and
- * opts into extra expected codes explicitly where the driver's contract needs
- * them (e.g. {NotConnected, PropertyNotImplemented} for a getter that answers
- * without a connection) — so a widened set is a visible per-file decision,
- * not a silent default. Thread-safe: op_threads hits this concurrently.
+ * guard.report() in the CHECK's message so a failure names what it saw).
+ * The constructor's expected_codes REPLACES the default {NotConnected}, it
+ * does not add to it — pass {NotConnected, PropertyNotImplemented} (not just
+ * {PropertyNotImplemented}) where the driver's contract needs a wider set
+ * (e.g. a getter that answers without a connection), or every racing-
+ * disconnect NotConnected in the storm is counted as a regression and the
+ * case fails nondeterministically. So a widened set is a visible, complete
+ * per-file decision, not a silent default. Thread-safe: op_threads hits this
+ * concurrently.
  *
  * Neither copyable nor movable (it owns a std::mutex) — a registration must
  * capture it by reference in the operate lambda, not by value.
