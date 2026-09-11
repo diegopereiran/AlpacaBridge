@@ -154,7 +154,10 @@ anything unrecognised, which the server treats as an unknown method and the
 guard refuses before the endpoint's own method check runs. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
-unaffected) or the same-origin web portal.
+unaffected) or the same-origin web portal. One device endpoint takes the same
+guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
+a UTCDate write steps the system clock (see the Clock section above). Every
+other device setter is unguarded.
 
 ## Connection-drop pattern (important for clients)
 

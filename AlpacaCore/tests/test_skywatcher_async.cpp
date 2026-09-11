@@ -22,17 +22,30 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <string_view>
 #include <thread>
 
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
 
 namespace {
+// Same shape as the unit file's helper: the call must throw an
+// AlpacaException carrying exactly this error code.
+void expect_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == expected_code);
+    }
+}
 // open-astro#395: pins the host-discipline probe for one case and restores
 // the real adjtimex read afterwards, whatever the case does.
 struct ProbeGuard {
@@ -1560,6 +1573,18 @@ TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and repo
     const auto back_error =
         std::chrono::duration_cast<std::chrono::milliseconds>(reported_back - std::chrono::system_clock::now());
     CHECK(std::abs(back_error.count()) < 500);
+
+    // open-astro#414: the offset is session state. Arm it again, then
+    // disconnect and reconnect: the readback is back on the host clock until
+    // the client writes UTCDate once more.
+    driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1));
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto after_reconnect = std::chrono::duration_cast<std::chrono::milliseconds>(
+        driver->get_utc_date() - std::chrono::system_clock::now());
+    CHECK(std::abs(after_reconnect.count()) < 500);
     driver->set_connected(false);
 }
 
@@ -1705,6 +1730,121 @@ TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 
     // Right at the tolerance edge: 1 s drift is not a step, 1.5 s is.
     CHECK_FALSE(host_clock_stepped(seconds(91), seconds(90)));
     CHECK(host_clock_stepped(milliseconds(91500), seconds(90)));
+}
+
+TEST_CASE("SkyWatcher async - target properties are independently set (#304, #391)", "[skywatcher][async]") {
+    // Moved here from the unit file when the getters gained check_connected()
+    // (#391): ASCOM treats the two target properties as independent, each
+    // throwing ValueNotSet until that property itself has been written.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    REQUIRE(driver->get_connected());
+
+    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // Writing RA must not unlock Dec.
+    driver->set_target_right_ascension(7.25);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    expect_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // Writing Dec unlocks the second property without disturbing the first.
+    driver->set_target_declination(-12.5);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    CHECK(driver->get_target_declination() == -12.5);
+
+    // Updating one leaves the other intact.
+    driver->set_target_right_ascension(3.0);
+    CHECK(driver->get_target_declination() == -12.5);
+    driver->set_connected(false);
+
+    // Disconnected, the getters say NotConnected first, whatever was set.
+    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("SkyWatcher async - Dec written first leaves RA unset (#304)", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_target_declination(41.0);
+    CHECK(driver->get_target_declination() == 41.0);
+    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a slew refused at dispatch still publishes the target (#404)", "[skywatcher][async]") {
+    // The three writers agree: the target is what the client asked for, set
+    // before dispatch. The fake refuses the next ":J" start, so the
+    // synchronous slew throws at dispatch; the target must still read back.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    mount.reject_start_motion(1, 1);  // kAxisRa; the goto starts RA first, so that throw is the dispatch failure
+    CHECK_THROWS_AS(driver->slew_to_coordinates(5.5, -25.0), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_slewing());
+    CHECK(std::abs(driver->get_target_right_ascension() - 5.5) < 1e-9);
+    CHECK(std::abs(driver->get_target_declination() + 25.0) < 1e-9);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a sync that fails after its writes still publishes the target (#404)",
+          "[skywatcher][async]") {
+    // The sync half of #404: with tracking on, the sync stops RA, writes both
+    // ":E" positions, then restarts tracking. The fake refuses that restart
+    // (":J" answered "!2"), so sync_to_coordinates() throws after the point
+    // the old code published the target. The pair must still read back.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));
+    mount.reject_start_motion(1, 1);
+    CHECK_THROWS_AS(driver->sync_to_coordinates(5.5, -25.0), alpacacore::AlpacaException);
+    CHECK(std::abs(driver->get_target_right_ascension() - 5.5) < 1e-9);
+    CHECK(std::abs(driver->get_target_declination() + 25.0) < 1e-9);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - the client-clock disagreement WARN fires once per connection (#400)",
+          "[skywatcher][async]") {
+    // Only meaningful on a disciplined host (the WARN is gated on it); on an
+    // undisciplined runner the count stays 0 on both writes and the case
+    // still passes, which is the honest outcome without a discipline seam.
+    // The sink is restored by a guard, so a REQUIRE that throws out of the
+    // case cannot leave the global sink pointing at this frame's counter.
+    std::atomic<int> warns{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("Client UTCDate disagrees") != std::string::npos) {
+                ++warns;
+            }
+        });
+    {
+        FakeSkyWatcherMount mount;
+        REQUIRE(mount.ok());
+        auto driver = connected_driver(mount);
+        const auto far = std::chrono::system_clock::now() + std::chrono::minutes(30);
+        driver->set_utc_date(far);
+        driver->set_utc_date(far + std::chrono::seconds(1));
+        driver->set_utc_date(far + std::chrono::seconds(2));
+        const int first_session = warns.load();
+        CHECK(first_session <= 1);
+        // A reconnect re-arms it.
+        driver->set_connected(false);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        driver->set_utc_date(far);
+        CHECK(warns.load() == first_session * 2);
+        driver->set_connected(false);
+    }
 }
 
 TEST_CASE("SkyWatcher async - discipline gained after the write stops the client offset steering pointing (#405)",

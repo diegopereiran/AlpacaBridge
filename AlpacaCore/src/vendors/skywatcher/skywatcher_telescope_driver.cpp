@@ -745,7 +745,13 @@ public:
         return get_slewing_locked();
     }
 
+    // open-astro#391: the target pair is written under mutex_ by the slew,
+    // sync and reset paths, so the accessors take it too (no I/O behind
+    // them), and the getters answer NotConnected before ValueNotSet like
+    // every other property here.
     double get_target_declination() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -756,11 +762,14 @@ public:
         if (dec < -90.0 || dec > 90.0) {
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -771,6 +780,7 @@ public:
         if (ra < 0.0 || ra >= 24.0) {
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
@@ -824,14 +834,20 @@ public:
         // client does, and the router has already refused to step it.
         utc_offset_host_was_synchronized_ = detail::host_synchronized_probe();
         next_discipline_resample_ = std::chrono::steady_clock::now() + detail::host_discipline_resample_interval();
-        if (utc_offset_host_was_synchronized_ &&
+        // open-astro#400: once per connection. The disagreement is a
+        // configuration fact, not an event, and a client that re-writes
+        // UTCDate on a poll interval would otherwise repeat the same line for
+        // the whole session; reset_runtime_state_locked() re-arms it.
+        if (utc_offset_host_was_synchronized_ && !client_disagreement_warned_ &&
             (utc_offset_ > alpacacore::util::HostClock::kClientDisagreementWarn ||
              utc_offset_ < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
+            client_disagreement_warned_ = true;
             ALPACA_LOG_WARN(
                 "SkyWatcher",
                 "Client UTCDate disagrees with an NTP-disciplined host clock by " +
                     std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(utc_offset_).count()) +
-                    " ms; honouring it for the UTCDate readback but pointing by the host clock");
+                    " ms; honouring it for the UTCDate readback but pointing by the host clock (logged once per "
+                    "connection)");
         }
         invalidate_position_cache_locked();  // reported RA moves with LST
     }
@@ -1423,18 +1439,24 @@ public:
         });
     }
 
-    void slew_to_target() override {
+    // Snapshot of the target pair, taken under mutex_ and released before the
+    // motion call, which takes the same lock itself (open-astro#391).
+    std::pair<double, double> target_or_throw() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
-        slew_to_coordinates(target_ra_hours_, target_dec_degrees_);
+        return {target_ra_hours_, target_dec_degrees_};
+    }
+
+    void slew_to_target() override {
+        const auto [ra, dec] = target_or_throw();
+        slew_to_coordinates(ra, dec);
     }
 
     void slew_to_target_async() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
-        }
-        slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
+        const auto [ra, dec] = target_or_throw();
+        slew_to_coordinates_async(ra, dec);
     }
 
     void sync_to_coordinates(double ra, double dec) override {
@@ -1456,6 +1478,13 @@ public:
         // stop is stale by the whole pause (stop ramp + writes + restart,
         // ~1-3 s = 15-45 arcsec of RA; seen by ConformU as a constant
         // ~79 arcsec return error together with the old post-sync freeze).
+        // open-astro#404: published before the hardware write, like the two
+        // slew paths, so a sync that fails mid-way still reports the pair the
+        // client asked for.
+        target_ra_hours_ = ra;
+        target_dec_degrees_ = dec;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         const bool was_tracking = tracking_;
         if (was_tracking) {
             const uint64_t gen = ++motion_generation_;
@@ -1473,20 +1502,13 @@ public:
         if (was_tracking) {
             set_tracking_locked(lock, true);
         }
-
-        target_ra_hours_ = ra;
-        target_dec_degrees_ = dec;
-        target_ra_set_ = true;
-        target_dec_set_ = true;
         invalidate_position_cache_locked();
         // No post-sync read freeze: live reads land on the synced frame.
     }
 
     void sync_to_target() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
-        }
-        sync_to_coordinates(target_ra_hours_, target_dec_degrees_);
+        const auto [ra, dec] = target_or_throw();
+        sync_to_coordinates(ra, dec);
     }
 
     void unpark() override {
@@ -1783,6 +1805,13 @@ private:
     void reset_runtime_state_locked() {
         target_ra_set_ = false;
         target_dec_set_ = false;
+        client_disagreement_warned_ = false;  // open-astro#400: one WARN per connection
+        // open-astro#414: the client UTCDate offset and the discipline flag
+        // sampled with it are session state; a reconnect starts from the
+        // host clock until the client writes UTCDate again.
+        has_utc_offset_ = false;
+        utc_offset_ = {};
+        utc_offset_host_was_synchronized_ = false;
         parked_ = false;
         at_home_ = false;
         tracking_ = false;
@@ -2771,6 +2800,14 @@ private:
         slewing_cached_ = true;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         restore_tracking_after_slew_ = tracking_;
+        // open-astro#404: the target is what the client ASKED for, so it is
+        // published before dispatch on every writer (this one, the async slew
+        // and sync). A dispatch that fails does not un-ask it, and the three
+        // paths now agree on what TargetRightAscension reads afterwards.
+        target_ra_hours_ = ra;
+        target_dec_degrees_ = dec;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         try {
             dispatch_predicted_goto_locked(lock, ra, dec);
         } catch (...) {
@@ -2781,10 +2818,6 @@ private:
             restore_tracking_after_slew_ = false;
             throw;
         }
-        target_ra_hours_ = ra;
-        target_dec_degrees_ = dec;
-        target_ra_set_ = true;
-        target_dec_set_ = true;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         parked_ = false;
@@ -3248,6 +3281,7 @@ private:
     // which is why it is mutable.
     mutable bool utc_offset_host_was_synchronized_ = false;
     mutable std::chrono::steady_clock::time_point next_discipline_resample_{};  // open-astro#405
+    bool client_disagreement_warned_ = false;                                   // open-astro#400
     mutable std::chrono::system_clock::duration utc_offset_{};
     mutable std::chrono::system_clock::time_point utc_anchor_system_{};
     mutable std::chrono::steady_clock::time_point utc_anchor_steady_{};
