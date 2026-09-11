@@ -865,14 +865,20 @@ TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period", "
 
 TEST_CASE("SkyWatcher southern hemisphere - tracking turns RA the right way",
           "[skywatcher][telescope][eqm35][hemisphere]") {
-    // Regression for the hardware bug found on an EQM-35 Pro at latitude -37.2
-    // (2026-09-06). start_speed_motion_locked() negated the RA rate below the
-    // equator, so tracking drove axis 1 counts DOWN when holding a star needs
-    // them UP -- doubling the sky's apparent motion instead of cancelling it.
+    // History: #250 removed the southern RA reversal from
+    // start_speed_motion_locked() because the driver's REPORTED RA advanced
+    // at 2x sidereal with it in place. That report came from a pointing
+    // model that read the RA axis angle as the hour angle in both
+    // hemispheres; #432 showed the model was wrong (the counterweight-down
+    // home puts the dec-axis sweep on the HA = +/-6 h circle, and south of
+    // the equator the mount faces the other pole, so HA = -(a1/15 +/- 6)).
+    // With the corrected model, holding a star below the equator needs the
+    // counts to go DOWN -- indi-eqmod's `RAInverted = (Hemisphere == SOUTH)`.
     //
-    // Crucially, the RATE was correct the whole time (0.99995x sidereal on
-    // hardware). Only the DIRECTION was wrong, so any test that measures the
-    // magnitude of axis motion passes. This asserts the sign.
+    // The RATE was correct the whole time (0.99995x sidereal on hardware);
+    // only the direction is at stake, so this asserts the sign. The physical
+    // (oracle-checked) version of this assertion is in
+    // test_skywatcher_pointing.cpp.
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
     REQUIRE(mount.ok());
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
@@ -884,19 +890,19 @@ TEST_CASE("SkyWatcher southern hemisphere - tracking turns RA the right way",
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
     const double after = mount.axis_degrees(1);
 
-    // Hour angle is a1/15 in BOTH hemispheres, and tracking must make HA
-    // increase with sidereal time -- so the axis angle must INCREASE.
+    // South of the equator the sky hour angle increases as the axis angle
+    // DEcreases, so tracking must drive the counts down.
     INFO("axis1 moved from " << before << " to " << after << " deg");
-    CHECK(after > before);
+    CHECK(after < before);
 
     driver->set_tracking(false);
     driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[skywatcher][telescope][hemisphere]") {
-    // The fix removed a hemisphere conditional; guard that the northern
-    // behaviour (which was correct, and is what the Wave 100i was validated
-    // on) is untouched -- both hemispheres now drive RA the same way.
+    // North of the equator increasing counts move the OTA west (EQMOD's
+    // convention and what the Wave 100i was validated on), so tracking must
+    // drive the counts UP; the southern sibling above asserts the mirror.
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
     REQUIRE(mount.ok());
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
@@ -1004,22 +1010,14 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
 
 // ── Pier side across the meridian (open-astro#261) ──────────────────────────
 //
-// Audit finding (2026-09-09, no hardware): the branch that decides both the
-// dec-axis sign AND the reported pier side is chosen purely from the sign of
-// hour angle in ra_dec_to_axis_degrees_locked() / get_side_of_pier() /
-// get_destination_side_of_pier() -- hemisphere_south_locked() is consulted
-// ONLY for dec_mech (which flips the a2 magnitude, not which branch is
-// picked). So, unlike the RA-tracking-direction bug (#250) and the
-// DeclinationRate/PulseGuide sign bug (#253) -- both of which were exposed by
-// the driver's own reported coordinates moving the wrong way under motion --
-// there is no internal contradiction a loopback test can find here: whichever
-// physical side the code labels "pierEast", it reports and slews to that same
-// side consistently in both hemispheres, by construction. These tests assert
-// exactly that contract (self-consistency + flip-with-HA, the same shape
-// OnStep's ConformU-validated fix above requires: "WE", not constant) and
-// will pass whether or not the label matches the true physical side below the
-// equator. They do NOT, and cannot, confirm which side is physically correct
-// -- that needs the plate-solved goto-across-the-meridian check in #261.
+// These tests assert the ASCOM contract only: the reported side flips with
+// hour angle and agrees with DestinationSideOfPier (the same shape OnStep's
+// ConformU-validated fix above requires: "WE", not constant). Which
+// MECHANICAL branch realises each side is the #261 question, and it is
+// settled by the physical oracle in test_skywatcher_pointing.cpp (#432):
+// the pierEast branch is a2 >= 0 north of the equator and a2 < 0 south of
+// it, because the mount faces the opposite pole there. The labels below are
+// therefore the same in both hemispheres while the axis branch mirrors.
 
 TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and agrees with destination",
           "[skywatcher][telescope][eqm35][hemisphere]") {

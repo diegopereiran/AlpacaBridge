@@ -1539,11 +1539,25 @@ datagrams before each send so replies cannot get off-by-one.
   30 s re-sample above covers discipline gained without a step. Tests pin both branches through
   the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
   clock state (#395).
-- Pointing convention: home = counterweight down pointing at the pole, counts offset
-  `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
-  `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
-  sign (HA >= 0 -> pierEast). TODO markers in the driver flag the physical rotation
-  signs and southern-hemisphere handling as hardware-unvalidated.
+- Pointing convention (#432): home = counterweight down pointing at the visible pole,
+  counts offset `0x800000`, axis angles `a1`/`a2` in degrees from home in the
+  increasing-count direction. **Mechanical frame** — branch A (`a2 >= 0`):
+  `dec_mech = 90 - a2`, `ha_mech = a1/15 + 6`; branch B (`a2 < 0`): `dec_mech = 90 + a2`,
+  `ha_mech = a1/15 - 6`. The 6 h is the counterweight-down home: the dec axis lies in the
+  meridian plane there, so a dec-only rotation sweeps the HA = ±6 h circle and the meridian
+  needs the bar horizontal (`a1 = ±90`); every reachable target keeps `|a1| <= 90`
+  (counterweight never above horizontal). **Sky frame**: north of the equator sky = mechanical;
+  south of it `dec = -dec_mech`, `HA = -ha_mech`, and branch A is pier**West** (the ASCOM label
+  follows the sky hour angle, `HA >= 0 -> pierEast`, in both hemispheres; the branch that
+  realises it mirrors). Tracking, `RightAscensionRate` and East/West pulses go through
+  `ra_axis_sign_locked()` (counts up north, down south — indi-eqmod's
+  `RAInverted = (Hemisphere == SOUTH)`); `MoveAxis`, goto deltas and AutoHome are mechanical
+  and never apply it. This is indi-eqmod's `EncodersToRADec()` with its DE zero re-expressed
+  relative to its home (`DEStepHome = DEStepInit + steps/4`). **Do not judge this model by
+  the driver's own reported RA/Dec, ConformU included: the driver reports what it commands.**
+  `test_skywatcher_pointing.cpp` carries an independent vector oracle (GEM geometry, EQMOD
+  sign conventions) and asserts gotos land on the sky in both hemispheres; extend that file
+  for any change here.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period
@@ -1893,10 +1907,15 @@ with the fix reverted to the raw equality check, and passes with it restored.
 
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
-  - Pointing math is hemisphere-correct at latitude -37.2 with no changes: home
-    points at the SOUTH celestial pole, so `dec = -90 + a2`. Verified against raw
-    counts — reported HA matched axis 1 to 0.0004 deg, and alt/az recomputed
-    independently from the reported RA/Dec matched the driver to 4 decimal places.
+  - Pointing math at latitude -37.2: home points at the SOUTH celestial pole, so
+    `dec = -90 + a2`. The session "verified" this against raw counts — reported HA
+    matched axis 1 to 0.0004 deg, and alt/az recomputed from the reported RA/Dec matched
+    to 4 decimal places. **That was self-consistency only**: the driver reports the model
+    it commands, so those checks could not see that the RA-axis/hour-angle relation was
+    missing its 6 h home offset and its southern sign (#432, found from a Wave 150i sky
+    test in the north). The dec relation was right; the RA relation is now
+    `HA = -(a1/15 ± 6)` here. Treat every "reported coordinates matched" line in this
+    section as a consistency check, not a sky check.
   - `MoveAxis` verified semantically in all four directions, not just for motion:
     each button was checked against the change in REPORTED RA/Dec. N: Dec +15.59
     deg, S: Dec -16.96 deg, E: RA +15.47 deg, W: RA -15.28 deg, zero cross-axis
@@ -1912,7 +1931,11 @@ with the fix reverted to the raw equality check, and passes with it restored.
     ascom-standards.org/newdocs/telescope.html#Telescope.MoveAxis, 2026-09-06).
   - **Tracking rate measured at 0.99995x sidereal over 5 minutes** (-46 ppm,
     -2.5 arcsec/hour, against a +/-31 ppm encoder-quantisation floor), Dec drift
-    exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1.
+    exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1. The
+    magnitude stands; the DIRECTION that session settled on (counts up, #250) was
+    reversed by #432: below the equator the counts must go down, which is what the
+    original code did and what indi-eqmod does. The "2.007x sidereal" that condemned
+    it was the reported RA of the old model, not the sky.
   - **Technique worth reusing:** the protocol wrapper does NOT log individual
     commands, so do not plan to read step periods out of the journal. Sample
     `":j1"`/`":j2"` through the Alpaca `commandstring` passthrough instead and
