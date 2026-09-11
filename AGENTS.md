@@ -1184,7 +1184,7 @@ Every new driver **must** ship with at least the following 8 unit test cases, pl
 
 9. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test. This is an `AlpacaHTTP`-level integration test, additional to the 8 vendor unit tests above, not a substitute for cases 6-8.
 
-### Hardware-free driver tests via the SDK seam (ToupTek pattern — extend to other vendors)
+### Hardware-free driver tests via the SDK seam (ToupTek and QHY — extend to other vendors)
 
 The ToupTek drivers take the SDK through the abstract `ToupTekSDK` interface
 (`touptek_sdk_wrapper.h`): production factories pass the `ToupTekSDKWrapper`
@@ -1202,6 +1202,18 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
 - When touching another vendor's wrapper significantly, adopt the same seam
   shape there (one abstract interface + factory overload + scripted fake) —
   the reusable pattern from issue #104.
+- **QHY has the same seam** (`QHYSDK` / `FakeQHYSDK` / `LockedQHYSDK`, issue
+  #321), and for QHY it is the *only* way to test a connect at all: the first
+  `libqhyccd` call spawns `PnpEventListenerThread`, which segfaults in
+  `libusb_hotplug_register_callback` on any host without a working USB stack,
+  so the real singleton cannot be touched on a test runner. Two extra rules
+  apply there. **(a) No QHY fake method may block** — the camera driver's
+  exposure, temperature and cooler-off workers join with a bounded timeout and
+  *detach* on expiry, and its pulse-guide worker is detached by design, so a
+  blocking fake leaves detached threads calling into it after the test ends.
+  **(b) Those detachable workers capture a `QHYSDK*`, never `this`** — reaching
+  the seam through the `sdk_` member from a worker that may outlive the driver
+  is a use-after-free at exactly the moment the SDK call returns.
 - **Poll-until-settled loops keep the sleep cadence in the driver but put the
   DECISION in `util::ConsecutiveSettle`** (`util/poll_settle.h`, issue #105):
   stability-run + poll-budget semantics, unit-tested with scripted sequences

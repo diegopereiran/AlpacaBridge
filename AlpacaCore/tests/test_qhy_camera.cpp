@@ -15,8 +15,11 @@
 #include <alpacacore/version.h>
 
 #include <functional>
+#include <string>
 
 #include "catch2_compat.h"
+#include "fake_qhy_sdk.h"
+#include "locked_qhy_sdk.h"
 
 namespace {
 
@@ -27,6 +30,19 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     } catch (const alpacacore::AlpacaException& ex) {
         REQUIRE(ex.error_code() == expected_code);
     }
+}
+
+using alpacacore::test::FakeQHYSDK;
+using alpacacore::test::LockedQHYSDK;
+
+// Connect coverage runs over the SDK seam (issue #321). The real QHY SDK
+// cannot initialise on a test runner at all -- its libusb hotplug init
+// segfaults on a USB-less host -- so before the seam existed nothing in this
+// file ever reached set_connected(true).
+FakeQHYSDK make_fake(const std::string& id = "fake-qhy-0") {
+    FakeQHYSDK fake;
+    fake.cameras.push_back(FakeQHYSDK::default_camera(id, "FakeQHY600"));
+    return fake;
 }
 
 } // namespace
@@ -118,4 +134,107 @@ TEST_CASE("QHY Camera Driver - State Machine Contracts", "[qhy][camera][unit]") 
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
+}
+
+// ── Connect path (over the SDK seam, issue #321) ────────────────────────────
+
+TEST_CASE("QHY Camera Driver - Connects over the SDK seam", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // The connect sequence the wrapper documents: open, init, then chip info
+    // and the readout-mode enumeration.
+    CHECK(fake.physical_opens == 1);
+    CHECK(fake.init_calls == 1);
+    CHECK(fake.call_count("get_chip_info") == 1);
+    CHECK(fake.call_count("get_num_readout_modes") == 1);
+    CHECK(driver->get_camera_x_size() == 64);
+    CHECK(driver->get_camera_y_size() == 48);
+    CHECK(driver->get_readout_modes().size() == 2);
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.physical_closes == 1);
+    CHECK(fake.ref_count("fake-qhy-0") == 0);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("QHY Camera Driver - A failed connect rolls back the ref-counted open", "[qhy][camera][unit]") {
+    // An unmatched open pins the handle for the life of the process: the CFW
+    // driver shares the same open_count, so CloseQHYCCD would never fire.
+    auto fake = make_fake();
+    fake.throw_from.insert("set_bits_mode");
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.physical_opens == 1);
+    CHECK(fake.physical_closes == 1);  // rolled back
+    CHECK(fake.ref_count("fake-qhy-0") == 0);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("QHY Camera Driver - Reconnect reuses the driver cleanly", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    driver->set_connected(true);
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(fake.physical_opens == 2);
+    CHECK(fake.physical_closes == 1);
+
+    driver->set_connected(false);
+    CHECK(fake.physical_opens == fake.physical_closes);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("QHY Camera Driver - Connecting an unknown camera id fails and leaks nothing", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "not-a-camera", sdk);
+
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.physical_opens == 0);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("QHY Camera Driver - An uninitialised SDK resource fails the connect", "[qhy][camera][unit]") {
+    // The failure mode issue #321 is about: on real hardware this path is only
+    // reachable by crashing the process inside libqhyccd.
+    auto fake = make_fake();
+    fake.sdk_resource_available = false;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.physical_opens == 0);
+}
+
+TEST_CASE("QHY Camera Driver - Gain and offset round-trip while connected", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+
+    driver->set_gain(42);
+    CHECK(driver->get_gain() == 42);
+    driver->set_offset(17);
+    CHECK(driver->get_offset() == 17);
+    CHECK(driver->get_gain_min() == 0);
+    CHECK(driver->get_gain_max() == 100);
+
+    require_alpaca_error([&]() { driver->set_gain(1000); }, alpacacore::AlpacaError::InvalidValue);
+
+    driver->set_connected(false);
+    CHECK(fake.underflow_closes == 0);
 }

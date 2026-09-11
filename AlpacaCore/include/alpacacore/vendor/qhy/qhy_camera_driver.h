@@ -13,6 +13,8 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
+
 #include <memory>
 #include <string>
 
@@ -38,5 +40,20 @@ std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::st
  * @return Unique pointer to camera driver
  */
 std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index);
+
+/**
+ * @brief Test overloads taking an explicit SDK seam (issue #321).
+ *
+ * The default overloads above pass QHYSDKWrapper::instance(). These let a test
+ * inject a FakeQHYSDK instead — the only way to reach this driver's connect
+ * path, since the real SDK cannot initialise on a USB-less host.
+ *
+ * The SDK reference MUST outlive the returned driver, INCLUDING this driver's
+ * detachable workers: the exposure, temperature and cooler-off threads join
+ * with a bounded timeout and detach on expiry, and the pulse-guide thread is
+ * detached by design. All of them hold a QHYSDK* rather than `this`.
+ */
+std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk);
+std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk);
 
 } // namespace alpacacore::vendor::qhy
