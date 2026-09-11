@@ -102,15 +102,53 @@ namespace guide_direction {
 } // namespace guide_direction
 
 /**
- * @brief Singleton wrapper around the QHYCCD SDK.
+ * @brief Abstract interface over the QHYCCD SDK operations the drivers use.
  *
- * Manages SDK resource lifetime (InitQHYCCDResource / ReleaseQHYCCDResource),
- * camera handle lifecycle, and exposes all per-camera SDK operations.
- * SDK headers are not exposed; all types are standard C++.
+ * This is the fault-injection seam (issue #321): production code talks to the
+ * QHYSDKWrapper singleton below; tests substitute a scripted fake
+ * (AlpacaCore/tests/fake_qhy_sdk.h) that can throw from any specific call,
+ * return canned enumerations/positions, and count opens vs closes — so the
+ * connect paths are exercisable without hardware. The QHY SDK is the one
+ * vendor blob that cannot run at all on a USB-less host: the first libqhyccd
+ * call spawns PnpEventListenerThread, which segfaults in
+ * libusb_hotplug_register_callback when libusb_init failed. Any QHY connect
+ * or `[stress]` test therefore MUST run against the fake and never touch the
+ * singleton — that is the rule for anything added here, not a description of
+ * current coverage: the connect tests on this branch follow it, and the
+ * `[stress]` registration (issue #321) has to satisfy it before the two QHY
+ * entries can come off the allow-list in check_stress_registration.py.
+ * Each create_qhy_* factory has an overload taking a QHYSDK&; the
+ * default overload passes the singleton.
+ *
+ * Contract notes for implementors (fakes included):
+ * - Methods report failure by THROWING AlpacaException, never by return code
+ *   (except the documented bool returns on get_camera_model, get_chip_info,
+ *   is_control_available, start_single_frame and get_single_frame).
+ * - open_camera/close_camera are reference-counted per camera_id: the physical
+ *   open happens on the first opener and the physical close when the last
+ *   owner releases, so a camera driver and the CFW driver on the same physical
+ *   device (e.g. the miniCam8M's integrated wheel) each get an independent
+ *   open/close lifecycle over one shared handle.
+ * - A fake MUST NOT block in any method. The camera driver's exposure,
+ *   temperature and cooler-off workers join with a bounded timeout and DETACH
+ *   on expiry, and its pulse-guide thread is detached by design; a blocking
+ *   fake turns those into detached threads still calling into the fake after
+ *   the test body has moved on.
+ *
+ * LIFETIME: drivers hold a plain QHYSDK& — and the detachable workers above
+ * capture a QHYSDK* — so the SDK object MUST outlive every driver constructed
+ * on it. Declare the fake before the driver (locals destroy in reverse order);
+ * never stash a driver beyond the fake's scope.
  */
-class QHYSDKWrapper {
+class QHYSDK {
 public:
-    static QHYSDKWrapper& instance();
+    // Destructor is protected and NON-virtual (below), not public and virtual:
+    // nothing ever owns a QHYSDK*. Drivers hold a QHYSDK&, workers capture a
+    // raw QHYSDK*, and every implementation is either a function-local static
+    // (QHYSDKWrapper) or a stack object (FakeQHYSDK, LockedQHYSDK). A public
+    // virtual destructor here would make `delete static_cast<QHYSDK*>(&...)`
+    // compile against the singleton, since access for delete is checked on the
+    // static type.
 
     // ── Enumeration ──────────────────────────────────────────────────────────
 
@@ -121,12 +159,12 @@ public:
      * Chip dimensions and capabilities require calling get_chip_info() after
      * open_camera() + init_camera().
      */
-    std::vector<QHYCameraInfo> enumerate_cameras();
+    virtual std::vector<QHYCameraInfo> enumerate_cameras() = 0;
 
     /**
      * @brief Get the model name for a camera ID without opening it.
      */
-    bool get_camera_model(const std::string& camera_id, std::string& model);
+    virtual bool get_camera_model(const std::string& camera_id, std::string& model) = 0;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -139,9 +177,9 @@ public:
      * lifecycle -- the underlying OpenQHYCCD fires once, on the first opener,
      * and CloseQHYCCD only when the last owner calls close_camera().
      */
-    void open_camera(const std::string& camera_id);
-    void init_camera(const std::string& camera_id);
-    void close_camera(const std::string& camera_id);
+    virtual void open_camera(const std::string& camera_id) = 0;
+    virtual void init_camera(const std::string& camera_id) = 0;
+    virtual void close_camera(const std::string& camera_id) = 0;
 
     /**
      * @brief Register the exposure worker's liveness flag for a camera_id.
@@ -156,7 +194,8 @@ public:
      * Stored outside the handle map so it survives that map entry being
      * erased by close_camera() -- which is exactly the moment it's needed.
      */
-    void register_exposure_worker(const std::string& camera_id, std::shared_ptr<std::atomic<bool>> running_flag);
+    virtual void register_exposure_worker(const std::string& camera_id,
+                                          std::shared_ptr<std::atomic<bool>> running_flag) = 0;
 
     // ── Chip info (requires open + init) ────────────────────────────────────
 
@@ -165,23 +204,22 @@ public:
      *
      * Calls GetQHYCCDChipInfo and capability checks.
      */
-    bool get_chip_info(const std::string& camera_id, QHYCameraInfo& info);
+    virtual bool get_chip_info(const std::string& camera_id, QHYCameraInfo& info) = 0;
 
     // ── Control parameters ───────────────────────────────────────────────────
 
-    bool is_control_available(const std::string& camera_id, int control_id);
-    double get_param(const std::string& camera_id, int control_id);
-    QHYControlRange get_param_range(const std::string& camera_id, int control_id);
-    void set_param(const std::string& camera_id, int control_id, double value);
+    virtual bool is_control_available(const std::string& camera_id, int control_id) = 0;
+    virtual double get_param(const std::string& camera_id, int control_id) = 0;
+    virtual QHYControlRange get_param_range(const std::string& camera_id, int control_id) = 0;
+    virtual void set_param(const std::string& camera_id, int control_id, double value) = 0;
 
     // ── Image configuration ──────────────────────────────────────────────────
 
-    void set_resolution(const std::string& camera_id,
-                        uint32_t start_x, uint32_t start_y,
-                        uint32_t width, uint32_t height);
-    void set_bin_mode(const std::string& camera_id, uint32_t wbin, uint32_t hbin);
-    void set_bits_mode(const std::string& camera_id, uint32_t bits);
-    uint32_t get_mem_length(const std::string& camera_id);
+    virtual void set_resolution(const std::string& camera_id, uint32_t start_x, uint32_t start_y, uint32_t width,
+                                uint32_t height) = 0;
+    virtual void set_bin_mode(const std::string& camera_id, uint32_t wbin, uint32_t hbin) = 0;
+    virtual void set_bits_mode(const std::string& camera_id, uint32_t bits) = 0;
+    virtual uint32_t get_mem_length(const std::string& camera_id) = 0;
 
     // ── Exposure ─────────────────────────────────────────────────────────────
 
@@ -189,7 +227,7 @@ public:
      * @brief Start a single frame exposure.
      * @return true if SDK returned QHYCCD_READ_DIRECTLY (old cameras — read immediately)
      */
-    bool start_single_frame(const std::string& camera_id);
+    virtual bool start_single_frame(const std::string& camera_id) = 0;
 
     /**
      * @brief Blocking call that waits for a single frame and copies it into buffer.
@@ -197,17 +235,15 @@ public:
      * buffer must be pre-allocated to at least get_mem_length() bytes.
      * @return true on success, false on failure
      */
-    bool get_single_frame(const std::string& camera_id,
-                          uint8_t* buffer,
-                          uint32_t& width, uint32_t& height,
-                          uint32_t& bpp, uint32_t& channels);
+    virtual bool get_single_frame(const std::string& camera_id, uint8_t* buffer, uint32_t& width, uint32_t& height,
+                                  uint32_t& bpp, uint32_t& channels) = 0;
 
     /**
      * @brief Cancel the current exposure (and discard the frame).
      *
      * Uses CancelQHYCCDExposingAndReadout — all cameras support this.
      */
-    void cancel_exposure(const std::string& camera_id);
+    virtual void cancel_exposure(const std::string& camera_id) = 0;
 
     // ── Guide port ──────────────────────────────────────────────────────────
 
@@ -217,7 +253,7 @@ public:
      * @param qhy_direction  QHY direction: EAST=0, NORTH=1, SOUTH=2, WEST=3
      * @param duration_ms    Duration in milliseconds
      */
-    void guide(const std::string& camera_id, uint32_t qhy_direction, uint16_t duration_ms);
+    virtual void guide(const std::string& camera_id, uint32_t qhy_direction, uint16_t duration_ms) = 0;
 
     // ── Temperature ──────────────────────────────────────────────────────────
 
@@ -227,7 +263,7 @@ public:
      * Must be called periodically (approximately every second) while cooling
      * is active.
      */
-    void control_temp(const std::string& camera_id, double target_temp_c);
+    virtual void control_temp(const std::string& camera_id, double target_temp_c) = 0;
 
     // ── Filter wheel (integrated CFW) ────────────────────────────────────────
 
@@ -235,29 +271,94 @@ public:
      * @brief Move the integrated color filter wheel to a slot.
      * @param position 0-based slot index.
      */
-    void move_cfw(const std::string& camera_id, int position);
+    virtual void move_cfw(const std::string& camera_id, int position) = 0;
 
     /**
      * @brief Read the CFW's current settled position.
      * @return 0-based slot index, or -1 if the wheel is still moving/unsettled.
      */
-    int get_cfw_position(const std::string& camera_id);
+    virtual int get_cfw_position(const std::string& camera_id) = 0;
 
     // ── Readout modes ────────────────────────────────────────────────────────
 
-    uint32_t get_num_readout_modes(const std::string& camera_id);
-    std::string get_readout_mode_name(const std::string& camera_id, uint32_t mode_index);
-    void set_readout_mode(const std::string& camera_id, uint32_t mode_index);
+    virtual uint32_t get_num_readout_modes(const std::string& camera_id) = 0;
+    virtual std::string get_readout_mode_name(const std::string& camera_id, uint32_t mode_index) = 0;
+    virtual void set_readout_mode(const std::string& camera_id, uint32_t mode_index) = 0;
 
     // ── Misc ─────────────────────────────────────────────────────────────────
 
-    std::string get_sdk_version();
+    virtual std::string get_sdk_version() = 0;
+
+protected:
+    // See the note at the top of the class: protected + non-virtual, so no
+    // caller can delete through a QHYSDK*, while every implementation is still
+    // destroyed normally through its own static type.
+    ~QHYSDK() = default;
+};
+
+/**
+ * @brief Singleton wrapper around the QHYCCD SDK.
+ *
+ * Manages SDK resource lifetime (InitQHYCCDResource / ReleaseQHYCCDResource),
+ * camera handle lifecycle, and exposes all per-camera SDK operations.
+ * SDK headers are not exposed; all types are standard C++.
+ *
+ * The SDK resource comes up lazily, on the first call that needs it, rather
+ * than in the constructor — see Impl's constructor comment in the .cpp for
+ * why (constructing this must never crash a USB-less host).
+ */
+class QHYSDKWrapper final : public QHYSDK {
+public:
+    static QHYSDKWrapper& instance();
+
+    std::vector<QHYCameraInfo> enumerate_cameras() override;
+    bool get_camera_model(const std::string& camera_id, std::string& model) override;
+
+    void open_camera(const std::string& camera_id) override;
+    void init_camera(const std::string& camera_id) override;
+    void close_camera(const std::string& camera_id) override;
+    void register_exposure_worker(const std::string& camera_id,
+                                  std::shared_ptr<std::atomic<bool>> running_flag) override;
+
+    bool get_chip_info(const std::string& camera_id, QHYCameraInfo& info) override;
+
+    bool is_control_available(const std::string& camera_id, int control_id) override;
+    double get_param(const std::string& camera_id, int control_id) override;
+    QHYControlRange get_param_range(const std::string& camera_id, int control_id) override;
+    void set_param(const std::string& camera_id, int control_id, double value) override;
+
+    void set_resolution(const std::string& camera_id, uint32_t start_x, uint32_t start_y, uint32_t width,
+                        uint32_t height) override;
+    void set_bin_mode(const std::string& camera_id, uint32_t wbin, uint32_t hbin) override;
+    void set_bits_mode(const std::string& camera_id, uint32_t bits) override;
+    uint32_t get_mem_length(const std::string& camera_id) override;
+
+    bool start_single_frame(const std::string& camera_id) override;
+    bool get_single_frame(const std::string& camera_id, uint8_t* buffer, uint32_t& width, uint32_t& height,
+                          uint32_t& bpp, uint32_t& channels) override;
+    void cancel_exposure(const std::string& camera_id) override;
+
+    void guide(const std::string& camera_id, uint32_t qhy_direction, uint16_t duration_ms) override;
+
+    void control_temp(const std::string& camera_id, double target_temp_c) override;
+
+    void move_cfw(const std::string& camera_id, int position) override;
+    int get_cfw_position(const std::string& camera_id) override;
+
+    uint32_t get_num_readout_modes(const std::string& camera_id) override;
+    std::string get_readout_mode_name(const std::string& camera_id, uint32_t mode_index) override;
+    void set_readout_mode(const std::string& camera_id, uint32_t mode_index) override;
+
+    std::string get_sdk_version() override;
 
 private:
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 
     QHYSDKWrapper();
+    // No `override`: QHYSDK's destructor is protected and non-virtual, so this
+    // does not override anything. It still runs on the function-local static's
+    // destruction at exit, which is the only way this object is ever destroyed.
     ~QHYSDKWrapper();
 
     QHYSDKWrapper(const QHYSDKWrapper&) = delete;
