@@ -765,12 +765,14 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
   fired (25 s on a silent handset: five 5 s query timeouts). The four
-  wrapper-backed switch drivers can block too — their `is_open()` waits out
-  the wrapper's `open()` — but that work is local -- a libgpiod or char-device
-  open, plus one soft-PWM thread per port on the ASIAIR Plus, and the same
-  mutex is held across `close()` -- so the window is microseconds to
-  milliseconds rather than a multi-second serial handshake. The rule applies to both; only the five make
-  it urgent. Every router
+  wrapper-backed switch drivers can block too — their `is_open()` waits for the
+  wrapper mutex, which `open()` holds throughout and `close()` holds for its
+  two locked phases (it unlocks to join the PWM workers) — but that work is
+  all local, so the window is microseconds to milliseconds rather than a
+  multi-second serial handshake. Do not describe it more precisely than that
+  in prose: the mechanism has been restated wrongly three times, and the bound
+  is what the rule depends on. The rule applies to both; only the five make it
+  urgent. Every router
   site now reads `get_connecting()` first and short-circuits; while a task
   is in flight `Connected` reports false. A connect request that arrives
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
