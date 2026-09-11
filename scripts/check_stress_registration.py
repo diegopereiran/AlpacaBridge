@@ -449,14 +449,22 @@ def find_stray_stress_cases():
     return failures
 
 
-# `if(TARGET x)` gates a file on the vendor target existing. Two shapes look
-# like it and are not it, and a bare `"TARGET" in line` accepts both:
-# `if(NOT TARGET x)` compiles the file exactly when the vendor is ABSENT, which
-# is the opposite of gating, and any identifier merely CONTAINING the word
-# counts -- `if(CATCH2_MAIN_TARGET STREQUAL "")` is a live example in the very
-# CMakeLists this parses. Require TARGET as its own word followed by an
-# argument, and reject a negated condition outright.
-_TARGET_GATE_RE = re.compile(r"\bTARGET\s+\S")
+# `if(TARGET alpacacore_<vendor>)` gates a file on that VENDOR's target, which
+# is what AGENTS.md tells authors to write. Three shapes look like gating and
+# are not, and a bare `"TARGET" in line` accepts all three: `if(NOT TARGET x)`
+# compiles the file exactly when the vendor is ABSENT, which is the opposite of
+# gating; any identifier merely CONTAINING the word counts, and
+# `if(CATCH2_MAIN_TARGET STREQUAL "")` is a live example in the very CMakeLists
+# this parses; and a non-vendor target such as `if(TARGET Catch2::Catch2WithMain)`
+# (line 11 of that file) is true in every build that compiles these tests at
+# all, so a file parked there would pass the rule while still compiling in the
+# vendor-less TSan build -- the exact hole this rule closes. Require TARGET as
+# its own word naming an `alpacacore_` target, and reject a negated condition
+# outright.
+#
+# Known limit: only the `if(` line itself is scanned, so a condition wrapped
+# across lines reads as ungated. Nothing in the tree writes one.
+_TARGET_GATE_RE = re.compile(r"\bTARGET\s+alpacacore_\S")
 _NOT_TARGET_RE = re.compile(r"\bNOT\s+TARGET\b")
 
 
@@ -786,6 +794,17 @@ def self_test():
                      '"[vendor][focuser][stress]") {}')
     check("a // inside a string literal does not blank the rest of the line",
           stress_tag_sets_in_text(url_in_string) == [{"vendor", "focuser", "stress"}])
+    # NOT pinned here, deliberately: the raw-string and char-literal branches of
+    # strip_comments() have no observable effect on any input tried. The literal
+    # scanner stops at a newline as well as at the closing quote, so it re-syncs
+    # at every line break and a mangled literal cannot reach a TEST_CASE on a
+    # later line. Probed by deleting each branch in turn and re-running this
+    # suite plus same-line cases (a quote char literal, a raw string containing
+    # both a quote and a //, and a C++14 digit separator): identical tag sets
+    # every time. A check written against them would pass with the branch
+    # deleted -- the fake coverage this gate exists to remove -- so the honest
+    # record is this comment. Tracked for a real pin if the scanner ever stops
+    # breaking on newlines.
 
     # The CMake gating rule (issue #396), at the predicate level.
     gated = ("if(TARGET alpacacore_zwo)\n"
@@ -853,6 +872,11 @@ def self_test():
                         "endif()\n")
     check("an identifier merely containing TARGET does not count as gating",
           len(ungated_registration_files_in_cmake(target_substring, regs)) == 1)
+    non_vendor_target = ("if(TARGET Catch2::Catch2WithMain)\n"
+                         "    list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)\n"
+                         "endif()\n")
+    check("a non-vendor if(TARGET ...) does not count as gating",
+          len(ungated_registration_files_in_cmake(non_vendor_target, regs)) == 1)
 
     # The predicate above is well covered, but main()'s USE of it was not:
     # deleting `failures.extend(guard_failures)` left every check green. Drive
