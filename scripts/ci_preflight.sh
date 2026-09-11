@@ -429,7 +429,10 @@ if [ "${RUN_TSAN:-0}" = "1" ]; then
      && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
         "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log" \
      `# binary exit code (pipefail) is the pass/fail gate; grep only guards zero-test runs` \
-     `# [stress] is reserved for vendor driver registrations only -- see the` \
+     `# [stress] is reserved for vendor driver registrations only -- anything` \
+     `# else tagged [stress] in an unconditional test file makes this gate` \
+     `# vacuous, which it silently was until the AsyncConnectable case moved` \
+     `# to [stress-guard]. See the` \
      `# matching comment in ci.yml -- so this threshold cannot be inflated by` \
      `# an unconditional harness self-test masking every vendor target vanishing` \
      && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-run.log" \

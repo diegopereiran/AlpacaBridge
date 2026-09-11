@@ -313,12 +313,21 @@ jobs:
           #
           # [stress] is reserved for vendor driver registrations ONLY, so this
           # grep's threshold means what it says regardless of how many vendor
-          # targets are actually configured. The harness's own self-tests (e.g.
-          # StressCallGuard's concurrency case) use a DIFFERENT tag
-          # ([stress-guard], run separately below) precisely so they can't
-          # inflate this count and mask every vendor target silently vanishing
-          # (issue #322 review finding — a single unconditional non-vendor
-          # [stress]-tagged case would have made this guard vacuous).
+          # targets are actually configured. Core/harness self-tests use a
+          # DIFFERENT tag ([stress-guard], run separately below) precisely so
+          # they cannot inflate this count and mask every vendor target
+          # silently vanishing.
+          #
+          # This invariant had to be RESTORED, not merely stated: the
+          # AsyncConnectable lifecycle case in test_async_connectable.cpp
+          # carried [stress] while sitting in the unconditional TEST_SOURCES
+          # block, so with every vendor target absent this filter still matched
+          # one case, printed "All tests passed (2 assertions in 1 test case)",
+          # and the grep below accepted it -- this job went green with zero
+          # vendor concurrency coverage. That case is now [stress-guard]
+          # (issue #322 review finding). Keep it that way: anything tagged
+          # [stress] that is not a vendor registration makes this gate vacuous
+          # again.
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log
           # The test binary's own exit code (via pipefail) is the pass/fail gate;
           # this grep only guards the zero-test case, so it deliberately matches

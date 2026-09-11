@@ -135,6 +135,12 @@ TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "
     // check it exists to be. [stress-guard] gets its own separate TSan
     // invocation instead (see ci.yml / ci_preflight.sh), decoupled from the
     // vendor-registration count.
+    //
+    // That was not hypothetical: review found the guard already vacuous,
+    // because test_async_connectable.cpp's lifecycle case carried [stress]
+    // from the same unconditional block. It is [stress-guard] now too. If you
+    // are about to tag something [stress] that is not a vendor driver
+    // registration, this is the comment telling you not to.
     // op_threads hits one guard concurrently in real registrations.
     StressCallGuard guard;
     constexpr int kThreads = 8;

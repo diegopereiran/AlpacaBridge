@@ -220,12 +220,23 @@ TEST_CASE("AsyncConnectable - failed disconnect drops a queued connect", "[async
     CHECK(d.connect_completions_.load() == 1);  // no reconnect after the failed teardown
 }
 
-TEST_CASE("AsyncConnectable - lifecycle stress with chained pending flags", "[async_connectable][stress]") {
+TEST_CASE("AsyncConnectable - lifecycle stress with chained pending flags", "[async_connectable][stress-guard]") {
     // TSan-covered regression for the pending_connect_ queuing path and the
     // tail's chained-flag draining (issue #136): hammer alternating async
     // requests from several threads while readers poll. Run under the
     // sanitizers-tsan CI job; even without TSan this catches crashes, hangs,
     // and std::terminate.
+    //
+    // Tagged [stress-guard], NOT [stress] (issue #322). This file is
+    // unconditional in TEST_SOURCES, so while this case carried [stress] the
+    // vendor zero-coverage grep was VACUOUS: with every vendor target absent,
+    // `alpacacore_tests "[stress]"` still matched this one case and printed
+    // "All tests passed (2 assertions in 1 test case)", which the grep accepts
+    // -- so sanitizers-tsan went green with zero vendor concurrency coverage,
+    // the exact failure that grep exists to catch. [stress] now means "a
+    // vendor driver registration"; core/harness self-tests like this one use
+    // [stress-guard] and run under their own TSan invocation, so this case
+    // keeps its TSan coverage without propping up the vendor threshold.
     TestConnectable d;
     d.op_delay_ = 2ms;
     std::atomic<bool> stop{false};

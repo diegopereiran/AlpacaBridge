@@ -356,14 +356,14 @@ def self_test():
 
     real_tracked_files = globals()["tracked_files"]
     with tempfile.TemporaryDirectory() as tmp:
-        driver = os.path.join(tmp, "fakevendor_camera_driver.cpp")
-        with open(driver, "w", encoding="utf-8") as fh:
-            fh.write("class D { DeviceType get_device_type() const override "
-                     "{ return DeviceType::Camera; } };\n")
         stress = os.path.join(tmp, "test_fakevendor_concurrency_stress.cpp")
 
         def fake_tracked_files(pattern):
-            return [driver] if pattern.endswith("_driver.cpp") else [stress]
+            # No drivers at all: with nothing to be uncovered, a non-zero exit
+            # can ONLY come from the guard-tag wiring under test. Returning []
+            # says that outright rather than relying on a temp path happening
+            # to be shallow enough that find_drivers() skips it.
+            return [] if pattern.endswith("_driver.cpp") else [stress]
 
         def run_main_with(case_source):
             with open(stress, "w", encoding="utf-8") as fh:
@@ -378,9 +378,6 @@ def self_test():
                 ALLOWLIST.clear()
                 ALLOWLIST.update(saved_allowlist)
 
-        # The driver path here is a bare temp filename, so find_drivers() skips
-        # it (no AlpacaCore/src/vendors/ prefix) and there is no pair to miss --
-        # which means a non-zero exit can only come from the guard wiring.
         clean = 'TEST_CASE("Ok", "[fakevendor][camera][stress]") {}'
         check("main() passes when a registration file uses [stress]",
               run_main_with(clean) == 0)
