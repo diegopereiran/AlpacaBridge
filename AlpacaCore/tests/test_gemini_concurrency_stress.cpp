@@ -185,10 +185,12 @@ TEST_CASE("Gemini PDH Advanced 3 switch - concurrent connect/disconnect/operate 
     // the ladder with margin and costs nothing, because the fake answers on
     // the first attempt and the budget is never consumed.
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
-    // Guarded: the proving connect is torn down before the storm starts, and
-    // reading the drivers this can only no-op here. CHECK_NOTHROW so a future
-    // regression surfaces as a named failure on this line rather than as an
-    // unexpected exception attributed to the whole TEST_CASE.
+    // Tears the proving connect back down before the storm starts. This is a
+    // real teardown, not a no-op -- settle_connected() above just proved the
+    // driver CONNECTED, so this closes the port and reaps what the driver
+    // owns. It has no throwing failure path today; CHECK_NOTHROW pins that,
+    // so a future regression surfaces as a named failure on this line rather
+    // than as an unexpected exception attributed to the whole TEST_CASE.
     CHECK_NOTHROW(driver->set_connected(false));
 
     alpacacore::test::run_lifecycle_stress(*driver, pdh_switch_operate);
@@ -227,10 +229,12 @@ TEST_CASE("Gemini Flat Panel Pro - concurrent connect/disconnect/operate stress"
     // retry ladder is the same shape, and the budget is retry headroom, not
     // a bound on a single slow-but-successful attempt.
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
-    // Guarded: the proving connect is torn down before the storm starts, and
-    // reading the drivers this can only no-op here. CHECK_NOTHROW so a future
-    // regression surfaces as a named failure on this line rather than as an
-    // unexpected exception attributed to the whole TEST_CASE.
+    // Tears the proving connect back down before the storm starts. This is a
+    // real teardown, not a no-op -- settle_connected() above just proved the
+    // driver CONNECTED, so this closes the port and reaps what the driver
+    // owns. It has no throwing failure path today; CHECK_NOTHROW pins that,
+    // so a future regression surfaces as a named failure on this line rather
+    // than as an unexpected exception attributed to the whole TEST_CASE.
     CHECK_NOTHROW(driver->set_connected(false));
 
     alpacacore::test::run_lifecycle_stress(*driver, flatpanel_operate);
