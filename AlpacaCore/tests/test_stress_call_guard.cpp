@@ -18,6 +18,7 @@
 // non-std::exception throw.
 
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 

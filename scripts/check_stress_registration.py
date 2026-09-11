@@ -187,7 +187,11 @@ def find_registered_pairs(known_vendors, known_device_types):
 
 
 def guard_tagged_cases_in_text(text):
-    """Descriptions of TEST_CASEs tagged [stress-guard] but NOT [stress].
+    """The matched TEST_CASE(...) headers tagged [stress-guard] but NOT [stress].
+
+    Each entry is the whole matched prefix (name + tag string), not just the
+    description -- that is what the failure message quotes, so a reader can
+    see which tags were actually written.
 
     [stress-guard] exists for harness self-tests that need ThreadSanitizer but
     are not vendor registrations (issue #322); it runs under its own TSan
@@ -343,6 +347,46 @@ def self_test():
     spaced_guard = 'TEST_CASE("Foo", "[vendor] [focuser]  [stress-guard]") {}'
     check("whitespace between tags does not let [stress-guard] evade the check",
           len(guard_tagged_cases_in_text(spaced_guard)) == 1)
+
+    # The predicate above is well covered, but main()'s USE of it was not:
+    # deleting `failures.extend(guard_failures)` left every check green. Drive
+    # main() end to end over synthetic files so the wiring is pinned too.
+    import os
+    import tempfile
+
+    real_tracked_files = globals()["tracked_files"]
+    with tempfile.TemporaryDirectory() as tmp:
+        driver = os.path.join(tmp, "fakevendor_camera_driver.cpp")
+        with open(driver, "w", encoding="utf-8") as fh:
+            fh.write("class D { DeviceType get_device_type() const override "
+                     "{ return DeviceType::Camera; } };\n")
+        stress = os.path.join(tmp, "test_fakevendor_concurrency_stress.cpp")
+
+        def fake_tracked_files(pattern):
+            return [driver] if pattern.endswith("_driver.cpp") else [stress]
+
+        def run_main_with(case_source):
+            with open(stress, "w", encoding="utf-8") as fh:
+                fh.write(case_source + "\n")
+            globals()["tracked_files"] = fake_tracked_files
+            saved_allowlist = set(ALLOWLIST)
+            ALLOWLIST.clear()
+            try:
+                return main()
+            finally:
+                globals()["tracked_files"] = real_tracked_files
+                ALLOWLIST.clear()
+                ALLOWLIST.update(saved_allowlist)
+
+        # The driver path here is a bare temp filename, so find_drivers() skips
+        # it (no AlpacaCore/src/vendors/ prefix) and there is no pair to miss --
+        # which means a non-zero exit can only come from the guard wiring.
+        clean = 'TEST_CASE("Ok", "[fakevendor][camera][stress]") {}'
+        check("main() passes when a registration file uses [stress]",
+              run_main_with(clean) == 0)
+        offending = 'TEST_CASE("Bad", "[fakevendor][camera][stress-guard]") {}'
+        check("main() FAILS when a registration file uses [stress-guard] alone",
+              run_main_with(offending) == 1)
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
