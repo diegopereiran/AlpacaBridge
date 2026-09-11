@@ -295,11 +295,15 @@ private:
         bool last_was_connect = connect;
         while (true) {
             // Read connected-now BEFORE taking pending_mutex_: get_connected()
-            // may take the driver state mutex (the Bisque, Celestron, iOptron,
-            // OnStep and Sky-Watcher telescopes all do), and the sync
-            // set_connected path takes driver mutex -> pending_mutex_
-            // (obligations 4/5) — calling it under pending_mutex_ is an ABBA
-            // deadlock. The read is a momentary snapshot either way (the sync
+            // may take the driver state mutex, and the sync set_connected path
+            // takes driver mutex -> pending_mutex_ (obligations 4/5) — calling
+            // it under pending_mutex_ is an ABBA deadlock. The drivers that
+            // create that hazard are the Bisque, Celestron, iOptron, OnStep
+            // and Sky-Watcher telescopes. The wrapper-backed switch drivers
+            // (iOptron PowerBox, ToupTek PowerBox, ZWO ASIAIR and ASIAIR
+            // Plus) also lock in get_connected(), via the wrapper's is_open(),
+            // but release it before their set_connected reaches
+            // pending_mutex_, so they never nest the two. The read is a momentary snapshot either way (the sync
             // setter never held both locks at once), and a stale value is
             // benign: the deferred transitions below are idempotent.
             //
@@ -307,8 +311,9 @@ private:
             // is a bare atomic load, made lock-free by the issue #130 fix
             // because a blocking read stalled polling clients for the whole
             // hand-controller handshake. Do not add it back (open-astro#315).
-            // The ordering above is still required for the drivers that lock,
-            // so this is a list of who makes it necessary, not a permission.
+            // The ordering above is still required for the drivers that nest
+            // the two locks, so this is a list of who makes it necessary, not
+            // an inventory of every get_connected() that takes a mutex.
             const bool connected_now = last_was_connect && get_connected();
             // Consume a pending flag and publish the next conn_task_ state in
             // the SAME pending_mutex_ critical section. Paired with the
