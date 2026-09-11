@@ -78,7 +78,8 @@ Rate setters must re-anchor the dead-reckoning model in place (`anchor_model_loc
 hardware. Also: ConformU runs ON the SBC over localhost — the dev VM's LAN path has 2-90 ms spikes
 that stamp constant `Can*` getters with 0.10x s FAST marks — and a Bash tool timeout kills a child
 ConformU mid-slew, so launch it detached (`setsid nohup`) and poll a done marker. Motor-controller
-mounts store no site: set SiteLatitude/Longitude first or ConformU aborts "below the horizon".
+mounts store no site: set SiteLatitude/Longitude in the device config first, or the driver
+refuses the connect (#274) and ConformU never reaches CheckMethods.
 
 **Apply this checklist up front.** ConformU is single-threaded and catches *none*
 of the races below — code review plus the TSan concurrency stress suite do
@@ -1487,7 +1488,16 @@ datagrams before each send so replies cannot get off-by-one.
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
   step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
   fast mode). The mount stores **no site or time** — site lat/long/elevation come from
-  the web UI config or the Alpaca setters. Time comes from two functions: `utc_now_locked()`
+  the web UI config or the Alpaca setters. **Latitude and longitude are mandatory on this
+  vendor** (#274): `configuredevice` rejects a skywatcher config without both, and
+  `Connected = true` throws `InvalidOperation` unless each has been set explicitly, by
+  config or by its setter. A config **already on disk** is registered anyway, with a WARN,
+  and left for the connect-time guard to refuse: a device dropped at startup never enters
+  the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
+  the entry that is at fault. That asymmetry is the rule for any new validation in
+  `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`. `0.0` is a real coordinate, so the driver tracks whether each
+  was ever set rather than testing for the value — an unset southern rig would otherwise
+  run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
   client-set `UTCDate` offset only when the host clock was undisciplined (no NTP) at the moment
   of the write, so a client's clock error never steers pointing on an NTP-good host;
@@ -1536,9 +1546,12 @@ datagrams before each send so replies cannot get off-by-one.
   the slew in the background (AtPark turns true on completion); MoveAxis(0) issues the stop,
   keeps Slewing true via the manual flag, and a background task clears it and restores
   tracking once the axis reports stopped. This applies to every telescope driver.
-- ConformU needs a real site: with lat/long left at 0,0 the CheckMethods slew tests abort
-  with "highest elevation available is below the horizon". Set the observing site in the
-  web UI before validating.
+- ConformU needs a real site. Since #274 a Sky-Watcher device with no site refuses
+  `Connected` outright, so the run fails at connect; the client reports "Connection
+  failed" and the driver's message naming the two fields is in the server log (#358).
+  Set the observing site in the web UI before validating. Before #274 the site collapsed
+  to 0,0 instead and the CheckMethods slew tests aborted with "highest elevation
+  available is below the horizon".
 - Web UI: `skywatcher`-prefixed field names; network field is `udpPort` (NOT `tcpPort`).
 - ConformU 4.5.0 validated on Wave 100i over **both transports** (Linux arm64): USB (dev PC)
   and Wi-Fi UDP (Raspberry Pi CM4 joined to the mount AP) — 0 errors, 0 issues, 0 timing
@@ -2479,9 +2492,12 @@ it is never reachable through `router.cpp` or the web UI.
   (3.5.1). 2.4 GHz is exempt: ch 1-11 are world-domain legal, which is why
   the shipped images default to 2.4 GHz ch 6.
 - The review bot login is `github-actions`; every push restarts a full
-  review round — batch fixes. Test rig persisted-device state under
-  `AlpacaHTTP/build/config/` makes `test_routing` fail with "already
-  registered" — `rm -rf build/config` before local runs.
+  review round — batch fixes. Test rig persisted-device state makes
+  `test_routing` fail with "already registered". Since #274 each of the two
+  router-backed binaries runs in its own ctest `WORKING_DIRECTORY`, so the
+  files to clear are `AlpacaHTTP/build/test_routing_cwd/config/` and
+  `AlpacaHTTP/build/test_persisted_devices_cwd/config/`, not
+  `build/config/`.
 
 ## General Notes
 

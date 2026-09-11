@@ -29,6 +29,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -161,7 +162,18 @@ private:
         std::uint32_t server_tx_id
     );
 
-    bool register_device_from_config(const nlohmann::json& config, std::string& error_message);
+    // open-astro#274: where a device config came from decides what a failed
+    // validation rule means. A config arriving over
+    // /management/v1/configuredevice can still be corrected by the caller, so
+    // it is rejected. One already on disk cannot: dropping it removes the
+    // device from the registry, and /management/v1/configureddevices -- the
+    // web UI's only source of devices -- then cannot show it, leaving no way
+    // to edit the entry that is at fault. Persisted configs are registered
+    // anyway and left for the driver's connect-time guard to refuse.
+    enum class ConfigSource : std::uint8_t { Api, Persisted };
+
+    bool register_device_from_config(const nlohmann::json& config, std::string& error_message,
+                                     ConfigSource source = ConfigSource::Api);
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
     void add_or_replace_persisted_device(const nlohmann::json& config);
     bool remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);

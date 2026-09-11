@@ -1583,6 +1583,84 @@ TEST_CASE("SkyWatcher async - the UTCDate readback honours the client on any hos
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - connecting without configured site coordinates is refused (#274)",
+          "[skywatcher][async]") {
+    // The mount stores no site of its own, so an unconfigured device would run
+    // on 0.0/0.0. hemisphere_south_locked() is site_latitude_ < 0.0, which
+    // silently puts a southern rig on northern pointing math and undoes #250,
+    // #253 and #261. 0.0/0.0 is a real place, so the driver tracks provenance
+    // rather than testing for the magic value.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, std::nullopt, std::nullopt);
+    try {
+        driver->set_connected(true);
+        FAIL("Expected the connect to be refused");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+    }
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("SkyWatcher async - one configured coordinate is not enough (#274)", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+
+    // Latitude alone: the hemisphere is known but LST is not, so this is still
+    // refused rather than half-accepted.
+    // The error code is asserted, not just the type: a connect refused for an
+    // unrelated reason (a fake-board handshake failure, say) also throws
+    // AlpacaException, and these cases are about the site guard specifically.
+    auto refused_for_site = [](alpacacore::TelescopeDriver& driver) {
+        try {
+            driver.set_connected(true);
+            FAIL("Expected the connect to be refused");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        }
+        CHECK_FALSE(driver.get_connected());
+    };
+
+    auto lat_only = sw::create_skywatcher_telescope(0, endpoint(mount), -33.87, std::nullopt, std::nullopt);
+    refused_for_site(*lat_only);
+
+    auto lon_only = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, 151.21, std::nullopt);
+    refused_for_site(*lon_only);
+}
+
+TEST_CASE("SkyWatcher async - 0.0/0.0 configured explicitly is accepted (#274)", "[skywatcher][async]") {
+    // Null island is a real place. The guard is about provenance, not about
+    // the value, so a device deliberately configured there must connect.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 0.0, 0.0, 0.0);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    CHECK(driver->get_site_latitude() == 0.0);
+    CHECK(driver->get_site_longitude() == 0.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - the ASCOM setters satisfy the site requirement (#274)", "[skywatcher][async]") {
+    // A raw Alpaca client that writes SiteLatitude and SiteLongitude before
+    // Connected has supplied the same information the config would have, so
+    // the connect must succeed. Both setters work while disconnected.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, std::nullopt, std::nullopt);
+    driver->set_site_latitude(-33.87);
+    // Still short one coordinate.
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+
+    driver->set_site_longitude(151.21);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 review)", "[skywatcher][unit]") {
     // The offset is a delta against the host clock at write time. When the
     // host clock is corrected afterwards (Sync Time, NTP, `date`), applying

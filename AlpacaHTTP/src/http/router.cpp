@@ -6992,7 +6992,8 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
     return response;
 }
 
-bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message) {
+bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message,
+                                         [[maybe_unused]] ConfigSource source) {
     std::string device_type_str = config.value("deviceType", "");
     std::string vendor = config.value("vendor", "");
     int device_number = config.value("deviceNumber", -1);
@@ -7369,6 +7370,29 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         }
         if (config.contains("siteElevation")) {
             site_elevation = config.value("siteElevation", 0.0);
+        }
+
+        // open-astro#274: /management/v1/configuredevice is a first-class REST
+        // API independent of the web UI, and used to accept a skywatcher
+        // config with no coordinates at all. The mount stores no site of its
+        // own, so both would then collapse to 0.0 and a southern rig would run
+        // northern pointing math -- silently undoing #250, #253 and #261. The
+        // check goes inline here, the same way the portPath/host checks below
+        // do, because this branch is a hand-written if/else chain per vendor
+        // rather than a schema layer.
+        if (!site_latitude.has_value() || !site_longitude.has_value()) {
+            static constexpr const char* kMissingSite =
+                "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no "
+                "site of its own, and tracking direction, guide sign and pier side are all hemisphere-dependent";
+            if (source == ConfigSource::Api) {
+                error_message = kMissingSite;
+                return false;
+            }
+            // Already on disk from before this rule existed. Register it so it
+            // keeps appearing in configureddevices and stays editable in the
+            // web UI; the driver refuses the connect until it is fixed.
+            util::log_warning("Persisted Sky-Watcher telescope " + std::to_string(device_number) +
+                              " has no site coordinates and will refuse to connect. " + kMissingSite);
         }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
@@ -9044,7 +9068,7 @@ void Router::load_persisted_devices() {
     for (const auto& entry : payload) {
         std::string error_message;
         try {
-            if (!register_device_from_config(entry, error_message)) {
+            if (!register_device_from_config(entry, error_message, ConfigSource::Persisted)) {
                 util::log_warning("Skipping persisted device: " + error_message);
             }
         } catch (const std::exception& e) {
