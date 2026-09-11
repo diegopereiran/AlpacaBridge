@@ -32,6 +32,19 @@
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
 
+namespace {
+// Same shape as the unit file's helper: the call must throw an
+// AlpacaException carrying exactly this error code.
+void expect_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == expected_code);
+    }
+}
+}  // namespace
+
 namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeSkyWatcherMount;
 
@@ -1536,6 +1549,18 @@ TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and repo
     const auto back_error =
         std::chrono::duration_cast<std::chrono::milliseconds>(reported_back - std::chrono::system_clock::now());
     CHECK(std::abs(back_error.count()) < 500);
+
+    // open-astro#414: the offset is session state. Arm it again, then
+    // disconnect and reconnect: the readback is back on the host clock until
+    // the client writes UTCDate once more.
+    driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1));
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto after_reconnect = std::chrono::duration_cast<std::chrono::milliseconds>(
+        driver->get_utc_date() - std::chrono::system_clock::now());
+    CHECK(std::abs(after_reconnect.count()) < 500);
     driver->set_connected(false);
 }
 
@@ -1681,6 +1706,49 @@ TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 
     // Right at the tolerance edge: 1 s drift is not a step, 1.5 s is.
     CHECK_FALSE(host_clock_stepped(seconds(91), seconds(90)));
     CHECK(host_clock_stepped(milliseconds(91500), seconds(90)));
+}
+
+TEST_CASE("SkyWatcher async - target properties are independently set (#304, #391)", "[skywatcher][async]") {
+    // Moved here from the unit file when the getters gained check_connected()
+    // (#391): ASCOM treats the two target properties as independent, each
+    // throwing ValueNotSet until that property itself has been written.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    REQUIRE(driver->get_connected());
+
+    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // Writing RA must not unlock Dec.
+    driver->set_target_right_ascension(7.25);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    expect_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // Writing Dec unlocks the second property without disturbing the first.
+    driver->set_target_declination(-12.5);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    CHECK(driver->get_target_declination() == -12.5);
+
+    // Updating one leaves the other intact.
+    driver->set_target_right_ascension(3.0);
+    CHECK(driver->get_target_declination() == -12.5);
+    driver->set_connected(false);
+
+    // Disconnected, the getters say NotConnected first, whatever was set.
+    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("SkyWatcher async - Dec written first leaves RA unset (#304)", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_target_declination(41.0);
+    CHECK(driver->get_target_declination() == 41.0);
+    expect_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#304)", "[skywatcher][async]") {
