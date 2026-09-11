@@ -81,7 +81,8 @@ public:
         alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; });
 
     // open-astro#314: re-run the hardware-RTC probe and cache the answer.
-    // Called from the server's reactor timer, never from a request path: the
+    // Called from the server's RTC probe thread, never from a request path
+    // and never from the reactor: the
     // probe is an I2C transaction on a bus-attached RTC and can block for the
     // adapter timeout, and the connect initiator it used to sit on is timed
     // against the 1 s STANDARD target.

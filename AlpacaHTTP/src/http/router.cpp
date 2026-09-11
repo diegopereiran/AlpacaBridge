@@ -1618,7 +1618,7 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
     // usually right to seconds, so it is INFO -- but still a WARN when nothing
     // is allowed to correct it.
     // has_rtc() is a memory read: the probe behind it runs at startup and on
-    // the server's reactor timer, never here (open-astro#314). It used to read
+    // the server's RTC probe thread, never here (open-astro#314). It used to read
     // sysfs inline, which on a bus-attached RTC is an I2C transaction that can
     // block for the adapter timeout, on the connect initiator AGENTS.md times
     // against the 1 s STANDARD target and with the connection op mutex held.

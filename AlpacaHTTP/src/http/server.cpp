@@ -1099,12 +1099,6 @@ void Server::wake_reactor() {
     (void)::write(fd, &byte, 1);
 }
 
-// The reactor: parks idle connections on a poll set and hands each one to the
-// worker pool the moment its next request begins to arrive. One thread, no
-// request parsing, no blocking calls except poll(). A connection is here
-// exactly when no worker holds it, which is what makes thread_pool_size mean
-// concurrent requests rather than concurrent connections: a hundred idle
-// clients cost a hundred pollfds and nothing else.
 // open-astro#314: refresh the hardware-RTC probe on a timer instead of on
 // whichever request arrives next. The paths that read its answer -- the
 // ITelescopeV4 connect initiator and the description endpoint -- have a 1 s
@@ -1136,6 +1130,12 @@ void Server::rtc_probe_loop() {
     }
 }
 
+// The reactor: parks idle connections on a poll set and hands each one to the
+// worker pool the moment its next request begins to arrive. One thread, no
+// request parsing, no blocking calls except poll(). A connection is here
+// exactly when no worker holds it, which is what makes thread_pool_size mean
+// concurrent requests rather than concurrent connections: a hundred idle
+// clients cost a hundred pollfds and nothing else.
 void Server::reactor_loop() {
     std::vector<ConnectionPtr> idle;
     std::vector<struct pollfd> pfds;

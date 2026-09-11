@@ -241,8 +241,8 @@ TEST_CASE("HostClock - the RTC probe is primed at construction and never re-run 
     }
     CHECK(probes == 1);
 
-    // Only an explicit refresh re-probes. That is what the server's reactor
-    // timer calls, and what #307 will call after this process writes the RTC.
+    // Only an explicit refresh re-probes. That is what the server's RTC probe
+    // thread calls, and what #307 will call after this process writes the RTC.
     c.refresh_rtc();
     CHECK(probes == 2);
 }

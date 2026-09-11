@@ -2504,7 +2504,7 @@ int main() {
             EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "client");
             EXPECT(*probe_calls == 1);
 
-            // The off-request-path refresh the server's reactor timer calls is
+            // The off-request-path refresh the server's RTC probe thread calls is
             // the only thing that re-probes.
             clock_router.refresh_rtc_probe();
             EXPECT(*probe_calls == 2);

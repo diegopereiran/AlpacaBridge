@@ -139,8 +139,8 @@ public:
 
     /**
      * Re-run the RTC probe and cache the answer. Called once at construction
-     * and thereafter only from off the request path: the server's reactor
-     * timer (open-astro#314), and, when it lands, after this process writes
+     * and thereafter only from off the request path: the server's dedicated
+     * RTC probe thread (open-astro#314), and, when it lands, after this process writes
      * the RTC itself (open-astro#307).
      *
      * Cheap and safe to call when the answer has already settled: the probe
