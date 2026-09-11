@@ -419,7 +419,7 @@ public:
         require_open(camera_id);
         // Matches QHYSDKWrapper::get_num_readout_modes(): floors at 1 ("at
         // least one mode"), never reports zero.
-        return std::max<uint32_t>(1, static_cast<uint32_t>(readout_modes.size()));
+        return effective_readout_mode_count();
     }
 
     std::string get_readout_mode_name(const std::string& camera_id, uint32_t mode_index) override {
@@ -440,8 +440,11 @@ public:
         require_open(camera_id);
         // Matches QHYSDKWrapper::set_readout_mode(): an out-of-range index is
         // an SDK call failure, which check_result() turns into
-        // DriverException -- not InvalidValue.
-        if (mode_index >= readout_modes.size()) {
+        // DriverException -- not InvalidValue. Ranged against the SAME
+        // floored count get_num_readout_modes() reports, not against
+        // readout_modes.size(): otherwise an empty list advertises one mode
+        // and then rejects index 0, which no real camera does.
+        if (mode_index >= effective_readout_mode_count()) {
             throw AlpacaException("fake: SetQHYCCDReadMode failed (index out of range)", AlpacaError::DriverException);
         }
         readout_mode_ = mode_index;
@@ -496,6 +499,14 @@ private:
         if (!sdk_resource_available) {
             throw AlpacaException("QHY SDK resource not initialized", AlpacaError::DriverException);
         }
+    }
+
+    // The mode count every readout-mode method ranges against: the real SDK
+    // never reports zero modes, so an empty `readout_modes` still means one.
+    // Keeping this in one place is what stops get_num_readout_modes() and
+    // set_readout_mode() from disagreeing about whether index 0 is valid.
+    uint32_t effective_readout_mode_count() const {
+        return std::max<uint32_t>(1, static_cast<uint32_t>(readout_modes.size()));
     }
 
     bool is_open(const std::string& camera_id) const {

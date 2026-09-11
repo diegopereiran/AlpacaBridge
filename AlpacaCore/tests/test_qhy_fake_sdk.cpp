@@ -385,3 +385,20 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
     // forward wired to the wrong inner method.
     CHECK(fake.calls.size() == methods.size());
 }
+
+TEST_CASE("FakeQHYSDK - an empty readout-mode list still accepts index 0", "[qhy][fake][unit]") {
+    // get_num_readout_modes() floors at 1, so the fake advertises one mode
+    // even with no canned names. set_readout_mode() must range against that
+    // SAME floored count -- otherwise the fake reports a mode it then refuses
+    // to select, which no real camera does.
+    auto fake = make_fake();
+    fake.readout_modes.clear();
+    fake.open_camera("fake-qhy-0");
+
+    REQUIRE(fake.get_num_readout_modes("fake-qhy-0") == 1);
+    CHECK_NOTHROW(fake.set_readout_mode("fake-qhy-0", 0));
+    // One past the advertised count is still a DriverException.
+    CHECK_THROWS_AS(fake.set_readout_mode("fake-qhy-0", 1), AlpacaException);
+    // The synthesized name is unchanged by the floor.
+    CHECK(fake.get_readout_mode_name("fake-qhy-0", 0) == "Mode 0");
+}
