@@ -42,7 +42,11 @@ import sys
 VENDORS_PREFIX = "AlpacaCore/src/vendors/"
 STRESS_TEST_GLOB_PREFIX = "AlpacaCore/tests/test_"
 STRESS_TEST_GLOB_SUFFIX = "_concurrency_stress.cpp"
-TEST_GLOB = "AlpacaCore/tests/test_*.cpp"
+# Every place a TEST_CASE can compile into alpacacore_tests. Headers are
+# included because the tests/ helpers (fake_mount_server.h and friends) are
+# #included by several TUs, so a TEST_CASE added to one would compile in and
+# re-inflate the vendor threshold while slipping past a *.cpp-only scan.
+TEST_GLOBS = ("AlpacaCore/tests/test_*.cpp", "AlpacaCore/tests/*.h")
 
 # Anchored to the actual override, not just any DeviceType:: mention in the
 # file -- a driver that referenced a different DeviceType::X earlier (a
@@ -239,7 +243,10 @@ def find_stray_stress_cases():
     registrations = set(
         tracked_files(STRESS_TEST_GLOB_PREFIX + "*" + STRESS_TEST_GLOB_SUFFIX))
     failures = []
-    for path in tracked_files(TEST_GLOB):
+    candidates = []
+    for glob in TEST_GLOBS:
+        candidates.extend(tracked_files(glob))
+    for path in sorted(set(candidates)):
         if path in registrations:
             continue
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -418,17 +425,33 @@ def self_test():
     real_tracked_files = globals()["tracked_files"]
     with tempfile.TemporaryDirectory() as tmp:
         stress = os.path.join(tmp, "test_fakevendor_concurrency_stress.cpp")
+        core = os.path.join(tmp, "test_fakecore.cpp")
 
         def fake_tracked_files(pattern):
             # No drivers at all: with nothing to be uncovered, a non-zero exit
-            # can ONLY come from the guard-tag wiring under test. Returning []
+            # can ONLY come from the tag wiring under test. Returning []
             # says that outright rather than relying on a temp path happening
             # to be shallow enough that find_drivers() skips it.
-            return [] if pattern.endswith("_driver.cpp") else [stress]
+            if pattern.endswith("_driver.cpp"):
+                return []
+            # TEST_GLOB is the BROAD glob, so it must return the
+            # non-registration file too -- otherwise find_stray_stress_cases()
+            # skips everything it is handed (all of it is in `registrations`)
+            # and returns [] no matter what, leaving its main() wiring
+            # untestable. That was a real hole: deleting
+            # `failures.extend(find_stray_stress_cases())` left every check
+            # here green until this fixture grew the second file.
+            if pattern == TEST_GLOBS[0]:
+                return [stress, core]
+            if pattern in TEST_GLOBS:
+                return []
+            return [stress]
 
-        def run_main_with(case_source):
+        def run_main_with(stress_source, core_source=""):
             with open(stress, "w", encoding="utf-8") as fh:
-                fh.write(case_source + "\n")
+                fh.write(stress_source + "\n")
+            with open(core, "w", encoding="utf-8") as fh:
+                fh.write(core_source + "\n")
             globals()["tracked_files"] = fake_tracked_files
             saved_allowlist = set(ALLOWLIST)
             ALLOWLIST.clear()
@@ -445,6 +468,15 @@ def self_test():
         offending = 'TEST_CASE("Bad", "[fakevendor][camera][stress-guard]") {}'
         check("main() FAILS when a registration file uses [stress-guard] alone",
               run_main_with(offending) == 1)
+
+        # The sibling wiring: a [stress] case in a NON-registration file is the
+        # regression that made CI's vendor zero-coverage grep vacuous.
+        stray = 'TEST_CASE("Stray", "[fakecore][stress]") {}'
+        check("main() FAILS when a non-registration file uses [stress]",
+              run_main_with(clean, stray) == 1)
+        guarded = 'TEST_CASE("Fine", "[fakecore][stress-guard]") {}'
+        check("main() passes when a non-registration file uses [stress-guard]",
+              run_main_with(clean, guarded) == 0)
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
