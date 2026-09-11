@@ -26,8 +26,10 @@ namespace alpacacore::vendor::qhy {
 
 class QHYFilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
-    QHYFilterWheelDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index)
+    QHYFilterWheelDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index,
+                         QHYSDK& sdk)
         : AsyncConnectable("QHY"),
+          sdk_(sdk),
           device_number_(device_number),
           camera_id_(std::move(camera_id)),
           camera_index_(camera_index),
@@ -107,7 +109,6 @@ public:
             return;
         }
 
-        auto& sdk = QHYSDKWrapper::instance();
         if (connected) {
             const std::string& id = resolve_camera_id_locked();
 
@@ -118,12 +119,12 @@ public:
             // which never calls InitQHYCCD; validated on real miniCam8M
             // hardware -- see AGENTS.md), so the wheel doesn't need
             // to wait on -- or trigger -- the imaging chip's init sequence.
-            sdk.open_camera(id);
+            sdk_.open_camera(id);
             try {
-                if (!sdk.is_control_available(id, control::CFWPORT)) {
+                if (!sdk_.is_control_available(id, control::CFWPORT)) {
                     throw AlpacaException("No CFW detected on this QHY camera", AlpacaError::NotConnected);
                 }
-                int slots = static_cast<int>(sdk.get_param(id, control::CFWSLOTSNUM));
+                int slots = static_cast<int>(sdk_.get_param(id, control::CFWSLOTSNUM));
                 if (slots <= 0) {
                     throw AlpacaException("QHY CFW reported an invalid slot count", AlpacaError::DriverException);
                 }
@@ -132,7 +133,7 @@ public:
                 normalize_slot_data_locked();
 
                 std::string model;
-                if (sdk.get_camera_model(id, model) && !model.empty()) {
+                if (sdk_.get_camera_model(id, model) && !model.empty()) {
                     camera_model_ = model;
                 }
 
@@ -144,7 +145,7 @@ public:
                 // lazily. Doing it here spends that cost against Connect's
                 // STANDARD (1.0s) budget instead, and seeds cached_position_
                 // (see get_position) so the read right after connect is fast.
-                int initial_pos = sdk.get_cfw_position(id);
+                int initial_pos = sdk_.get_cfw_position(id);
                 if (initial_pos >= 0) {
                     cached_position_ = initial_pos;
                 } else {
@@ -163,7 +164,7 @@ public:
                     // a stale ID.
                     camera_id_.reset();
                 }
-                sdk.close_camera(close_id);
+                sdk_.close_camera(close_id);
                 throw;
             }
             connected_.store(true);
@@ -185,7 +186,7 @@ public:
         pending_target_.reset();
         connected_.store(false);
         if (close_id.has_value()) {
-            sdk.close_camera(close_id.value());
+            sdk_.close_camera(close_id.value());
         }
     }
 
@@ -244,7 +245,7 @@ public:
         if (cached_position_.has_value() && !pending_target_.has_value()) {
             return cached_position_.value();
         }
-        int pos = QHYSDKWrapper::instance().get_cfw_position(camera_id_.value());
+        int pos = sdk_.get_cfw_position(camera_id_.value());
         if (pending_target_.has_value()) {
             if (pos == pending_target_.value()) {
                 cached_position_ = pos;
@@ -298,7 +299,7 @@ public:
         // keeps the never-issued-move case from ever reaching this point.)
         cached_position_.reset();
         pending_target_ = position;
-        QHYSDKWrapper::instance().move_cfw(camera_id_.value(), position);
+        sdk_.move_cfw(camera_id_.value(), position);
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -339,7 +340,7 @@ private:
 
     const std::string& resolve_camera_id_locked() {
         if (camera_index_.has_value() && !camera_id_.has_value()) {
-            auto cameras = QHYSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (cameras.empty()) {
                 throw AlpacaException("No QHY cameras detected", AlpacaError::NotConnected);
             }
@@ -425,6 +426,7 @@ private:
         }
     }
 
+    QHYSDK& sdk_;
     int device_number_;
     std::optional<std::string> camera_id_;
     std::optional<int> camera_index_;
@@ -444,12 +446,31 @@ private:
     mutable std::mutex mutex_;
 };
 
+// These default overloads resolve the singleton EAGERLY, at device-creation
+// time -- before the seam, it was first touched on the driver's first SDK
+// call. That is safe only because QHYSDKWrapper's constructor does no
+// libqhyccd work (see Impl's constructor in qhy_sdk_wrapper.cpp) and
+// InitQHYCCDResource() stays behind ensure_resource(). If that constructor
+// ever gains real work, this moves a libqhyccd call onto the
+// configure/management path, which on a USB-less host is the crash path this
+// whole seam exists to avoid. Keep the constructor trivial, or make these
+// overloads lazy -- issue #368 weighs that change, since today the constraint
+// is held by this comment and nothing mechanical.
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id) {
-    return std::make_unique<QHYFilterWheelDriver>(device_number, camera_id, std::nullopt);
+    return create_qhy_filterwheel(device_number, camera_id, QHYSDKWrapper::instance());
 }
 
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_number, int camera_index) {
-    return std::make_unique<QHYFilterWheelDriver>(device_number, std::nullopt, camera_index);
+    return create_qhy_filterwheel_by_index(device_number, camera_index, QHYSDKWrapper::instance());
+}
+
+std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id,
+                                                          QHYSDK& sdk) {
+    return std::make_unique<QHYFilterWheelDriver>(device_number, camera_id, std::nullopt, sdk);
+}
+
+std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_number, int camera_index, QHYSDK& sdk) {
+    return std::make_unique<QHYFilterWheelDriver>(device_number, std::nullopt, camera_index, sdk);
 }
 
 }  // namespace alpacacore::vendor::qhy
