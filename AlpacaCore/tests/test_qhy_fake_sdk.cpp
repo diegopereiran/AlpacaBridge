@@ -433,14 +433,17 @@ TEST_CASE("FakeQHYSDK - get_param answers the QHYCCD_ERROR sentinel for an unsup
     CHECK(fake.get_param("fake-qhy-0", unsupported) == 0.0);
 }
 
-TEST_CASE("FakeQHYSDK - get_mem_length tracks the binned ROI", "[qhy][fake][unit]") {
+TEST_CASE("FakeQHYSDK - get_mem_length tracks the ROI, which the driver binds", "[qhy][fake][unit]") {
     // GetQHYCCDMemLength() shrinks when the frame does (issue #365), and the
     // fake stored wbin_/hbin_ without reading them. The fix is NOT to divide
     // here: roi_ is already in BINNED pixels, because that is what the driver
-    // passes -- set_bin_locked() calls set_resolution(0, 0, max_width / bin_x,
-    // max_height / bin_y), and start_exposure() passes num_x_/num_y_, which are
-    // ASCOM NumX/NumY. Dividing again would report a quarter of the bytes the
-    // SDK owes for the frame it is about to deliver.
+    // passes. NOTE the set_bin_mode() calls below are no-ops by construction --
+    // nothing reads wbin_/hbin_ (the re-scoped #365 residual) -- so this case
+    // covers the ROI path, not the binning path; it is written the way the
+    // driver drives the fake, and it would fail if get_mem_length() ever
+    // started dividing by the binning as well. The driver -- set_bin_locked() calls set_resolution(0, 0, max_width /
+    // bin_x, max_height / bin_y), and start_exposure() passes num_x_/num_y_, which are ASCOM NumX/NumY. Dividing again
+    // would report a quarter of the bytes the SDK owes for the frame it is about to deliver.
     auto fake = make_fake();
     fake.open_camera("fake-qhy-0");
     fake.set_bits_mode("fake-qhy-0", 16);

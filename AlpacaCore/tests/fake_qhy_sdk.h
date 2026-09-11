@@ -81,8 +81,12 @@ namespace alpacacore::test {
  *
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
- * corresponding real guard. Each is tracked; none is relied on by the cases
- * in this branch, but the [stress] follow-up (#321) will exercise them all:
+ * corresponding real guard. Each is tracked, and the [stress] follow-up (#321)
+ * will exercise them all. One IS relied on: the two binning cases call
+ * set_bin_mode() and assert get_mem_length() does not shrink further, so the
+ * #365 residual below is load-bearing for them -- making get_mem_length() read
+ * wbin_/hbin_ would fail those cases, which is the protection wanted, but it
+ * means closing #365 is not free:
  *
  * - set_bin_mode()'s wbin_/hbin_ are WRITE-ONLY: nothing reads them, so a bin
  *   change on its own never moves get_mem_length(). Under the ROI UNITS
@@ -151,9 +155,25 @@ public:
     // the DEFAULT seeding pre-bakes the trap the get_chip_info() parity gap
     // above warns about. Keep the two in step when adding a capability.
     std::set<int> controls_available{
-        vendor::qhy::control::BITS16,  vendor::qhy::control::BIN1X1,      vendor::qhy::control::BIN2X2,
-        vendor::qhy::control::GAIN,    vendor::qhy::control::OFFSET,      vendor::qhy::control::EXPOSURE,
-        vendor::qhy::control::CFWPORT, vendor::qhy::control::CFWSLOTSNUM, vendor::qhy::control::ST4PORT,
+        vendor::qhy::control::BITS16,
+        vendor::qhy::control::BIN1X1,
+        vendor::qhy::control::BIN2X2,
+        vendor::qhy::control::GAIN,
+        vendor::qhy::control::OFFSET,
+        vendor::qhy::control::EXPOSURE,
+        vendor::qhy::control::CFWPORT,
+        vendor::qhy::control::CFWSLOTSNUM,
+        vendor::qhy::control::ST4PORT,
+        // CURTEMP/CURPWM are seeded in `params` below, and since get_param()
+        // now answers the QHYCCD_ERROR sentinel for anything missing from
+        // `params` (issue #373), membership there reads as "supported". Listing
+        // them here too keeps the fake's two capability sources in step, as the
+        // note above requires: the driver gates its telemetry read on
+        // is_control_available(CURTEMP) (qhy_camera_driver.cpp), so without this
+        // the seeded readings were unreachable and the telemetry path silently
+        // untested.
+        vendor::qhy::control::CURTEMP,
+        vendor::qhy::control::CURPWM,
     };
     std::map<int, double> params{
         {vendor::qhy::control::GAIN, 10.0},         {vendor::qhy::control::OFFSET, 20.0},
