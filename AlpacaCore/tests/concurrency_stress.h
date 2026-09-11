@@ -102,6 +102,10 @@ struct StressOptions {
  *
  * Neither copyable nor movable (it owns a std::mutex) — a registration must
  * capture it by reference in the operate lambda, not by value.
+ *
+ * The constructor is explicit, so brace-init needs its own parens:
+ *     StressCallGuard guard({AlpacaError::NotConnected, AlpacaError::InvalidValue});
+ * not `StressCallGuard guard = {...};`, which won't compile.
  */
 class StressCallGuard {
 public:
@@ -118,6 +122,10 @@ public:
             }
             record("AlpacaException(code=" + std::to_string(ex.error_code()) + ")", ex.what());
         } catch (const std::exception& ex) {
+            // typeid(ex).name() is the ABI-mangled name on libstdc++ (e.g.
+            // "St12out_of_range", not "std::out_of_range") -- fine for a
+            // CHECK message, but don't mistake the prefix in a report() line
+            // for garbage output.
             record(typeid(ex).name(), ex.what());
         }
     }

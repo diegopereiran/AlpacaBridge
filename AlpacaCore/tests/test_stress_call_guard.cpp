@@ -103,7 +103,14 @@ TEST_CASE("StressCallGuard - report() caps the number of stored samples", "[unit
     CHECK(report.find("more") != std::string::npos);
 }
 
-TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "[unit]") {
+TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "[stress][unit]") {
+    // Tagged [stress] (not just [unit]) so this is the one case of the guard's
+    // own locking that the TSan job actually exercises -- CI runs the TSan
+    // binary as `alpacacore_tests "[stress]"`, so a [unit]-only tag would
+    // leave a lost-update bug in this mutex invisible to a race detector and
+    // showing only as an occasional flaky count under ASan. Harmless for
+    // check_stress_registration.py, which only globs
+    // test_*_concurrency_stress.cpp filenames for vendor registrations.
     // op_threads hits one guard concurrently in real registrations.
     StressCallGuard guard;
     constexpr int kThreads = 8;
