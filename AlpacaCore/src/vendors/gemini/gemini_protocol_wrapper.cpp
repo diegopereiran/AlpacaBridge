@@ -256,6 +256,18 @@ public:
 
     int connect(const ConnectionConfig& config) {
         std::lock_guard<std::mutex> lock(mutex_);
+        // open-astro#333: connect_serial() assigns serial_fd_ unconditionally
+        // with no prior close, so a second connect on a live wrapper leaks the
+        // first descriptor for the life of the process and, on hardware,
+        // re-asserts DTR and resets the MCU mid-session. The focuser driver's
+        // transition_mutex_ is what prevents that; this makes a future caller
+        // bug loud instead of silent. A throw rather than an assert: assert
+        // aborts in every build where NDEBUG is undefined, which is CI and
+        // every dev build, leaving the graceful path reachable only in the
+        // shipped .deb.
+        if (connected_) {
+            throw AlpacaException("Gemini protocol wrapper is already connected", AlpacaError::InvalidOperation);
+        }
         config_ = config;
 
         connect_serial();

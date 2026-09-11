@@ -111,6 +111,21 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // open-astro#333: the idempotency check below and the protocol_ call
+        // that follows it must be one atomic transition. Without this, two
+        // HTTP workers could both observe connected_ == false and both reach
+        // protocol_.connect(), which assigns serial_fd_ unconditionally: the
+        // first descriptor leaks for the life of the process, and on a real
+        // MyFocuserPro2 the second open() re-asserts DTR and resets the MCU
+        // mid-session. The window is wide, not a single instruction -- the
+        // handshake retry ladder is ~9.1 s in the worst case.
+        //
+        // Deliberately NOT the base's connection mutex, and not shared with
+        // firmware_mutex_ (see its comment below): this serializes
+        // set_connected() against other set_connected() calls only, and
+        // leaves every getter free rather than parking them behind the
+        // handshake. Both sibling Gemini drivers make the same split.
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -272,6 +287,8 @@ private:
     // the base joins that thread — sharing one mutex would deadlock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_;  // captured at connect; web-UI only (guarded by firmware_mutex_)
+
+    std::mutex transition_mutex_;  // serializes set_connected() transitions (open-astro#333)
 };
 
 std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
