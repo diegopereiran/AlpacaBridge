@@ -74,6 +74,13 @@ public:
 
     /**
      * @brief Connect to the focuser.
+     *
+     * Refuses with InvalidOperation when the wrapper already holds a live
+     * connection (open-astro#333): a second connect would open a second
+     * descriptor and leak the first. This makes "connect on a live wrapper"
+     * an error rather than a re-handshake, so a caller that wants reconnect
+     * semantics has to disconnect() first.
+     *
      * @param config Connection configuration
      * @return Firmware version on success
      */

@@ -12,12 +12,18 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
+#include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <thread>
 #include <variant>
+#include <vector>
 
 #include "catch2_compat.h"
+#include "fake_gemini_focuser.h"
 
 namespace {
 
@@ -114,3 +120,123 @@ TEST_CASE("Gemini Focuser Driver - Unique IDs", "[gemini][focuser][unit]") {
     CHECK(driver0->get_unique_id() == "GEMINI_FOCUSER_0");
     CHECK(driver1->get_unique_id() == "GEMINI_FOCUSER_1");
 }
+
+#ifndef _WIN32
+
+TEST_CASE("Gemini Focuser Driver - concurrent set_connected(true) is one transition (#333)",
+          "[gemini][focuser][concurrency]") {
+    // The focuser was the only Gemini driver without a transition mutex, so
+    // set_connected() was a check-then-act on a plain atomic. Two HTTP workers
+    // could both observe connected_ == false and both reach
+    // protocol_.connect(), which assigns serial_fd_ with no prior close, so
+    // the first descriptor leaks for the life of the process. (Not an MCU
+    // reset: the first fd is still open and connect_serial() clears HUPCL,
+    // so a second open() on a live tty raises no DTR edge.)
+    //
+    // The window is the handshake ladder, up to ~9.1 s on hardware. The fake
+    // holds its handshake reply so the race is reproducible rather than
+    // timing-dependent.
+    alpacacore::test::FakeGeminiFocuser fake;
+    fake.set_handshake_delay(std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 2; ++i) {
+        workers.emplace_back([&] {
+            try {
+                driver->set_connected(true);
+            } catch (const std::exception&) {
+                ++failures;
+            }
+        });
+    }
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    // Neither caller may fail: both asked for a state the driver is already
+    // reaching. Without the transition mutex the loser reaches the wrapper,
+    // whose already-connected guard throws.
+    CHECK(failures.load() == 0);
+    CHECK(driver->get_connected());
+    // Exactly one connect reached the wire. Without either fix this is 2, and
+    // the first descriptor is the one that leaks.
+    CHECK(fake.connects() == 1);
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Gemini protocol wrapper - a second connect on a live wrapper throws (#333)",
+          "[gemini][focuser][concurrency]") {
+    // The driver's transition mutex keeps this unreachable through the
+    // driver, so the guard is pinned directly: a live wrapper refuses a
+    // second connect with InvalidOperation instead of leaking the first
+    // descriptor.
+    alpacacore::test::FakeGeminiFocuser fake;
+    alpacacore::vendor::gemini::GeminiProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    CHECK(wrapper.connect(config) > 0);
+    CHECK(wrapper.is_connected());
+    require_alpaca_error([&]() { wrapper.connect(config); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(wrapper.is_connected());
+    CHECK(fake.connects() == 1);  // the refused connect never reached the wire
+    wrapper.disconnect();
+    CHECK_FALSE(wrapper.is_connected());
+}
+
+TEST_CASE("Gemini Focuser Driver - a connect racing a disconnect settles once (#333)",
+          "[gemini][focuser][concurrency]") {
+    // The same unguarded serial_fd_ a second connect overwrites is the one a
+    // concurrent disconnect closes, so the two must not interleave either.
+    alpacacore::test::FakeGeminiFocuser fake;
+    fake.set_handshake_delay(std::chrono::milliseconds(200));
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+
+    std::atomic<int> failures{0};
+    auto flip = [&](bool target) {
+        try {
+            driver->set_connected(target);
+        } catch (const std::exception&) {
+            ++failures;
+        }
+    };
+
+    for (int round = 0; round < 5; ++round) {
+        std::thread up(flip, true);
+        std::thread down(flip, false);
+        up.join();
+        down.join();
+        CHECK(failures.load() == 0);
+        // Whichever won, the driver is in a definite state and the link
+        // agrees with it: a getter must not throw NotConnected while
+        // get_connected() reports true.
+        if (driver->get_connected()) {
+            CHECK_NOTHROW(driver->get_position());
+        }
+        driver->set_connected(false);
+    }
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Gemini Focuser Driver - connect/disconnect cycles reuse the port cleanly (#333)",
+          "[gemini][focuser][concurrency]") {
+    // The already-connected guard must not break the ordinary sequential
+    // reconnect the web UI does every time a device is re-enabled.
+    alpacacore::test::FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+
+    for (int i = 0; i < 3; ++i) {
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK_NOTHROW(driver->get_position());
+        driver->set_connected(false);
+        REQUIRE_FALSE(driver->get_connected());
+    }
+    // One handshake per connect, no more.
+    CHECK(fake.connects() == 3);
+}
+
+#endif  // _WIN32

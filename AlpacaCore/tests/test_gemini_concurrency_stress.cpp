@@ -44,10 +44,13 @@
 //     a cover call would widen this past a registration PR; also a
 //     follow-up.
 //
-// The focuser has no fake, so it takes the accepted fail-fast bar (the
-// ZWO/iOptron precedent): a serial path that cannot exist, so every connect
-// fails fast and the storm still covers the AsyncConnectable machinery and
-// the connect-failure cleanup.
+// The focuser stays on the accepted fail-fast bar (the ZWO/iOptron
+// precedent): a serial path that cannot exist, so every connect fails fast
+// and the storm still covers the AsyncConnectable machinery and the
+// connect-failure cleanup. Note that a pty-backed fake DOES now exist for it
+// -- AlpacaCore/tests/fake_gemini_focuser.h, added with the transition-mutex
+// fix (open-astro#333) -- it is simply not wired into this storm yet. Wire
+// that up rather than writing a second seam.
 
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/focuser_driver.h>
