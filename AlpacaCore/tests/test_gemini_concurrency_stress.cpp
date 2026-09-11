@@ -94,9 +94,23 @@ void flatpanel_operate(AlpacaDriver& d) {
     // Unconditional submission is what builds an unbounded thread chain
     // here: on the background path calibrator_on()/calibrator_off() return
     // as soon as they spawn a task thread, each spawned thread joins its
-    // predecessor (so they all stay live), and the drain rate is one
-    // set_light() ~= 110 ms (2 commands x kCommandDelayMs) against four op
-    // threads submitting every ~200 us. This gate is a TOCTOU check, not
+    // predecessor (so they all stay live), and four op threads submit every
+    // ~200 us -- far faster than one set_light() (two send_command_locked()
+    // round trips) can drain.
+    //
+    // Deliberately no figure for that drain rate. This TEST_CASE builds the
+    // *Pro* model, and send_command_locked() skips its kCommandDelayMs
+    // settle entirely when config_.model == FlatPanelModel::Pro
+    // (gemini_flatpanel_protocol_wrapper.cpp:853) -- that fixed 50 ms cost
+    // is a Lite/Rev2 property, and this file storms neither. On the Pro path
+    // what remains is the fake's reply latency plus read_response()'s
+    // kReadCharDelayMs (10 ms) poll granularity, which is a property of the
+    // fake and the runner rather than of the driver, so quoting a number
+    // here would just be a figure nobody re-measures.
+    //
+    // The gate's conclusion does not depend on that number, and a faster
+    // drain only strengthens it: fewer commands are ever in flight at once,
+    // so the chain is shorter, not longer. The gate is a TOCTOU check, not
     // serialization -- several op threads can observe "not changing" in the
     // same window and all submit together, so it does not cap the chain at
     // one command at a time, only at op_threads (4) per drain interval
@@ -171,6 +185,12 @@ TEST_CASE("Gemini PDH Advanced 3 switch - concurrent connect/disconnect/operate 
 TEST_CASE("Gemini PDH Advanced 3 switch - destruction races an in-flight connect", "[gemini][switch][stress]") {
     FakeGeminiPdh hub;
     const std::string port = hub.slave_path();
+    // 25 iterations, not the harness default of 100: unlike a fail-fast
+    // case, every iteration here reaches a real handshake, whose first
+    // attempt alone sleeps 100 ms before its read. 100 iterations would put
+    // ~10 s on the clock for this case on its own, and the sanitizers-tsan
+    // job it runs in has no timeout-minutes at all. Do not "restore" the
+    // default without re-checking both.
     alpacacore::test::run_destruction_during_connect_stress(
         [&port]() { return alpacacore::vendor::gemini::create_gemini_pdh_switch(0, port, 19200); }, 25);
 }
@@ -200,6 +220,7 @@ TEST_CASE("Gemini Flat Panel Pro - concurrent connect/disconnect/operate stress"
 TEST_CASE("Gemini Flat Panel Pro - destruction races an in-flight connect", "[gemini][covercalibrator][stress]") {
     FakeGeminiFlatPanel panel;
     const std::string port = panel.slave_path();
+    // 25 not 100, same reasoning as the PDH destruction case above.
     alpacacore::test::run_destruction_during_connect_stress(
         [&port]() { return alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, port, 9600); }, 25);
 }
