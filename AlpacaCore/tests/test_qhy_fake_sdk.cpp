@@ -17,8 +17,12 @@
 
 #include <alpacacore/util/error_handling.h>
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_qhy_sdk.h"
@@ -298,4 +302,86 @@ TEST_CASE("FakeQHYSDK - an out-of-range readout mode name falls back, set fails"
     } catch (const AlpacaException& ex) {
         CHECK(ex.error_code() == AlpacaError::DriverException);
     }
+}
+
+TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][fake][unit]") {
+    // The decorator is 26 hand-written one-line forwards, so a transposed
+    // body (move_cfw calling get_cfw_position, say) compiles and would only
+    // surface as a baffling failure in the [stress] follow-up, which is where
+    // LockedQHYSDK is actually load-bearing. Walk all 26 through the decorator
+    // and assert the fake's call ledger names exactly them, once each: a
+    // mis-wired forward shows up as one name at 2 and another at 0.
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+
+    const std::string id = "fake-qhy-0";
+    sdk.enumerate_cameras();
+    std::string model;
+    sdk.get_camera_model(id, model);
+    sdk.open_camera(id);
+    sdk.init_camera(id);
+    sdk.register_exposure_worker(id, std::make_shared<std::atomic<bool>>(false));
+    alpacacore::vendor::qhy::QHYCameraInfo info{};
+    sdk.get_chip_info(id, info);
+    sdk.is_control_available(id, control::GAIN);
+    sdk.get_param(id, control::GAIN);
+    sdk.get_param_range(id, control::GAIN);
+    sdk.set_param(id, control::GAIN, 10.0);
+    sdk.set_resolution(id, 0, 0, 8, 8);
+    sdk.set_bin_mode(id, 1, 1);
+    sdk.set_bits_mode(id, 16);
+    sdk.get_mem_length(id);
+    sdk.start_single_frame(id);
+    std::vector<uint8_t> buffer(1024 * 1024, 0);
+    uint32_t w = 0, h = 0, bpp = 0, channels = 0;
+    sdk.get_single_frame(id, buffer.data(), w, h, bpp, channels);
+    sdk.cancel_exposure(id);
+    sdk.guide(id, 0, 10);
+    sdk.control_temp(id, -5.0);
+    sdk.move_cfw(id, 1);
+    sdk.get_cfw_position(id);
+    sdk.get_num_readout_modes(id);
+    sdk.get_readout_mode_name(id, 0);
+    sdk.set_readout_mode(id, 0);
+    sdk.get_sdk_version();
+    sdk.close_camera(id);
+
+    const std::vector<std::string> methods{
+        "enumerate_cameras",
+        "get_camera_model",
+        "open_camera",
+        "init_camera",
+        "close_camera",
+        "register_exposure_worker",
+        "get_chip_info",
+        "is_control_available",
+        "get_param",
+        "get_param_range",
+        "set_param",
+        "set_resolution",
+        "set_bin_mode",
+        "set_bits_mode",
+        "get_mem_length",
+        "start_single_frame",
+        "get_single_frame",
+        "cancel_exposure",
+        "guide",
+        "control_temp",
+        "move_cfw",
+        "get_cfw_position",
+        "get_num_readout_modes",
+        "get_readout_mode_name",
+        "set_readout_mode",
+        "get_sdk_version",
+    };
+    // Guards against the list drifting from the interface: if a 27th method is
+    // added to QHYSDK, LockedQHYSDK gains a forward and this case must grow too.
+    CHECK(methods.size() == 26);
+    for (const auto& name : methods) {
+        INFO("method: " << name);
+        CHECK(fake.call_count(name.c_str()) == 1);
+    }
+    // Nothing OUTSIDE the list was hit, which is the half that catches a
+    // forward wired to the wrong inner method.
+    CHECK(fake.calls.size() == methods.size());
 }

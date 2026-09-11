@@ -142,7 +142,13 @@ namespace guide_direction {
  */
 class QHYSDK {
 public:
-    virtual ~QHYSDK() = default;
+    // Destructor is protected and NON-virtual (below), not public and virtual:
+    // nothing ever owns a QHYSDK*. Drivers hold a QHYSDK&, workers capture a
+    // raw QHYSDK*, and every implementation is either a function-local static
+    // (QHYSDKWrapper) or a stack object (FakeQHYSDK, LockedQHYSDK). A public
+    // virtual destructor here would make `delete static_cast<QHYSDK*>(&...)`
+    // compile against the singleton, since access for delete is checked on the
+    // static type.
 
     // ── Enumeration ──────────────────────────────────────────────────────────
 
@@ -282,6 +288,12 @@ public:
     // ── Misc ─────────────────────────────────────────────────────────────────
 
     virtual std::string get_sdk_version() = 0;
+
+protected:
+    // See the note at the top of the class: protected + non-virtual, so no
+    // caller can delete through a QHYSDK*, while every implementation is still
+    // destroyed normally through its own static type.
+    ~QHYSDK() = default;
 };
 
 /**
@@ -344,7 +356,10 @@ private:
     std::unique_ptr<Impl> pimpl_;
 
     QHYSDKWrapper();
-    ~QHYSDKWrapper() override;
+    // No `override`: QHYSDK's destructor is protected and non-virtual, so this
+    // does not override anything. It still runs on the function-local static's
+    // destruction at exit, which is the only way this object is ever destroyed.
+    ~QHYSDKWrapper();
 
     QHYSDKWrapper(const QHYSDKWrapper&) = delete;
     QHYSDKWrapper& operator=(const QHYSDKWrapper&) = delete;

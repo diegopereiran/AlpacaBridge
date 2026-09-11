@@ -89,6 +89,13 @@ namespace alpacacore::test {
  * - set_readout_mode() does not re-run init_camera() the way the real one
  *   re-invokes InitQHYCCD, so any init_calls assertion around a mode switch
  *   reads differently here than on hardware. Tracked in issue #335.
+ * - get_chip_info() derives has_cooler/is_color/bayer_pattern/has_st4_port/
+ *   has_shutter from the canned QHYCameraInfo, where the real one derives all
+ *   five from IsQHYCCDControlAvailable. So steering a capability by
+ *   adding/removing control::COOLER from `controls_available` has NO effect
+ *   here, while the same change on hardware would flip has_cooler. Set the
+ *   struct field (or use default_cooled_camera()) instead. Tracked in
+ *   issue #337.
  *
  * Not thread-hardened, by design — wrap it in LockedQHYSDK for the [stress]
  * suite so ThreadSanitizer reports point at driver code, not at this file.
@@ -131,6 +138,19 @@ public:
     bool frame_ok = true;        // get_single_frame's return
 
     // --- observability -----------------------------------------------------
+    //
+    // Only `calls` is mutex-guarded (read it via call_count()). Every plain
+    // counter below is written by whichever thread made the call and read
+    // straight from the test body, which is a data race the moment a driver
+    // worker is running concurrently with that read.
+    //
+    // Sound for every case in these files today: they all use default_camera()
+    // (no cooler, so no telemetry or temperature thread) and none starts an
+    // exposure or a pulse guide, so the only writer is the test thread itself.
+    // THE FIRST cooled-camera or exposure case added here breaks that, and
+    // these reads become TSan findings in test code -- exactly the noise
+    // LockedQHYSDK exists to keep out of the [stress] suite. Route them
+    // through the same lock before adding such a case. Tracked in issue #331.
     std::map<std::string, int> calls;
     int physical_opens = 0;
     int physical_closes = 0;
