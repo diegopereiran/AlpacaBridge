@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 #include <memory>
 #include <string>
@@ -44,5 +45,17 @@ std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, con
  * @return Unique pointer to filter wheel driver
  */
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_number, int camera_index);
+
+/**
+ * @brief Test overloads taking an explicit SDK seam (issue #321).
+ *
+ * The default overloads above pass QHYSDKWrapper::instance(). These let a test
+ * inject a FakeQHYSDK instead — the only way to reach this driver's connect
+ * path, since the real SDK cannot initialise on a USB-less host.
+ *
+ * The SDK reference MUST outlive the returned driver.
+ */
+std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id, QHYSDK& sdk);
+std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_number, int camera_index, QHYSDK& sdk);
 
 }  // namespace alpacacore::vendor::qhy
