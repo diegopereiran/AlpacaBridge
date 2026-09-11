@@ -49,10 +49,16 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
  * path, since the real SDK cannot initialise on a USB-less host.
  *
  * The SDK reference MUST outlive the returned driver, INCLUDING this driver's
- * detachable workers: the exposure, temperature, cooler-off and telemetry
- * threads join with a bounded timeout and detach on expiry, and the
- * pulse-guide thread is detached by design. All of them reach the SDK through
- * a captured QHYSDK* rather than through the driver's `sdk_` member.
+ * detachable workers: the exposure, temperature and cooler-off threads join
+ * with a bounded timeout and detach on expiry, and the pulse-guide thread is
+ * detached by design. The telemetry thread is NOT one of them — it is joined
+ * unconditionally on every path (disconnect, shutdown,
+ * stop_telemetry_thread_locked), so it can never outlive the driver. Do not
+ * relax that join: the capture below is what makes a DETACHED worker's SDK
+ * access survivable, and telemetry does not rely on it.
+ *
+ * All five workers, telemetry included, reach the SDK through a captured
+ * QHYSDK* rather than through the driver's `sdk_` member.
  *
  * That capture NARROWS the use-after-free window; it does NOT close it. Every
  * one of those workers except pulse-guide also captures `this` and

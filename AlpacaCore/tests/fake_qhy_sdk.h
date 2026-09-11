@@ -80,7 +80,7 @@ namespace alpacacore::test {
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
  * corresponding real guard. Each is tracked; none is relied on by the cases
- * in this branch, but the [stress] follow-up (#321) will exercise all three:
+ * in this branch, but the [stress] follow-up (#321) will exercise all four:
  *
  * - open_camera() does not refuse a fresh open while a registered exposure
  *   worker is still live (the real one throws InvalidOperation — this is the
