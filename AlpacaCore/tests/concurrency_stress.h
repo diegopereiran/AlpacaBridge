@@ -85,8 +85,12 @@ struct StressOptions {
  *   exactly as it would without this guard. This guard existing must not
  *   change that.
  *
- * A registration ends with CHECK(guard.unexpected_count() == 0) (put
- * guard.report() in the CHECK's message so a failure names what it saw).
+ * A registration ends with
+ *     INFO(guard.report());
+ *     CHECK(guard.unexpected_count() == 0);
+ * (CHECK has no message argument in Catch2 v2 or v3 -- INFO attaches
+ * guard.report() to the next assertion's failure output instead, so a
+ * failure names what it saw).
  * The constructor's expected_codes REPLACES the default {NotConnected}, it
  * does not add to it — pass {NotConnected, PropertyNotImplemented} (not just
  * {PropertyNotImplemented}) where the driver's contract needs a wider set

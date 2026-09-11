@@ -70,6 +70,18 @@ TEST_CASE("StressCallGuard - a caller-specified expected code is swallowed", "[u
     CHECK(guard.unexpected_count() == 0);
 }
 
+TEST_CASE("StressCallGuard - a caller-specified set REPLACES the default, not extends it", "[unit]") {
+    // The exact footgun the header comment and AGENTS.md warn about in bold:
+    // this must NOT still treat NotConnected as expected just because it's
+    // the default. Passing only {InvalidValue} means NotConnected is now
+    // unexpected too -- without this case, an implementation that quietly
+    // unioned the caller's set with the default would pass every other test
+    // in this file identically.
+    StressCallGuard guard({AlpacaError::InvalidValue});
+    guard([] { throw AlpacaException("racing a disconnect", AlpacaError::NotConnected); });
+    CHECK(guard.unexpected_count() == 1);
+}
+
 TEST_CASE("StressCallGuard - a call after an unexpected throw still keeps isolation", "[unit]") {
     // The whole point: the FIRST throw must not skip the calls after it, the
     // way run_lifecycle_stress's outer catch would.

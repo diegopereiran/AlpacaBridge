@@ -14,7 +14,8 @@
 #                  vendors ON
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
 #   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
-#                  connect/disconnect/operate concurrency suite (issue #101)
+#                  connect/disconnect/operate concurrency suite (issue #101),
+#                  plus [stress-guard] (the harness's own self-tests, issue #322)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   unicode        scan sources for Trojan-Source / invisible Unicode
