@@ -433,38 +433,66 @@ TEST_CASE("FakeQHYSDK - get_param answers the QHYCCD_ERROR sentinel for an unsup
     CHECK(fake.get_param("fake-qhy-0", unsupported) == 0.0);
 }
 
-TEST_CASE("FakeQHYSDK - get_mem_length shrinks with the binning", "[qhy][fake][unit]") {
-    // GetQHYCCDMemLength() shrinks after SetQHYCCDBinMode -- a 2x2 bin
-    // quarters the frame -- and the fake stored wbin_/hbin_ without reading
-    // them, so it reported a full-resolution length at every binning
-    // (issue #365). An exposure test that binned and sized a buffer from this
-    // would have passed here and undersized on hardware.
+TEST_CASE("FakeQHYSDK - get_mem_length tracks the binned ROI", "[qhy][fake][unit]") {
+    // GetQHYCCDMemLength() shrinks when the frame does (issue #365), and the
+    // fake stored wbin_/hbin_ without reading them. The fix is NOT to divide
+    // here: roi_ is already in BINNED pixels, because that is what the driver
+    // passes -- set_bin_locked() calls set_resolution(0, 0, max_width / bin_x,
+    // max_height / bin_y), and start_exposure() passes num_x_/num_y_, which are
+    // ASCOM NumX/NumY. Dividing again would report a quarter of the bytes the
+    // SDK owes for the frame it is about to deliver.
     auto fake = make_fake();
     fake.open_camera("fake-qhy-0");
-    fake.set_resolution("fake-qhy-0", 0, 0, 64, 48);
     fake.set_bits_mode("fake-qhy-0", 16);
 
+    // Unbinned: the driver would pass the full sensor size.
+    fake.set_resolution("fake-qhy-0", 0, 0, 64, 48);
     fake.set_bin_mode("fake-qhy-0", 1, 1);
     const uint32_t unbinned = fake.get_mem_length("fake-qhy-0");
     CHECK(unbinned == 64U * 48U * 2U);
 
+    // 2x2: the driver passes the halved ROI, so the length quarters.
+    fake.set_resolution("fake-qhy-0", 0, 0, 32, 24);
     fake.set_bin_mode("fake-qhy-0", 2, 2);
     CHECK(fake.get_mem_length("fake-qhy-0") == unbinned / 4);
 
     // Asymmetric binning halves one axis only.
+    fake.set_resolution("fake-qhy-0", 0, 0, 32, 48);
     fake.set_bin_mode("fake-qhy-0", 2, 1);
     CHECK(fake.get_mem_length("fake-qhy-0") == unbinned / 2);
 
     // 8-bit readout halves it again, independently of the binning.
     fake.set_bits_mode("fake-qhy-0", 8);
+    fake.set_resolution("fake-qhy-0", 0, 0, 32, 24);
     fake.set_bin_mode("fake-qhy-0", 2, 2);
-    CHECK(fake.get_mem_length("fake-qhy-0") == 64U / 2 * (48U / 2));
+    CHECK(fake.get_mem_length("fake-qhy-0") == 32U * 24U);
+}
 
-    // An ROI that does not divide evenly truncates, as the SDK does.
-    fake.set_bits_mode("fake-qhy-0", 16);
-    fake.set_resolution("fake-qhy-0", 0, 0, 65, 49);
-    fake.set_bin_mode("fake-qhy-0", 2, 2);
-    CHECK(fake.get_mem_length("fake-qhy-0") == 32U * 24U * 2U);
+TEST_CASE("FakeQHYSDK - get_single_frame never exceeds get_mem_length", "[qhy][fake][unit]") {
+    // The driver sizes its frame buffer from get_mem_length() and hands that
+    // exact buffer to get_single_frame() (qhy_camera_driver.cpp: mem_length ->
+    // local_buf(mem_length) -> get_single_frame). Hardware cannot deliver an
+    // image larger than GetQHYCCDMemLength(), so the fake must not either.
+    // When get_mem_length() divided by the binning and get_single_frame() did
+    // not, this pairing was a heap-buffer-overflow inside the fake (ASan: a
+    // 384-byte buffer memset with 1536 bytes) -- a crash in test scaffolding
+    // that would have read as a driver bug.
+    for (const auto bin : {1U, 2U, 4U}) {
+        auto fake = make_fake();
+        fake.open_camera("fake-qhy-0");
+        fake.set_bits_mode("fake-qhy-0", 16);
+        fake.set_resolution("fake-qhy-0", 0, 0, 64U / bin, 48U / bin);
+        fake.set_bin_mode("fake-qhy-0", bin, bin);
+
+        const uint32_t mem_length = fake.get_mem_length("fake-qhy-0");
+        std::vector<uint8_t> buffer(mem_length, 0);
+        uint32_t width = 0, height = 0, bpp = 0, channels = 0;
+        REQUIRE(fake.get_single_frame("fake-qhy-0", buffer.data(), width, height, bpp, channels));
+
+        const uint32_t delivered = width * height * ((bpp > 8) ? 2U : 1U);
+        INFO("bin " << bin << ": mem_length " << mem_length << ", frame " << width << "x" << height);
+        CHECK(delivered == mem_length);
+    }
 }
 
 TEST_CASE("FakeQHYSDK - control_temp converges over calls instead of settling instantly", "[qhy][fake][unit]") {

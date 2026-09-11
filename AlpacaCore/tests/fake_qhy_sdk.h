@@ -103,9 +103,20 @@ namespace alpacacore::test {
  *   struct field (or use default_cooled_camera()) instead. Tracked in
  *   issue #337.
  *
+ * ROI UNITS — `roi_` is in BINNED pixels, matching the only caller: the driver
+ * passes max_width / bin_x to set_resolution() from set_bin_locked(), and
+ * ASCOM NumX/NumY (already binned) from start_exposure(). So get_mem_length()
+ * shrinks with the binning because the ROI shrinks, NOT by dividing again --
+ * doing both would report a quarter of the bytes the SDK owes for the frame it
+ * is about to deliver. get_mem_length() and get_single_frame() must agree:
+ * hardware cannot deliver an image larger than GetQHYCCDMemLength(), and the
+ * "get_single_frame never exceeds get_mem_length" case pins the pair at bin > 1.
+ *
  * FIXED since this list was written, kept named so a reader chasing an old
- * comment lands somewhere: get_mem_length() now divides by the stored binning
- * (issue #365); get_param() now answers the QHYCCD_ERROR sentinel, not 0.0,
+ * comment lands somewhere: get_mem_length() now tracks the binned ROI
+ * (issue #365 -- see ROI UNITS above; an intermediate version of that fix
+ * divided by the binning a second time and overran the driver's buffer);
+ * get_param() now answers the QHYCCD_ERROR sentinel, not 0.0,
  * for a control missing from `params` (issue #373); and control_temp() now
  * approaches its target by `temp_settle_step_c` per call rather than settling
  * instantly, the way ControlQHYCCDTemp's PID does (issue #390).
@@ -410,15 +421,23 @@ public:
         hit("get_mem_length");
         require_open(camera_id);
         const uint32_t bytes_per_px = (bits_ > 8) ? 2U : 1U;
-        // The SDK shrinks the buffer after SetQHYCCDBinMode -- a 2x2 bin
-        // quarters the frame -- so a fake that ignored wbin_/hbin_ reported a
-        // full-resolution length at every binning and an exposure test that
-        // binned would size its buffer wrong (issue #365). Integer division,
-        // matching the SDK: an ROI that does not divide evenly loses the
-        // remainder rather than rounding up.
-        const uint32_t wbin = (wbin_ == 0) ? 1U : wbin_;
-        const uint32_t hbin = (hbin_ == 0) ? 1U : hbin_;
-        return (roi_.width / wbin) * (roi_.height / hbin) * bytes_per_px;
+        // ROI CONVENTION (issue #365, settled in review): roi_ is in BINNED
+        // pixels, because that is what the only caller passes --
+        // set_bin_locked() calls set_resolution(0, 0, max_width / bin_x,
+        // max_height / bin_y), and start_exposure() passes num_x_/num_y_, which
+        // are ASCOM NumX/NumY and therefore binned too. So the length DOES
+        // shrink with the binning, via a smaller ROI, and dividing by
+        // wbin_/hbin_ here as well would report a quarter of the bytes the SDK
+        // must return for the frame it is about to deliver -- a new parity lie
+        // in place of the old one, and a heap overflow in any test that sizes
+        // its buffer from this and then calls get_single_frame() (proven with
+        // ASan: 384-byte buffer, 1536-byte memset).
+        //
+        // This value and what get_single_frame() reports must stay in step:
+        // hardware cannot deliver an image larger than GetQHYCCDMemLength().
+        // The contract case "get_single_frame never exceeds get_mem_length"
+        // pins that pairing at bin > 1.
+        return roi_.width * roi_.height * bytes_per_px;
     }
 
     bool start_single_frame(const std::string& camera_id) override {

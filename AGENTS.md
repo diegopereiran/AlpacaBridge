@@ -1264,8 +1264,15 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   recognising in the next fake: `get_param()` answered `0.0` for an unsupported
   control where `GetQHYCCDParam()` answers `QHYCCD_ERROR` (~4.29e9), so
   "unsupported" and "reads zero" were indistinguishable; `get_mem_length()`
-  ignored the binning it had been told about, so a binned exposure test would
-  have sized its buffer at full resolution and only undersized on hardware; and
+  ignored the binning it had been told about -- and closing that exposed a
+  second, sharper rule: **a fake's paired calls must agree with each other**,
+  since `get_mem_length()` and `get_single_frame()` are used together (size a
+  buffer from one, fill it with the other) and hardware cannot deliver an
+  image larger than `GetQHYCCDMemLength()`. Fixing one of a pair alone turned
+  a parity gap into a heap-buffer-overflow inside the fake, which reads as a
+  driver bug in an ASan/TSan job. Write the units down where the state lives
+  (`roi_` is in binned pixels, because that is what the driver passes) and
+  pin the pairing with a case, not just the single call; and
   `control_temp()` wrote its target straight into `CURTEMP`, an instant settle
   the real `ControlQHYCCDTemp` PID can never produce, which would have let a
   driver that merely reads back its own setpoint pass a thermal test. Keep the
