@@ -689,8 +689,15 @@ public:
             // this thread while it's still stuck inside SetQHYCCDParam below,
             // the destructor is the ONLY thing that runs after the blocking
             // call returns, and it must not touch a driver that may by then be
-            // destroyed. Everything else in this lambda that uses `this` runs
-            // BEFORE that point, while the bounded join still holds.
+            // destroyed.
+            //
+            // The rest of this lambda is NOT protected that way. join_temp_thread()
+            // below is a member call that itself blocks up to 2s -- the same bound
+            // join_cooler_off_thread() waits before detaching -- so this worker can
+            // be detached while still inside it, with `this` already gone. That is
+            // a real window, not a theoretical one; it is why detachment here is
+            // bounded-and-unsafe rather than safe, and why the SDK is reached
+            // through a captured pointer instead of `sdk_`.
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }

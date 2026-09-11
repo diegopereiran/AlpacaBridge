@@ -374,8 +374,12 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
         "set_readout_mode",
         "get_sdk_version",
     };
-    // Guards against the list drifting from the interface: if a 27th method is
-    // added to QHYSDK, LockedQHYSDK gains a forward and this case must grow too.
+    // A literal self-check on the list, NOT a guard against the interface
+    // growing: if QHYSDK gains a 27th method, LockedQHYSDK must gain a forward
+    // to still compile, but this list, the driven calls and fake.calls all
+    // stay at 26 and the case still passes. Adding a method means updating
+    // this list by hand. What the case DOES catch (mutation-verified) is a
+    // forward wired to the wrong inner method, or to none.
     CHECK(methods.size() == 26);
     for (const auto& name : methods) {
         INFO("method: " << name);
