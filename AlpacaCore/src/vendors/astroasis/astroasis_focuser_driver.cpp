@@ -61,13 +61,32 @@ public:
 
     int get_interface_version() const override { return 4; }
 
+    // Deliberately a plain atomic read, not under mutex_ -- do NOT pull it in
+    // during a sweep of the "connected_ only under mutex_" invariant. Taking
+    // the lock here would be safe (async_connectable.h explicitly allows
+    // get_connected() to take the driver mutex, and several telescope drivers
+    // do; the task tail reads it BEFORE pending_mutex_ so that stays deadlock-
+    // free), but it would buy nothing -- connected_ is one atomic -- and would
+    // cost: a Connected poll landing during an in-flight connect would block
+    // for the whole ~1.1 s HID handshake instead of answering immediately.
     bool get_connected() const override { return connected_.load(); }
 
     void connect() override { start_connection_task(true); }
 
     void disconnect() override {
         // Disconnect synchronously — closing the HID handle is trivial and
-        // ASCOM clients expect Connected to be false immediately after.
+        // ASCOM clients expect Connected to be false immediately after. The
+        // close does take hid_global_mutex(), so it can queue behind a
+        // concurrent by-index enumeration's bus scan (bounded; see accepted
+        // cost (1) on that mutex in astroasis_protocol_wrapper.cpp) — but
+        // connected_ is stored false before it, so the flip never waits on
+        // THAT lock. It can still wait on this driver's mutex_, behind an
+        // in-flight get_status() HID transaction (up to kDefaultTimeoutMs) or
+        // a connect handshake -- that wait predates this file's hid_global_mutex(),
+        // but is now strictly larger: an in-flight connect can itself be queued
+        // on hid_global_mutex() behind a concurrent enumeration's bus scan, which
+        // widens how long disconnect() can wait on mutex_ before it ever reaches
+        // the close.
         stop_connection_thread();
         try {
             set_connected(false);
