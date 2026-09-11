@@ -171,6 +171,9 @@ public:
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         utc_ = utc;
         ++utc_writes;
+        if (on_utc_write) {
+            on_utc_write();  // lets a test observe what happened BEFORE the write
+        }
     }
 
     alpacacore::AlignmentMode get_alignment_mode() const override { return alpacacore::AlignmentMode::GermanPolar; }
@@ -255,6 +258,7 @@ public:
     void sync_to_alt_az(double, double) override {}
 
     int utc_writes = 0;
+    std::function<void()> on_utc_write;
 
 private:
     int number_;
@@ -2278,6 +2282,7 @@ int main() {
         {
             alpacahttp::Router clock_router;
             int set_calls = 0;
+            int set_calls_at_write = -1;  // set_calls as seen from inside the driver write
             std::chrono::system_clock::time_point set_to{};
             clock_router.set_host_clock_hooks([] { return false; },
                                               [&](std::chrono::system_clock::time_point tp, std::string&) {
@@ -2286,13 +2291,18 @@ int main() {
                                                   return true;
                                               });
             scope->utc_writes = 0;
+            scope->on_utc_write = [&] { set_calls_at_write = set_calls; };
             const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
+            scope->on_utc_write = nullptr;
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
             EXPECT(set_calls == 1);
             EXPECT(set_to == expected);
             // Ordering: the clock is stepped first, then the driver is handed
-            // the same value it was stepped to.
+            // the same value it was stepped to. The stub records how many
+            // steps had happened when its write arrived; swapping the two
+            // calls in the router makes this 0.
+            EXPECT(set_calls_at_write == 1);
             EXPECT(scope->utc_writes == 1);
             EXPECT(scope->get_utc_date() == expected);
 
