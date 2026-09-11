@@ -1489,7 +1489,12 @@ Target hardware: Wave 100i/150i (also applicable to AZ-GTi-class mounts).
 Protocol documentation: `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`
 (shared with the SynScan vendor directory). No external SDK required.
 
-Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi module,
+Connection types: Serial (the mount's own USB port or an EQDIR-class adapter, 8N1; the scan probes
+9600 then 115200 per port, because an EQ board's built-in PL2303 port answers only at 115200,
+so a silent Prolific/FTDI/CH340-class port costs at least about 3.3 s per scan: 1.5 s at 9600, the
+300 ms SynScan echo guard, 1.5 s at 115200, and up to roughly 4.4 s because the read loops only
+check their deadline between `VTIME` reads; multiplied by every such adapter on the rig; #403
+records the measurement) and Network (built-in Wi-Fi module,
 **UDP** port 11880 — one command per datagram, one reply per datagram; AP-mode address
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
@@ -1518,14 +1523,21 @@ datagrams before each send so replies cannot get off-by-one.
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
-  client-set `UTCDate` offset only when the host clock was undisciplined (no NTP) at the moment
-  of the write, so a client's clock error never steers pointing on an NTP-good host;
+  client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
+  the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
+  path through `detail::host_synchronized_probe()` (one `adjtimex` read, no device I/O; #405), so
+  a client's clock error never steers pointing on an NTP-good host and stops steering it within
+  about 30 s of the host becoming disciplined by slewing (INFO log; the flag only moves
+  undisciplined to disciplined, since ignoring the offset is the safe side);
   `client_utc_now_locked()` feeds the `UTCDate` readback and always honours the client's write,
   because that property is the client's to set and ConformU reads back what it wrote (#287,
   #351). On an NTP-less host the router also steps the system clock from that write (#289). The
   offset is not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped
   underneath it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks
-  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write.
+  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write; the
+  30 s re-sample above covers discipline gained without a step. Tests pin both branches through
+  the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
+  clock state (#395).
 - Pointing convention: home = counterweight down pointing at the pole, counts offset
   `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
   `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
@@ -1773,14 +1785,18 @@ against its checklist, 2026-09-06:
   board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
 - [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
   EQM-35 specifically, but the issue's ask applies equally.
-- [ ] Fake mount test double extended with a classic-board profile (9600 baud, no home
-  index, older firmware string) — deliberately NOT added with invented numbers. This
-  branch's `FakeMountProfile::eqm35_pro()` is a REAL hardware capture; fabricating a
-  plausible HEQ5/EQ6 profile without hardware to source it from would misrepresent
-  guessed values as measured ones. The issue notes HEQ5 PRO and EQ6 hardware is already
-  on hand via the `synscan` (hand-controller) driver validation (#7, #29) — reuse an
-  actual reading from that hardware over an EQDIR cable when available, rather than
-  inventing one.
+- [x] Fake mount test double extended with a classic-board profile: `FakeMountProfile::eqm35_pro()`
+  in `AlpacaCore/tests/fake_skywatcher_mount.h` is a REAL EQM-35 Pro capture (its built-in PL2303
+  port answers only at 115200), used by the `[eqm35]`-tagged cases in
+  `AlpacaCore/tests/test_skywatcher_async.cpp`: identity from the mount code, the count-frame
+  FindHome fallback, the board's own sidereal period, and the `[hemisphere]` southern-hemisphere
+  regressions that depend on its geometry and feature word (one `[eqm35]` case uses the Wave
+  profile as the control). Counts are deliberately not stated here; grep the tag.
+- [ ] A second classic-board profile (HEQ5 PRO / EQ6, 9600 baud over an EQDIR cable, older
+  firmware string) — deliberately NOT added with invented numbers: fabricating a plausible
+  profile without hardware to source it from would misrepresent guessed values as measured
+  ones. HEQ5 PRO and EQ6 hardware is on hand via the `synscan` (hand-controller) driver
+  validation (#7, #29); capture an actual reading from it over an EQDIR cable when available.
 - **Not yet done, intentionally: adding the EQM-35 Pro to `SUPPORTED-DRIVERS.md` and the
   architecture table, and renaming the "Sky-Watcher Wave" section to "Sky-Watcher Direct
   Motor Controller" per the issue's suggestion.** This PR's code and tests are ready for
