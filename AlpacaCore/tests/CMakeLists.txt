@@ -49,6 +49,10 @@ endif()
 if(TARGET alpacacore_qhy)
     list(APPEND TEST_SOURCES test_qhy_camera.cpp)
     list(APPEND TEST_SOURCES test_qhy_filterwheel.cpp)
+    # Contract tests for the fault-injectable QHY SDK seam (issue #321), which
+    # is what lets the two files above reach the connect path at all -- the
+    # real SDK's libusb hotplug init crashes on a USB-less runner.
+    list(APPEND TEST_SOURCES test_qhy_fake_sdk.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)
