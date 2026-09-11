@@ -1260,7 +1260,7 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   plausible value where hardware answers a sentinel, or that settles instantly
   where hardware converges, produces green tests for driver code that breaks on
   the bench — and the plausible answer is the dangerous one precisely because
-  nothing looks wrong. Three QHY examples, all now fixed and all worth
+  nothing looks wrong. Three QHY examples, two now fixed and one re-scoped and all worth
   recognising in the next fake: `get_param()` answered `0.0` for an unsupported
   control where `GetQHYCCDParam()` answers `QHYCCD_ERROR` (~4.29e9), so
   "unsupported" and "reads zero" were indistinguishable; `get_mem_length()`
