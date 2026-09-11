@@ -737,12 +737,20 @@ TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher]
     // ":e" -> "=032732": firmware 3.39, mount code 0x32. The third byte is an
     // identity, NOT a patch level, so the version must read "3.39" and never
     // "3.39.50".
-    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro");
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (EQMOD)");
     auto firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.39");
 
+    // A clean disconnect must keep the last known-good identity: the web UI
+    // and configureddevices listing read these while disconnected, and the
+    // rig showed the direct connection reverting to a generic name after
+    // every disconnect while the synscan driver kept its model (2026-09-10).
     driver->set_connected(false);
+    CHECK(driver->get_name() == "Sky-Watcher EQM-35 Pro (EQMOD)");
+    firmware = driver->get_device_firmware();
+    REQUIRE(firmware.has_value());
+    CHECK(*firmware == "3.39");
 }
 
 TEST_CASE("SkyWatcher EQM-35 - FindHome uses the count-frame fallback", "[skywatcher][telescope][eqm35]") {
@@ -781,7 +789,7 @@ TEST_CASE("SkyWatcher Wave - home indexer still enables FindHome", "[skywatcher]
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
 
-    CHECK(driver->get_name() == "Sky-Watcher Wave 100i");
+    CHECK(driver->get_name() == "Sky-Watcher Wave 100i (EQMOD)");
     CHECK(driver->get_can_find_home() == true);
 
     driver->set_connected(false);
@@ -954,6 +962,92 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
     const double reported_dec_after = driver->get_declination();
     INFO("reported Dec " << reported_dec_before << " -> " << reported_dec_after);
     CHECK(reported_dec_after > reported_dec_before);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// ── Pier side across the meridian (open-astro#261) ──────────────────────────
+//
+// Audit finding (2026-09-09, no hardware): the branch that decides both the
+// dec-axis sign AND the reported pier side is chosen purely from the sign of
+// hour angle in ra_dec_to_axis_degrees_locked() / get_side_of_pier() /
+// get_destination_side_of_pier() -- hemisphere_south_locked() is consulted
+// ONLY for dec_mech (which flips the a2 magnitude, not which branch is
+// picked). So, unlike the RA-tracking-direction bug (#250) and the
+// DeclinationRate/PulseGuide sign bug (#253) -- both of which were exposed by
+// the driver's own reported coordinates moving the wrong way under motion --
+// there is no internal contradiction a loopback test can find here: whichever
+// physical side the code labels "pierEast", it reports and slews to that same
+// side consistently in both hemispheres, by construction. These tests assert
+// exactly that contract (self-consistency + flip-with-HA, the same shape
+// OnStep's ConformU-validated fix above requires: "WE", not constant) and
+// will pass whether or not the label matches the true physical side below the
+// equator. They do NOT, and cannot, confirm which side is physically correct
+// -- that needs the plate-solved goto-across-the-meridian check in #261.
+
+TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and agrees with destination",
+          "[skywatcher][telescope][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    double lst = driver->get_sidereal_time();
+    // West of the meridian (HA > 0) -> pierEast (0) on the a2 >= 0 branch.
+    double west_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
+    // East of the meridian (HA < 0) -> pierWest (1) on the a2 < 0 branch.
+    double east_ra = std::fmod(lst + 2.0, 24.0);
+    const double dec = -40.0;
+
+    REQUIRE(driver->get_destination_side_of_pier(west_ra, dec) == 0);
+    REQUIRE(driver->get_destination_side_of_pier(east_ra, dec) == 1);
+
+    driver->slew_to_coordinates_async(west_ra, dec);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+    CHECK(driver->get_side_of_pier() == 0);
+
+    // A branch crossing forces the RA axis (a1) to jump by close to 180 deg
+    // -- that IS a real meridian flip, not a test artifact: at
+    // kMaxMoveAxisRateDegPerSec (~3.3 deg/s) it is a ~55 s goto plus ramp
+    // (measured 57 s in the loopback), not the ~15 s one-branch slew above.
+    driver->slew_to_coordinates_async(east_ra, dec);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 90000));
+    // The branch must actually flip on the second goto, not just relabel the
+    // same axis position.
+    CHECK(driver->get_side_of_pier() == 1);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher northern hemisphere - SideOfPier flips with hour angle and agrees with destination",
+          "[skywatcher][telescope][hemisphere]") {
+    // Mirrors the southern-hemisphere test above with an unchanged (Wave)
+    // profile: the branch/HA-sign rule is not conditioned on hemisphere at
+    // all, so this must behave identically.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    double lst = driver->get_sidereal_time();
+    double west_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
+    double east_ra = std::fmod(lst + 2.0, 24.0);
+    const double dec = 40.0;
+
+    REQUIRE(driver->get_destination_side_of_pier(west_ra, dec) == 0);
+    REQUIRE(driver->get_destination_side_of_pier(east_ra, dec) == 1);
+
+    driver->slew_to_coordinates_async(west_ra, dec);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+    CHECK(driver->get_side_of_pier() == 0);
+
+    driver->slew_to_coordinates_async(east_ra, dec);  // ~180 deg RA jump, see sibling test
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 90000));
+    CHECK(driver->get_side_of_pier() == 1);
+
     driver->set_tracking(false);
     driver->set_connected(false);
 }
@@ -1132,6 +1226,314 @@ TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rat
 
     driver->set_tracking(false);
     driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a RightAscensionRate stall that survives the :J kick is caught in the background",
+          "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#248: the RightAscensionRate / TrackingRate
+    // setters (apply_ra_tracking_rate_locked) got the ":J" kick but not the
+    // sampled rate-applied check -- they run under mutex_ inside a property
+    // call and the check needs an unlocked ~450 ms window. A stall there has
+    // no natural end point: RA would track at the wrong rate until the next
+    // rate change. The setter now spawns a one-shot background check that
+    // re-kicks the axis, without the property call itself waiting for it.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    auto measure_rate = [&] {
+        double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        double p1 = mount.physical_degrees(1);
+        return (p1 - p0) / 0.3;
+    };
+    const double sidereal_rate = measure_rate();
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    // A stall that survives the setter's own ":I"+":J": the preset is stored
+    // (":i" agrees) and the kick is acknowledged but swallowed. Only the
+    // sampled check can recover this.
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_right_ascension_rate(0.5);  // continuous, same direction: live ":I" on the tracking axis
+    const double setter_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // The property call must not absorb the ~450 ms sample window.
+    REQUIRE(setter_ms < 200.0);
+
+    // The setter's kick, then the background check's re-kick -- and never a
+    // stop/restart, the axis keeps running throughout.
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 1500));
+    REQUIRE(mount.stop_count(1) == stops_before);
+    const double new_rate = measure_rate();
+    REQUIRE(std::abs(new_rate - sidereal_rate) > std::abs(sidereal_rate) * 0.1);
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a pending RightAscensionRate check is reaped by Tracking off and by disconnect",
+          "[skywatcher][async]") {
+    // The background check is owned like the pulse task: whatever takes the
+    // RA axis while its sample window is open reaps it, so its ":I"+":J"
+    // resend can never land on an axis someone else just stopped (which
+    // would silently restart tracking), and a disconnect joins it instead of
+    // leaking a thread into the destructor.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.5);
+    driver->set_tracking(false);  // lands inside the check's ~450 ms sample window
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 3000));
+    // Give a leaked check its whole window and then some: nothing may
+    // restart the axis, and no second ":J" may reach the board.
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    REQUIRE_FALSE(mount.axis_running(1));
+    REQUIRE(mount.start_count(1) == starts_before + 1);  // the setter's own kick only
+
+    // Disconnect racing a fresh check: set_connected(false) must return
+    // promptly (the check is cancelled, not waited out) and cleanly.
+    driver->set_tracking(true);  // offset 0.5 still stored: restarts at the offset rate
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.0);  // live change back to sidereal: spawns a check
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    const double disconnect_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    REQUIRE(disconnect_ms < 2000.0);
+    REQUIRE_FALSE(driver->get_connected());
+}
+
+TEST_CASE("SkyWatcher async - the rate-applied check stretches its window to resolve a Lunar TrackingRate stall",
+          "[skywatcher][async]") {
+    // Hardware 2026-09-10 (EQM-35 Pro): a TrackingRate=Lunar write produced a
+    // spurious "did not take" + resend. Lunar is 3.5% off sidereal -- about
+    // one count over the fixed 300 ms window, inside the two-read truncation
+    // error, so the nearest-rate verdict was a coin flip. The window now
+    // stretches until the two candidate rates are >= 4 counts apart (this
+    // fake: ~2.4 s), so a REAL Lunar stall is still caught...
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_tracking_rate(1);                      // Lunar: live in-place ":I", 3.5% slower
+    REQUIRE(mount.step_period(1) != sidereal_preset);  // stored...
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 4500));  // ...and re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a sub-resolution TrackingRate change is not spuriously re-kicked",
+          "[skywatcher][async]") {
+    // ...while Solar (0.27% off sidereal: 0.09 counts over 300 ms, ~30 s to
+    // resolve) is below anything the check can see inside its 3 s cap, so it
+    // must NOT sample-and-guess: exactly one ":J" (the setter's own kick),
+    // never a resend, on a healthy board.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+
+    driver->set_tracking_rate(2);                                  // Solar
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));  // well past settle + min window
+    REQUIRE(mount.start_count(1) == starts_before + 1);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE(
+    "SkyWatcher async - a pulse whose rate delta is unresolvable within its own duration "
+    "does not overshoot the commanded on-time",
+    "[skywatcher][async]") {
+    // Bot review round 1 on open-astro/AlpacaBridge#248: the pulse dispatch's
+    // rate-applied check samples the axis WHILE it is already running at the
+    // pulse rate, and the pulse's remaining hold is duration MINUS the time
+    // the check took -- clamped at zero, never extended. Before this fix,
+    // a low guide rate (small pulse-vs-tracking delta) at a duration right at
+    // kMinPulseForRateVerifyMs could stretch the adaptive window toward its
+    // 3 s ceiling, well past the 1.5 s commanded duration: the pulse would
+    // physically hold the guide rate for however long the check took, over
+    // 2x its commanded on-time. The dispatch call now caps its window at
+    // (duration - settle), so an unresolvable delta is skipped immediately
+    // (an INFO log, not a wait) instead of stretching past the pulse itself.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    // 0.02x sidereal: on this fake's counts-per-revolution, resolving this
+    // delta to kMinResolvableDeltaCounts needs several seconds -- more than
+    // (kMinPulseForRateVerifyMs - settle) leaves room for.
+    driver->set_guide_rate(
+        {0.02 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.02 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    constexpr int kPulseMs = 1500;  // exactly kMinPulseForRateVerifyMs: the check DOES run
+    driver->pulse_guide(2, kPulseMs);
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+    auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 5000));
+    double elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    // Must land close to the commanded 1500 ms, nowhere near the ~3150 ms an
+    // unbounded window would have produced.
+    REQUIRE(elapsed_ms >= 1300.0);
+    REQUIRE(elapsed_ms < 2000.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - re-asserting the same TrackingRate leaves a pending rate check running",
+          "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#258 review: apply_ra_tracking_rate_locked()
+    // reaped any pending check unconditionally, BEFORE its own "nothing
+    // changed" early return. set_tracking_rate() has no idempotent-rewrite
+    // guard (unlike set_right_ascension_rate), so a client re-asserting the
+    // same TrackingRate mid-check cancelled it and spawned no replacement:
+    // a stalled ":I" from the first write was then never caught -- the
+    // exact unbounded-stall failure the background check exists for.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    // Lunar stall that survives the setter's own ":I"+":J" (fake's lower
+    // CPR needs ~2.4 s of window to resolve, so the check is still in
+    // flight when the rewrite lands).
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_tracking_rate(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // inside the sample window
+    driver->set_tracking_rate(1);                                 // same value: must NOT drop the check
+    REQUIRE(mount.start_count(1) == starts_before + 1);           // and must not write/kick again itself
+
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 4500));  // check re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+
+    driver->set_tracking_rate(0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a Dec pulse leaves a pending RA rate check running", "[skywatcher][async]") {
+    // open-astro/AlpacaBridge#258 review: the pulse dispatch reaped a pending
+    // RA rate-verify check unconditionally, so a North/South pulse (Dec axis
+    // only) cancelled it with nothing to replace it. Dec corrections landing
+    // inside the check's window are routine while autoguiding; a stalled
+    // ":I" from a RightAscensionRate write would then never be caught.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.5);                        // spawns the check
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // inside its settle/window
+    driver->pulse_guide(0, 200);                                  // North: Dec axis only
+    REQUIRE(mount.start_count(1) == starts_before + 1);           // the pulse itself touched no RA
+
+    REQUIRE(wait_until([&] { return mount.start_count(1) >= starts_before + 2; }, 1500));  // check re-kicked
+    REQUIRE(mount.stop_count(1) == stops_before);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and reported RA (#287)",
+          "[skywatcher][async]") {
+    // Before the fix get_utc_date() reported the client's offset while every
+    // LST computation used the raw host clock, so a client time-sync fixed the
+    // readback and not the pointing. Now one utc_now_locked() feeds both.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    REQUIRE(driver->get_connected());
+
+    const auto wrap24 = [](double h) {
+        h = std::fmod(h, 24.0);
+        return h < 0.0 ? h + 24.0 : h;
+    };
+    const double lst0 = driver->get_sidereal_time();
+    const double ra0 = driver->get_right_ascension();
+    const auto host_now = std::chrono::system_clock::now();
+    driver->set_utc_date(host_now + std::chrono::hours(1));
+
+    const auto reported = driver->get_utc_date();
+    const auto readback_error = std::chrono::duration_cast<std::chrono::milliseconds>(
+        reported - (std::chrono::system_clock::now() + std::chrono::hours(1)));
+    CHECK(std::abs(readback_error.count()) < 500);
+
+    // One UT hour is 1.0027379 sidereal hours.
+    const double d_lst = wrap24(driver->get_sidereal_time() - lst0);
+    CHECK(d_lst > 1.0027379 - 0.002);
+    CHECK(d_lst < 1.0027379 + 0.002);
+    // The axes have not moved (tracking off, counts fixed) so reported RA
+    // follows LST one-for-one: RA = LST - HA.
+    const double d_ra = wrap24(driver->get_right_ascension() - ra0);
+    CHECK(d_ra > 1.0027379 - 0.002);
+    CHECK(d_ra < 1.0027379 + 0.002);
+
+    // Setting the clock back to the host's time undoes it.
+    driver->set_utc_date(std::chrono::system_clock::now());
+    const double d_back = wrap24(driver->get_sidereal_time() - lst0);
+    CHECK((d_back < 0.002 || d_back > 23.998));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 review)", "[skywatcher][unit]") {
+    // The offset is a delta against the host clock at write time. When the
+    // host clock is corrected afterwards (Sync Time, NTP, `date`), applying
+    // the stale delta on top of it would move every LST-derived value by the
+    // old error, so utc_now_locked() drops it. The rule is pure: the system
+    // clock and the steady clock must have advanced by the same amount.
+    using namespace std::chrono;
+    using alpacacore::vendor::skywatcher::detail::host_clock_stepped;
+    // Both clocks advanced together: no step.
+    CHECK_FALSE(host_clock_stepped(seconds(90), seconds(90)));
+    CHECK_FALSE(host_clock_stepped(milliseconds(90400), milliseconds(90000)));
+    // Host clock jumped 20 minutes forward (Sync Time on a slow clock) or
+    // 20 minutes back while the steady clock advanced 90 s: stepped.
+    CHECK(host_clock_stepped(seconds(90) + minutes(20), seconds(90)));
+    CHECK(host_clock_stepped(seconds(90) - minutes(20), seconds(90)));
+    // Right at the tolerance edge: 1 s drift is not a step, 1.5 s is.
+    CHECK_FALSE(host_clock_stepped(seconds(91), seconds(90)));
+    CHECK(host_clock_stepped(milliseconds(91500), seconds(90)));
 }
 
 #endif  // _WIN32

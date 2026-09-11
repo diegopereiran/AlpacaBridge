@@ -10,21 +10,19 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/vendor/zwo/zwo_asiair_plus_protocol_wrapper.h>
-
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-
-#include <pwm_gpio.h>  // vendored from external/ZWO/asiair-plus/
-
+#include <alpacacore/util/serial_io.h>
+#include <alpacacore/vendor/zwo/zwo_asiair_plus_protocol_wrapper.h>
 #include <fcntl.h>
+#include <pwm_gpio.h>  // vendored from external/ZWO/asiair-plus/
 #include <sys/ioctl.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <cstring>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,18 +40,6 @@ constexpr const char* kLogCategory = "ZWO_ASIAIR_PLUS";
 // See external/ZWO/asiair-plus/pwm_gpio.h for the full mapping.
 constexpr int kKernelIndexMasterEnable = 3;
 constexpr int kKernelIndexDcPortBase   = 4;  // DC ports 1..4 at indices 4..7
-
-std::string strerror_safe(int err) {
-    char buf[128]{};
-#if defined(_GNU_SOURCE)
-    return std::string(::strerror_r(err, buf, sizeof(buf)));
-#else
-    if (::strerror_r(err, buf, sizeof(buf)) != 0) {
-        return std::to_string(err);
-    }
-    return std::string(buf);
-#endif
-}
 
 int kernel_index_for(std::size_t wrapper_index) {
     return kKernelIndexDcPortBase + static_cast<int>(wrapper_index);
@@ -111,7 +97,7 @@ public:
         const int fd = ::open(device_path_.c_str(), O_RDWR | O_CLOEXEC);
         if (fd < 0) {
             const int err = errno;
-            throw AlpacaException("Failed to open '" + device_path_ + "': " + strerror_safe(err),
+            throw AlpacaException("Failed to open '" + device_path_ + "': " + util::errno_string(err),
                                   AlpacaError::NotConnected);
         }
         fd_ = fd;
@@ -454,17 +440,15 @@ private:
         mode.mode = PWM_GPIO_MODE_GPIO;
         if (::ioctl(fd_, PWM_GPIO_SET_MODE, &mode) != 0) {
             const int err = errno;
-            throw AlpacaException(
-                "PWM_GPIO_SET_MODE(GPIO) failed on kernel index " +
-                    std::to_string(kernel_idx) + ": " + strerror_safe(err),
-                AlpacaError::DriverException);
+            throw AlpacaException("PWM_GPIO_SET_MODE(GPIO) failed on kernel index " + std::to_string(kernel_idx) +
+                                      ": " + util::errno_string(err),
+                                  AlpacaError::DriverException);
         }
         int enable_arg = kernel_idx;
         if (::ioctl(fd_, PWM_GPIO_ENABLE, &enable_arg) != 0) {
             const int err = errno;
             throw AlpacaException(
-                "PWM_GPIO_ENABLE failed on kernel index " +
-                    std::to_string(kernel_idx) + ": " + strerror_safe(err),
+                "PWM_GPIO_ENABLE failed on kernel index " + std::to_string(kernel_idx) + ": " + util::errno_string(err),
                 AlpacaError::DriverException);
         }
         // **Polarity at the SET_LEVEL ioctl is INVERTED from typical gpiod
@@ -494,10 +478,9 @@ private:
         level.level = value != 0 ? 0 : 1;
         if (::ioctl(fd_, PWM_GPIO_SET_LEVEL, &level) != 0) {
             const int err = errno;
-            throw AlpacaException(
-                "PWM_GPIO_SET_LEVEL failed on kernel index " +
-                    std::to_string(kernel_idx) + ": " + strerror_safe(err),
-                AlpacaError::DriverException);
+            throw AlpacaException("PWM_GPIO_SET_LEVEL failed on kernel index " + std::to_string(kernel_idx) + ": " +
+                                      util::errno_string(err),
+                                  AlpacaError::DriverException);
         }
     }
 

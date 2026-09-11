@@ -17,6 +17,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/router.h>
 #include <alpacahttp/util/error_mapping.h>
@@ -30,9 +31,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -1565,6 +1566,7 @@ nlohmann::json Router::build_description_payload() const {
             std::lock_guard<std::mutex> lock(server_info_mutex_);
             desc["ProfileName"] = profile_name_;
         }
+        add_clock_fields(desc);
         return desc;
     }
 
@@ -1587,7 +1589,61 @@ nlohmann::json Router::build_description_payload() const {
     desc["ManufacturerVersion"] = manufacturer_version;
     desc["Location"] = location;
     desc["ProfileName"] = profile_name;
+    add_clock_fields(desc);
     return desc;
+}
+
+// open-astro#289/#292: a telescope driver about to compute LST from a clock
+// nothing has disciplined. Says which of the three states it is in and what
+// will, or will not, correct it: a client UTCDate write is still to come, or
+// setting the clock has been refused, or clients are not allowed to. Called
+// from both connect paths (legacy PUT connected and the ITelescopeV4 PUT
+// connect initiator).
+void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const {
+    if (device.get_device_type() != alpacacore::DeviceType::Telescope || host_clock_.synchronized() ||
+        host_clock_.stepped_by_client()) {
+        return;
+    }
+    // open-astro#292: a clock the kernel loaded from a hardware RTC at boot is
+    // usually right to seconds, so it is INFO -- but still a WARN when nothing
+    // is allowed to correct it.
+    // has_rtc() reads sysfs, which is an I2C transaction on a bus-attached RTC,
+    // and this sits on the connect initiator AGENTS.md times against the 1 s
+    // STANDARD target. Bounded: the probe settles after one success and is
+    // rate-limited to once per 30 s while no device is found.
+    const bool rtc = host_clock_.has_rtc();
+    // enabled() alone does not mean "a client will correct it": without
+    // CAP_SYS_TIME every step is refused and the clock is never corrected at
+    // all, which is the one state that must not be quiet at connect.
+    // A refused step is checked before the opt-out: Sync Time is the same
+    // clock_settime in this process, so once the kernel has refused one, that
+    // button is dead too and must not be recommended by either branch.
+    const bool refused = host_clock_.step_ever_failed();
+    const bool correctable = host_clock_.enabled() && !refused;
+    const std::string msg =
+        "Telescope " + std::to_string(device.get_device_number()) +
+        (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's accuracy is unverified, nothing has "
+               "checked it since it was last set)"
+             : " connecting with an undisciplined host clock (no NTP, not yet set by a client)") +
+        (correctable ? "; goto/LST math runs on it until a client writes UTCDate"
+         : refused   ? "; goto/LST math runs on it and nothing in this process can correct it (setting the clock was "
+                       "refused: no CAP_SYS_TIME, which the packaged systemd unit grants). Set the clock outside the "
+                       "service, e.g. scripts/sync-clock.sh over SSH"
+                   : "; goto/LST math runs on it, and syncSystemClockFromClients is off so no client will correct it. "
+                     "Use the web UI's Sync Time");
+    if (rtc && correctable) {
+        util::log_info(msg);
+    } else {
+        util::log_warning(msg);
+    }
+}
+
+// open-astro#289: clock state next to the server identity so the web UI and
+// clients can see whether pointing math is running on a trusted clock.
+void Router::add_clock_fields(nlohmann::json& desc) const {
+    desc["ClockSynchronized"] = host_clock_.synchronized();
+    desc["ClockSource"] = host_clock_.source();  // "ntp" | "client" | "rtc" | "none"
+    desc["SyncSystemClockFromClients"] = host_clock_.enabled();
 }
 
 Response Router::handle_description(const Request& request, std::uint32_t server_tx_id) {
@@ -1644,9 +1700,27 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 new_profile_name = body["profile_name"].get<std::string>();
             }
 
-            if (!new_location && !new_profile_name) {
-                AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET,
-                                                         "Request must include a 'Location' or 'ProfileName' property");
+            std::optional<bool> new_sync_clock;
+            for (const char* key :
+                 {"SyncSystemClockFromClients", "syncSystemClockFromClients", "sync_system_clock_from_clients"}) {
+                if (body.contains(key)) {
+                    const auto& v = body[key];
+                    bool parsed = false;
+                    if (v.is_boolean()) {
+                        parsed = v.get<bool>();
+                    } else if (v.is_string()) {
+                        parsed = parse_bool_value(v.get<std::string>(), key);
+                    } else {
+                        throw_invalid_value(std::string("Invalid value for ") + key);
+                    }
+                    new_sync_clock = parsed;
+                    break;
+                }
+            }
+            if (!new_location && !new_profile_name && !new_sync_clock) {
+                AlpacaResponse err = make_error_response(
+                    client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET,
+                    "Request must include a 'Location', 'ProfileName' or 'SyncSystemClockFromClients' property");
                 response.set_body(err);
                 return response;
             }
@@ -1673,6 +1747,9 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 if (new_profile_name) {
                     persist_values.emplace_back("profile_name", *new_profile_name);
                 }
+                if (new_sync_clock) {
+                    persist_values.emplace_back("sync_system_clock_from_clients", *new_sync_clock ? "true" : "false");
+                }
                 std::string persist_error;
                 if (!update_server_values_in_config(config_path, persist_values, persist_error)) {
                     AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
@@ -1690,6 +1767,11 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 if (new_profile_name) {
                     profile_name_ = *new_profile_name;
                 }
+            }
+            if (new_sync_clock) {
+                host_clock_.set_enabled(*new_sync_clock);
+                util::log_info(std::string("syncSystemClockFromClients ") + (*new_sync_clock ? "enabled" : "disabled") +
+                               " by " + request.remote_address());
             }
         } else if (request.method() != HttpMethod::GET) {
             AlpacaResponse alpaca_response = make_error_response(
@@ -2232,6 +2314,7 @@ Response Router::dispatch_device_method(
                     // synchronously.  The async path + poll lets us return as
                     // soon as the handshake finishes without hard-blocking the
                     // full worst-case duration.
+                    warn_if_clock_undisciplined(*device);
                     device->connect();
                     auto deadline = std::chrono::steady_clock::now()
                                   + std::chrono::seconds(8);
@@ -2500,6 +2583,10 @@ Response Router::dispatch_device_method(
                 // get_connecting() first (see PUT connected): a mid-task
                 // connect goes to the driver, whose base class reconciles it.
                 if (device->get_connecting() || !device->get_connected()) {
+                    // Same clock check as PUT connected: Platform 7 clients
+                    // (NINA 3.x) prefer this path, so the warning has to cover
+                    // both or it never fires for them (open-astro#289).
+                    warn_if_clock_undisciplined(*device);
                     device->connect();
                 }
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
@@ -3199,6 +3286,28 @@ Response Router::dispatch_telescope_method(
                 }
                 auto time_point = std::chrono::system_clock::from_time_t(utc_time) +
                     std::chrono::milliseconds(millis);
+                // open-astro#289: on an SBC with no NTP and no RTC this write is
+                // the only correct time the host will ever see. Step the system
+                // clock from it when the kernel reports the clock undisciplined
+                // (never over NTP/chrony/GPS), then hand the driver the same value.
+                {
+                    const auto step = host_clock_.step_from_client(time_point);
+                    using Outcome = alpacacore::util::HostClock::Outcome;
+                    const std::string what = "UTCDate from " + request.remote_address() + " for telescope/" +
+                                             std::to_string(telescope->get_device_number()) + ": host clock " +
+                                             alpacacore::util::HostClock::outcome_name(step.outcome) +
+                                             " (client - host = " + std::to_string(step.delta.count()) + " ms)";
+                    if (step.outcome == Outcome::Stepped) {
+                        util::log_info(what);
+                    } else if (step.outcome == Outcome::Failed) {
+                        util::log_warning(what + ": " + step.error);
+                    } else if (step.outcome == Outcome::SkippedSynchronized &&
+                               (step.delta.count() > 2000 || step.delta.count() < -2000)) {
+                        util::log_warning(what + "; NTP-disciplined host and client disagree by more than 2 s");
+                    } else {
+                        util::log_debug(what);
+                    }
+                }
                 telescope->set_utc_date(time_point);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
@@ -6618,12 +6727,19 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     ts.tv_sec = static_cast<time_t>(epoch_seconds);
     ts.tv_nsec = 0;
     if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
-                                std::string("clock_settime failed (requires CAP_SYS_TIME): ") + std::strerror(errno));
+        // open-astro#292: an operator who only ever presses Sync Time would
+        // otherwise never trip the latch, and the connect line would keep
+        // claiming the clock is about to be corrected.
+        host_clock_.mark_step_failed();
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
+            std::string("clock_settime failed (requires CAP_SYS_TIME): ") + alpacacore::util::errno_string(errno));
         response.set_body(alpaca_response);
         return response;
     }
+    // The clock is now client-set for the management readout and the
+    // connect-time warning; clock_settime alone leaves STA_UNSYNC set.
+    host_clock_.mark_stepped();
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;

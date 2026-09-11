@@ -27,6 +27,18 @@ namespace alpacacore::vendor::skywatcher {
 // stores no site or time information, so the site must be provided via
 // configuration or the SiteLatitude/SiteLongitude setters.
 
+namespace detail {
+// True when the host clock moved underneath a client-set UTCDate offset: the
+// system clock advanced by a different amount than the steady clock since the
+// offset was captured (Sync Time, NTP taking over, a manual `date`). The
+// offset described the old host clock, so it is dropped rather than applied
+// on top of the corrected one. Pure, so the rule is unit-testable without
+// stepping the test host's clock.
+bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
+                        std::chrono::steady_clock::duration steady_elapsed,
+                        std::chrono::milliseconds tolerance = std::chrono::milliseconds(1000));
+}  // namespace detail
+
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
                                                              std::optional<double> site_latitude_deg = std::nullopt,
                                                              std::optional<double> site_longitude_deg = std::nullopt,

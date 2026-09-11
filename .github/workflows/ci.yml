@@ -473,6 +473,64 @@ jobs:
         # vendored external/ tree (see the script).
         run: python3 .github/scripts/check-unicode.py
 
+  docs-drift:
+    name: Docs drift check
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check docs/config for self-inconsistency
+        # Catches drift between the repo's own docs and its actual config
+        # (CMake options vs docs/development.md, zizmor/cppcheck pins between
+        # ci.yml and ci_preflight.sh, VERSION vs the README badge, and stale
+        # paths in AGENTS.md) that nothing previously caught automatically.
+        run: python3 scripts/check_docs_drift.py
+
+  stress-registration:
+    name: Stress-test registration
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-test the check's own regexes
+        # Regression guard for DEVICE_TYPE_OVERRIDE_RE / TEST_CASE_TAGS_RE
+        # against synthetic snippets, independent of repo state.
+        run: python3 scripts/check_stress_registration.py --self-test
+
+      - name: Check every vendor driver has [stress] coverage or an allow-list entry
+        # AGENTS.md requires a [stress] TEST_CASE for every driver exercised
+        # by the sanitizers-tsan job; this was previously enforced only by
+        # code review. See scripts/check_stress_registration.py.
+        run: python3 scripts/check_stress_registration.py
+
+  conformu-reports:
+    name: ConformU report validation
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm   # pure text/JSON scan; arch-independent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject a failing or missing ConformU report
+        # /submit-pr already blocks this locally (a driver PR must ship a
+        # clean AlpacaCore/conformu/** or AlpacaHTTP/conformu/** report), but
+        # that's a prompt-only gate: a PR opened by hand, or from a fork not
+        # using the skill, bypasses it. This is the same pass/fail logic as a
+        # CI job so it can't be skipped.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_BASE_REF"
+          python3 scripts/check_conformu_reports.py "origin/$GITHUB_BASE_REF"
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-24.04-arm   # static text analysis; arch-independent

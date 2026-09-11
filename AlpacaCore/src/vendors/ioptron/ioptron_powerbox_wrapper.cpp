@@ -12,13 +12,14 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/ioptron/ioptron_powerbox_wrapper.h>
 #include <gpiod.h>
 
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <cstring>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -32,18 +33,6 @@ namespace {
 
 constexpr const char* kLogCategory = "IOPTRON_POWERBOX";
 constexpr const char* kGpioConsumer = "alpacabridge-imate-powerbox";
-
-std::string strerror_safe(int err) {
-    char buf[128]{};
-#if defined(_GNU_SOURCE)
-    return std::string(::strerror_r(err, buf, sizeof(buf)));
-#else
-    if (::strerror_r(err, buf, sizeof(buf)) != 0) {
-        return std::to_string(err);
-    }
-    return std::string(buf);
-#endif
-}
 
 gpiod_line_value to_line_value(int v) { return v != 0 ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE; }
 
@@ -127,7 +116,7 @@ public:
         chip_ = ::gpiod_chip_open(gpio_chip_path_.c_str());
         if (chip_ == nullptr) {
             int err = errno;
-            throw AlpacaException("Failed to open GPIO chip '" + gpio_chip_path_ + "': " + strerror_safe(err),
+            throw AlpacaException("Failed to open GPIO chip '" + gpio_chip_path_ + "': " + util::errno_string(err),
                                   AlpacaError::NotConnected);
         }
 
@@ -142,7 +131,7 @@ public:
             }
             if (::gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT) != 0) {
                 int err = errno;
-                throw AlpacaException("gpiod_line_settings_set_direction failed: " + strerror_safe(err),
+                throw AlpacaException("gpiod_line_settings_set_direction failed: " + util::errno_string(err),
                                       AlpacaError::DriverException);
             }
 
@@ -152,12 +141,12 @@ public:
             }
             if (::gpiod_line_config_add_line_settings(line_cfg, offsets.data(), offsets.size(), settings) != 0) {
                 int err = errno;
-                throw AlpacaException("gpiod_line_config_add_line_settings failed: " + strerror_safe(err),
+                throw AlpacaException("gpiod_line_config_add_line_settings failed: " + util::errno_string(err),
                                       AlpacaError::DriverException);
             }
             if (::gpiod_line_config_set_output_values(line_cfg, initial_values.data(), initial_values.size()) != 0) {
                 int err = errno;
-                throw AlpacaException("gpiod_line_config_set_output_values failed: " + strerror_safe(err),
+                throw AlpacaException("gpiod_line_config_set_output_values failed: " + util::errno_string(err),
                                       AlpacaError::DriverException);
             }
 
@@ -170,7 +159,7 @@ public:
             request_ = ::gpiod_chip_request_lines(chip_, req_cfg, line_cfg);
             if (request_ == nullptr) {
                 int err = errno;
-                throw AlpacaException("gpiod_chip_request_lines failed: " + strerror_safe(err),
+                throw AlpacaException("gpiod_chip_request_lines failed: " + util::errno_string(err),
                                       AlpacaError::NotConnected);
             }
         } catch (...) {
@@ -237,7 +226,7 @@ public:
                         const int err = errno;
                         ALPACA_LOG_WARN(kLogCategory, "iMate PowerBox: failed to settle PWM port on GPIO " +
                                                           std::to_string(ports_[i].gpio_line) +
-                                                          " before release: " + strerror_safe(err) +
+                                                          " before release: " + util::errno_string(err) +
                                                           " (port may be left in an indeterminate state)");
                     }
                 }
@@ -309,7 +298,7 @@ public:
         }
         if (rc != 0) {
             int err = errno;
-            throw AlpacaException("gpiod_line_request_set_value failed: " + strerror_safe(err),
+            throw AlpacaException("gpiod_line_request_set_value failed: " + util::errno_string(err),
                                   AlpacaError::DriverException);
         }
         port_states_[index]->value.store(value);
@@ -362,7 +351,7 @@ private:
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
                                      "iMate PowerBox PWM worker: gpiod_line_request_set_value failed on GPIO " +
-                                         std::to_string(offset) + ": " + strerror_safe(err) +
+                                         std::to_string(offset) + ": " + util::errno_string(err) +
                                          "; aborting worker thread");
                     stop->store(true);
                     return false;
@@ -391,7 +380,7 @@ private:
                     const int err = errno;
                     ALPACA_LOG_ERROR(kLogCategory,
                                      "iMate PowerBox PWM worker: gpiod_line_request_set_value(ACTIVE) failed on GPIO " +
-                                         std::to_string(offset) + ": " + strerror_safe(err) +
+                                         std::to_string(offset) + ": " + util::errno_string(err) +
                                          "; aborting worker thread");
                     stop->store(true);
                     break;
@@ -405,7 +394,7 @@ private:
                     ALPACA_LOG_ERROR(
                         kLogCategory,
                         "iMate PowerBox PWM worker: gpiod_line_request_set_value(INACTIVE) failed on GPIO " +
-                            std::to_string(offset) + ": " + strerror_safe(err) + "; aborting worker thread");
+                            std::to_string(offset) + ": " + util::errno_string(err) + "; aborting worker thread");
                     stop->store(true);
                     break;
                 }

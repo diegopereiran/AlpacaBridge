@@ -196,7 +196,7 @@ vendor-agnostic; do them in the driver from the start.
 - Every persisted field allowlisted per device type in `sanitize_device_config`, every
   non-ZWO form field `name` vendor-prefixed — the full rules live in ONE place:
   [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors).
-  The round-trip test (Required Test Case #6) is the automated catch.
+  The round-trip test (Required Test Case #9) is the automated catch.
 
 > The connection-thread lifecycle lives in ONE place: `AsyncConnectable`
 > (`AlpacaCore/include/alpacacore/async_connectable.h`). Every vendor driver
@@ -1144,7 +1144,7 @@ so a driver-building agent bumps correctly without them.
 
 ### Required Test Cases for Every New Vendor Device Driver
 
-Every new driver **must** ship with at least the following test cases. Use the existing tests (e.g. `test_svbony_camera.cpp`, `test_gemini_focuser.cpp`) as reference.
+Every new driver **must** ship with at least the following 8 unit test cases, plus the config round-trip test (case 9). Use the existing tests (e.g. `test_svbony_camera.cpp`, `test_gemini_focuser.cpp`) as reference.
 
 1. **Defaults** `"<Vendor> <Device> Driver - Defaults"` `[<vendor>][<device>][unit]`
    - Create driver with device number 0.
@@ -1174,7 +1174,15 @@ Every new driver **must** ship with at least the following test cases. Use the e
    - Switches: `get_max_switch`, invalid switch ID handling.
    - Rotators: `get_can_reverse`, device state telemetry.
 
-6. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test.
+6. **Value range validation** — invalid inputs must throw `AlpacaException` with `error_code() == AlpacaError::InvalidValue`, not silently normalize or throw a generic error (ConformU specifically tests boundary values).
+
+7. **State machine contracts** — device state follows ASCOM rules without needing hardware (e.g. `CameraState == Idle` before any exposure, `Slewing == false` when not connected, `IsPulseGuiding == false` when idle). These have caught real bugs: iOptron's settle loop prematurely declared slews complete, SynScan's `IsPulseGuiding` always returned false, SVBONY's `CameraState` got stuck after SDK hangs.
+
+8. **Unsupported method error codes** — a method the device doesn't support must throw with the correct error code (usually `InvalidOperation` or `MethodNotImplemented`), not a generic `DriverException`. ConformU distinguishes "not implemented" from "driver error."
+
+   Cases 6-8 are the **ASCOM contract tests**: they exist specifically because a generic "does it throw?" test (case 3/4) is not enough to pass ConformU, which checks the exact Alpaca error code and state-machine behavior. See `/driver-build` Step 7 for the full pattern, worked examples per device type, and the `require_alpaca_error` helper. **Minimum 8 test cases, 30+ assertions total** — cases 6-8 alone should add 10-15 assertions on top of the 5 basic cases; if you have significantly fewer you are probably not testing enough error codes and state transitions.
+
+9. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test. This is an `AlpacaHTTP`-level integration test, additional to the 8 vendor unit tests above, not a substitute for cases 6-8.
 
 ### Hardware-free driver tests via the SDK seam (ToupTek pattern — extend to other vendors)
 
@@ -1217,10 +1225,10 @@ When adding a test file for a new vendor device:
 
 - CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
-- **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`.**
+- **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`** — `scripts/check_docs_drift.py` (the `docs-drift` CI job / pre-flight gate) now fails if they diverge, so this can't silently drift again.
 - **Web UI JavaScript is gated only by `node --check`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS with no bundler/eslint/`package.json`, so this parse-only check is its sole automated validation — there is nothing else stopping a stray brace from shipping.
-- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together.
-- **Concurrency now has automated coverage — but only where a driver is registered with the stress harness.** The `sanitizers-tsan` job (issue #101) builds all-vendors with ThreadSanitizer and runs the `[stress]` connect/disconnect/operate suite (`AlpacaCore/tests/concurrency_stress.h`): lifecycle storms from N threads, destruction racing an in-flight connect, and the racing-disconnect-never-dropped settle check. Locally: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. Registered so far: ToupTek camera / AFW / thermal switch (over the fake SDK seam, wrapped in `LockedToupTekSDK`), ZWO EFW + camera, Player One Phoenix + camera, SVBONY camera, Bisque, and — over the loopback fake-mount TCP seam (`tests/fake_mount_server.h`, which drives drivers into the *connected* state so the poll/pulse/GOTO/teardown threads actually run) — the ZWO, Celestron, SynScan, and iOptron telescopes. **When you add or substantially change a driver, add a `[stress]` TEST_CASE for it** — one factory + one operate callback (see `test_touptek_concurrency_stress.cpp`). Drivers without a registration are still covered only by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver); do not assume green CI means thread-safe for them. **SDK-callback paths especially**: the TSan suppressions mute any report with a vendor-blob frame on the stack, so a race in driver code invoked from an SDK internal thread is invisible to CI unless that callback path is exercised through a fake-SDK seam (fully instrumented, no suppression applies) — when you add an SDK callback to a driver, register a fake-seam stress path for it in the same change.
+- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together; `scripts/check_docs_drift.py` fails the build if they disagree. The same script also fails if a `docs/development.md` build-options table row goes missing for a CMake `ALPACACORE_ENABLE_*` option, if `VERSION` and the README badge disagree, or if AGENTS.md references a repo path that doesn't exist.
+- **Concurrency now has automated coverage — but only where a driver is registered with the stress harness.** The `sanitizers-tsan` job (issue #101) builds all-vendors with ThreadSanitizer and runs the `[stress]` connect/disconnect/operate suite (`AlpacaCore/tests/concurrency_stress.h`): lifecycle storms from N threads, destruction racing an in-flight connect, and the racing-disconnect-never-dropped settle check. Locally: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. Registered so far: ToupTek camera / AFW / AAF focuser / thermal switch (over the fake SDK seam, wrapped in `LockedToupTekSDK`), ZWO EFW + camera + EAF focuser + CAA rotator + dew heater switch, Player One Phoenix + camera, SVBONY camera, Bisque, OnStep, and — over the loopback fake-mount TCP seam (`tests/fake_mount_server.h`, which drives drivers into the *connected* state so the poll/pulse/GOTO/teardown threads actually run) — the ZWO, Celestron, SynScan, and iOptron telescopes, plus the SkyWatcher telescope over its own loopback UDP simulator (`tests/fake_skywatcher_mount.h`), plus (fail-fast, no fake seam) the iOptron iEFW filter wheel, iEAF focuser, and iMate PowerBox Switch, and the Astroasis Oasis focuser (hidapi, no fake seam exists). **When you add or substantially change a driver, add a `[stress]` TEST_CASE for it** — one factory + one operate callback (see `test_touptek_concurrency_stress.cpp`). Drivers without a registration are still covered only by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver); do not assume green CI means thread-safe for them. `scripts/check_stress_registration.py` (the `stress-registration` CI job / pre-flight gate) fails on any vendor/device-type pair that is neither registered nor explicitly allow-listed there, so the currently-unregistered drivers are tracked in one place instead of only in this paragraph (the gate keys on vendor/device-type pairs, so the two ZWO ASIAIR switch drivers are masked by the dew-heater switch registration and remain covered by code review only). **SDK-callback paths especially**: the TSan suppressions mute any report with a vendor-blob frame on the stack, so a race in driver code invoked from an SDK internal thread is invisible to CI unless that callback path is exercised through a fake-SDK seam (fully instrumented, no suppression applies) — when you add an SDK callback to a driver, register a fake-seam stress path for it in the same change.
 
 ## Logging, Threading, and Errors
 
@@ -1430,12 +1438,24 @@ Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi 
 datagrams before each send so replies cannot get off-by-one.
 
 - **The serial probe asks for a SynScan handset echo first and skips the port if one answers** (`util/synscan_handset_probe.h`, 2026-09): a SynScan V4 hand controller (fw 04.40.00, built-in PL2303 `067b:23a3`) shares the Prolific adapter class this scan targets, and it stops answering serial ENTIRELY after receiving bytes at the wrong rate — one motor-controller probe at 115200 is enough — until it is power-cycled (unplugging the mount is not enough when the handset runs on USB power from the SBC). On the EQM-35 Pro rig this was the whole "hand-controller commands time out" report: the handset had been wedged by this probe at service start. The guard is at the top of `probe_skywatcher_port()`, gated on the caller's baud not being 9600 (the rate that is safe for a handset to receive) so it costs nothing on the only baud any caller currently probes at while still covering every future non-9600 caller; the same hazard applies to any other scan that sends non-9600 traffic to Prolific-class ports (the iOptron iEAF/iAFS2/3 and iEFW handshakes at 115200 are the known ones — not yet guarded). The SynScan driver's serial connect additionally claims the port with `TIOCEXCL`, an independent layer that blocks a concurrent same-process open regardless of baud. Hardware-verified 2026-09-09 (EQM-35 Pro rig): the exact-echo path connects cleanly, a manual open of the port while connected fails with `EBUSY` and succeeds again immediately after disconnect (no lock leak), and an abrupt `systemctl restart` mid-poll still re-detects the handset on the very first probe after restart (the closest this rig can reproduce of the stale-reply race the tolerant read loop targets). **Not exercised by this pass:** the baud gate itself — `fix/eqm35-hand-controller-timeout` only ever calls `probe_skywatcher_port()` at 9600, so the guard structurally cannot fire on this branch alone; its actual trigger (`kProbeBauds` including 115200) lives on `driver/skywatcher-eqm35` and needs its own hardware pass once combined with this fix. **Reverse direction (review on open-astro#242):** the guard sends the 9600 echo to a port that may be a Sky-Watcher motor board expecting 115200 — could a board be wedged by wrong-rate bytes the way the handset is? Empirically no, and the guard adds no new class of traffic: on `main` the probe has always sent `:e1` at 9600 to every candidate port, and `driver/skywatcher-eqm35`'s `kProbeBauds` tries 9600 first, so the real EQM-35 board received 9600 traffic before every successful 115200 detection during that branch's hardware bring-up (build a014531). The guard only runs on the non-9600 pass, i.e. after that same port has just been probed at 9600. Still, when the branches are combined, the combined pass should confirm both directions on the same rig: handset not wedged by the scan, board still detected at 115200 after the 9600 echo.
+- **Coordinates are equinox of date, not J2000.** `EquatorialSystem` reports Topocentric and
+  RA/Dec come from LST, so they are mean-equinox-of-date; plate solvers return J2000, and the
+  two drift apart by ~50"/yr since 2000 (~22 arcmin in 2026, mostly RA). Alpaca clients read
+  the flag and convert; a raw solver output held next to the driver's reported RA/Dec does not,
+  and a `SyncToCoordinates` fed a J2000 position writes the whole offset into the mount.
+  Precess before comparing or syncing, and rule this out before reading a ~20' goto error as
+  a driver bug (open-astro#230, Wave 150i report).
 - **All pointing math lives in the driver.** The MC protocol only counts steps: the driver
   owns RA/Dec <-> axis-angle conversion (CPR read at connect via `:a`, timer frequency
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
   step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
   fast mode). The mount stores **no site or time** — site lat/long/elevation come from
-  the web UI config or the Alpaca setters, and UTCDate is host-clock backed.
+  the web UI config or the Alpaca setters. Time is the host clock plus the client-set
+  `UTCDate` offset, through one `utc_now_locked()` for every LST computation (#287); on an
+  NTP-less host the router also steps the system clock from that write (#289). The offset is
+  not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped underneath
+  it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks disagreeing
+  by more than 1 s since the write, and re-armed by the next `UTCDate` write.
 - Pointing convention: home = counterweight down pointing at the pole, counts offset
   `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
   `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
@@ -1447,6 +1467,18 @@ datagrams before each send so replies cannot get off-by-one.
   in-place (`:I` is legal during slow-mode motion), then restoring the sidereal preset —
   the axis never stops. Dec pulses (and RA while not tracking) are software-timed
   speed-mode nudges. Position override accumulation as per the SynScan lessons.
+- **A live `:I` on a running axis is not always applied** (EQM-35 Pro, MC firmware 3.39,
+  2026-09-06): the board stores the preset (`:i` reads it back) but the motor keeps its old
+  rate. Every live in-place `:I` is therefore followed by a `:J` re-latch (INDI does the
+  same), and the driver sample-verifies the rate over ~450 ms (`verify_live_rate_or_rekick`)
+  and resends `:I`+`:J` if the axis did not change speed. Pulses ≥ 1.5 s verify inside the
+  pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone);
+  the `RightAscensionRate`/`TrackingRate` setters cannot wait 450 ms inside a property call,
+  so they spawn a one-shot background task (`rate_verify_thread_`, open-astro #248). That
+  task never takes `mutex_`, which is what lets every RA-taking path reap it WITH `mutex_`
+  held (setters, Tracking off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew,
+  disconnect) — a lock-free reap would leave a window for a setter to spawn one between an
+  initiator's reap and its lock, and the resend would land mid-pulse or on a stopped axis.
 - `:f` status nibbles: char0 bit0 speed-mode/bit1 CCW/bit2 fast; char1 bit0 running/bit1
   blocked; char2 bit0 init-done/bit1 level switch. Slewing = running AND NOT speed-mode
   on either axis (a tracking axis is not slewing).
@@ -1595,6 +1627,21 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   connected over Alpaca with zero driver warnings. Further bring-up notes (pointing math,
   MoveAxis semantics, tracking-rate measurement, the southern-hemisphere fixes) are
   recorded against those fixes elsewhere in this section.
+- **SynScan hand controller in "PC Direct Mode" reaches this driver unchanged, 2026-09-10**
+  (open-astro#275; EQM-35 Pro, SynScan V4 handset, Raspberry Pi 3B). The handset's menu
+  setting switches its own USB port from the SynScan command set to the raw motor-controller
+  protocol, so a `skywatcher` serial device pointed at the *handset's* port (9600 baud — PC
+  Direct Mode keeps the PC-facing rate) connects exactly like the board's own port: identity
+  `EQM-35 Pro (mount code 50), firmware 3.39`, Declination bit-identical to the direct port
+  (so `:a`/`:b`/`:g` geometry relays intact), `PulseGuide` N/S +11.25" and back to the same
+  count. The #242 echo guard steps aside by itself — a handset in this mode no longer answers
+  the SynScan echo — and the SynScan driver's scan then finds nothing on that port, which is
+  correct. Caveat: command latency through the 9600-baud relay is higher and more variable
+  than the board's own port; open-loop `MoveAxis` legs of ±2 deg/s for 1 s netted ~7 arcmin
+  instead of ~2 arcsec. Driver-timed motion is unaffected. Prefer the mount's own USB port
+  or an EQDIR cable where available; PC Direct Mode is a working no-extra-hardware fallback
+  for classic mounts that have neither (the #230 audience). Docs line for
+  `SUPPORTED-DRIVERS.md` lands with the post-ConformU direct-driver docs PR.
 
 #### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
 
@@ -1625,11 +1672,28 @@ against its checklist, 2026-09-06:
   built for WandererAstro, explicitly designed to generalize "across wrappers"). Fixed:
   both scan loops skip a port another connected device holds open, `probe_skywatcher_port`
   re-checks after `open()` for the TOCTOU window, and `connect_serial()` claims the port
-  in the registry BEFORE opening it and releases it in `disconnect_locked()`. This is a
-  project-wide gap outside WandererAstro (synscan, ioptron, gemini, celestron, onstep none
-  use the registry either) — only `skywatcher` was closed here, in scope for this issue.
-- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open; see the
-  hemisphere fixes and pending bench test elsewhere in this section.
+  in the registry BEFORE opening it and releases it in `disconnect_locked()`. The gap is
+  wider than this vendor: only WandererAstro (all four wrappers) and Gemini's PDH wrapper
+  (`gemini_pdh_protocol_wrapper.cpp`) use the registry; synscan, ioptron, celestron, onstep
+  and Gemini's focuser/flat-panel wrappers do not — only `skywatcher` was closed here, in
+  scope for this issue. The claim/release in `connect_serial()` is covered by a pty-backed
+  test in `test_skywatcher_serial.cpp`; the post-`open()` re-check in `probe_skywatcher_port`
+  narrows the TOCTOU window but cannot close it (in-process best-effort set, not a file lock).
+- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
+  Audit (2026-09-09, no hardware): unlike the RA/Dec direction bugs above, the branch that
+  drives `SideOfPier`/`DestinationSideOfPier` is chosen purely from the sign of hour angle
+  in `ra_dec_to_axis_degrees_locked()`, and `hemisphere_south_locked()` is consulted only for
+  `dec_mech` (the a2 magnitude), never for which branch is picked or which side it is labelled.
+  So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
+  OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
+  a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
+  the "pierEast" branch is the true physical east side below the equator, because there is no
+  internal contradiction to expose (whichever side the code calls pierEast, it consistently
+  slews to and reports that side). Loopback regressions asserting the flip contract on the
+  EQM-35 Pro and Wave profiles are in `test_skywatcher_async.cpp` ("Pier side across the
+  meridian"). The physical-side question stays open until the plate-solved goto-across-the-
+  meridian check on the rig (see the hemisphere fixes and pending bench test elsewhere in this
+  section).
 - [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session
   (no plate solve performed).
 - [ ] Park/unpark weights-down convention — not specifically re-verified on a classic

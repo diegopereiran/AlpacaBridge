@@ -23,8 +23,8 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -610,8 +610,7 @@ private:
         }
         ALPACA_LOG_TRACE("Gemini", "Power hub command: " + cmd);
         if (!write_line(serial_fd_, cmd)) {
-            throw AlpacaException("Serial write failed: " + std::string(std::strerror(errno)),
-                                  AlpacaError::DriverException);
+            throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
     }
 
@@ -718,7 +717,7 @@ private:
                     if (connected_ && serial_fd_ >= 0) {
                         polled = true;
                         if (!write_line(serial_fd_, ">G#")) {
-                            write_error = std::string(std::strerror(errno));
+                            write_error = util::errno_string(errno);
                         }
                     }
                 }
@@ -788,7 +787,7 @@ private:
             mark_serial_port_closed(opened_port_);
             opened_port_.clear();
             throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + std::strerror(errno) + ")",
+                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
                 AlpacaError::NotConnected);
         }
         if (!configure_serial_fd(serial_fd_)) {

@@ -179,7 +179,8 @@ Privileged operations use two mechanisms, both scoped tightly:
   `wifi.share.*` pair is required for shared-mode (hotspot) activation.
   Requires the `polkitd` package on the image.
 - **Ambient capabilities**: the systemd unit grants
-  `CAP_SYS_TIME` (synctime endpoint, `clock_settime`) and `CAP_NET_ADMIN`
+  `CAP_SYS_TIME` (the synctime endpoint and a client's `Telescope.UTCDate`
+  write on an NTP-less host, both `clock_settime`) and `CAP_NET_ADMIN`
   (wifi country endpoint, nl80211 `REQ_SET_REG` — the `iw reg set`
   equivalent). Ambient grants work despite `NoNewPrivileges=true` because
   systemd applies them at exec; `CapabilityBoundingSet` is limited to the

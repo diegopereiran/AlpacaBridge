@@ -16,11 +16,14 @@
 #include <alpacacore/device_registry.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -2339,6 +2342,60 @@ int main() {
         EXPECT(get_connected_value(router, slow_base, "1"));
         put_connected(router, slow_base, "1", false);
         EXPECT(!slow->get_connected());
+    }
+
+    // open-astro#289: the description carries the host-clock state, and the
+    // client-clock policy can be toggled and persisted through the same PUT
+    // that owns Location/ProfileName.
+    {
+        alpacahttp::Router clock_router;
+        char path_template[] = "/tmp/alpacahttp_test_routing_clock_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        ::unlink(config_path.c_str());  // the router creates it on first persist
+        clock_router.set_config_path(config_path);
+
+        auto desc = [&]() {
+            const auto resp = route_request(clock_router, "GET", "/management/v1/description");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            return json["Value"];
+        };
+        auto v = desc();
+        EXPECT(v.contains("ClockSynchronized") && v["ClockSynchronized"].is_boolean());
+        EXPECT(v.contains("ClockSource") && v["ClockSource"].is_string());
+        const std::string source = v["ClockSource"].get<std::string>();
+        EXPECT(source == "ntp" || source == "rtc" || source == "none");  // never "client" before a UTCDate write
+        EXPECT(v["ClockSynchronized"].get<bool>() == (source == "ntp"));
+        EXPECT(v.value("SyncSystemClockFromClients", false) == true);
+        EXPECT(clock_router.sync_system_clock_from_clients());
+
+        // Boolean and string forms are both accepted; the value persists to the config file.
+        auto put = route_request(clock_router, "PUT", "/management/v1/description",
+                                 R"({"SyncSystemClockFromClients": false})");
+        auto put_json = nlohmann::json::parse(put.body(), nullptr, false);
+        EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", -1) == 0);
+        EXPECT(!clock_router.sync_system_clock_from_clients());
+        EXPECT(desc().value("SyncSystemClockFromClients", true) == false);
+        {
+            std::ifstream in(config_path);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            EXPECT(buf.str().find("sync_system_clock_from_clients: \"false\"") != std::string::npos);
+        }
+        put = route_request(clock_router, "PUT", "/management/v1/description",
+                            R"({"syncSystemClockFromClients": "true"})");
+        put_json = nlohmann::json::parse(put.body(), nullptr, false);
+        EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", -1) == 0);
+        EXPECT(clock_router.sync_system_clock_from_clients());
+        // A non-bool value is rejected and leaves the setting alone.
+        put = route_request(clock_router, "PUT", "/management/v1/description", R"({"SyncSystemClockFromClients": 3})");
+        put_json = nlohmann::json::parse(put.body(), nullptr, false);
+        EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) != 0);
+        EXPECT(clock_router.sync_system_clock_from_clients());
+        ::unlink(config_path.c_str());
     }
 
     std::cout << "All routing tests passed!\n";

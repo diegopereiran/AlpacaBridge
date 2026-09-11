@@ -43,6 +43,9 @@ public:
     const std::string& manufacturer() const { return manufacturer_; }
     const std::string& location() const { return location_; }
     const std::string& profile_name() const { return profile_name_; }
+    // open-astro#289: let a client's Telescope.UTCDate write step the host
+    // clock when the kernel reports it undisciplined (no NTP/RTC). Default on.
+    bool sync_system_clock_from_clients() const { return sync_system_clock_from_clients_; }
     std::size_t thread_pool_size() const { return thread_pool_size_; }
     std::size_t max_connections() const { return max_connections_; }
     int keep_alive_lifetime_seconds() const { return keep_alive_lifetime_seconds_; }
@@ -62,6 +65,7 @@ public:
     void set_manufacturer(const std::string& mfg) { manufacturer_ = mfg; }
     void set_location(const std::string& loc) { location_ = loc; }
     void set_profile_name(const std::string& name) { profile_name_ = name; }
+    void set_sync_system_clock_from_clients(bool enabled) { sync_system_clock_from_clients_ = enabled; }
     void set_thread_pool_size(std::size_t size) {
         if (size < 1) size = 1;
         if (size > 256) size = 256;
@@ -88,6 +92,7 @@ private:
     std::string manufacturer_ = "OpenAstro.net";
     std::string location_ = "";
     std::string profile_name_ = "";
+    bool sync_system_clock_from_clients_ = true;
     std::size_t thread_pool_size_ = 32;  // Default: 32 concurrent requests (supports multiple devices + clients)
     // Upper bound on open client connections across all owners (idle on the
     // reactor, queued, or being served). Idle keep-alive connections cost no
