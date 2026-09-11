@@ -51,7 +51,10 @@ namespace alpacacore::test {
  * goes through the SAME mutex as everything else. That is safe only as long
  * as the rule above holds (no fake method blocks) — the moment a fake gains a
  * deliberate delay (to test a real timeout path, say), this decorator turns
- * that production safety valve into a deadlock instead of a no-op.
+ * that production safety valve into a deadlock instead of a no-op. Nothing
+ * mechanical stops that: the no-blocking rule is convention, and making it
+ * enforceable is issue #339 — this decorator is the reason that issue matters
+ * rather than being tidiness.
  */
 class LockedQHYSDK : public vendor::qhy::QHYSDK {
 public:

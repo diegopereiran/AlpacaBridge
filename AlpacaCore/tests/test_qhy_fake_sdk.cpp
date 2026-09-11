@@ -387,7 +387,7 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
     }
     // Nothing OUTSIDE the list was hit, which is the half that catches a
     // forward wired to the wrong inner method.
-    CHECK(fake.calls.size() == methods.size());
+    CHECK(fake.distinct_calls() == methods.size());
 }
 
 TEST_CASE("FakeQHYSDK - an empty readout-mode list still accepts index 0", "[qhy][fake][unit]") {

@@ -16,6 +16,7 @@
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -80,7 +81,7 @@ namespace alpacacore::test {
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
  * corresponding real guard. Each is tracked; none is relied on by the cases
- * in this branch, but the [stress] follow-up (#321) will exercise all five:
+ * in this branch, but the [stress] follow-up (#321) will exercise all six:
  *
  * - open_camera() does not refuse a fresh open while a registered exposure
  *   worker is still live (the real one throws InvalidOperation — this is the
@@ -107,6 +108,13 @@ namespace alpacacore::test {
  *   sizes a buffer from this would pass here and fail on hardware. Adjacent
  *   to #328 (same sizing path) and cheapest to fix with it. Tracked in
  *   issue #365.
+ * - get_param() answers 0.0 for a control missing from `params`, where the
+ *   real one returns GetQHYCCDParam() raw -- i.e. the QHYCCD_ERROR sentinel
+ *   (0xFFFFFFFF, ~4.29e9) for an unsupported control. Nothing asks for one
+ *   here (every control the drivers read is seeded, and CURTEMP/CURPWM are
+ *   gated by is_control_available first), but modelling "unsupported" by
+ *   dropping an entry from `params` would hand the driver a plausible 0.0
+ *   where hardware hands it a sentinel to reject. Tracked in issue #373.
  *
  * Not thread-hardened, by design — wrap it in LockedQHYSDK for the [stress]
  * suite so ThreadSanitizer reports point at driver code, not at this file.
@@ -191,6 +199,17 @@ public:
         std::lock_guard<std::mutex> lock(sync_.calls_mutex);
         auto it = calls.find(fn);
         return it == calls.end() ? 0 : it->second;
+    }
+
+    /// How many DISTINCT method names have been called at least once.
+    ///
+    /// Exists so a test never has to touch `calls` directly: reading
+    /// `calls.size()` from a test body is the one read that bypasses the
+    /// accessor, and it would have to be found again when issue #331 routes
+    /// the rest of the observability state through this lock.
+    std::size_t distinct_calls() const {
+        std::lock_guard<std::mutex> lock(sync_.calls_mutex);
+        return calls.size();
     }
 
     /// A plausible uncooled mono camera, sized small so get_mem_length() and
