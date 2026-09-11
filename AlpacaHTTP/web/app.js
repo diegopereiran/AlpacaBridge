@@ -1764,6 +1764,14 @@ function formatServerClock(date) {
         if (!parts.year || !parts.month || !parts.day || !parts.hour || !parts.minute || !parts.second) {
             throw new Error('incomplete date parts');
         }
+        // hourCycle predates neither Chrome 73 nor Safari 14.1; an older
+        // browser ignores it, en-CA falls back to 12-hour, and the reduce
+        // above drops the AM/PM part -- 23:30 would render as 11:30 with
+        // nothing to say which half of the day it is. A dayPeriod part is
+        // exactly that case, so treat it as unusable and take the fallback.
+        if (parts.dayPeriod) {
+            throw new Error('12-hour clock, hourCycle unsupported');
+        }
         // The date parts come from en-CA for its year-month-day ordering, but
         // that locale renders most zones as a GMT offset (it carries only the
         // North American abbreviations). The label is asked for again in the
