@@ -6652,6 +6652,44 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     }
 }
 
+namespace {
+
+// CSRF guard shared by the state-changing management endpoints (PR #198
+// follow-up; extended to synctime by issue #298). These endpoints are
+// unauthenticated under the trusted-LAN threat model, so a malicious page
+// open in a browser on the same LAN could otherwise fire a cross-origin
+// request at them. Browsers always attach an Origin header to a cross-origin
+// mutating request, so reject any whose Origin host does not match the Host
+// the request was addressed to. Non-browser clients (curl, native apps) send
+// no Origin and are unaffected, as is the same-origin web portal.
+//
+// Returns the 403 response to send, or std::nullopt when the request may
+// proceed. `what` names the endpoint in the error message.
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t server_tx_id,
+                                                    const char* what) {
+    if (request.method() == HttpMethod::GET || !request.has_header("Origin")) {
+        return std::nullopt;
+    }
+    const std::string origin = request.get_header("Origin");
+    const std::string host = request.get_header("Host");
+    // Strip scheme from Origin, then compare host[:port] exactly.
+    const auto scheme_end = origin.find("://");
+    const std::string origin_host = scheme_end == std::string::npos ? origin : origin.substr(scheme_end + 3);
+    if (!host.empty() && origin_host == host) {
+        return std::nullopt;
+    }
+    AlpacaResponse alpaca_response =
+        make_error_response(0, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                            std::string("Cross-origin ") + what + " requests are not allowed");
+    Response resp;
+    resp.set_content_type("application/json");
+    resp.set_status(403, "Forbidden");
+    resp.set_body(alpaca_response);
+    return resp;
+}
+
+}  // namespace
+
 Response Router::handle_sync_time(const Request& request, std::uint32_t server_tx_id) {
     // Note: like the restart/shutdown management endpoints, this is
     // intentionally unauthenticated — the web UI is served on the LAN and the
@@ -6666,6 +6704,15 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Since open-astro#291 a successful set has a second effect beyond the
+    // clock: it marks the host client-stepped, which suppresses the
+    // undisciplined-clock WARN on the next telescope connect. A cross-origin
+    // POST could otherwise move the clock by years *and* hide the log line
+    // that would have explained the resulting pointing error.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "time synchronisation")) {
+        return *rejected;
     }
 
     // GET returns the server's current time (epoch seconds) without changing
@@ -6770,29 +6817,10 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    // CSRF guard for state-changing operations (PR #198 follow-up): a
-    // malicious website open in a browser on the LAN can fire cross-origin
-    // requests at this unauthenticated endpoint. Browsers always attach an
-    // Origin header to cross-origin mutating requests; reject any whose
-    // Origin host does not match the Host the request was addressed to.
-    // Non-browser clients (curl, native apps) send no Origin and are
-    // unaffected, as is the same-origin web portal.
-    if (request.method() != HttpMethod::GET && request.has_header("Origin")) {
-        std::string origin = request.get_header("Origin");
-        std::string host = request.get_header("Host");
-        // Strip scheme from Origin, then compare host[:port] exactly.
-        auto scheme_end = origin.find("://");
-        std::string origin_host = scheme_end == std::string::npos ? origin : origin.substr(scheme_end + 3);
-        if (host.empty() || origin_host != host) {
-            AlpacaResponse alpaca_response =
-                make_error_response(0, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                                    "Cross-origin WiFi management requests are not allowed");
-            Response resp;
-            resp.set_content_type("application/json");
-            resp.set_status(403, "Forbidden");
-            resp.set_body(alpaca_response);
-            return resp;
-        }
+    // CSRF guard for state-changing operations (PR #198 follow-up). Same
+    // rejection the synctime endpoint uses; see reject_cross_origin_request().
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "WiFi management")) {
+        return *rejected;
     }
 
     const std::string& sub = match.method_name;

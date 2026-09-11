@@ -188,7 +188,14 @@ Privileged operations use two mechanisms, both scoped tightly:
 
 State-changing WiFi requests additionally carry a CSRF guard (browser
 `Origin` header must match `Host`, else 403); the management surface is
-otherwise unauthenticated per the trusted-LAN model. The persisted wifi
+otherwise unauthenticated per the trusted-LAN model. The `synctime` endpoint
+shares that guard on its POST/PUT (issue #298): it sets the system clock and
+marks the host client-stepped, which suppresses the undisciplined-clock
+warning at the next telescope connect, so a drive-by cross-origin request
+could otherwise move the clock and hide the pointing error it causes. The
+remaining state-changing management endpoints (`restart`, `shutdown`,
+`configuredevice`, `removedevice`, `loglevel`, the `description` PUT) do not
+carry it yet. The persisted wifi
 country lives in `/var/lib/alpacabridge/config/wifi_country` and is
 re-applied at daemon startup in `main()` before NetworkManager's boot-time
 hotspot autoconnect.

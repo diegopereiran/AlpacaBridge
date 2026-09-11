@@ -2156,6 +2156,57 @@ int main() {
         const auto del_response = route_request(router, "DELETE", "/management/v1/synctime");
         const auto del_json = nlohmann::json::parse(del_response.body(), nullptr, false);
         EXPECT(!del_json.is_discarded() && del_json.value("ErrorNumber", 0) != 0);
+
+        // CSRF guard (issue #298): this endpoint sets the system clock and,
+        // since #291, marks the host client-stepped, so it takes the same
+        // Origin check the wifi endpoints use. A cross-origin mutating
+        // request is rejected with 403 before the body is even parsed.
+        {
+            const std::string body = "{\"Epoch\": 1757500000}";
+            std::ostringstream raw;
+            raw << "POST /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n"
+                << "Content-Type: text/plain\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 403);
+        }
+
+        // A same-origin request passes the guard. It still fails here,
+        // because setting the clock needs CAP_SYS_TIME, but not with 403.
+        {
+            const std::string body = "{\"Epoch\": 1757500000}";
+            std::ostringstream raw;
+            raw << "POST /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://localhost\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() != 403);
+        }
+
+        // A GET carrying a cross-origin Origin header changes nothing, so it
+        // is still served rather than rejected.
+        {
+            std::ostringstream raw;
+            raw << "GET /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n\r\n";
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() != 403);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        }
     }
 
     // wifi management endpoints: routing + input validation. The happy paths
