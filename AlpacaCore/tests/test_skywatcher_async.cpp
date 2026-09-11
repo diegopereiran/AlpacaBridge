@@ -1558,8 +1558,13 @@ TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#30
     CHECK(std::abs(driver->get_target_declination() + 25.0) < 1e-9);
 
     // And a reconnect clears both again, so the pair never survives a session.
+    // get_connected() is asserted between the two calls on purpose: without
+    // it the case is self-satisfying, since a reconnect that silently failed
+    // would leave both getters throwing and everything below would pass.
     driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
     driver->set_connected(true);
+    REQUIRE(driver->get_connected());
     CHECK_THROWS_AS(driver->get_target_right_ascension(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->get_target_declination(), alpacacore::AlpacaException);
     driver->set_connected(false);
