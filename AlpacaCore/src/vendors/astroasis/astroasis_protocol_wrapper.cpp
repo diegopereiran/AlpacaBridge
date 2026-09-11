@@ -32,6 +32,53 @@ constexpr std::size_t kReportSize = 65;  // report ID byte + 64-byte HID report
 constexpr int kDefaultTimeoutMs = 100;
 constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in the vendor SDK
 
+// hidapi's library-level entry points touch process-global state -- hid_init's
+// ref-counted context and the backend's udev/libusb bus scan behind
+// hid_enumerate/hid_open_path -- and hidapi does not serialize them for us
+// (upstream documents only "different hid_device handles from different
+// threads" as safe). Impl::mutex_ is per instance, so it cannot order an
+// enumerate on the HTTP thread (create_astroasis_focuser_by_index) against a
+// second instance's connect. Every call into those entry points, from any
+// thread, takes this one lock.
+//
+// Deliberately NOT held across hid_write/hid_read_timeout: those are per-handle
+// I/O that hidapi already supports concurrently across distinct handles, and the
+// connect handshake alone blocks in hid_read_timeout for up to
+// kHandshakeTimeoutMs -- a global lock there would stall every other focuser's
+// I/O (and every enumeration) behind one device's transaction for no safety
+// gain.
+//
+// Lock order (AGENTS.md "driver mutex_ -> operation lock -> SDK-wrapper
+// mutex"): driver mutex_ -> Impl::mutex_ -> this. Nothing may take Impl::mutex_
+// while holding it; enumerate_astroasis_focusers() takes only this one.
+//
+// File-local because Astroasis is the only vendor linking hidapi. If a second
+// one ever does, this must be promoted to a shared header -- two separate
+// mutexes would serialize nothing.
+//
+// Two known, accepted costs. (1) enumerate_astroasis_focusers() holds this
+// across a full udev/libusb bus scan (unavoidable: devs is hidapi-owned memory
+// that must be copied out before hid_free_enumeration), so a by-index device
+// creation on an HTTP thread can stall another focuser's connect/disconnect for
+// tens of milliseconds on a busy USB tree -- and, since AstroasisFocuserDriver
+// holds its own mutex_ across protocol_.connect()/disconnect(), every property
+// read on that focuser queued behind them for the same duration. Bounded,
+// never a deadlock. (2) A
+// function-local static is destroyed at exit, before any static-lifetime object
+// constructed earlier. What keeps that unreachable is NOT heap ownership: the
+// DeviceRegistry singleton is constructed at startup registration and this mutex
+// on the first hidapi call, so the mutex is destroyed FIRST, and a driver still
+// held by the registry at static-destruction time would lock a destroyed mutex
+// in ~Impl. The invariant is the explicit
+// DeviceRegistry::instance().clear() in AlpacaHTTP/examples/simple_server's
+// main(), which destroys every driver before main returns. Drop that call, or
+// give a driver static lifetime, and this mutex must be leaked instead
+// (`static auto* m = new std::mutex;`).
+std::mutex& hid_global_mutex() {
+    static std::mutex m;
+    return m;
+}
+
 std::uint32_t to_big_endian(std::uint32_t host) {
     return ((host & 0x000000FFu) << 24) | ((host & 0x0000FF00u) << 8) | ((host & 0x00FF0000u) >> 8) |
            ((host & 0xFF000000u) >> 24);
@@ -90,8 +137,17 @@ public:
             throw AlpacaException("Astroasis focuser: connect() called while already connected (caller bug)",
                                   AlpacaError::DriverException);
         }
-        hid_init();
-        device_ = hid_open_path(hid_path.c_str());
+        {
+            std::lock_guard<std::mutex> hid_lock(hid_global_mutex());
+            // Checked, like the enumerate path: a failed init would otherwise
+            // surface one call later as an indistinguishable "failed to open"
+            // naming the path, which sends the reader after a cabling or
+            // permissions problem that isn't there.
+            if (hid_init() != 0) {
+                throw AlpacaException("hidapi initialization failed", AlpacaError::NotConnected);
+            }
+            device_ = hid_open_path(hid_path.c_str());
+        }
         if (!device_) {
             throw AlpacaException("Failed to open Astroasis focuser HID device: " + hid_path,
                                   AlpacaError::NotConnected);
@@ -115,8 +171,7 @@ public:
             // connected_ is already false here: it's only ever true when
             // device_ != nullptr, and the already-connected throw above
             // guarantees device_ was nullptr on entry, in every build.
-            hid_close(device_);
-            device_ = nullptr;
+            close_device_locked();
             throw;
         }
 
@@ -127,10 +182,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         // No protocol command here -- AOFocuserClose only tears down the OS
         // handle, it does not send anything to the device.
-        if (device_) {
-            hid_close(device_);
-            device_ = nullptr;
-        }
+        close_device_locked();
         connected_ = false;
     }
 
@@ -206,6 +258,21 @@ public:
     }
 
 private:
+    // Caller must hold mutex_ and must NOT hold hid_global_mutex() -- it is
+    // non-recursive, so widening a global-lock scope over a call site of this
+    // (verified by mutation: all of connect()) self-deadlocks right here.
+    // Closes under hid_global_mutex() and clears
+    // device_ so the two close sites (the connect handshake's failure path and
+    // disconnect()) cannot drift apart on either the lock or the clear.
+    void close_device_locked() {
+        if (!device_) {
+            return;
+        }
+        std::lock_guard<std::mutex> hid_lock(hid_global_mutex());
+        hid_close(device_);
+        device_ = nullptr;
+    }
+
     void require_connected() const {
         if (!connected_ || !device_) {
             throw AlpacaException("Astroasis focuser not connected", AlpacaError::NotConnected);
@@ -284,6 +351,10 @@ void AstroasisProtocolWrapper::stop_move() { impl_->stop_move(); }
 
 std::vector<AstroasisPortInfo> enumerate_astroasis_focusers() {
     std::vector<AstroasisPortInfo> results;
+    // Held across the whole init/enumerate/copy/free sequence: devs points into
+    // hidapi-owned memory that hid_free_enumeration must reclaim, so the list
+    // has to be copied out before the lock drops.
+    std::lock_guard<std::mutex> hid_lock(hid_global_mutex());
     if (hid_init() != 0) {
         return results;
     }
