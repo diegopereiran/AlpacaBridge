@@ -1915,10 +1915,13 @@ int main() {
             std::ifstream in(persisted);
             original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
-        nlohmann::json entries = nlohmann::json::parse(original, nullptr, false);
-        if (!entries.is_array()) {
-            entries = nlohmann::json::array();
-        }
+        // Only this entry, rather than appending to whatever is on disk: the
+        // second Router below re-registers EVERY entry in the file and builds
+        // that vendor's driver, and some vendors touch hardware eagerly (the
+        // astroasis by-index path AGENTS.md warns about). Appending would make
+        // this case depend on every earlier block having removed what it added,
+        // which nothing enforces. The original contents are restored below.
+        nlohmann::json entries = nlohmann::json::array();
         entries.push_back({{"vendor", "skywatcher"},
                            {"deviceType", "telescope"},
                            {"deviceNumber", 9630},
@@ -1933,11 +1936,7 @@ int main() {
 
         // A second Router: load_persisted_devices() is one-shot per instance,
         // so the startup path only runs on an instance that has not read the
-        // file yet. Note that it re-registers EVERY entry left in the file,
-        // not just 9630 -- safe only because each block above removes what it
-        // added. A block that forgets would have this construction build that
-        // vendor's driver, and some touch hardware eagerly (the astroasis
-        // by-index path AGENTS.md warns about). Keep the file empty here.
+        // file yet.
         const auto listed_json = [&] {
             alpacahttp::Router startup_router;
             const auto listed = route_request(startup_router, "GET", "/management/v1/configureddevices");
