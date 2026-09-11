@@ -27,11 +27,13 @@
 // Blind commands (":05" move, ":07" max, ":12", ":14", ":15", ":16") are
 // recorded and not answered, as the firmware does.
 //
-// Unlike the sibling fakes, this one counts how many times the SLAVE has been
-// opened, which is the observable that matters for #333: a concurrent connect
-// that gets past the driver's transition_mutex_ opens the port a second time
-// and leaks the first descriptor. A settable handshake delay widens the window
-// so the race is reproducible rather than timing-dependent.
+// The observable that matters for #333 is how many connects reached the
+// wire: the fake holds the pty master, which sees nothing when the slave is
+// opened, so a connect is counted by its handshake command (":1502#", see
+// connects() below). A concurrent connect that gets past the driver's
+// transition_mutex_ sends a second handshake and leaks the first descriptor.
+// A settable handshake delay widens the window so the race is reproducible
+// rather than timing-dependent.
 
 #include <fcntl.h>
 #include <poll.h>
