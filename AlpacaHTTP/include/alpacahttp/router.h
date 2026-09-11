@@ -64,8 +64,28 @@ public:
     void set_config_path(std::string config_path);
     // open-astro#289: whether a client's Telescope.UTCDate write may step the
     // host clock when the kernel reports it undisciplined (no NTP/RTC).
-    void set_sync_system_clock_from_clients(bool enabled) { host_clock_.set_enabled(enabled); }
-    bool sync_system_clock_from_clients() const { return host_clock_.enabled(); }
+    void set_sync_system_clock_from_clients(bool enabled) { host_clock_->set_enabled(enabled); }
+    bool sync_system_clock_from_clients() const { return host_clock_->enabled(); }
+
+    // Test-only seam (open-astro#302): replace the host clock with one whose
+    // three probes are fakes (adjtimex, clock_settime and the sysfs RTC
+    // read), so the #289 wiring -- the UTCDate PUT stepping
+    // the clock before the driver sees the value, and the connect-time
+    // warning -- can be driven in a test without touching the real system
+    // clock. NOT the synctime endpoint: handle_sync_time() calls
+    // clock_settime() directly and only its mark_stepped()/mark_step_failed()
+    // bookkeeping goes through this object, so a test must never POST it an
+    // in-range epoch even with the hooks installed. The current
+    // syncSystemClockFromClients setting carries over; the step latches
+    // (stepped_, step_failed_) deliberately do not, since a replacement clock
+    // starts from "nothing has happened to it yet" -- which is what a test
+    // installing hooks before serving wants.
+    //
+    // Replaces the clock object rather than mutating it, so it must be called
+    // before the router serves any request; no request path may be in flight.
+    void set_host_clock_hooks(
+        alpacacore::util::HostClock::IsSynchronizedFn is_synchronized, alpacacore::util::HostClock::SetTimeFn set_time,
+        alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; });
 
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
@@ -274,7 +294,10 @@ private:
     std::string config_path_;
 
     // Thread-safe; owns the "has a client stepped the clock" state (#289).
-    alpacacore::util::HostClock host_clock_;
+    // By pointer only so set_host_clock_hooks() can swap in a fake before the
+    // router starts serving (#302); HostClock holds a mutex and so is neither
+    // copyable nor assignable.
+    std::unique_ptr<alpacacore::util::HostClock> host_clock_ = std::make_unique<alpacacore::util::HostClock>();
 };
 
 } // namespace alpacahttp
