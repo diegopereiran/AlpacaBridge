@@ -1453,6 +1453,13 @@ public:
         // stop is stale by the whole pause (stop ramp + writes + restart,
         // ~1-3 s = 15-45 arcsec of RA; seen by ConformU as a constant
         // ~79 arcsec return error together with the old post-sync freeze).
+        // open-astro#404: published before the hardware write, like the two
+        // slew paths, so a sync that fails mid-way still reports the pair the
+        // client asked for.
+        target_ra_hours_ = ra;
+        target_dec_degrees_ = dec;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         const bool was_tracking = tracking_;
         if (was_tracking) {
             const uint64_t gen = ++motion_generation_;
@@ -1470,11 +1477,6 @@ public:
         if (was_tracking) {
             set_tracking_locked(lock, true);
         }
-
-        target_ra_hours_ = ra;
-        target_dec_degrees_ = dec;
-        target_ra_set_ = true;
-        target_dec_set_ = true;
         invalidate_position_cache_locked();
         // No post-sync read freeze: live reads land on the synced frame.
     }
@@ -2739,6 +2741,14 @@ private:
         slewing_cached_ = true;
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         restore_tracking_after_slew_ = tracking_;
+        // open-astro#404: the target is what the client ASKED for, so it is
+        // published before dispatch on every writer (this one, the async slew
+        // and sync). A dispatch that fails does not un-ask it, and the three
+        // paths now agree on what TargetRightAscension reads afterwards.
+        target_ra_hours_ = ra;
+        target_dec_degrees_ = dec;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         try {
             dispatch_predicted_goto_locked(lock, ra, dec);
         } catch (...) {
@@ -2749,10 +2759,6 @@ private:
             restore_tracking_after_slew_ = false;
             throw;
         }
-        target_ra_hours_ = ra;
-        target_dec_degrees_ = dec;
-        target_ra_set_ = true;
-        target_dec_set_ = true;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         parked_ = false;
