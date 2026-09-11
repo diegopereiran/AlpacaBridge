@@ -2357,8 +2357,11 @@ Response Router::dispatch_device_method(
                     // four wrapper-backed switches, whose is_open() waits out
                     // their wrapper's open() -- a libgpiod or char-device open,
                     // plus a soft-PWM thread per port on the ASIAIR Plus -- and
-                    // so blocks for far less —
-                    // unsafe to read mid-task either way) without a
+                    // so blocks for far less. Blocking is all the switches do:
+                    // they release the wrapper lock before pending_mutex_, so
+                    // they never nest the two and do not create the ABBA
+                    // hazard the five telescopes do -- unsafe to read
+                    // mid-task either way) without a
                     // per-driver capability flag, which is future work.
                 } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
                            (device->get_connecting() || device->get_connected())) {
