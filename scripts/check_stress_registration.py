@@ -70,7 +70,6 @@ ALLOWLIST = {
     ("playerone", "switch"),
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
-    ("weewx", "observingconditions"),
 }
 
 
