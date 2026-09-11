@@ -59,8 +59,8 @@ struct StressOptions {
  * `run_lifecycle_stress` below wraps the WHOLE operate callback in one
  * try/catch, not each call inside it — on a fail-fast path where every call
  * throws, the first throw skips every call after it, and the storm exercises
- * one line instead of nine. Every `[stress]` registration since #303 has
- * therefore defined its own local
+ * one line instead of nine. Every open `[stress]` registration PR at the time
+ * of writing (#316-#320) therefore defined its own local
  *
  *     template <typename Fn> void call(Fn&& fn) { try { fn(); } catch (const std::exception&) {} }
  *
@@ -93,6 +93,12 @@ struct StressOptions {
  * case fails nondeterministically. So a widened set is a visible, complete
  * per-file decision, not a silent default. Thread-safe: op_threads hits this
  * concurrently.
+ *
+ * NotImplemented, PropertyNotImplemented and MethodNotImplemented all share
+ * the same numeric AlpacaError code (alpaca_errors.h) -- opting into any ONE
+ * of them for readability admits all three. Fine in practice (the three mean
+ * closely related things), but don't read the expected set as more precise
+ * than the codes actually are.
  *
  * Neither copyable nor movable (it owns a std::mutex) — a registration must
  * capture it by reference in the operate lambda, not by value.
