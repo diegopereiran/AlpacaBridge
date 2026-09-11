@@ -427,11 +427,12 @@ fi
 # in their own invocation, with the same zero-test guard. See the matching
 # comment in ci.yml.
 #
-# These are plain comments rather than the `# ...` command-substitution trick
-# used inside the pipeline below: that form is inert only because the
-# substitution expands to an empty string that word-splitting drops, and one
-# stray backtick, $ or trailing backslash in the prose would turn a comment
-# into a live command inside the gate itself.
+# This prose lives here, above the `if`, rather than inside the pipeline. The
+# gate used to carry it there as `# ...` command-substitution pseudo-comments,
+# now retired: that form is inert only because the substitution expands to an
+# empty string that word-splitting drops, so one stray backtick, $ or trailing
+# backslash in the prose would have turned a comment into a live command
+# inside the gate itself. Do not reintroduce it here.
 
 if [ "${RUN_TSAN:-0}" = "1" ]; then
   section "ThreadSanitizer (concurrency stress, all vendors)"
