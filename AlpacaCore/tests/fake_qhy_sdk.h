@@ -82,8 +82,15 @@ namespace alpacacore::test {
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
  * corresponding real guard. Each is tracked; none is relied on by the cases
- * in this branch, but the [stress] follow-up (#321) will exercise all four:
+ * in this branch, but the [stress] follow-up (#321) will exercise them all:
  *
+ * - set_bin_mode()'s wbin_/hbin_ are WRITE-ONLY: nothing reads them, so a bin
+ *   change on its own never moves get_mem_length(). Under the ROI UNITS
+ *   convention below that is correct for how the driver drives this fake --
+ *   it always pairs a bin change with a set_resolution() carrying the binned
+ *   size -- but a test that calls set_bin_mode() alone and expects the length
+ *   to shrink, the way the real GetQHYCCDMemLength() does after
+ *   SetQHYCCDBinMode, will not see it. Tracked in issue #365.
  * - open_camera() does not refuse a fresh open while a registered exposure
  *   worker is still live (the real one throws InvalidOperation — this is the
  *   PR #201 finding). `exposure_workers_` is written and never read here.
@@ -113,11 +120,8 @@ namespace alpacacore::test {
  * "get_single_frame never exceeds get_mem_length" case pins the pair at bin > 1.
  *
  * FIXED since this list was written, kept named so a reader chasing an old
- * comment lands somewhere: get_mem_length() now tracks the binned ROI
- * (issue #365 -- see ROI UNITS above; an intermediate version of that fix
- * divided by the binning a second time and overran the driver's buffer);
- * get_param() now answers the QHYCCD_ERROR sentinel, not 0.0,
- * for a control missing from `params` (issue #373); and control_temp() now
+ * comment lands somewhere: get_param() now answers the QHYCCD_ERROR sentinel,
+ * not 0.0, for a control missing from `params` (issue #373); and control_temp() now
  * approaches its target by `temp_settle_step_c` per call rather than settling
  * instantly, the way ControlQHYCCDTemp's PID does (issue #390).
  *
@@ -421,8 +425,9 @@ public:
         hit("get_mem_length");
         require_open(camera_id);
         const uint32_t bytes_per_px = (bits_ > 8) ? 2U : 1U;
-        // ROI CONVENTION (issue #365, settled in review): roi_ is in BINNED
-        // pixels, because that is what the only caller passes --
+        // ROI CONVENTION (issue #365, settled in review -- this body is
+        // UNCHANGED by that investigation, which is the point): roi_ is in
+        // BINNED pixels, because that is what the only caller passes --
         // set_bin_locked() calls set_resolution(0, 0, max_width / bin_x,
         // max_height / bin_y), and start_exposure() passes num_x_/num_y_, which
         // are ASCOM NumX/NumY and therefore binned too. So the length DOES
@@ -431,7 +436,8 @@ public:
         // must return for the frame it is about to deliver -- a new parity lie
         // in place of the old one, and a heap overflow in any test that sizes
         // its buffer from this and then calls get_single_frame() (proven with
-        // ASan: 384-byte buffer, 1536-byte memset).
+        // ASan: 384-byte buffer, 1536-byte memset). set_bin_mode()'s
+        // wbin_/hbin_ therefore stay write-only -- see the parity gap above.
         //
         // This value and what get_single_frame() reports must stay in step:
         // hardware cannot deliver an image larger than GetQHYCCDMemLength().

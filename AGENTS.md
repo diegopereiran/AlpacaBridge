@@ -1264,7 +1264,10 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   recognising in the next fake: `get_param()` answered `0.0` for an unsupported
   control where `GetQHYCCDParam()` answers `QHYCCD_ERROR` (~4.29e9), so
   "unsupported" and "reads zero" were indistinguishable; `get_mem_length()`
-  ignored the binning it had been told about -- and closing that exposed a
+  was reported as ignoring the binning it had been told about, and acting on
+  that entry literally made the fake worse, which is its own lesson: **a gap
+  entry is a claim about the real SDK, and it can be wrong.** Check the
+  units against the only caller before "fixing" one. It also exposed a
   second, sharper rule: **a fake's paired calls must agree with each other**,
   since `get_mem_length()` and `get_single_frame()` are used together (size a
   buffer from one, fill it with the other) and hardware cannot deliver an
