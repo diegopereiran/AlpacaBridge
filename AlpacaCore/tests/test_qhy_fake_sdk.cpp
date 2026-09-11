@@ -255,7 +255,11 @@ TEST_CASE("FakeQHYSDK - a moved-from instance is still safely usable", "[qhy][fa
     // exercises exactly the path that used to null-deref, without depending
     // on `cameras` (moved away, as ordinary vector move semantics dictate).
     REQUIRE_NOTHROW(source.get_sdk_version());
-    CHECK(source.call_count("get_sdk_version") == 1);
+    // >= 1, not == 1: `calls` is a moved-from standard container, so it is
+    // "valid but unspecified" rather than guaranteed empty. The guarantee this
+    // case actually tests is that sync_ survived the move and hit() ran, which
+    // >= 1 states without leaning on a libstdc++/libc++ implementation detail.
+    CHECK(source.call_count("get_sdk_version") >= 1);
 }
 
 TEST_CASE("FakeQHYSDK - cancel_exposure on a closed handle is a silent no-op", "[qhy][fake][unit]") {

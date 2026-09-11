@@ -14,8 +14,12 @@
 
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::test {
