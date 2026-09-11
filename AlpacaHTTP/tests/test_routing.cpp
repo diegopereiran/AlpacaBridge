@@ -144,10 +144,15 @@ private:
 // TelescopeDriver member is a harmless default; only the UTCDate pair carries
 // state, so a test can assert which time_point the router handed the driver
 // and in what order relative to the clock step.
-class TelescopeClockStubDriver final : public alpacacore::TelescopeDriver, public alpacacore::AsyncConnectable {
+// Deliberately NOT an AsyncConnectable: these cases drive
+// AlpacaDriver::connect()'s synchronous default, which is all the #289
+// wiring needs, and inheriting the mixin without overriding connect(),
+// disconnect() or get_connecting() would imply coverage of the async
+// initiator that this block does not have. LockedSlowConnectStubDriver
+// below is the stub that does exercise it.
+class TelescopeClockStubDriver final : public alpacacore::TelescopeDriver {
 public:
-    explicit TelescopeClockStubDriver(int number) : AsyncConnectable("TelescopeClockStub"), number_(number) {}
-    ~TelescopeClockStubDriver() override { shutdown_connection(); }
+    explicit TelescopeClockStubDriver(int number) : number_(number) {}
 
     int get_device_number() const override { return number_; }
     std::string get_name() const override { return "Telescope Clock Stub"; }
@@ -2457,6 +2462,17 @@ int main() {
                 return std::nullopt;
             };
             auto warned_about_clock = [&] { return clock_warning_level().has_value(); };
+            // The RTC arm carries a different sentence ("connecting on the
+            // hardware RTC's time"), so it needs its own matcher.
+            auto rtc_line_level = [&]() -> std::optional<alpacacore::logging::LogLevel> {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                for (const auto& line : captured) {
+                    if (line.message.find("hardware RTC's time") != std::string::npos) {
+                        return line.level;
+                    }
+                }
+                return std::nullopt;
+            };
             auto clear = [&] {
                 std::lock_guard<std::mutex> lock(captured_mutex);
                 captured.clear();
@@ -2518,6 +2534,26 @@ int main() {
                 route_request(clock_router, "PUT", "/api/v1/telescope/9805/connected", "Connected=true");
                 EXPECT(!warned_about_clock());
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9805);
+            }
+
+            // An RTC-booted host a client can still correct is the ladder's
+            // INFO arm: the clock is undisciplined, but it came from hardware
+            // and something will fix it, so the line is informational rather
+            // than a warning. Without this the Warn assertions above cannot
+            // tell the ladder from a constant.
+            {
+                auto scope_e = std::make_shared<TelescopeClockStubDriver>(9806);
+                EXPECT(registry.register_device(scope_e));
+                alpacahttp::Router clock_router;
+                clock_router.set_host_clock_hooks(
+                    [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
+                    [] { return true; });
+                clear();
+                route_request(clock_router, "PUT", "/api/v1/telescope/9806/connected", "Connected=true");
+                // Same phrase the WARN cases match, so the two arms are
+                // distinguished by level alone.
+                EXPECT(rtc_line_level() == alpacacore::logging::LogLevel::Info);
+                registry.unregister_device(alpacacore::DeviceType::Telescope, 9806);
             }
 
             alpacacore::logging::set_log_sink(previous_sink);
