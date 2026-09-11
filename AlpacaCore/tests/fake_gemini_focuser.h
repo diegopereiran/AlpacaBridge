@@ -37,13 +37,13 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <stdlib.h>  // posix_openpt/grantpt/unlockpt/ptsname: POSIX, not the <cstdlib> subset
 #include <termios.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -117,6 +117,11 @@ public:
     /// get_firmware_version() sends, which the driver calls right after every
     /// connect, so ":03#" arrives twice per session and cannot separate a
     /// second connect from an ordinary firmware read.
+    ///
+    /// One collision to know about: GeminiProtocolWrapper::set_speed(2) emits
+    /// the same ":1502#" (":150%d#"). No test calls it today, so the count is
+    /// exact; a test that does would inflate every connects() assertion in
+    /// this file.
     int connects() const { return count(":1502#"); }
 
     /// Hold the reply to the handshake for `delay`, widening the window
