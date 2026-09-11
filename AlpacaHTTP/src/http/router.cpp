@@ -1617,10 +1617,11 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
     // open-astro#292: a clock the kernel loaded from a hardware RTC at boot is
     // usually right to seconds, so it is INFO -- but still a WARN when nothing
     // is allowed to correct it.
-    // has_rtc() reads sysfs, which is an I2C transaction on a bus-attached RTC,
-    // and this sits on the connect initiator AGENTS.md times against the 1 s
-    // STANDARD target. Bounded: the probe settles after one success and is
-    // rate-limited to once per 30 s while no device is found.
+    // has_rtc() is a memory read: the probe behind it runs at startup and on
+    // the server's reactor timer, never here (open-astro#314). It used to read
+    // sysfs inline, which on a bus-attached RTC is an I2C transaction that can
+    // block for the adapter timeout, on the connect initiator AGENTS.md times
+    // against the 1 s STANDARD target and with the connection op mutex held.
     const bool rtc = host_clock_->has_rtc();
     // enabled() alone does not mean "a client will correct it": without
     // CAP_SYS_TIME every step is refused and the clock is never corrected at

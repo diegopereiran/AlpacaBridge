@@ -207,6 +207,10 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
     // rule comes from the base branch), so this reads "none".
     f.synchronized = false;
     f.rtc = false;
+    // has_rtc() is a cached read since open-astro#314, so the fake's new
+    // answer is not visible until something off the request path re-probes.
+    CHECK(c.has_rtc());
+    c.refresh_rtc();
     CHECK_FALSE(c.has_rtc());
     CHECK(c.source() == "none");
     Fake g;
@@ -215,6 +219,32 @@ TEST_CASE("HostClock - a hardware RTC is reported as the source, and stepping is
     HostClock no_probe([] { return false; }, [](system_clock::time_point, std::string&) { return true; });
     CHECK_FALSE(no_probe.has_rtc());
     CHECK(no_probe.source() == "none");
+}
+
+TEST_CASE("HostClock - the RTC probe is primed at construction and never re-run implicitly (#314)",
+          "[util][hostclock][unit]") {
+    int probes = 0;
+    HostClock c([] { return false; }, [](system_clock::time_point, std::string&) { return true; },
+                [&probes] {
+                    ++probes;
+                    return true;
+                });
+    // Construction is startup: the one place where a wedged I2C bus may cost
+    // a second, because nothing is waiting on it.
+    CHECK(probes == 1);
+
+    // Every reader is a memory read. source() goes through has_rtc(), and on
+    // an undisciplined, unstepped clock that is the branch that reports "rtc".
+    for (int i = 0; i < 10; ++i) {
+        CHECK(c.has_rtc());
+        CHECK(c.source() == "rtc");
+    }
+    CHECK(probes == 1);
+
+    // Only an explicit refresh re-probes. That is what the server's reactor
+    // timer calls, and what #307 will call after this process writes the RTC.
+    c.refresh_rtc();
+    CHECK(probes == 2);
 }
 
 TEST_CASE("HostClock - an external clock set (synctime endpoint) is recorded as a client step",

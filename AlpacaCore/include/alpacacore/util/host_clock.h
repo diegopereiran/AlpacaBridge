@@ -15,6 +15,7 @@
 #include <sys/timex.h>
 #include <time.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -72,7 +73,12 @@ public:
     }
     HostClock(
         IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; })
-        : is_synchronized_(std::move(is_synchronized)), set_time_(std::move(set_time)), has_rtc_(std::move(has_rtc)) {}
+        : is_synchronized_(std::move(is_synchronized)), set_time_(std::move(set_time)), has_rtc_(std::move(has_rtc)) {
+        // open-astro#314: prime the probe here, at construction, so that no
+        // request path ever pays for it. Construction is startup, where a
+        // wedged I2C bus costs a second that nobody is waiting on.
+        refresh_rtc();
+    }
 
     void set_enabled(bool enabled) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -121,7 +127,27 @@ public:
     // clock CAME FROM, not about how accurate it is: nothing on an NTP-less
     // host verifies or rewrites the RTC, so it may still be wrong or drifting.
     // Reporting only -- the stepping decision never looks at it.
-    bool has_rtc() const { return has_rtc_(); }
+    //
+    // open-astro#314: a memory read in every case. The underlying probe reads
+    // sysfs, which on a bus-attached RTC (DS3231, PCF85063) is a real I2C
+    // transaction that can block for the adapter timeout on a wedged bus --
+    // about a second. This is called from warn_if_clock_undisciplined() on the
+    // ITelescopeV4 connect initiator, which AGENTS.md times against the 1 s
+    // STANDARD target and which holds the device connection op mutex, and from
+    // the description endpoint the web UI polls. Neither may probe.
+    bool has_rtc() const { return rtc_.load(std::memory_order_relaxed); }
+
+    /**
+     * Re-run the RTC probe and cache the answer. Called once at construction
+     * and thereafter only from off the request path: the server's reactor
+     * timer (open-astro#314), and, when it lands, after this process writes
+     * the RTC itself (open-astro#307).
+     *
+     * Cheap and safe to call when the answer has already settled: the probe
+     * itself short-circuits, and it is rate-limited to once per 30 s while no
+     * device has been found.
+     */
+    void refresh_rtc() { rtc_.store(has_rtc_(), std::memory_order_relaxed); }
 
     // Kernel truth, evaluated once per process (positively; a miss is re-probed
     // in case the RTC registers late): the /sys/class/rtc device whose hctosys
@@ -264,6 +290,10 @@ private:
     IsSynchronizedFn is_synchronized_;
     SetTimeFn set_time_;
     HasRtcFn has_rtc_;
+    // The probe's answer, so has_rtc() never touches the bus (#314). Atomic
+    // rather than under mutex_: source() reads it while step_from_client()
+    // may hold the mutex, and that was the reason the probe was outside it.
+    std::atomic<bool> rtc_{false};
     mutable std::mutex mutex_;
     bool enabled_ = true;
     mutable bool stepped_ = false;

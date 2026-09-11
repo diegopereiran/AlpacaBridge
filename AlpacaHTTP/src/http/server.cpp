@@ -1088,6 +1088,14 @@ void Server::reactor_loop() {
     std::vector<ConnectionPtr> idle;
     std::vector<struct pollfd> pfds;
     const int wake_fd = reactor_wake_fds_[0];
+    // open-astro#314: the hardware-RTC probe is refreshed here rather than by
+    // whichever request happens to arrive next. It can block on a wedged I2C
+    // bus, and the paths that read its answer -- the ITelescopeV4 connect
+    // initiator and the description endpoint -- must not. The probe settles
+    // after one successful read, so on a host with an RTC this stops costing
+    // anything almost immediately; on a host without one it is an opendir.
+    constexpr auto kRtcRefreshInterval = std::chrono::seconds(30);
+    auto next_rtc_refresh = std::chrono::steady_clock::now() + kRtcRefreshInterval;
 
     while (true) {
         // Take in what workers and the accept loop parked since last time,
@@ -1117,6 +1125,11 @@ void Server::reactor_loop() {
             pfds.push_back({conn->fd, POLLIN, 0});
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(conn->deadline - now).count();
             timeout_ms = static_cast<int>(std::min<long long>(timeout_ms, std::max<long long>(remaining, 0)));
+        }
+
+        if (now >= next_rtc_refresh) {
+            router_.refresh_rtc_probe();
+            next_rtc_refresh = now + kRtcRefreshInterval;
         }
 
         const int ready = ::poll(pfds.data(), pfds.size(), timeout_ms);
