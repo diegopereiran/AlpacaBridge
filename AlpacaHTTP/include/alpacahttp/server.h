@@ -61,6 +61,13 @@ public:
     // Wait for server to stop
     void wait();
 
+    // Test-only seam (open-astro#314): the router this server dispatches to,
+    // so a test can install HostClock hooks before start() and then observe
+    // what the RTC probe thread does with them. Call it before start(); the
+    // router's own seam replaces the clock object and is not safe against a
+    // request in flight.
+    Router& router_for_test() { return router_; }
+
 private:
     Config config_;
     Router router_;
@@ -135,6 +142,17 @@ private:
     // to the ready queue when their next request arrives. Woken through a
     // self-pipe when a worker parks a connection or stop() begins.
     std::thread reactor_thread_;
+    // open-astro#314: the hardware-RTC probe refresh. Its own thread rather
+    // than the reactor's, because the probe reads
+    // /sys/class/rtc/rtcN/since_epoch and can block on a wedged I2C bus for
+    // about a second, while the reactor must never block in anything but
+    // poll() (AGENTS.md) -- a stalled reactor delays every parked keep-alive
+    // connection's next request, which is the cost this change exists to
+    // avoid. Wakes every 31 s, or immediately when stop() sets the flag.
+    std::thread rtc_probe_thread_;
+    std::mutex rtc_probe_mutex_;
+    std::condition_variable rtc_probe_cv_;
+    bool rtc_probe_stop_{false};
     // Threads stop() could not join because it was running ON them (a
     // handler that called stop() from its own worker; no current handler
     // does). Never detached: the next stop() from another thread, or the
@@ -160,6 +178,7 @@ private:
 
     void run_server();
     void reactor_loop();
+    void rtc_probe_loop();
     void worker_thread(std::uint64_t generation);
     enum class ServeResult : std::uint8_t { KeepOpen, Close };
     ServeResult serve_one_request(Connection& conn);

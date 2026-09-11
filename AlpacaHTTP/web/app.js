@@ -3416,14 +3416,27 @@ document.getElementById('device-form').addEventListener('submit', async function
             return;
         }
 
+        // open-astro#274: both are mandatory for this driver. The mount stores
+        // no site of its own, so leaving them blank used to collapse to 0.0 and
+        // put a southern rig on northern pointing math. The server rejects the
+        // same config; this fails fast with a clearer message than a round trip.
+        //
+        // Deliberately checked here rather than with a `required` attribute on
+        // the inputs: the vendor sections are hidden with display:none, which
+        // does not exempt a control from constraint validation. A required
+        // field inside the hidden skywatcher section would block submitting
+        // the form for EVERY other vendor, with the browser silently refusing
+        // to submit because it cannot focus the offending control.
         const skywatcherSiteLatitude = readOptionalNumber(formData, 'skywatcherSiteLatitude');
-        if (skywatcherSiteLatitude !== null) {
-            deviceData.siteLatitude = skywatcherSiteLatitude;
-        }
         const skywatcherSiteLongitude = readOptionalNumber(formData, 'skywatcherSiteLongitude');
-        if (skywatcherSiteLongitude !== null) {
-            deviceData.siteLongitude = skywatcherSiteLongitude;
+        if (skywatcherSiteLatitude === null || skywatcherSiteLongitude === null) {
+            alert('Site latitude and longitude are required for the Sky-Watcher direct driver. ' +
+                'The mount stores no site of its own, and tracking direction, guide sign and ' +
+                'pier side all depend on which hemisphere it is in.');
+            return;
         }
+        deviceData.siteLatitude = skywatcherSiteLatitude;
+        deviceData.siteLongitude = skywatcherSiteLongitude;
         const skywatcherSiteElevation = readOptionalNumber(formData, 'skywatcherSiteElevation');
         if (skywatcherSiteElevation !== null) {
             deviceData.siteElevation = skywatcherSiteElevation;

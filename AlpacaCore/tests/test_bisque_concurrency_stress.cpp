@@ -22,8 +22,10 @@
 //
 // Hardware-free: connects fail fast (TCP connection refused on the loopback
 // port below), which still storms the base machinery, the failure-path
-// cleanup, and the mutex-guarded getters racing the lifecycle. SynScan /
-// Celestron / iOptron telescope share the same shape via the same base.
+// cleanup, and the mutex-guarded getters racing the lifecycle. Celestron,
+// iOptron, OnStep and Sky-Watcher share this shape; SynScan does NOT -- its
+// getter became a bare atomic load with the issue #130 fix. The current list
+// lives in async_connectable.h; do not restate it here.
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>

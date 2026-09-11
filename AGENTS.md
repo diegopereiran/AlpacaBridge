@@ -78,7 +78,8 @@ Rate setters must re-anchor the dead-reckoning model in place (`anchor_model_loc
 hardware. Also: ConformU runs ON the SBC over localhost — the dev VM's LAN path has 2-90 ms spikes
 that stamp constant `Can*` getters with 0.10x s FAST marks — and a Bash tool timeout kills a child
 ConformU mid-slew, so launch it detached (`setsid nohup`) and poll a done marker. Motor-controller
-mounts store no site: set SiteLatitude/Longitude first or ConformU aborts "below the horizon".
+mounts store no site: set SiteLatitude/Longitude in the device config first, or the driver
+refuses the connect (#274) and ConformU never reaches CheckMethods.
 
 **Apply this checklist up front.** ConformU is single-threaded and catches *none*
 of the races below — code review plus the TSan concurrency stress suite do
@@ -758,19 +759,31 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the wrong flag.
 - **The router must never call `get_connected()` while `get_connecting()` is
   true — the connect side of the rule above** (SynScan hand controller,
-  2026-09, issue #130). Six telescope drivers (SynScan, Celestron, OnStep,
-  Bisque, iOptron, Sky-Watcher) answer `get_connected()` under the state
-  mutex that their `set_connected(true)` holds for the entire handshake, so
-  a `get_connected()` call from the `PUT connected` wait or from a `GET
+  2026-09, issue #130). Five telescope drivers (Celestron, OnStep, Bisque,
+  iOptron, Sky-Watcher; SynScan was in this list until the #130 fix made its
+  getter lock-free) answer `get_connected()` under the state mutex that their
+  `set_connected(true)` holds for the entire handshake, so a
+  `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
-  fired (25 s on a silent handset: five 5 s query timeouts). Every router
+  fired (25 s on a silent handset: five 5 s query timeouts). The four
+  wrapper-backed switch drivers can block too — their `is_open()` waits for the
+  wrapper mutex, which `open()` holds throughout and `close()` holds for its
+  two locked phases (it unlocks to join the PWM workers) — but that work is
+  all local, so the window is microseconds to milliseconds rather than a
+  multi-second serial handshake. Do not describe it more precisely than that
+  in prose: the mechanism has been restated wrongly three times, and the bound
+  is what the rule depends on. The rule applies to both; only the five make it
+  urgent. Every router
   site now reads `get_connecting()` first and short-circuits; while a task
   is in flight `Connected` reports false. A connect request that arrives
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (30 drivers already do; SynScan now does) — the other five still
-  take the mutex and rely on the router rule. Regression tests:
+  getter (29 drivers do, SynScan among them since the #130 fix) —
+  the five above still take the mutex and rely on the router rule, and four
+  wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita, ZWO ASIAIR
+  and ASIAIR Plus) lock inside the wrapper's `is_open()` but release it before
+  `pending_mutex_`, so they rely on the rule without creating the ABBA hazard. Regression tests:
   `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
   `AlpacaCore/tests/test_synscan_async_park.cpp`.
   **Known trade-off:** while a task is in flight, `Connected` reports false
@@ -780,12 +793,14 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connect that may still succeed moments later. Accepted because the
   alternative (reading `get_connected()` directly) is the phantom-link bug
   this rule fixes; there is no per-driver signal yet for which
-  `get_connected()` implementations are safe to read mid-task (the 30
-  lock-free ones) versus which aren't (the six above).
+  `get_connected()` implementations are safe to read mid-task (the 29
+  lock-free ones) versus which aren't (the five above and the four
+  wrapper-backed switches).
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
-  can still block on a mutex-holding driver's handshake for the six above.
+  can still block on a mutex-holding driver's handshake for the five above and the four
+  wrapper-backed switches (their wrapper `open()` holds the same mutex `is_open()` takes).
   Far narrower than the bug this rule fixes (needs a second request to land
   in a specific few-instruction window, not just a slow connect), and not
   worth a structural fix here: closing it means every driver exposing one
@@ -1009,7 +1024,10 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   deadline) has exactly one owner at a time and moves by `unique_ptr`. Rules
   this earns:
   - Never block in the reactor. Expired connections are handed to a worker
-    marked `close_only` so the graceful drain happens off the poll thread.
+    marked `close_only` so the graceful drain happens off the poll thread,
+    and the hardware-RTC probe (#314), which can sit on a wedged I2C bus for
+    about a second, runs on its own low-frequency timer thread rather than
+    between two `poll()` calls.
     The one exception is the final pass at `stop()`: after a zero-timeout
     poll hands already-arrived requests to the draining workers, every
     remaining idle socket gets `shutdown(SHUT_WR)`, one shared 100 ms
@@ -1044,7 +1062,10 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - **No server thread is ever detached.** A thread `stop()` cannot join
     because it is running on it (a handler calling `stop()` synchronously;
     no current handler does) goes into `orphaned_threads_`, and the next
-    `stop()` from another thread or the destructor joins it. So nothing
+    `stop()` from another thread or the destructor joins it. The threads this
+    covers are the accept/server thread, the reactor, the worker pool and the
+    RTC probe timer (`rtc_probe_thread_`, #314) -- the last spawns and joins
+    alongside the reactor and takes no lock `stop()` holds. So nothing
     can touch a `Server`'s members, the wake pipe included, after the
     destructor returns (review round 5). Destroying a `Server` from inside
     one of its own handlers is not supported.
@@ -1468,7 +1489,7 @@ Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi 
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
 
-- **The serial probe asks for a SynScan handset echo first and skips the port if one answers** (`util/synscan_handset_probe.h`, 2026-09): a SynScan V4 hand controller (fw 04.40.00, built-in PL2303 `067b:23a3`) shares the Prolific adapter class this scan targets, and it stops answering serial ENTIRELY after receiving bytes at the wrong rate — one motor-controller probe at 115200 is enough — until it is power-cycled (unplugging the mount is not enough when the handset runs on USB power from the SBC). On the EQM-35 Pro rig this was the whole "hand-controller commands time out" report: the handset had been wedged by this probe at service start. The guard is at the top of `probe_skywatcher_port()`, gated on the caller's baud not being 9600 (the rate that is safe for a handset to receive) so it costs nothing on the only baud any caller currently probes at while still covering every future non-9600 caller; the same hazard applies to any other scan that sends non-9600 traffic to Prolific-class ports (the iOptron iEAF/iAFS2/3 and iEFW handshakes at 115200 are the known ones — not yet guarded). The SynScan driver's serial connect additionally claims the port with `TIOCEXCL`, an independent layer that blocks a concurrent same-process open regardless of baud. Hardware-verified 2026-09-09 (EQM-35 Pro rig): the exact-echo path connects cleanly, a manual open of the port while connected fails with `EBUSY` and succeeds again immediately after disconnect (no lock leak), and an abrupt `systemctl restart` mid-poll still re-detects the handset on the very first probe after restart (the closest this rig can reproduce of the stale-reply race the tolerant read loop targets). **Not exercised by this pass:** the baud gate itself — `fix/eqm35-hand-controller-timeout` only ever calls `probe_skywatcher_port()` at 9600, so the guard structurally cannot fire on this branch alone; its actual trigger (`kProbeBauds` including 115200) lives on `driver/skywatcher-eqm35` and needs its own hardware pass once combined with this fix. **Reverse direction (review on open-astro#242):** the guard sends the 9600 echo to a port that may be a Sky-Watcher motor board expecting 115200 — could a board be wedged by wrong-rate bytes the way the handset is? Empirically no, and the guard adds no new class of traffic: on `main` the probe has always sent `:e1` at 9600 to every candidate port, and `driver/skywatcher-eqm35`'s `kProbeBauds` tries 9600 first, so the real EQM-35 board received 9600 traffic before every successful 115200 detection during that branch's hardware bring-up (build a014531). The guard only runs on the non-9600 pass, i.e. after that same port has just been probed at 9600. Still, when the branches are combined, the combined pass should confirm both directions on the same rig: handset not wedged by the scan, board still detected at 115200 after the 9600 echo.
+- **The serial probe asks for a SynScan handset echo first and skips the port if one answers** (`util/synscan_handset_probe.h`, 2026-09): a SynScan V4 hand controller (fw 04.40.00, built-in PL2303 `067b:23a3`) shares the Prolific adapter class this scan targets, and it stops answering serial ENTIRELY after receiving bytes at the wrong rate — one motor-controller probe at 115200 is enough — until it is power-cycled (unplugging the mount is not enough when the handset runs on USB power from the SBC). On the EQM-35 Pro rig this was the whole "hand-controller commands time out" report: the handset had been wedged by this probe at service start. The guard is at the top of `probe_skywatcher_port()`, gated on the caller's baud not being 9600 (the rate that is safe for a handset to receive). Since the EQ-class support landed, `kProbeBauds` includes 115200, so the guard fires on every scanned port that stays silent at 9600 and costs its 300 ms echo timeout there; it still covers every future non-9600 caller; the same hazard applies to any other scan that sends non-9600 traffic to Prolific-class ports (the iOptron iEAF/iAFS2/3 and iEFW handshakes at 115200 are the known ones — not yet guarded). The SynScan driver's serial connect additionally claims the port with `TIOCEXCL`, an independent layer that blocks a concurrent same-process open regardless of baud. Hardware-verified 2026-09-09 (EQM-35 Pro rig): the exact-echo path connects cleanly, a manual open of the port while connected fails with `EBUSY` and succeeds again immediately after disconnect (no lock leak), and an abrupt `systemctl restart` mid-poll still re-detects the handset on the very first probe after restart (the closest this rig can reproduce of the stale-reply race the tolerant read loop targets). **Not exercised by a hardware pass yet:** the baud gate firing at 115200 — the fix's own validation branch only ever called `probe_skywatcher_port()` at 9600; its trigger (`kProbeBauds` including 115200) is now on `main`, so the combined guard-plus-115200 path still needs its own hardware pass on the EQM-35 Pro rig. **Reverse direction (review on open-astro#242):** the guard sends the 9600 echo to a port that may be a Sky-Watcher motor board expecting 115200 — could a board be wedged by wrong-rate bytes the way the handset is? Empirically no, and the guard adds no new class of traffic: on `main` the probe has always sent `:e1` at 9600 to every candidate port, and `driver/skywatcher-eqm35`'s `kProbeBauds` tries 9600 first, so the real EQM-35 board received 9600 traffic before every successful 115200 detection during that branch's hardware bring-up (build a014531). The guard only runs on the non-9600 pass, i.e. after that same port has just been probed at 9600. Still, when the branches are combined, the combined pass should confirm both directions on the same rig: handset not wedged by the scan, board still detected at 115200 after the 9600 echo.
 - **Coordinates are equinox of date, not J2000.** `EquatorialSystem` reports Topocentric and
   RA/Dec come from LST, so they are mean-equinox-of-date; plate solvers return J2000, and the
   two drift apart by ~50"/yr since 2000 (~22 arcmin in 2026, mostly RA). Alpaca clients read
@@ -1481,12 +1502,25 @@ datagrams before each send so replies cannot get off-by-one.
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
   step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
   fast mode). The mount stores **no site or time** — site lat/long/elevation come from
-  the web UI config or the Alpaca setters. Time is the host clock plus the client-set
-  `UTCDate` offset, through one `utc_now_locked()` for every LST computation (#287); on an
-  NTP-less host the router also steps the system clock from that write (#289). The offset is
-  not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped underneath
-  it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks disagreeing
-  by more than 1 s since the write, and re-armed by the next `UTCDate` write.
+  the web UI config or the Alpaca setters. **Latitude and longitude are mandatory on this
+  vendor** (#274): `configuredevice` rejects a skywatcher config without both, and
+  `Connected = true` throws `InvalidOperation` unless each has been set explicitly, by
+  config or by its setter. A config **already on disk** is registered anyway, with a WARN,
+  and left for the connect-time guard to refuse: a device dropped at startup never enters
+  the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
+  the entry that is at fault. That asymmetry is the rule for any new validation in
+  `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`. `0.0` is a real coordinate, so the driver tracks whether each
+  was ever set rather than testing for the value — an unset southern rig would otherwise
+  run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
+  feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
+  client-set `UTCDate` offset only when the host clock was undisciplined (no NTP) at the moment
+  of the write, so a client's clock error never steers pointing on an NTP-good host;
+  `client_utc_now_locked()` feeds the `UTCDate` readback and always honours the client's write,
+  because that property is the client's to set and ConformU reads back what it wrote (#287,
+  #351). On an NTP-less host the router also steps the system clock from that write (#289). The
+  offset is not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped
+  underneath it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks
+  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write.
 - Pointing convention: home = counterweight down pointing at the pole, counts offset
   `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
   `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
@@ -1526,9 +1560,12 @@ datagrams before each send so replies cannot get off-by-one.
   the slew in the background (AtPark turns true on completion); MoveAxis(0) issues the stop,
   keeps Slewing true via the manual flag, and a background task clears it and restores
   tracking once the axis reports stopped. This applies to every telescope driver.
-- ConformU needs a real site: with lat/long left at 0,0 the CheckMethods slew tests abort
-  with "highest elevation available is below the horizon". Set the observing site in the
-  web UI before validating.
+- ConformU needs a real site. Since #274 a Sky-Watcher device with no site refuses
+  `Connected` outright, so the run fails at connect; the client reports "Connection
+  failed" and the driver's message naming the two fields is in the server log (#358).
+  Set the observing site in the web UI before validating. Before #274 the site collapsed
+  to 0,0 instead and the CheckMethods slew tests aborted with "highest elevation
+  available is below the horizon".
 - Web UI: `skywatcher`-prefixed field names; network field is `udpPort` (NOT `tcpPort`).
 - ConformU 4.5.0 validated on Wave 100i over **both transports** (Linux arm64): USB (dev PC)
   and Wi-Fi UDP (Raspberry Pi CM4 joined to the mount AP) — 0 errors, 0 issues, 0 timing
@@ -2469,9 +2506,12 @@ it is never reachable through `router.cpp` or the web UI.
   (3.5.1). 2.4 GHz is exempt: ch 1-11 are world-domain legal, which is why
   the shipped images default to 2.4 GHz ch 6.
 - The review bot login is `github-actions`; every push restarts a full
-  review round — batch fixes. Test rig persisted-device state under
-  `AlpacaHTTP/build/config/` makes `test_routing` fail with "already
-  registered" — `rm -rf build/config` before local runs.
+  review round — batch fixes. Test rig persisted-device state makes
+  `test_routing` fail with "already registered". Since #274 each of the two
+  router-backed binaries runs in its own ctest `WORKING_DIRECTORY`, so the
+  files to clear are `AlpacaHTTP/build/test_routing_cwd/config/` and
+  `AlpacaHTTP/build/test_persisted_devices_cwd/config/`, not
+  `build/config/`.
 
 ## General Notes
 
