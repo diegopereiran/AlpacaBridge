@@ -1933,7 +1933,11 @@ int main() {
 
         // A second Router: load_persisted_devices() is one-shot per instance,
         // so the startup path only runs on an instance that has not read the
-        // file yet.
+        // file yet. Note that it re-registers EVERY entry left in the file,
+        // not just 9630 -- safe only because each block above removes what it
+        // added. A block that forgets would have this construction build that
+        // vendor's driver, and some touch hardware eagerly (the astroasis
+        // by-index path AGENTS.md warns about). Keep the file empty here.
         const auto listed_json = [&] {
             alpacahttp::Router startup_router;
             const auto listed = route_request(startup_router, "GET", "/management/v1/configureddevices");

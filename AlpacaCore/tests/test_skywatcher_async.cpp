@@ -1542,13 +1542,24 @@ TEST_CASE("SkyWatcher async - one configured coordinate is not enough (#274)", "
 
     // Latitude alone: the hemisphere is known but LST is not, so this is still
     // refused rather than half-accepted.
+    // The error code is asserted, not just the type: a connect refused for an
+    // unrelated reason (a fake-board handshake failure, say) also throws
+    // AlpacaException, and these cases are about the site guard specifically.
+    auto refused_for_site = [](alpacacore::TelescopeDriver& driver) {
+        try {
+            driver.set_connected(true);
+            FAIL("Expected the connect to be refused");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        }
+        CHECK_FALSE(driver.get_connected());
+    };
+
     auto lat_only = sw::create_skywatcher_telescope(0, endpoint(mount), -33.87, std::nullopt, std::nullopt);
-    CHECK_THROWS_AS(lat_only->set_connected(true), alpacacore::AlpacaException);
-    CHECK_FALSE(lat_only->get_connected());
+    refused_for_site(*lat_only);
 
     auto lon_only = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, 151.21, std::nullopt);
-    CHECK_THROWS_AS(lon_only->set_connected(true), alpacacore::AlpacaException);
-    CHECK_FALSE(lon_only->get_connected());
+    refused_for_site(*lon_only);
 }
 
 TEST_CASE("SkyWatcher async - 0.0/0.0 configured explicitly is accepted (#274)", "[skywatcher][async]") {
