@@ -22,13 +22,27 @@
 //     status cache while the Alpaca getters read it.
 //   - Flat Panel Pro CoverCalibrator over fake_gemini_flatpanel.h. This one
 //     is strictly request/response -- no reader thread, and set_connected
-//     (false) reaps nothing. What the storm races here is its
-//     calibrator_task_thread_, which the DESTRUCTOR reaps
-//     (reap_calibrator_task(true)), not a disconnect. The cover task is NOT
-//     covered: the operate callback issues no open/close/halt_cover, so
-//     cover_task_thread_ is never constructed and reap_cover_task(true)
-//     always takes its !joinable() early exit. Adding a cover call would
-//     widen this past a registration PR; it is a follow-up.
+//     (false) reaps nothing. The thread this driver owns is
+//     calibrator_task_thread_, reaped by the DESTRUCTOR
+//     (reap_calibrator_task(true)) rather than by a disconnect.
+//
+//     Be precise about how often the storm actually reaches it: most
+//     submissions take the INLINE fast path instead. start_calibrator_task()
+//     claims inline whenever !cover_in_flight_ && calibrator_pending_count_
+//     == 0 (gemini_flatpanel_driver.cpp:897), the callback issues no cover
+//     move so cover_in_flight_ is always false, and the submission gate
+//     below only fires when the count reads 0. The background path is
+//     therefore reached only when a second op thread slips between another
+//     thread's gate check and its claim -- a microsecond window, so it is
+//     hit opportunistically, not on every run. Treat the background path as
+//     sampled, NOT as covered; deterministic reproduction needs the fake to
+//     hold a reply (set_reply_delay(">L#", ...)) and is a follow-up.
+//
+//     The cover task is not reached at all: the operate callback issues no
+//     open/close/halt_cover, so cover_task_thread_ is never constructed and
+//     reap_cover_task(true) always takes its !joinable() early exit. Adding
+//     a cover call would widen this past a registration PR; also a
+//     follow-up.
 //
 // The focuser has no fake, so it takes the accepted fail-fast bar (the
 // ZWO/iOptron precedent): a serial path that cannot exist, so every connect
@@ -171,7 +185,11 @@ TEST_CASE("Gemini PDH Advanced 3 switch - concurrent connect/disconnect/operate 
     // the ladder with margin and costs nothing, because the fake answers on
     // the first attempt and the budget is never consumed.
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
-    driver->set_connected(false);
+    // Guarded: the proving connect is torn down before the storm starts, and
+    // reading the drivers this can only no-op here. CHECK_NOTHROW so a future
+    // regression surfaces as a named failure on this line rather than as an
+    // unexpected exception attributed to the whole TEST_CASE.
+    CHECK_NOTHROW(driver->set_connected(false));
 
     alpacacore::test::run_lifecycle_stress(*driver, pdh_switch_operate);
 
@@ -209,7 +227,11 @@ TEST_CASE("Gemini Flat Panel Pro - concurrent connect/disconnect/operate stress"
     // retry ladder is the same shape, and the budget is retry headroom, not
     // a bound on a single slow-but-successful attempt.
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
-    driver->set_connected(false);
+    // Guarded: the proving connect is torn down before the storm starts, and
+    // reading the drivers this can only no-op here. CHECK_NOTHROW so a future
+    // regression surfaces as a named failure on this line rather than as an
+    // unexpected exception attributed to the whole TEST_CASE.
+    CHECK_NOTHROW(driver->set_connected(false));
 
     alpacacore::test::run_lifecycle_stress(*driver, flatpanel_operate);
 
