@@ -304,9 +304,10 @@ private:
             // ASIAIR Plus) also lock in get_connected(), via the wrapper's
             // is_open(), but release it before their set_connected reaches
             // pending_mutex_, so they never nest the two. The read here is a
-            // momentary snapshot whichever driver answers it, and a stale
-            // value is benign: the deferred transitions below are
-            // idempotent.
+            // momentary snapshot whichever driver answers it -- nothing holds
+            // a driver lock across the call, so the value cannot be pinned by
+            // this thread -- and a stale value is benign: the deferred
+            // transitions below are idempotent.
             //
             // SynScan is deliberately NOT in that list: its get_connected()
             // is a bare atomic load, made lock-free by the issue #130 fix

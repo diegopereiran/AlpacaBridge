@@ -766,9 +766,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connected` blocked for the whole connect and the wait's 8 s deadline never
   fired (25 s on a silent handset: five 5 s query timeouts). The four
   wrapper-backed switch drivers can block too — their `is_open()` waits out
-  the wrapper's `open()` — but that open is a local `gpiod_chip_open()` on a
-  device node, so the window is microseconds to milliseconds rather than a
-  multi-second serial handshake. The rule applies to both; only the five make
+  the wrapper's `open()` — but that open is local -- a libgpiod or char-device
+  open, plus one soft-PWM thread per port on the ASIAIR Plus -- so the window
+  is microseconds to milliseconds rather than a multi-second serial handshake. The rule applies to both; only the five make
   it urgent. Every router
   site now reads `get_connecting()` first and short-circuits; while a task
   is in flight `Connected` reports false. A connect request that arrives
