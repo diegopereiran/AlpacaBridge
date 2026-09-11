@@ -157,3 +157,21 @@ TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "
     }
     CHECK(guard.unexpected_count() == kThreads * kPerThread / 2);
 }
+
+TEST_CASE("StressCallGuard - a non-Alpaca throw is labelled with the ABI-mangled type name", "[unit]") {
+    // report()'s type label for a non-Alpaca throw is typeid(ex).name(), which
+    // on libstdc++/libc++ is the MANGLED name ("St12out_of_range"), not
+    // "std::out_of_range". The header documents that so a reader doesn't take
+    // the prefix for garbage; pin it here so swapping in a demangled name
+    // becomes a deliberate change with a failing test, rather than a silent
+    // shift in every registration's failure output.
+    StressCallGuard guard;
+    guard([] { throw std::out_of_range("boom"); });
+    const std::string report = guard.report();
+    INFO(report);
+    CHECK(report.find("out_of_range") != std::string::npos);
+    // The mangled form carries the Nested-name length prefix; the demangled
+    // form would carry "std::" instead. Assert we are on the mangled side.
+    CHECK(report.find("St12out_of_range") != std::string::npos);
+    CHECK(report.find("std::out_of_range") == std::string::npos);
+}

@@ -19,14 +19,17 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <exception>
 #include <functional>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <typeinfo>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::test {
@@ -134,7 +137,7 @@ public:
     template <typename Fn>
     void operator()(Fn&& fn) {
         try {
-            fn();
+            std::forward<Fn>(fn)();
         } catch (const AlpacaException& ex) {
             if (is_expected(ex.error_code())) {
                 return;

@@ -170,6 +170,26 @@ def find_registered_pairs(known_vendors, known_device_types):
     return registered
 
 
+def guard_tagged_cases_in_text(text):
+    """Descriptions of TEST_CASEs tagged [stress-guard] but NOT [stress].
+
+    [stress-guard] exists for harness self-tests that need ThreadSanitizer but
+    are not vendor registrations (issue #322); it runs under its own TSan
+    invocation, deliberately outside the vendor-coverage count this script
+    gates. A registration file that reached for it INSTEAD of [stress] would
+    still get TSan, still look registered to a reader, and silently drop out
+    of that count -- so the pair would go uncovered without appearing in
+    ALLOWLIST. Reject the tag in these files; the harness self-test that owns
+    it lives in test_stress_call_guard.cpp, which this glob never scans.
+    """
+    found = []
+    for m in TEST_CASE_TAGS_RE.finditer(text):
+        tags = {t.lower() for t in TAG_RE.findall(m.group(1))}
+        if "stress-guard" in tags and "stress" not in tags:
+            found.append(m.group(0))
+    return found
+
+
 def main():
     drivers, failures = find_drivers()
     failures = list(failures)  # find_drivers' own ambiguity findings, if any
@@ -192,6 +212,16 @@ def main():
                 "remove ('%s', '%s') from ALLOWLIST in %s"
                 % (vendor, dtype, vendor, dtype, __file__)
             )
+
+    for path in tracked_files(STRESS_TEST_GLOB_PREFIX + "*" + STRESS_TEST_GLOB_SUFFIX):
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for case in guard_tagged_cases_in_text(fh.read()):
+                failures.append(
+                    "[stress-guard] IN A REGISTRATION FILE: %s uses [stress-guard] "
+                    "without [stress], so it does not count toward vendor coverage "
+                    "here. Use [stress] for a vendor registration; [stress-guard] is "
+                    "for harness self-tests only: %s" % (path, case)
+                )
 
     driver_pairs = set(drivers)
     for vendor, dtype in sorted(ALLOWLIST - driver_pairs):
@@ -277,6 +307,24 @@ def self_test():
     # A TEST_CASE with no [stress] tag must not be picked up.
     non_stress = 'TEST_CASE("Foo", "[vendor][focuser][unit]") {}'
     check("a non-[stress] TEST_CASE is excluded", stress_tag_sets_in_text(non_stress) == [])
+
+    # [stress-guard] must not stand in for [stress] in a registration file:
+    # it gets its own TSan invocation but is deliberately outside the vendor
+    # coverage count, so a registration wearing it would silently go
+    # uncovered while still looking registered.
+    guard_only = 'TEST_CASE("Foo", "[vendor][focuser][stress-guard]") {}'
+    check("a [stress-guard]-only TEST_CASE is rejected in a registration file",
+          len(guard_tagged_cases_in_text(guard_only)) == 1)
+    check("a [stress-guard]-only TEST_CASE is not counted as [stress] coverage",
+          stress_tag_sets_in_text(guard_only) == [])
+
+    # Carrying both is fine -- the case still counts as vendor coverage, and
+    # the extra tag only adds it to the second TSan invocation.
+    both_tags = 'TEST_CASE("Foo", "[vendor][focuser][stress][stress-guard]") {}'
+    check("a TEST_CASE tagged both [stress] and [stress-guard] is allowed",
+          guard_tagged_cases_in_text(both_tags) == [])
+    check("a TEST_CASE tagged both still counts as [stress] coverage",
+          stress_tag_sets_in_text(both_tags) == [{"vendor", "focuser", "stress", "stress-guard"}])
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
