@@ -33,6 +33,11 @@ masks every other driver of the same vendor and type. The two ZWO ASIAIR
 switch drivers (`zwo_asiair_switch_driver.cpp`, `zwo_asiair_plus_switch_driver.cpp`,
 libgpiod, no fake seam) have no [stress] case and are hidden behind the ZWO
 dew-heater switch registration; they are covered by code review only.
+Same shape for (gemini, covercalibrator): only Flat Panel Pro
+(GeminiFlatPanelV2Driver, gemini_flatpanel_driver.cpp) is stormed, but that
+also marks the Cover Lite class (GeminiFlatPanelDriver, same file, its own
+set_connected/calibrator implementation, no task threads) and the Rev2
+model path as covered; both are code-review only, not exercised.
 
 The device type for a driver file is read from its own
 `get_device_type() const override { return DeviceType::X; }` rather than
@@ -98,9 +103,6 @@ TAG_RE = re.compile(r"\[([^\]]+)\]")
 # still-covered entry left behind is itself a failure (see main()), so
 # nothing here can silently go stale.
 ALLOWLIST = {
-    ("gemini", "covercalibrator"),
-    ("gemini", "focuser"),
-    ("gemini", "switch"),
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
 }
