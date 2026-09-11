@@ -3122,8 +3122,8 @@ private:
 
     double target_ra_hours_ = 0.0;
     double target_dec_degrees_ = 0.0;
-    mutable bool target_ra_set_ = false;
-    mutable bool target_dec_set_ = false;
+    bool target_ra_set_ = false;
+    bool target_dec_set_ = false;
 
     double aperture_diameter_m_ = 0.0;
     double aperture_area_m2_ = 0.0;
