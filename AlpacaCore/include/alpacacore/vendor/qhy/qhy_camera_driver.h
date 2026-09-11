@@ -49,9 +49,19 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
  * path, since the real SDK cannot initialise on a USB-less host.
  *
  * The SDK reference MUST outlive the returned driver, INCLUDING this driver's
- * detachable workers: the exposure, temperature and cooler-off threads join
- * with a bounded timeout and detach on expiry, and the pulse-guide thread is
- * detached by design. All of them hold a QHYSDK* rather than `this`.
+ * detachable workers: the exposure, temperature, cooler-off and telemetry
+ * threads join with a bounded timeout and detach on expiry, and the
+ * pulse-guide thread is detached by design. All of them reach the SDK through
+ * a captured QHYSDK* rather than through the driver's `sdk_` member.
+ *
+ * That capture NARROWS the use-after-free window; it does NOT close it. Every
+ * one of those workers except pulse-guide also captures `this` and
+ * dereferences it after the SDK call returns (`connected_`, `mutex_`, the
+ * `exposure_superseded` re-check), which is UB if the driver is already gone.
+ * Do not read this as "a worker that only touches the seam is safe to
+ * detach": these workers are unsafe once detached, and the bounded-join
+ * discipline is what keeps that window small. See the member comment in
+ * qhy_camera_driver.cpp and rule (b) in AGENTS.md.
  */
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk);
 std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk);

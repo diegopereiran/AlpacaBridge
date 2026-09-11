@@ -63,9 +63,13 @@ namespace alpacacore::test {
  *    those into detached threads still calling into it after the test body
  *    has moved on — i.e. a use-after-free of the fake itself.
  * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT, including those
- *    detachable workers, which hold a QHYSDK* rather than `this`. Declare the
- *    fake before the driver (locals destroy in reverse order); never stash a
- *    driver beyond the fake's scope.
+ *    detachable workers, which reach the SDK through a captured QHYSDK*
+ *    rather than through the driver's `sdk_` member. (All but pulse-guide
+ *    still capture `this` too and touch it after the SDK call returns, so
+ *    they are not safe to outlive the driver either -- the capture narrows
+ *    that window, it does not remove it.) Declare the fake before the driver
+ *    (locals destroy in reverse order); never stash a driver beyond the
+ *    fake's scope.
  *
  * default_camera() reports NO cooler. That is deliberate: has_cooler starts
  * the driver's telemetry thread, whose loop sleeps 1s between polls, so every
@@ -371,10 +375,11 @@ public:
         // is a silent no-op, not NotConnected. Deliberate on the real side --
         // this is the SDK's mechanism for interrupting a call already blocked
         // on the SAME handle from another thread, so it can't afford to throw
-        // on a handle a racing close() just erased.
-        if (!is_open(camera_id)) {
-            return;
-        }
+        // on a handle a racing close() just erased. The body is empty on BOTH
+        // paths -- the fake has no in-flight exposure to interrupt -- so there
+        // is deliberately no is_open() branch here: adding one would read as
+        // a guard while changing nothing.
+        static_cast<void>(camera_id);
     }
 
     void guide(const std::string& camera_id, uint32_t qhy_direction, uint16_t duration_ms) override {
