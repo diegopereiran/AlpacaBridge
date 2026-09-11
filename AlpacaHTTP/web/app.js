@@ -1765,10 +1765,11 @@ function formatServerClock(date) {
             throw new Error('incomplete date parts');
         }
         // The date parts come from en-CA for its year-month-day ordering, but
-        // that locale renders every zone as a GMT offset. The label is asked
-        // for again in the viewer's own locale, which yields the abbreviation
-        // an operator recognises (NZST rather than GMT+12) wherever the
-        // browser has one, and falls back to the offset where it does not.
+        // that locale renders most zones as a GMT offset (it carries only the
+        // North American abbreviations). The label is asked for again in the
+        // viewer's own locale, which yields the abbreviation an operator
+        // recognises (NZST rather than GMT+12) wherever the browser has one,
+        // and falls back to the offset where it does not.
         const zone = localZoneLabel(date) || parts.timeZoneName || '';
         const suffix = zone ? ` (${zone})` : '';
         return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}${suffix}`;
