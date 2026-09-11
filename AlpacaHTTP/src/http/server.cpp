@@ -175,8 +175,24 @@ void Server::stop() {
             reactor_accepting_ = false;
         }
         wake_reactor();
+        // The RTC probe timer, woken out of its wait the same way. It holds
+        // no connections and serves no request, so it can go first; a pass
+        // already inside the probe finishes its read before the flag is
+        // observed, which is bounded by the bus timeout (#314).
+        {
+            std::lock_guard<std::mutex> lock(rtc_probe_mutex_);
+            rtc_probe_stop_ = true;
+        }
+        rtc_probe_cv_.notify_all();
         // Threads a previous stop() could not join because it ran on them.
         join_orphaned_threads(current_id);
+        if (rtc_probe_thread_.joinable()) {
+            if (rtc_probe_thread_.get_id() == current_id) {
+                orphaned_threads_.push_back(std::move(rtc_probe_thread_));
+            } else {
+                rtc_probe_thread_.join();
+            }
+        }
         if (reactor_thread_.joinable()) {
             // The reactor runs no handler code, so it cannot be the caller;
             // the orphan branch is kept only so a future bug cannot deadlock.
@@ -445,6 +461,11 @@ void Server::run_server() {
             reactor_accepting_ = true;
         }
         reactor_thread_ = std::thread(&Server::reactor_loop, this);
+        {
+            std::lock_guard<std::mutex> lock(rtc_probe_mutex_);
+            rtc_probe_stop_ = false;
+        }
+        rtc_probe_thread_ = std::thread(&Server::rtc_probe_loop, this);
 
         // Start worker thread pool for handling concurrent requests. A new
         // generation: any worker left over from the previous one (detached
@@ -1084,19 +1105,41 @@ void Server::wake_reactor() {
 // exactly when no worker holds it, which is what makes thread_pool_size mean
 // concurrent requests rather than concurrent connections: a hundred idle
 // clients cost a hundred pollfds and nothing else.
+// open-astro#314: refresh the hardware-RTC probe on a timer instead of on
+// whichever request arrives next. The paths that read its answer -- the
+// ITelescopeV4 connect initiator and the description endpoint -- have a 1 s
+// budget, and the probe reads /sys/class/rtc/rtcN/since_epoch, which is an
+// I2C transaction on a bus-attached RTC and can block for about that long
+// when the bus is wedged.
+//
+// Its own thread, not the reactor's: the reactor must not block in anything
+// but poll() (AGENTS.md), and a second spent in the probe there would delay
+// the next request of every parked keep-alive connection, plus their idle
+// deadlines -- the same stall moved to a worse place. The probe settles after
+// one successful read, so on a host with an RTC this costs nothing within a
+// minute of start; on a host without one each pass is an opendir.
+//
+// 31 s, deliberately not the 30 s of the probe's own rate limiter: equal
+// periods race, and a pass landing a few microseconds early is silently
+// swallowed, which would make the effective period 60 s.
+void Server::rtc_probe_loop() {
+    constexpr auto kRtcRefreshInterval = std::chrono::seconds(31);
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(rtc_probe_mutex_);
+            rtc_probe_cv_.wait_for(lock, kRtcRefreshInterval, [this] { return rtc_probe_stop_; });
+            if (rtc_probe_stop_) {
+                return;
+            }
+        }
+        router_.refresh_rtc_probe();
+    }
+}
+
 void Server::reactor_loop() {
     std::vector<ConnectionPtr> idle;
     std::vector<struct pollfd> pfds;
     const int wake_fd = reactor_wake_fds_[0];
-    // open-astro#314: the hardware-RTC probe is refreshed here rather than by
-    // whichever request happens to arrive next. It can block on a wedged I2C
-    // bus, and the paths that read its answer -- the ITelescopeV4 connect
-    // initiator and the description endpoint -- must not. The probe settles
-    // after one successful read, so on a host with an RTC this stops costing
-    // anything almost immediately; on a host without one it is an opendir.
-    constexpr auto kRtcRefreshInterval = std::chrono::seconds(30);
-    auto next_rtc_refresh = std::chrono::steady_clock::now() + kRtcRefreshInterval;
-
     while (true) {
         // Take in what workers and the accept loop parked since last time,
         // and find out whether stop() has begun (after draining, so nothing
@@ -1125,11 +1168,6 @@ void Server::reactor_loop() {
             pfds.push_back({conn->fd, POLLIN, 0});
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(conn->deadline - now).count();
             timeout_ms = static_cast<int>(std::min<long long>(timeout_ms, std::max<long long>(remaining, 0)));
-        }
-
-        if (now >= next_rtc_refresh) {
-            router_.refresh_rtc_probe();
-            next_rtc_refresh = now + kRtcRefreshInterval;
         }
 
         const int ready = ::poll(pfds.data(), pfds.size(), timeout_ms);

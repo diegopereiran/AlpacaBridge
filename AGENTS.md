@@ -1009,7 +1009,10 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   deadline) has exactly one owner at a time and moves by `unique_ptr`. Rules
   this earns:
   - Never block in the reactor. Expired connections are handed to a worker
-    marked `close_only` so the graceful drain happens off the poll thread.
+    marked `close_only` so the graceful drain happens off the poll thread,
+    and the hardware-RTC probe (#314), which can sit on a wedged I2C bus for
+    about a second, runs on its own low-frequency timer thread rather than
+    between two `poll()` calls.
     The one exception is the final pass at `stop()`: after a zero-timeout
     poll hands already-arrived requests to the draining workers, every
     remaining idle socket gets `shutdown(SHUT_WR)`, one shared 100 ms
