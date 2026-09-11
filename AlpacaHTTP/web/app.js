@@ -1720,6 +1720,63 @@ async function refreshServerClockOffset() {
     updateServerClock();
 }
 
+// open-astro#354: the header clock rendered toISOString(), which is UTC by
+// definition, while the server's own log lines are written through
+// localtime_r() (logging_adapter.cpp, logging.cpp). The two disagreed about
+// which zone they were in with nothing on screen saying so, and correlating a
+// header reading against a log line meant knowing the host's offset and doing
+// the arithmetic by eye.
+//
+// This renders the same instant in the viewer's zone, in the log lines' own
+// "YYYY-MM-DD HH:MM:SS" shape, and keeps a zone label so the reading stays
+// unambiguous. The host's zone would be the better label for a remote
+// operator, but it is not in the description payload yet; adding it touches
+// add_clock_fields(), which two open PRs are already editing.
+//
+// Falls back to the previous UTC rendering if Intl cannot produce the parts:
+// a wrong-looking clock is worse than an unfashionable one.
+function localZoneLabel(date) {
+    try {
+        const part = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+            .formatToParts(date)
+            .find((p) => p.type === 'timeZoneName');
+        return part ? part.value : '';
+    } catch (e) {
+        return '';
+    }
+}
+
+function formatServerClock(date) {
+    try {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hourCycle: 'h23',
+            timeZoneName: 'short'
+        }).formatToParts(date).reduce((acc, part) => {
+            acc[part.type] = part.value;
+            return acc;
+        }, {});
+        if (!parts.year || !parts.month || !parts.day || !parts.hour || !parts.minute || !parts.second) {
+            throw new Error('incomplete date parts');
+        }
+        // The date parts come from en-CA for its year-month-day ordering, but
+        // that locale renders every zone as a GMT offset. The label is asked
+        // for again in the viewer's own locale, which yields the abbreviation
+        // an operator recognises (NZST rather than GMT+12) wherever the
+        // browser has one, and falls back to the offset where it does not.
+        const zone = localZoneLabel(date) || parts.timeZoneName || '';
+        const suffix = zone ? ` (${zone})` : '';
+        return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}${suffix}`;
+    } catch (e) {
+        return date.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    }
+}
+
 function updateServerClock() {
     const el = document.getElementById('server-clock');
     if (!el) {
@@ -1731,7 +1788,7 @@ function updateServerClock() {
         return;
     }
     const serverNow = new Date(Date.now() + serverClockOffsetMs);
-    el.textContent = serverNow.toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    el.textContent = formatServerClock(serverNow);
     // The GET returns whole seconds, so up to ±1 s of the offset is
     // quantization, not drift; only flag beyond 2 s.
     el.classList.toggle('drift', Math.abs(serverClockOffsetMs) > 2000);
