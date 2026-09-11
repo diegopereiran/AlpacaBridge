@@ -31,7 +31,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **Linux Notes**:
   - **Debian 13 (Trixie) on arm64**: AlpacaBridge is built and validated on arm64 only (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). All drivers have been tested using Debian 13 on arm64 with ConformU v4.2.1 (original drivers), v4.3.0, v4.4.0, or v4.5.1 (newer drivers). As new ConformU versions are released this will be adjusted.
-  - **Avoid ConformU 4.5.0 on arm64**: that release was published without `PublishReadyToRun`, causing spurious "OUTSIDE FAST RESPONSE TIME TARGET" failures on the first Camera-device member of each response type (`CameraState`, `CameraXSize`, `SensorType`) — reproducible on every vendor's camera driver, not a real regression. Fixed upstream in 4.5.1 ([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); until a formal 4.5.1 GitHub release exists, get it from `https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz`.
+  - **Avoid ConformU 4.5.0 on arm64**: that release was published without `PublishReadyToRun`, causing spurious "OUTSIDE FAST RESPONSE TIME TARGET" failures on the first Camera-device member of each response type (`CameraState`, `CameraXSize`, `SensorType`) — reproducible on this rig with every vendor's camera driver tried (ToupTek and ZWO), not a real regression. Earlier 4.5.0 arm64 runs recorded here as clean (the iOptron iCAMs and the ToupTek GPM662M) were taken before the JIT cost was understood; they are warm-process runs, where the first-use penalty has already been paid. Fixed upstream in 4.5.1 ([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); until a formal 4.5.1 GitHub release exists, get it from `https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz`.
   - **Kernel 6.12.75-v8-16+ or higher.**: Note: kernel 6.12.75-v8-16+ is required to ensure ZWO EAF/EFW hardware compatibility. Without it, devices besides ZWO may or may not be recognized. Please check the kernel version.
 
 - **Wi-Fi / Mount Notes**:
@@ -130,6 +130,7 @@ This document lists all hardware vendors and device types that are verified to w
 | ATR2600M (cooled, IMX571) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/ATR2600M/) |
 | GPM662M (mono, IMX662) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPM662M/) |
 | ATR585M (cooled mono, IMX585) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/ATR585M/) |
+| G3M715C (IMX715, rebadged as SVBONY SC715C) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SVBONY/SC715C/) |
 
 <details>
 <summary><strong>ToupTek Driver Notes</strong></summary>
