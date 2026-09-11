@@ -789,7 +789,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
-  can still block on a mutex-holding driver's handshake for the five above.
+  can still block on a mutex-holding driver's handshake for the five above and the four
+  wrapper-backed switches (their wrapper `open()` holds the same mutex `is_open()` takes).
   Far narrower than the bug this rule fixes (needs a second request to land
   in a specific few-instruction window, not just a slow connect), and not
   worth a structural fix here: closing it means every driver exposing one
