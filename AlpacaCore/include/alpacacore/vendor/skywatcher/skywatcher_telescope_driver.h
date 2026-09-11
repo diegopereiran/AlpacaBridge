@@ -53,7 +53,12 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
 // `host_was_synchronized` is sampled once, when the client writes UTCDate, so
 // the hot path costs no syscall. Pure, so the rule is unit-testable without
 // an NTP daemon.
-bool pointing_uses_client_offset(bool has_offset, bool host_was_synchronized, bool host_clock_was_stepped);
+//
+// `offset_survives` folds in both "an offset was written" and "the host clock
+// has not been stepped since", because the caller's
+// client_offset_survives_locked() already answers exactly that and the two
+// can never disagree at the call site.
+bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized);
 }  // namespace detail
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,

@@ -3302,8 +3302,11 @@ Response Router::dispatch_telescope_method(
                     } else if (step.outcome == Outcome::Failed) {
                         util::log_warning(what + ": " + step.error);
                     } else if (step.outcome == Outcome::SkippedSynchronized &&
-                               (step.delta.count() > 2000 || step.delta.count() < -2000)) {
-                        util::log_warning(what + "; NTP-disciplined host and client disagree by more than 2 s");
+                               (step.delta > alpacacore::util::HostClock::kClientDisagreementWarn ||
+                                step.delta < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
+                        util::log_warning(
+                            what + "; NTP-disciplined host and client disagree by more than " +
+                            std::to_string(alpacacore::util::HostClock::kClientDisagreementWarn.count() / 1000) + " s");
                     } else {
                         util::log_debug(what);
                     }

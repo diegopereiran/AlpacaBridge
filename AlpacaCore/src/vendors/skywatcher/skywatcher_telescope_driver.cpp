@@ -801,7 +801,8 @@ public:
         // than the client does, and the router has already refused to step it.
         utc_offset_host_was_synchronized_ = alpacacore::util::HostClock::kernel_is_synchronized();
         if (utc_offset_host_was_synchronized_ &&
-            (utc_offset_ > std::chrono::seconds(2) || utc_offset_ < std::chrono::seconds(-2))) {
+            (utc_offset_ > alpacacore::util::HostClock::kClientDisagreementWarn ||
+             utc_offset_ < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
             ALPACA_LOG_WARN(
                 "SkyWatcher",
                 "Client UTCDate disagrees with an NTP-disciplined host clock by " +
@@ -1814,7 +1815,7 @@ private:
     std::chrono::system_clock::time_point utc_now_locked() const {
         const auto system_now = std::chrono::system_clock::now();
         const bool survives = client_offset_survives_locked(system_now);
-        if (!detail::pointing_uses_client_offset(survives, utc_offset_host_was_synchronized_, !survives)) {
+        if (!detail::pointing_uses_client_offset(survives, utc_offset_host_was_synchronized_)) {
             return system_now;
         }
         return system_now + utc_offset_;
@@ -3252,8 +3253,8 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
     return drift > tolerance || drift < -tolerance;
 }
 
-bool pointing_uses_client_offset(bool has_offset, bool host_was_synchronized, bool host_clock_was_stepped) {
-    if (!has_offset || host_clock_was_stepped) {
+bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized) {
+    if (!offset_survives) {
         return false;  // nothing to apply, or the delta no longer describes anything
     }
     // A disciplined host already has a better clock than the client's, and

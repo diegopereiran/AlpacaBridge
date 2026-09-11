@@ -1547,23 +1547,22 @@ TEST_CASE("SkyWatcher - the pointing clock ignores a client offset on an NTP-dis
     // the test host's clock.
     using alpacacore::vendor::skywatcher::detail::pointing_uses_client_offset;
 
-    // No offset written: nothing to apply, whatever the host is doing.
-    CHECK_FALSE(pointing_uses_client_offset(false, false, false));
-    CHECK_FALSE(pointing_uses_client_offset(false, true, false));
+    // No surviving offset: nothing to apply, whatever the host is doing. That
+    // covers both "the client never wrote one" and "the host clock was
+    // stepped afterwards, so the delta describes a clock that no longer
+    // exists" (#291 review) -- client_offset_survives_locked() collapses the
+    // two before the rule is asked.
+    CHECK_FALSE(pointing_uses_client_offset(false, false));
+    CHECK_FALSE(pointing_uses_client_offset(false, true));
 
     // The off-grid case #289 exists for: no NTP, so the client's time is the
     // only correct time the host will ever see, and it must reach the mount.
-    CHECK(pointing_uses_client_offset(true, false, false));
+    CHECK(pointing_uses_client_offset(true, false));
 
     // An NTP-disciplined host has the better clock, and the router already
     // refused to step it. A tablet 30 minutes out must not skew every goto by
     // 7.5 degrees of RA on a rig whose own time is good.
-    CHECK_FALSE(pointing_uses_client_offset(true, true, false));
-
-    // A host clock step after the write invalidates the delta on both
-    // branches (#291 review); it describes a clock that no longer exists.
-    CHECK_FALSE(pointing_uses_client_offset(true, false, true));
-    CHECK_FALSE(pointing_uses_client_offset(true, true, true));
+    CHECK_FALSE(pointing_uses_client_offset(true, true));
 }
 
 TEST_CASE("SkyWatcher async - the UTCDate readback honours the client on any host (#301)", "[skywatcher][async]") {
