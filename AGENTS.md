@@ -769,8 +769,11 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (30 drivers already do; SynScan was moved to one by the #130 fix) —
-  the five above still take the mutex and rely on the router rule. Regression tests:
+  getter (29 drivers already do; SynScan was moved to one by the #130 fix) —
+  the five above still take the mutex and rely on the router rule, and four
+  wrapper-backed switch drivers (iOptron PowerBox, ToupTek PowerBox, ZWO ASIAIR
+  and ASIAIR Plus) lock inside the wrapper's `is_open()` but release it before
+  `pending_mutex_`, so they rely on the rule without creating the ABBA hazard. Regression tests:
   `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
   `AlpacaCore/tests/test_synscan_async_park.cpp`.
   **Known trade-off:** while a task is in flight, `Connected` reports false
@@ -780,12 +783,13 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connect that may still succeed moments later. Accepted because the
   alternative (reading `get_connected()` directly) is the phantom-link bug
   this rule fixes; there is no per-driver signal yet for which
-  `get_connected()` implementations are safe to read mid-task (the 30
-  lock-free ones) versus which aren't (the six above).
+  `get_connected()` implementations are safe to read mid-task (the 29
+  lock-free ones) versus which aren't (the five above and the four
+  wrapper-backed switches).
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
-  can still block on a mutex-holding driver's handshake for the six above.
+  can still block on a mutex-holding driver's handshake for the five above.
   Far narrower than the bug this rule fixes (needs a second request to land
   in a specific few-instruction window, not just a slow connect), and not
   worth a structural fix here: closing it means every driver exposing one
