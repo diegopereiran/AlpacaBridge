@@ -3167,8 +3167,10 @@ private:
     double site_latitude_;
     double site_longitude_;
     double site_elevation_m_;
-    // Client UTCDate offset and the anchors utc_now_locked() uses to notice a
-    // host clock step underneath it. Mutable: the drop happens on a read.
+    // Client UTCDate offset and the anchors client_offset_survives_locked()
+    // uses to notice a host clock step underneath it -- both clocks answer
+    // that question, and both time paths ask it. Mutable: the drop happens on
+    // a read.
     mutable bool has_utc_offset_ = false;
     // Was the host clock NTP/PTP-disciplined when the client wrote UTCDate?
     // Sampled once, at the write (open-astro#301).
