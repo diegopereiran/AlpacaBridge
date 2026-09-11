@@ -158,7 +158,9 @@ public:
     }
 
     /// The first few recorded "<type>: <what()>" lines, newline-joined —
-    /// meant for a CHECK's message, not for parsing.
+    /// meant for `INFO(guard.report());` immediately before the closing
+    /// CHECK (see the class doc: CHECK takes no message argument), not for
+    /// parsing.
     std::string report() const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::ostringstream out;

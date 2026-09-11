@@ -52,8 +52,14 @@ DEVICE_TYPE_OVERRIDE_RE = re.compile(
 # The description is matched as one or more adjacent string literals
 # (escapes allowed, `"a" "b"` concatenation allowed) so a comma inside it
 # cannot cut the match short and silently drop the tags.
+#
+# Whitespace BETWEEN tags is allowed because Catch2 allows it: "[a][b]" and
+# "[a] [b]" are the same two tags to Catch2, but a pattern demanding one
+# unbroken run of brackets sees only the first form. That gap silently
+# un-registers a case from this gate -- and from the [stress-guard] rejection
+# below -- for a purely cosmetic difference in how someone typed the tags.
 TEST_CASE_TAGS_RE = re.compile(
-    r'TEST_CASE\s*\(\s*(?:"(?:[^"\\]|\\.)*"\s*)+,\s*"((?:\[[^\]]+\])+)"')
+    r'TEST_CASE\s*\(\s*(?:"(?:[^"\\]|\\.)*"\s*)+,\s*"(\s*(?:\[[^\]]+\]\s*)+)"')
 TAG_RE = re.compile(r"\[([^\]]+)\]")
 
 # (vendor, device type) pairs with no [stress] TEST_CASE yet. Seeded from the
@@ -149,7 +155,7 @@ def stress_tag_sets_in_text(text):
 
 
 def find_registered_pairs(known_vendors, known_device_types):
-    """{(vendor, device_type)} covered by at least one [stress] TEST_CASE.
+    """({(vendor, device_type)} covered by a [stress] TEST_CASE, [guard findings]).
 
     Matches tags against the vendor/device-type vocabulary the driver scan
     itself found, rather than assuming a fixed tag order -- a TEST_CASE is
@@ -158,6 +164,9 @@ def find_registered_pairs(known_vendors, known_device_types):
     known vendor and a known device type.
     """
     registered = set()
+    guard_failures = []
+    # One pass over each file: the [stress-guard] rejection below needs the
+    # same text, so reading it twice only costs I/O.
     for path in tracked_files(STRESS_TEST_GLOB_PREFIX + "*" + STRESS_TEST_GLOB_SUFFIX):
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             text = fh.read()
@@ -167,7 +176,14 @@ def find_registered_pairs(known_vendors, known_device_types):
             for vendor in vendor_tags:
                 for dtype in dtype_tags:
                     registered.add((vendor, dtype))
-    return registered
+        for case in guard_tagged_cases_in_text(text):
+            guard_failures.append(
+                "[stress-guard] IN A REGISTRATION FILE: %s uses [stress-guard] "
+                "without [stress], so it does not count toward vendor coverage "
+                "here. Use [stress] for a vendor registration; [stress-guard] is "
+                "for harness self-tests only: %s" % (path, case)
+            )
+    return registered, guard_failures
 
 
 def guard_tagged_cases_in_text(text):
@@ -195,7 +211,8 @@ def main():
     failures = list(failures)  # find_drivers' own ambiguity findings, if any
     known_vendors = {v for v, _ in drivers}
     known_device_types = {d for _, d in drivers}
-    registered = find_registered_pairs(known_vendors, known_device_types)
+    registered, guard_failures = find_registered_pairs(known_vendors, known_device_types)
+    failures.extend(guard_failures)
 
     for (vendor, dtype), paths in sorted(drivers.items()):
         covered = (vendor, dtype) in registered
@@ -212,16 +229,6 @@ def main():
                 "remove ('%s', '%s') from ALLOWLIST in %s"
                 % (vendor, dtype, vendor, dtype, __file__)
             )
-
-    for path in tracked_files(STRESS_TEST_GLOB_PREFIX + "*" + STRESS_TEST_GLOB_SUFFIX):
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for case in guard_tagged_cases_in_text(fh.read()):
-                failures.append(
-                    "[stress-guard] IN A REGISTRATION FILE: %s uses [stress-guard] "
-                    "without [stress], so it does not count toward vendor coverage "
-                    "here. Use [stress] for a vendor registration; [stress-guard] is "
-                    "for harness self-tests only: %s" % (path, case)
-                )
 
     driver_pairs = set(drivers)
     for vendor, dtype in sorted(ALLOWLIST - driver_pairs):
@@ -325,6 +332,17 @@ def self_test():
           guard_tagged_cases_in_text(both_tags) == [])
     check("a TEST_CASE tagged both still counts as [stress] coverage",
           stress_tag_sets_in_text(both_tags) == [{"vendor", "focuser", "stress", "stress-guard"}])
+
+    # Catch2 treats "[a][b]" and "[a] [b]" as the same two tags, so a pattern
+    # demanding one unbroken bracket run would silently un-register a case
+    # over a cosmetic difference -- and would let a spaced [stress-guard] slip
+    # past the rejection above.
+    spaced = 'TEST_CASE("Foo", "[vendor] [focuser] [stress]") {}'
+    check("whitespace between tags still registers as [stress] coverage",
+          stress_tag_sets_in_text(spaced) == [{"vendor", "focuser", "stress"}])
+    spaced_guard = 'TEST_CASE("Foo", "[vendor] [focuser]  [stress-guard]") {}'
+    check("whitespace between tags does not let [stress-guard] evade the check",
+          len(guard_tagged_cases_in_text(spaced_guard)) == 1)
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
