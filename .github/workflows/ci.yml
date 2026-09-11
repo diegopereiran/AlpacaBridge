@@ -333,8 +333,9 @@ jobs:
           # this grep only guards the zero-test case, so it deliberately matches
           # both Catch2 summary forms without distinguishing pass from fail.
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-run.log
-          # Harness self-tests that need TSan but aren't a vendor registration
-          # (StressCallGuard's own concurrency case) run under their own tag,
+          # Core/harness self-tests that need TSan but aren't a vendor
+          # registration -- StressCallGuard's concurrency case and the
+          # AsyncConnectable lifecycle case -- run under their own tag,
           # in their own invocation, with the same zero-test guard, so a typo'd
           # or dropped tag doesn't silently skip them either.
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log

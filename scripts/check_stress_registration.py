@@ -42,6 +42,7 @@ import sys
 VENDORS_PREFIX = "AlpacaCore/src/vendors/"
 STRESS_TEST_GLOB_PREFIX = "AlpacaCore/tests/test_"
 STRESS_TEST_GLOB_SUFFIX = "_concurrency_stress.cpp"
+TEST_GLOB = "AlpacaCore/tests/test_*.cpp"
 
 # Anchored to the actual override, not just any DeviceType:: mention in the
 # file -- a driver that referenced a different DeviceType::X earlier (a
@@ -210,6 +211,52 @@ def guard_tagged_cases_in_text(text):
     return found
 
 
+def stray_stress_cases_in_text(text):
+    """The matched TEST_CASE(...) headers tagged [stress] -- for files OUTSIDE
+    the *_concurrency_stress.cpp glob, where that tag does not belong.
+
+    This is the direction that actually went wrong: test_async_connectable.cpp
+    carried [stress] from the unconditional TEST_SOURCES block, so with every
+    vendor target absent `alpacacore_tests "[stress]"` still matched one case,
+    printed "All tests passed (... in 1 test case)", and the CI zero-coverage
+    grep accepted it -- sanitizers-tsan went green with no vendor concurrency
+    coverage at all. The tag was moved to [stress-guard]; this check is what
+    stops the next one being added.
+
+    Core/harness self-tests that need TSan use [stress-guard], which has its
+    own invocation and its own zero-test grep.
+    """
+    found = []
+    for m in TEST_CASE_TAGS_RE.finditer(text):
+        tags = {t.lower() for t in TAG_RE.findall(m.group(1))}
+        if "stress" in tags:
+            found.append(m.group(0))
+    return found
+
+
+def find_stray_stress_cases():
+    """[findings] for [stress]-tagged TEST_CASEs outside the registration glob."""
+    registrations = set(
+        tracked_files(STRESS_TEST_GLOB_PREFIX + "*" + STRESS_TEST_GLOB_SUFFIX))
+    failures = []
+    for path in tracked_files(TEST_GLOB):
+        if path in registrations:
+            continue
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        for case in stray_stress_cases_in_text(text):
+            failures.append(
+                "[stress] OUTSIDE A REGISTRATION FILE: %s tags a TEST_CASE "
+                "[stress], but that tag is reserved for vendor driver "
+                "registrations in %s*%s -- this file compiles unconditionally, "
+                "so the case alone satisfies CI's vendor zero-coverage grep and "
+                "makes it vacuous. Use [stress-guard] for a core/harness "
+                "self-test that needs TSan: %s"
+                % (path, STRESS_TEST_GLOB_PREFIX, STRESS_TEST_GLOB_SUFFIX, case)
+            )
+    return failures
+
+
 def main():
     drivers, failures = find_drivers()
     failures = list(failures)  # find_drivers' own ambiguity findings, if any
@@ -217,6 +264,7 @@ def main():
     known_device_types = {d for _, d in drivers}
     registered, guard_failures = find_registered_pairs(known_vendors, known_device_types)
     failures.extend(guard_failures)
+    failures.extend(find_stray_stress_cases())
 
     for (vendor, dtype), paths in sorted(drivers.items()):
         covered = (vendor, dtype) in registered
@@ -347,6 +395,19 @@ def self_test():
     spaced_guard = 'TEST_CASE("Foo", "[vendor] [focuser]  [stress-guard]") {}'
     check("whitespace between tags does not let [stress-guard] evade the check",
           len(guard_tagged_cases_in_text(spaced_guard)) == 1)
+
+    # The other direction, which is the one that actually went wrong: a
+    # [stress] tag in a file outside the registration glob re-inflates the
+    # vendor threshold and makes CI's zero-coverage grep vacuous again.
+    stray = 'TEST_CASE("Foo", "[async_connectable][stress]") {}'
+    check("a [stress] TEST_CASE outside the glob is rejected",
+          len(stray_stress_cases_in_text(stray)) == 1)
+    guarded = 'TEST_CASE("Foo", "[async_connectable][stress-guard]") {}'
+    check("a [stress-guard] TEST_CASE outside the glob is fine",
+          stray_stress_cases_in_text(guarded) == [])
+    unrelated = 'TEST_CASE("Foo", "[async_connectable][unit]") {}'
+    check("an untagged-for-stress TEST_CASE outside the glob is fine",
+          stray_stress_cases_in_text(unrelated) == [])
 
     # The predicate above is well covered, but main()'s USE of it was not:
     # deleting `failures.extend(guard_failures)` left every check green. Drive
