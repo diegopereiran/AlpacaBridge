@@ -128,7 +128,7 @@ public:
     /// Thread-safe view of `calls` — driver workers hit the fake concurrently
     /// with the test body.
     int call_count(const char* fn) const {
-        std::lock_guard<std::mutex> lock(sync_->calls_mutex);
+        std::lock_guard<std::mutex> lock(sync_.calls_mutex);
         auto it = calls.find(fn);
         return it == calls.end() ? 0 : it->second;
     }
@@ -225,9 +225,15 @@ public:
     bool get_chip_info(const std::string& camera_id, QHYCameraInfo& info) override {
         hit("get_chip_info");
         require_open(camera_id);
+        // QHYSDKWrapper::get_chip_info() never writes info.model at all -- the
+        // driver gets the model exclusively from the separate
+        // get_camera_model() call, made earlier in the connect sequence.
+        // Back-filling it here (an earlier version of this fake did) would
+        // hide a regression that dropped that call: the test would still see
+        // a correct name under the fake and an empty one on real hardware.
+        const std::string model = info.model;
         for (const auto& cam : cameras) {
             if (cam.camera_id == camera_id) {
-                const std::string model = info.model.empty() ? cam.model : info.model;
                 info = cam;
                 info.model = model;
                 return true;
@@ -395,16 +401,31 @@ private:
         uint32_t height{48};
     };
 
-    // Behind a unique_ptr so the fake stays movable (tests build it in a
-    // helper and return it by value).
+    // A std::mutex has no move constructor, so the naive `std::mutex
+    // calls_mutex;` member would make FakeQHYSDK non-movable -- and
+    // test_qhy_fake_sdk.cpp's own static_assert, plus every helper that
+    // builds a fake and returns it by value, depends on movability. A
+    // std::unique_ptr<Sync> wrapper would restore movability but leaves the
+    // moved-from object's sync_ null, so a stray hit()/call_count() on it
+    // (a caller holding a moved-from fake past the move, say) segfaults
+    // instead of misbehaving loudly. Sync's own hand-written move
+    // constructor sidesteps both: there is nothing meaningful to transfer
+    // out of a mutex-only struct, so moving one just re-defaults a fresh
+    // mutex in place, and the moved-from object stays fully usable.
     struct Sync {
         mutable std::mutex calls_mutex;
+
+        Sync() = default;
+        Sync(Sync&&) noexcept {}
+        Sync& operator=(Sync&&) noexcept { return *this; }
+        Sync(const Sync&) = delete;
+        Sync& operator=(const Sync&) = delete;
     };
-    std::unique_ptr<Sync> sync_ = std::make_unique<Sync>();
+    Sync sync_;
 
     void hit(const char* fn) {
         {
-            std::lock_guard<std::mutex> lock(sync_->calls_mutex);
+            std::lock_guard<std::mutex> lock(sync_.calls_mutex);
             ++calls[fn];
         }
         if (throw_from.count(fn) != 0) {

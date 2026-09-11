@@ -153,7 +153,13 @@ TEST_CASE("FakeQHYSDK - a move clears any pending script", "[qhy][fake][unit]") 
     CHECK(fake.get_cfw_position("fake-qhy-0") == 4);
 }
 
-TEST_CASE("FakeQHYSDK - chip info comes from the canned camera and keeps a set model", "[qhy][fake][unit]") {
+TEST_CASE("FakeQHYSDK - chip info comes from the canned camera and never touches model", "[qhy][fake][unit]") {
+    // Matches QHYSDKWrapper::get_chip_info(), which never writes info.model at
+    // all -- the driver's connect sequence always populates it separately
+    // (via get_camera_model(), or a carried-over value) BEFORE calling
+    // get_chip_info(), so info.model is never empty in practice. A fake that
+    // back-filled it from the canned camera when empty would hide a
+    // regression that dropped that earlier call.
     auto fake = make_fake();
     fake.open_camera("fake-qhy-0");
 
@@ -162,7 +168,7 @@ TEST_CASE("FakeQHYSDK - chip info comes from the canned camera and keeps a set m
     CHECK(info.max_width == 64);
     CHECK(info.max_height == 48);
     CHECK(info.bpp == 16);
-    CHECK(info.model == "FakeQHY600");
+    CHECK(info.model.empty());  // untouched -- caller never set it
 
     // The camera driver pre-seeds info.model on reconnect and must not lose it.
     alpacacore::vendor::qhy::QHYCameraInfo preset{};
@@ -234,4 +240,20 @@ TEST_CASE("FakeQHYSDK - is movable so helpers can build one and return it", "[qh
                   "tests build a fake in a helper and return it by value");
     auto fake = make_fake();
     CHECK(fake.cameras.size() == 1);
+}
+
+TEST_CASE("FakeQHYSDK - a moved-from instance is still safely usable", "[qhy][fake][unit]") {
+    // The sync member holds only a mutex -- nothing meaningful to move out --
+    // so a moved-from fake must stay fully functional (its own collections,
+    // like `cameras`, are moved away by the ordinary member-wise move; only
+    // sync_ is special-cased to survive) rather than segfaulting on its next
+    // call, which a std::unique_ptr<Sync> nulled by the move would have done.
+    FakeQHYSDK source = make_fake();
+    FakeQHYSDK moved_to = std::move(source);
+
+    // get_sdk_version() only touches sync_ (via hit()) and a literal, so it
+    // exercises exactly the path that used to null-deref, without depending
+    // on `cameras` (moved away, as ordinary vector move semantics dictate).
+    REQUIRE_NOTHROW(source.get_sdk_version());
+    CHECK(source.call_count("get_sdk_version") == 1);
 }
