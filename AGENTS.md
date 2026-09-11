@@ -1772,16 +1772,16 @@ against its checklist, 2026-09-06:
   board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
 - [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
   EQM-35 specifically, but the issue's ask applies equally.
-- [x] Fake mount test double extended with a classic-board profile (`FakeMountProfile::eqm35_pro()`
-  in `AlpacaCore/tests/fake_skywatcher_mount.h`; seven cases construct it, three of them tagged `[eqm35]` and
-  four southern-hemisphere regressions that depend on its geometry and feature word) (9600 baud, no home
-  index, older firmware string) — deliberately NOT added with invented numbers. This
-  branch's `FakeMountProfile::eqm35_pro()` is a REAL hardware capture; fabricating a
-  plausible HEQ5/EQ6 profile without hardware to source it from would misrepresent
-  guessed values as measured ones. The issue notes HEQ5 PRO and EQ6 hardware is already
-  on hand via the `synscan` (hand-controller) driver validation (#7, #29) — reuse an
-  actual reading from that hardware over an EQDIR cable when available, rather than
-  inventing one.
+- [x] Fake mount test double extended with a classic-board profile: `FakeMountProfile::eqm35_pro()`
+  in `AlpacaCore/tests/fake_skywatcher_mount.h` is a REAL EQM-35 Pro capture (its built-in PL2303
+  port answers only at 115200), constructed by seven `[eqm35]` cases, three
+  `[skywatcher][telescope][eqm35]` identity/tracking/home cases and four `[eqm35][hemisphere]`
+  southern-hemisphere regressions that depend on its geometry and feature word.
+- [ ] A second classic-board profile (HEQ5 PRO / EQ6, 9600 baud over an EQDIR cable, older
+  firmware string) — deliberately NOT added with invented numbers: fabricating a plausible
+  profile without hardware to source it from would misrepresent guessed values as measured
+  ones. HEQ5 PRO and EQ6 hardware is on hand via the `synscan` (hand-controller) driver
+  validation (#7, #29); capture an actual reading from it over an EQDIR cable when available.
 - **Not yet done, intentionally: adding the EQM-35 Pro to `SUPPORTED-DRIVERS.md` and the
   architecture table, and renaming the "Sky-Watcher Wave" section to "Sky-Watcher Direct
   Motor Controller" per the issue's suggestion.** This PR's code and tests are ready for
