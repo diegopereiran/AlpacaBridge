@@ -1533,8 +1533,8 @@ TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and repo
     CHECK((d_back < 0.002 || d_back > 23.998));
     // ...and the readback follows the new write, again on either branch.
     const auto reported_back = driver->get_utc_date();
-    const auto back_error = std::chrono::duration_cast<std::chrono::milliseconds>(
-        reported_back - std::chrono::system_clock::now());
+    const auto back_error =
+        std::chrono::duration_cast<std::chrono::milliseconds>(reported_back - std::chrono::system_clock::now());
     CHECK(std::abs(back_error.count()) < 500);
     driver->set_connected(false);
 }
@@ -1566,8 +1566,7 @@ TEST_CASE("SkyWatcher - the pointing clock ignores a client offset on an NTP-dis
     CHECK_FALSE(pointing_uses_client_offset(true, true, true));
 }
 
-TEST_CASE("SkyWatcher async - the UTCDate readback honours the client on any host (#301)",
-          "[skywatcher][async]") {
+TEST_CASE("SkyWatcher async - the UTCDate readback honours the client on any host (#301)", "[skywatcher][async]") {
     // Whatever the pointing math does, a client that writes UTCDate and reads
     // it back must get its own value: ConformU checks exactly this, and it has
     // to hold on an NTP-disciplined build box as much as on an off-grid Pi.

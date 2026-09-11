@@ -802,11 +802,11 @@ public:
         utc_offset_host_was_synchronized_ = alpacacore::util::HostClock::kernel_is_synchronized();
         if (utc_offset_host_was_synchronized_ &&
             (utc_offset_ > std::chrono::seconds(2) || utc_offset_ < std::chrono::seconds(-2))) {
-            ALPACA_LOG_WARN("SkyWatcher",
-                            "Client UTCDate disagrees with an NTP-disciplined host clock by " +
-                                std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(utc_offset_)
-                                                   .count()) +
-                                " ms; honouring it for the UTCDate readback but pointing by the host clock");
+            ALPACA_LOG_WARN(
+                "SkyWatcher",
+                "Client UTCDate disagrees with an NTP-disciplined host clock by " +
+                    std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(utc_offset_).count()) +
+                    " ms; honouring it for the UTCDate readback but pointing by the host clock");
         }
         invalidate_position_cache_locked();  // reported RA moves with LST
     }
