@@ -147,8 +147,10 @@ refresh any channel pickers.
 
 ## Cross-origin protection
 
-State-changing requests (PUT/POST/DELETE) that carry a browser `Origin`
-header not matching the request's `Host` are rejected with HTTP 403. This
+Every request except `GET` that carries a browser `Origin` header not
+matching the request's `Host` is rejected with HTTP 403. In practice that
+means the state-changing methods (`PUT`/`POST`/`DELETE`), since those are
+the only ones these endpoints accept. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
 unaffected) or the same-origin web portal.
