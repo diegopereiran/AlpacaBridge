@@ -17,7 +17,13 @@ Checks:
      ci_preflight.sh (AGENTS.md: "Keep the cppcheck --suppress list
      identical between ci.yml and ci_preflight.sh").
   4. VERSION matches the version in the README's changelog badge line.
-  5. Every relative path referenced in AGENTS.md's inline code spans
+  5. The drivers whose `get_connected()` blocks are exactly the ones
+     `async_connectable.h` names as blocking. Measured from the code, not
+     restated: the router rule ("never call get_connected() while
+     get_connecting() is true") depends on knowing which drivers have that
+     shape, and the list has drifted repeatedly in both directions
+     (issues #315, #355, #381, #407).
+  6. Every relative path referenced in AGENTS.md's inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
 """
@@ -184,7 +190,135 @@ def check_version_matches_readme():
     return failures
 
 
-# --- check 5: AGENTS.md path references exist -------------------------------
+# --- check 5: the blocking-get_connected() list vs the code -----------------
+#
+# issue #381. Four comments and prose passages used to hand-maintain COUNTS of
+# this split; nothing checked them and they drifted repeatedly, including a
+# stale count introduced by the PR that was correcting the others. The counts
+# are gone (the rule is stated instead), but the NAMED lists remain
+# load-bearing: `async_connectable.h`'s connection-task tail must read
+# get_connected() before taking pending_mutex_ precisely because these drivers
+# nest the driver mutex outside it, and the router must never read
+# get_connected() mid-task because these drivers block on it. A reader who
+# trusts a stale list is misled in the direction that matters -- believing a
+# driver is safe to read mid-task when it blocks.
+#
+# So the code is the source of truth here and the comment must follow it: every
+# get_connected() override under AlpacaCore/src/vendors is classified by its
+# body, and the two blocking classes must be named in that header. A driver
+# whose file is not in DRIVER_PROSE_NAMES fails loudly rather than being
+# bucketed silently -- add it there AND to the header's list in the same
+# change.
+
+GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+override\s*\{")
+
+# Driver file basename -> the name the async_connectable.h comment uses for it.
+# Only the drivers that CAN be classified as blocking need an entry; the
+# lock-free majority is not named anywhere, by design.
+DRIVER_PROSE_NAMES = {
+    "bisque_telescope_driver.cpp": "Bisque",
+    "celestron_telescope_driver.cpp": "Celestron",
+    "ioptron_telescope_driver.cpp": "iOptron",
+    "onstep_telescope_driver.cpp": "OnStep",
+    "skywatcher_telescope_driver.cpp": "Sky-Watcher",
+    "ioptron_switch_driver.cpp": "iOptron iMate PowerBox",
+    "touptek_switch_driver.cpp": "ToupTek StellaVita",
+    "zwo_asiair_switch_driver.cpp": "ZWO ASIAIR",
+    "zwo_asiair_plus_switch_driver.cpp": "ASIAIR Plus",
+}
+
+
+def _matching_brace(text, open_index):
+    """Index just past the `}` closing the `{` at open_index."""
+    depth = 0
+    for i in range(open_index, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def classify_get_connected_bodies():
+    """({basename: kind}, [findings]) for every vendor get_connected() override.
+
+    kind is "driver-mutex" (takes a lock_guard/unique_lock, so it blocks behind
+    the connect sequence that holds the same mutex), "wrapper" (reaches the
+    vendor wrapper's is_open(), which takes the wrapper mutex that open() holds
+    throughout), or "lock-free".
+    """
+    kinds = {}
+    failures = []
+    vendors = ROOT / "AlpacaCore" / "src" / "vendors"
+    for path in sorted(vendors.rglob("*")):
+        if path.suffix not in (".cpp", ".h", ".hpp"):
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in GET_CONNECTED_RE.finditer(text):
+            open_index = match.end() - 1
+            body = text[open_index:_matching_brace(text, open_index)]
+            if re.search(r"\b(lock_guard|unique_lock|scoped_lock)\b", body):
+                kind = "driver-mutex"
+            elif re.search(r"(\.|->)is_open\s*\(\s*\)", body):
+                kind = "wrapper"
+            elif re.search(r"\bload\s*\(|\breturn\s+connected_\s*;", body):
+                kind = "lock-free"
+            else:
+                failures.append(
+                    "UNCLASSIFIABLE get_connected(): %s -- it neither takes a lock, nor reaches a "
+                    "wrapper's is_open(), nor reads an atomic. Classify it by hand: if it can block, "
+                    "add it to DRIVER_PROSE_NAMES in %s and to the list in async_connectable.h; if it "
+                    "cannot, make that visible in the body (an atomic load or a plain return)."
+                    % (path.relative_to(ROOT), Path(__file__).name))
+                continue
+            # A file with two driver classes (gemini_flatpanel_driver.cpp) is
+            # only interesting if they disagree, which would mean the file
+            # cannot be named as one thing in the prose list.
+            if kinds.get(path.name, kind) != kind:
+                failures.append(
+                    "MIXED get_connected() kinds in %s: %s and %s. The prose list names files, not "
+                    "classes, so split the drivers or name them individually."
+                    % (path.relative_to(ROOT), kinds[path.name], kind))
+            kinds[path.name] = kind
+    return kinds, failures
+
+
+def check_blocking_get_connected_list():
+    kinds, failures = classify_get_connected_bodies()
+    if not kinds:
+        return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
+
+    header = read("AlpacaCore/include/alpacacore/async_connectable.h")
+    for basename, kind in sorted(kinds.items()):
+        if kind == "lock-free":
+            # The lock-free majority is deliberately unnamed. What matters is
+            # that it is not named as blocking: a driver made lock-free (as
+            # SynScan was by #130) must come OUT of the list.
+            prose = DRIVER_PROSE_NAMES.get(basename)
+            if prose and prose in header:
+                failures.append(
+                    "STALE BLOCKING-LIST ENTRY: %s's get_connected() is lock-free, but "
+                    "async_connectable.h still names '%s' among the drivers that block. Remove it there "
+                    "and from DRIVER_PROSE_NAMES." % (basename, prose))
+            continue
+        prose = DRIVER_PROSE_NAMES.get(basename)
+        if prose is None:
+            failures.append(
+                "UNNAMED BLOCKING DRIVER: %s's get_connected() is %s, so it blocks behind its connect "
+                "sequence, but no prose name is registered for it. Add it to DRIVER_PROSE_NAMES in %s "
+                "and to the list in async_connectable.h -- the router rule and the pending_mutex_ "
+                "ordering both depend on that list being complete." % (basename, kind, Path(__file__).name))
+            continue
+        if prose not in header:
+            failures.append(
+                "MISSING FROM THE BLOCKING LIST: %s's get_connected() is %s, but async_connectable.h "
+                "does not name '%s'." % (basename, kind, prose))
+    return failures
+
+
+# --- check 6: AGENTS.md path references exist -------------------------------
 
 # Backtick-quoted spans that look like a repo-relative path: start with one of
 # these top-level dirs/files (spaces allowed only for a verbatim tracked path), and are not a bare CLI flag
@@ -296,6 +430,7 @@ CHECKS = [
     ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
     ("cppcheck --suppress sync (ci.yml vs ci_preflight.sh)", check_cppcheck_suppress_sync),
     ("VERSION matches README badge", check_version_matches_readme),
+    ("Blocking get_connected() list matches the code", check_blocking_get_connected_list),
     ("AGENTS.md path references exist", check_agents_md_paths_exist),
 ]
 
