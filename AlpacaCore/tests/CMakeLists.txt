@@ -94,6 +94,8 @@ endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
          test_wandererastro_filterwheel.cpp test_wandererastro_box_switch.cpp)
+    # cover/wheel/box over the pty streamer fake + fail-fast rotator [stress], #271
+    list(APPEND TEST_SOURCES test_wandererastro_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_astroasis)
     list(APPEND TEST_SOURCES test_astroasis_focuser.cpp test_astroasis_concurrency_stress.cpp)
