@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-09-09
+## Updated 2026-09-11
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -30,7 +30,8 @@ This document lists all hardware vendors and device types that are verified to w
   - **USB/Serial**: USB-to-serial adapter or direct serial connection
 
 - **Linux Notes**:
-  - **Debian 13 (Trixie) on arm64**: AlpacaBridge is built and validated on arm64 only (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). All drivers have been tested using Debian 13 on arm64 with ConformU v4.2.1 (original drivers), v4.3.0, or v4.4.0 (newer drivers). As new ConformU versions are released this will be adjusted.
+  - **Debian 13 (Trixie) on arm64**: AlpacaBridge is built and validated on arm64 only (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). All drivers have been tested using Debian 13 on arm64 with ConformU v4.2.1 (original drivers), v4.3.0, v4.4.0, or v4.5.1 (newer drivers). As new ConformU versions are released this will be adjusted.
+  - **Avoid ConformU 4.5.0 on arm64**: that release was published without `PublishReadyToRun`, causing spurious "OUTSIDE FAST RESPONSE TIME TARGET" failures on the first Camera-device member of each response type (`CameraState`, `CameraXSize`, `SensorType`) — reproducible on every vendor's camera driver, not a real regression. Fixed upstream in 4.5.1 ([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); until a formal 4.5.1 GitHub release exists, get it from `https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz`.
   - **Kernel 6.12.75-v8-16+ or higher.**: Note: kernel 6.12.75-v8-16+ is required to ensure ZWO EAF/EFW hardware compatibility. Without it, devices besides ZWO may or may not be recognized. Please check the kernel version.
 
 - **Wi-Fi / Mount Notes**:
@@ -108,12 +109,15 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | SV905C2 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SVBONY/SV905C2/) |
+| SC715C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SVBONY/SC715C/) |
 
 <details>
 <summary><strong>SVBONY Driver Notes</strong></summary>
 
 - **SDK**: SVBONY Camera SDK v1.13.4 (build target) 
 - **Connection**: USB (requires udev rules `90-ckusb.rules`)
+- **SC715C backend**: the SC715C is a rebadged **ToupTek G3M715C** (same sensor/hardware) and is NOT recognized by the SVBONY SDK. It is served by the ToupTek camera driver (ToupTek toupcamsdk) and needs the `ALPACACORE_ENABLE_TOUPTEK` build flag — select vendor **ToupTek**, not SVBONY, in the web UI; the ToupTek SDK enumerates it under its native name `G3M715C`. Same pattern as the iOptron iCAM cameras above (rebadged Player One hardware).
+- **SC715C validated**: ConformU 4.5.1 on Linux arm64, 2026-09-11: 0 errors, 0 issues, 0 timing issues. (Note: ConformU 4.5.0 on arm64 has a known timing-report bug unrelated to any driver — see General Notes above.)
 
 </details>
 
@@ -132,7 +136,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
-- **Tested models**: GPCMOS01200KPF and GPCMOS02000KPA (guide cameras), ATR2600M (cooled APS-C mono, IMX571), ATR585M (cooled mono, IMX585, HCG/LCG/HDR readout modes) and GPM662M (uncooled mono, IMX662, HCG/LCG readout modes) — all ConformU-validated on Linux arm64. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
+- **Tested models**: GPCMOS01200KPF and GPCMOS02000KPA (guide cameras), ATR2600M (cooled APS-C mono, IMX571), ATR585M (cooled mono, IMX585, HCG/LCG/HDR readout modes) and GPM662M (uncooled mono, IMX662, HCG/LCG readout modes) — all ConformU-validated on Linux arm64. G3M715C (also sold rebadged as SVBONY SC715C — see the SVBONY section) is validated too. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
 - **ConformU**: 4.3.0 — ATR2600M: 0 errors, 0 issues, 0 timing issues (SDK 59.30701.20260128). 4.5.0 — GPM662M (Raspberry Pi, 2026-08-26): 0 errors, 0 issues, all members within timing targets.
 - **Cooling (TEC)**: Capability-gated on `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF`. Uncooled cameras report `CanSetCCDTemperature = false`. On cooled models (ATR2600M) `CoolerOn` / `SetCCDTemperature` / `CoolerPower` drive the TEC; verified reaching −10 °C on hardware.
 - **Readout modes (conversion gain + High Full Well)**: on sensors that support them, ASCOM `ReadoutModes` exposes the conversion-gain (`HCG` / `LCG`, plus `HDR` on HDR-capable models) and `High Full Well` hardware modes as a dropdown (e.g. NINA). On the IMX571 these trade read-noise vs full-well (HCG = low noise; LCG / High Full Well = larger full well, ~51 ke⁻ → ~100 ke⁻). Sensors without these keep a single `Normal` mode.
