@@ -2498,7 +2498,10 @@ int main() {
             route_request(clock_router, "PUT", "/api/v1/telescope/9806/utcdate", client_utc_body);
             EXPECT(*probe_calls == 1);
 
-            // The answer itself still reaches the readout.
+            // The readout still works after the clock was stepped. This asserts
+            // the "client" branch of source(), which returns before consulting
+            // has_rtc() at all -- the cached RTC answer is covered by the rtc
+            // case below, not by this line.
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
             EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "client");

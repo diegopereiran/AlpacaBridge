@@ -79,6 +79,9 @@ public:
     //
     // Replaces the clock object rather than mutating it, so it must be called
     // before the router serves any request; no request path may be in flight.
+    // Since open-astro#314 that means before Server::start(): the RTC probe
+    // thread dereferences host_clock_ too, so the seam now has a second
+    // reader that is not a request path.
     void set_host_clock_hooks(
         alpacacore::util::HostClock::IsSynchronizedFn is_synchronized, alpacacore::util::HostClock::SetTimeFn set_time,
         alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; });
