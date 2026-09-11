@@ -78,7 +78,8 @@ Rate setters must re-anchor the dead-reckoning model in place (`anchor_model_loc
 hardware. Also: ConformU runs ON the SBC over localhost — the dev VM's LAN path has 2-90 ms spikes
 that stamp constant `Can*` getters with 0.10x s FAST marks — and a Bash tool timeout kills a child
 ConformU mid-slew, so launch it detached (`setsid nohup`) and poll a done marker. Motor-controller
-mounts store no site: set SiteLatitude/Longitude first or ConformU aborts "below the horizon".
+mounts store no site: set SiteLatitude/Longitude in the device config first, or the driver
+refuses the connect (#274) and ConformU never reaches CheckMethods.
 
 **Apply this checklist up front.** ConformU is single-threaded and catches *none*
 of the races below — code review plus the TSan concurrency stress suite do
@@ -1504,9 +1505,12 @@ datagrams before each send so replies cannot get off-by-one.
   the slew in the background (AtPark turns true on completion); MoveAxis(0) issues the stop,
   keeps Slewing true via the manual flag, and a background task clears it and restores
   tracking once the axis reports stopped. This applies to every telescope driver.
-- ConformU needs a real site: with lat/long left at 0,0 the CheckMethods slew tests abort
-  with "highest elevation available is below the horizon". Set the observing site in the
-  web UI before validating.
+- ConformU needs a real site. Since #274 a Sky-Watcher device with no site refuses
+  `Connected` outright, so the run fails at connect; the client reports "Connection
+  failed" and the driver's message naming the two fields is in the server log (#358).
+  Set the observing site in the web UI before validating. Before #274 the site collapsed
+  to 0,0 instead and the CheckMethods slew tests aborted with "highest elevation
+  available is below the horizon".
 - Web UI: `skywatcher`-prefixed field names; network field is `udpPort` (NOT `tcpPort`).
 - ConformU 4.5.0 validated on Wave 100i over **both transports** (Linux arm64): USB (dev PC)
   and Wi-Fi UDP (Raspberry Pi CM4 joined to the mount AP) — 0 errors, 0 issues, 0 timing
