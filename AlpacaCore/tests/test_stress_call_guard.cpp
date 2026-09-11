@@ -103,14 +103,20 @@ TEST_CASE("StressCallGuard - report() caps the number of stored samples", "[unit
     CHECK(report.find("more") != std::string::npos);
 }
 
-TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "[stress][unit]") {
-    // Tagged [stress] (not just [unit]) so this is the one case of the guard's
-    // own locking that the TSan job actually exercises -- CI runs the TSan
-    // binary as `alpacacore_tests "[stress]"`, so a [unit]-only tag would
-    // leave a lost-update bug in this mutex invisible to a race detector and
-    // showing only as an occasional flaky count under ASan. Harmless for
-    // check_stress_registration.py, which only globs
-    // test_*_concurrency_stress.cpp filenames for vendor registrations.
+TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "[stress-guard][unit]") {
+    // Tagged [stress-guard], NOT [stress] -- this needs TSan too (a lost-update
+    // bug in count_/samples_ would otherwise only show as an occasional flaky
+    // count under ASan), but [stress] is reserved for vendor driver
+    // registrations: the CI/ci_preflight zero-coverage guard runs
+    // `alpacacore_tests "[stress]"` and fails the job if that filter matches
+    // zero tests, specifically so an environment change that silently drops
+    // every vendor stress target can't green-light with no concurrency
+    // coverage. This file is unconditional in TEST_SOURCES (no vendor target
+    // guard), so tagging this case [stress] would let it alone satisfy that
+    // filter even with every vendor target absent -- defeating the exact
+    // check it exists to be. [stress-guard] gets its own separate TSan
+    // invocation instead (see ci.yml / ci_preflight.sh), decoupled from the
+    // vendor-registration count.
     // op_threads hits one guard concurrently in real registrations.
     StressCallGuard guard;
     constexpr int kThreads = 8;

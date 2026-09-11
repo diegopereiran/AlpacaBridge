@@ -425,7 +425,16 @@ if [ "${RUN_TSAN:-0}" = "1" ]; then
      && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
         "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log" \
      `# binary exit code (pipefail) is the pass/fail gate; grep only guards zero-test runs` \
-     && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-run.log"; then
+     `# [stress] is reserved for vendor driver registrations only -- see the` \
+     `# matching comment in ci.yml -- so this threshold can't be inflated by` \
+     `# an unconditional harness self-test masking every vendor target vanishing` \
+     && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-run.log" \
+     `# Harness self-tests needing TSan but not a vendor registration (e.g.` \
+     `# StressCallGuard's own concurrency case) run under [stress-guard] instead,` \
+     `# in their own invocation with the same zero-test guard.` \
+     && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
+        "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress-guard]" | tee "${TSAN_BUILD_DIR}/stress-guard-run.log" \
+     && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-guard-run.log"; then
     record PASS "tsan stress"
   else
     record FAIL "tsan stress"

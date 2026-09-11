@@ -309,11 +309,26 @@ jobs:
           # concurrency coverage. Assert on the run summary, which reflects
           # what actually executed and works on any Catch2 version, unlike
           # --list-tests output counting (issue #117).
+          #
+          # [stress] is reserved for vendor driver registrations ONLY, so this
+          # grep's threshold means what it says regardless of how many vendor
+          # targets are actually configured. The harness's own self-tests (e.g.
+          # StressCallGuard's concurrency case) use a DIFFERENT tag
+          # ([stress-guard], run separately below) precisely so they can't
+          # inflate this count and mask every vendor target silently vanishing
+          # (issue #322 review finding — a single unconditional non-vendor
+          # [stress]-tagged case would have made this guard vacuous).
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log
           # The test binary's own exit code (via pipefail) is the pass/fail gate;
           # this grep only guards the zero-test case, so it deliberately matches
           # both Catch2 summary forms without distinguishing pass from fail.
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-run.log
+          # Harness self-tests that need TSan but aren't a vendor registration
+          # (StressCallGuard's own concurrency case) run under their own tag,
+          # in their own invocation, with the same zero-test guard, so a typo'd
+          # or dropped tag doesn't silently skip them either.
+          ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log
+          grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-guard-run.log
 
   format:
     name: clang-format (changed lines)

@@ -45,7 +45,9 @@ namespace alpacacore::test {
  * driver and an `operate` callback exercising its operational surface, then
  * call the scenarios below. Every callback failure is swallowed — operations
  * racing a disconnect are EXPECTED to throw NotConnected; what must never
- * happen is a crash, a hang, or a TSan report.
+ * happen is a crash, a hang, or a TSan report. Wrap each call inside
+ * `operate` with StressCallGuard (below) rather than a local try/catch, so a
+ * fail-fast path doesn't have one throw silently skip the calls after it.
  */
 struct StressOptions {
     int lifecycle_threads = 4;                // hammer connect()/disconnect()/set_connected()
@@ -172,7 +174,12 @@ private:
         }
     }
 
-    std::vector<int> expected_codes_;
+    // const, not just conventionally read-only: is_expected() reads this
+    // without mutex_ (safe only because it's never written after
+    // construction), and const makes that invariant load-bearing rather than
+    // something a later "add an expect() mutator" change could quietly break
+    // into a data race.
+    const std::vector<int> expected_codes_;
     mutable std::mutex mutex_;
     int count_ = 0;
     std::vector<std::string> samples_;
