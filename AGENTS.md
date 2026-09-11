@@ -1775,9 +1775,11 @@ against its checklist, 2026-09-06:
   EQM-35 specifically, but the issue's ask applies equally.
 - [x] Fake mount test double extended with a classic-board profile: `FakeMountProfile::eqm35_pro()`
   in `AlpacaCore/tests/fake_skywatcher_mount.h` is a REAL EQM-35 Pro capture (its built-in PL2303
-  port answers only at 115200), constructed by seven `[eqm35]` cases, three
-  `[skywatcher][telescope][eqm35]` identity/tracking/home cases and four `[eqm35][hemisphere]`
-  southern-hemisphere regressions that depend on its geometry and feature word.
+  port answers only at 115200), used by the `[eqm35]`-tagged cases in
+  `AlpacaCore/tests/test_skywatcher_async.cpp`: identity from the mount code, the count-frame
+  FindHome fallback, the board's own sidereal period, and the `[hemisphere]` southern-hemisphere
+  regressions that depend on its geometry and feature word (one `[eqm35]` case uses the Wave
+  profile as the control). Counts are deliberately not stated here; grep the tag.
 - [ ] A second classic-board profile (HEQ5 PRO / EQ6, 9600 baud over an EQDIR cable, older
   firmware string) — deliberately NOT added with invented numbers: fabricating a plausible
   profile without hardware to source it from would misrepresent guessed values as measured
