@@ -1484,7 +1484,11 @@ Target hardware: Wave 100i/150i (also applicable to AZ-GTi-class mounts).
 Protocol documentation: `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`
 (shared with the SynScan vendor directory). No external SDK required.
 
-Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi module,
+Connection types: Serial (the mount's own USB port or an EQDIR-class adapter; the scan probes
+9600 then 115200 per port, because an EQ board's built-in PL2303 port answers only at 115200,
+so a silent Prolific/FTDI/CH340-class port costs about 3.3 s per scan: 1.5 s at 9600, the
+300 ms SynScan echo guard, 1.5 s at 115200, multiplied by every such adapter on the rig; #403
+records the measurement) and Network (built-in Wi-Fi module,
 **UDP** port 11880 — one command per datagram, one reply per datagram; AP-mode address
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
@@ -1768,7 +1772,8 @@ against its checklist, 2026-09-06:
   board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
 - [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
   EQM-35 specifically, but the issue's ask applies equally.
-- [ ] Fake mount test double extended with a classic-board profile (9600 baud, no home
+- [x] Fake mount test double extended with a classic-board profile (`FakeMountProfile::eqm35_pro()`
+  in `AlpacaCore/tests/fake_skywatcher_mount.h`, three cases use it) (9600 baud, no home
   index, older firmware string) — deliberately NOT added with invented numbers. This
   branch's `FakeMountProfile::eqm35_pro()` is a REAL hardware capture; fabricating a
   plausible HEQ5/EQ6 profile without hardware to source it from would misrepresent
