@@ -40,9 +40,7 @@ namespace {
 // this was three verbatim copies, so a change to what a default test fake
 // looks like had to be made in three places with nothing failing if it was
 // made in two.
-FakeQHYSDK make_fake(const std::string& id = "fake-qhy-0") {
-    return FakeQHYSDK::with_one_camera(id);
-}
+FakeQHYSDK make_fake(const std::string& id = "fake-qhy-0") { return FakeQHYSDK::with_one_camera(id); }
 
 }  // namespace
 
@@ -409,8 +407,7 @@ TEST_CASE("FakeQHYSDK - an empty readout-mode list still accepts index 0", "[qhy
     CHECK(fake.get_readout_mode_name("fake-qhy-0", 0) == "Mode 0");
 }
 
-TEST_CASE("FakeQHYSDK - get_param answers the QHYCCD_ERROR sentinel for an unsupported control",
-          "[qhy][fake][unit]") {
+TEST_CASE("FakeQHYSDK - get_param answers the QHYCCD_ERROR sentinel for an unsupported control", "[qhy][fake][unit]") {
     // Parity with the real wrapper, which returns GetQHYCCDParam() raw
     // (issue #373). The fake used to answer 0.0, and 0.0 is the more dangerous
     // of the two: modelling "this camera does not support that control" by
@@ -470,8 +467,7 @@ TEST_CASE("FakeQHYSDK - get_mem_length shrinks with the binning", "[qhy][fake][u
     CHECK(fake.get_mem_length("fake-qhy-0") == 32U * 24U * 2U);
 }
 
-TEST_CASE("FakeQHYSDK - control_temp converges over calls instead of settling instantly",
-          "[qhy][fake][unit]") {
+TEST_CASE("FakeQHYSDK - control_temp converges over calls instead of settling instantly", "[qhy][fake][unit]") {
     // ControlQHYCCDTemp is a PID that converges over many calls, which is why
     // the driver polls it about once a second (issue #390). The fake wrote the
     // target straight into CURTEMP, so a thermal test could assert an instant

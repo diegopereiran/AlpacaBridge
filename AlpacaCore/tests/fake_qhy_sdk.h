@@ -248,8 +248,7 @@ public:
     /// in three of them, so a change to what a default test fake looks like (a
     /// new entry in `controls_available`, a different canned camera) had to be
     /// made in three places with nothing failing if it was made in two.
-    static FakeQHYSDK with_one_camera(const std::string& id = "fake-qhy-0",
-                                      const std::string& model = "FakeQHY600") {
+    static FakeQHYSDK with_one_camera(const std::string& id = "fake-qhy-0", const std::string& model = "FakeQHY600") {
         FakeQHYSDK fake;
         fake.cameras.push_back(default_camera(id, model));
         return fake;

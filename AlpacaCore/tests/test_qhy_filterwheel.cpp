@@ -44,9 +44,7 @@ using alpacacore::test::LockedQHYSDK;
 // this was three verbatim copies, so a change to what a default test fake
 // looks like had to be made in three places with nothing failing if it was
 // made in two.
-FakeQHYSDK make_fake(const std::string& id = "fake-qhy-0") {
-    return FakeQHYSDK::with_one_camera(id);
-}
+FakeQHYSDK make_fake(const std::string& id = "fake-qhy-0") { return FakeQHYSDK::with_one_camera(id); }
 
 }  // namespace
 
