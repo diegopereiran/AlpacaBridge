@@ -46,6 +46,25 @@ void expect_alpaca_error(const std::function<void()>& fn, int expected_code) {
         CHECK(ex.error_code() == expected_code);
     }
 }
+// open-astro#395: pins the host-discipline probe for one case and restores
+// the real adjtimex read afterwards, whatever the case does.
+struct ProbeGuard {
+    explicit ProbeGuard(bool disciplined) {
+        alpacacore::vendor::skywatcher::detail::set_host_synchronized_probe([disciplined] { return disciplined; });
+    }
+    explicit ProbeGuard(std::function<bool()> probe, std::chrono::milliseconds resample_interval)
+        : previous_interval_(alpacacore::vendor::skywatcher::detail::host_discipline_resample_interval()) {
+        alpacacore::vendor::skywatcher::detail::set_host_synchronized_probe(std::move(probe));
+        alpacacore::vendor::skywatcher::detail::set_host_discipline_resample_interval(resample_interval);
+    }
+    ~ProbeGuard() {
+        // Restore the interval BEFORE the probe: from here on nothing may
+        // call the lambda this guard installed, whatever it captured.
+        alpacacore::vendor::skywatcher::detail::set_host_discipline_resample_interval(previous_interval_);
+        alpacacore::vendor::skywatcher::detail::set_host_synchronized_probe(nullptr);
+    }
+    std::chrono::milliseconds previous_interval_{30000};
+};
 }  // namespace
 
 namespace sw = alpacacore::vendor::skywatcher;
@@ -1503,9 +1522,11 @@ TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime and repo
     // the pointing math honours it only on a host the kernel reports as
     // undisciplined. On an NTP-disciplined host the host clock is the better
     // one and the router has already refused to step it, so a client's error
-    // must not reach the mount. Which branch this test takes therefore depends
-    // on the machine it runs on, and it asserts both.
-    const bool host_disciplined = alpacacore::util::HostClock::kernel_is_synchronized();
+    // must not reach the mount. open-astro#395: the discipline probe is a
+    // seam, so both branches run on every build host; this case runs the body
+    // once per branch.
+    const bool host_disciplined = GENERATE(true, false);
+    const ProbeGuard probe_guard(host_disciplined);
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
@@ -1822,6 +1843,44 @@ TEST_CASE("SkyWatcher async - the client-clock disagreement WARN fires once per 
         REQUIRE(driver->get_connected());
         driver->set_utc_date(far);
         CHECK(warns.load() == first_session * 2);
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("SkyWatcher async - discipline gained after the write stops the client offset steering pointing (#405)",
+          "[skywatcher][async]") {
+    // Host undisciplined at the write: the client's +1 h reaches LST. The
+    // host then becomes disciplined without a step (NTP slewing a clock that
+    // was already close), which the step detector cannot see. The pointing
+    // path re-samples the probe at most once per interval and drops back to
+    // the host clock; the UTCDate readback keeps honouring the client.
+    // Process-wide probe state is installed and restored by the guard, so a
+    // REQUIRE that throws out of the case cannot leave a lambda that
+    // captures this frame in the global slot.
+    std::atomic<bool> disciplined{false};
+    const ProbeGuard probe_guard([&] { return disciplined.load(); }, std::chrono::milliseconds(50));
+    {
+        FakeSkyWatcherMount mount;
+        REQUIRE(mount.ok());
+        auto driver = connected_driver(mount);
+        const auto wrap24 = [](double h) {
+            h = std::fmod(h, 24.0);
+            return h < 0.0 ? h + 24.0 : h;
+        };
+        const double lst0 = driver->get_sidereal_time();
+        driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1));
+        const double d_before = wrap24(driver->get_sidereal_time() - lst0);
+        CHECK(d_before > 1.0027379 - 0.002);
+
+        disciplined = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        static_cast<void>(driver->get_sidereal_time());  // the read that re-samples
+        const double d_after = wrap24(driver->get_sidereal_time() - lst0);
+        CHECK((d_after < 0.002 || d_after > 23.998));
+        // The readback is the client's property and still says +1 h.
+        const auto readback = std::chrono::duration_cast<std::chrono::milliseconds>(
+            driver->get_utc_date() - (std::chrono::system_clock::now() + std::chrono::hours(1)));
+        CHECK(std::abs(readback.count()) < 500);
         driver->set_connected(false);
     }
 }

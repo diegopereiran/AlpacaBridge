@@ -827,10 +827,13 @@ public:
         utc_anchor_system_ = std::chrono::system_clock::now();
         utc_anchor_steady_ = std::chrono::steady_clock::now();
         has_utc_offset_ = true;
-        // open-astro#301: sampled once, here, so the pointing path costs no
-        // syscall. A host the kernel reports as disciplined has a better clock
-        // than the client does, and the router has already refused to step it.
-        utc_offset_host_was_synchronized_ = alpacacore::util::HostClock::kernel_is_synchronized();
+        // open-astro#301: sampled here at the write; while the host was
+        // undisciplined, resample_host_discipline_locked() re-checks it at
+        // most once per interval on the pointing path (open-astro#405). A
+        // host the kernel reports as disciplined has a better clock than the
+        // client does, and the router has already refused to step it.
+        utc_offset_host_was_synchronized_ = detail::host_synchronized_probe();
+        next_discipline_resample_ = std::chrono::steady_clock::now() + detail::host_discipline_resample_interval();
         // open-astro#400: once per connection. The disagreement is a
         // configuration fact, not an event, and a client that re-writes
         // UTCDate on a poll interval would otherwise repeat the same line for
@@ -1874,10 +1877,39 @@ private:
     std::chrono::system_clock::time_point utc_now_locked() const {
         const auto system_now = std::chrono::system_clock::now();
         const bool survives = client_offset_survives_locked(system_now);
+        resample_host_discipline_locked(survives);
         if (!detail::pointing_uses_client_offset(survives, utc_offset_host_was_synchronized_)) {
             return system_now;
         }
         return system_now + utc_offset_;
+    }
+
+    // open-astro#405: a host that was undisciplined at the write and acquires
+    // NTP discipline by slewing (no step, so client_offset_survives_locked()
+    // never notices) would keep pointing by the client's offset for the whole
+    // session. Re-sample the discipline probe at most once per interval, off
+    // the write path, and stop applying the offset once the host is good.
+    // The mirror direction (disciplined then lost) is left alone: ignoring
+    // the offset is the safe side. Only ever moves the flag false -> true.
+    void resample_host_discipline_locked(bool offset_survives) const {
+        if (!offset_survives || utc_offset_host_was_synchronized_) {
+            return;
+        }
+        const auto interval = detail::host_discipline_resample_interval();
+        if (interval.count() <= 0) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_discipline_resample_) {
+            return;
+        }
+        next_discipline_resample_ = now + interval;
+        if (detail::host_synchronized_probe()) {
+            utc_offset_host_was_synchronized_ = true;
+            ALPACA_LOG_INFO("SkyWatcher",
+                            "Host clock became NTP-disciplined after the client's UTCDate write; pointing by the "
+                            "host clock from now on (the UTCDate readback still honours the client)");
+        }
     }
 
     // The ASCOM UTCDate readback, which always honours a client's write:
@@ -3244,9 +3276,12 @@ private:
     // a read.
     mutable bool has_utc_offset_ = false;
     // Was the host clock NTP/PTP-disciplined when the client wrote UTCDate?
-    // Sampled once, at the write (open-astro#301).
-    bool utc_offset_host_was_synchronized_ = false;
-    bool client_disagreement_warned_ = false;  // open-astro#400
+    // Sampled at the write (open-astro#301) and, only from false to true,
+    // re-sampled on the pointing path at most once per interval (#405),
+    // which is why it is mutable.
+    mutable bool utc_offset_host_was_synchronized_ = false;
+    mutable std::chrono::steady_clock::time_point next_discipline_resample_{};  // open-astro#405
+    bool client_disagreement_warned_ = false;                                   // open-astro#400
     mutable std::chrono::system_clock::duration utc_offset_{};
     mutable std::chrono::system_clock::time_point utc_anchor_system_{};
     mutable std::chrono::steady_clock::time_point utc_anchor_steady_{};
@@ -3319,6 +3354,46 @@ private:
 };
 
 namespace detail {
+namespace {
+std::mutex& probe_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::function<bool()>& probe_slot() {
+    static std::function<bool()> probe = &alpacacore::util::HostClock::kernel_is_synchronized;
+    return probe;
+}
+std::chrono::milliseconds& resample_slot() {
+    static std::chrono::milliseconds interval{30000};
+    return interval;
+}
+}  // namespace
+
+void set_host_synchronized_probe(std::function<bool()> probe) {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    probe_slot() =
+        probe ? std::move(probe) : std::function<bool()>(&alpacacore::util::HostClock::kernel_is_synchronized);
+}
+
+bool host_synchronized_probe() {
+    std::function<bool()> probe;
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex());
+        probe = probe_slot();
+    }
+    return probe();
+}
+
+void set_host_discipline_resample_interval(std::chrono::milliseconds interval) {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    resample_slot() = interval;
+}
+
+std::chrono::milliseconds host_discipline_resample_interval() {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    return resample_slot();
+}
+
 bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed, std::chrono::milliseconds tolerance) {
     const auto system_ms = std::chrono::duration_cast<std::chrono::milliseconds>(system_elapsed);

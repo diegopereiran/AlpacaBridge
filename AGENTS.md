@@ -1518,14 +1518,21 @@ datagrams before each send so replies cannot get off-by-one.
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
-  client-set `UTCDate` offset only when the host clock was undisciplined (no NTP) at the moment
-  of the write, so a client's clock error never steers pointing on an NTP-good host;
+  client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
+  the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
+  path through `detail::host_synchronized_probe()` (one `adjtimex` read, no device I/O; #405), so
+  a client's clock error never steers pointing on an NTP-good host and stops steering it within
+  about 30 s of the host becoming disciplined by slewing (INFO log; the flag only moves
+  undisciplined to disciplined, since ignoring the offset is the safe side);
   `client_utc_now_locked()` feeds the `UTCDate` readback and always honours the client's write,
   because that property is the client's to set and ConformU reads back what it wrote (#287,
   #351). On an NTP-less host the router also steps the system clock from that write (#289). The
   offset is not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped
   underneath it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks
-  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write.
+  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write; the
+  30 s re-sample above covers discipline gained without a step. Tests pin both branches through
+  the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
+  clock state (#395).
 - Pointing convention: home = counterweight down pointing at the pole, counts offset
   `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
   `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
