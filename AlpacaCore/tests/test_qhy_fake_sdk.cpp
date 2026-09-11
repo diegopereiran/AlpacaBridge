@@ -257,3 +257,41 @@ TEST_CASE("FakeQHYSDK - a moved-from instance is still safely usable", "[qhy][fa
     REQUIRE_NOTHROW(source.get_sdk_version());
     CHECK(source.call_count("get_sdk_version") == 1);
 }
+
+TEST_CASE("FakeQHYSDK - cancel_exposure on a closed handle is a silent no-op", "[qhy][fake][unit]") {
+    // Matches QHYSDKWrapper::cancel_exposure(): a missing/closed handle
+    // returns silently rather than throwing NotConnected -- this is the
+    // SDK's own mechanism for interrupting a call already blocked on the same
+    // handle from another thread, so it can't afford to throw on a handle a
+    // racing close() just erased.
+    auto fake = make_fake();
+    REQUIRE_NOTHROW(fake.cancel_exposure("fake-qhy-0"));
+    CHECK(fake.call_count("cancel_exposure") == 1);
+}
+
+TEST_CASE("FakeQHYSDK - get_num_readout_modes floors at 1", "[qhy][fake][unit]") {
+    // Matches QHYSDKWrapper::get_num_readout_modes(): "at least one mode",
+    // never zero.
+    auto fake = make_fake();
+    fake.open_camera("fake-qhy-0");
+    fake.readout_modes.clear();
+    CHECK(fake.get_num_readout_modes("fake-qhy-0") == 1);
+}
+
+TEST_CASE("FakeQHYSDK - an out-of-range readout mode name falls back, set fails", "[qhy][fake][unit]") {
+    // Matches QHYSDKWrapper: get_readout_mode_name() synthesizes "Mode N" for
+    // an index the SDK call doesn't recognize (it never throws InvalidValue
+    // here); set_readout_mode() on the same index is an SDK call failure,
+    // which check_result() turns into DriverException.
+    auto fake = make_fake();
+    fake.open_camera("fake-qhy-0");
+    REQUIRE(fake.readout_modes.size() == 2);
+
+    CHECK(fake.get_readout_mode_name("fake-qhy-0", 5) == "Mode 5");
+    try {
+        fake.set_readout_mode("fake-qhy-0", 5);
+        FAIL("expected a throw");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::DriverException);
+    }
+}

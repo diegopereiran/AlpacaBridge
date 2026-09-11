@@ -1728,12 +1728,14 @@ private:
     // ── Members ──────────────────────────────────────────────────────────────
 
     // The SDK seam (issue #321). Every background worker below that can be
-    // DETACHED captures this as a raw QHYSDK* rather than reaching through
-    // `this`: once detached, the driver may be destroyed while the worker is
-    // still inside its SDK call, so `sdk_` (a member) would be a
-    // use-after-free at exactly the moment the call returns. The SDK object
-    // outlives every driver built on it -- the singleton is process-scoped,
-    // and a test fake must be declared before the driver it feeds.
+    // DETACHED still captures `this` for everything else it touches, but must
+    // reach the SDK itself through a captured raw QHYSDK*, never through
+    // `this->sdk_`: once detached, the driver may be destroyed while the
+    // worker is still inside its SDK call, so going through the `sdk_` member
+    // at that point would be a use-after-free at exactly the moment the call
+    // returns. The SDK object outlives every driver built on it -- the
+    // singleton is process-scoped, and a test fake must be declared before
+    // the driver it feeds.
     QHYSDK& sdk_;
     int device_number_;
     std::optional<std::string> camera_id_;

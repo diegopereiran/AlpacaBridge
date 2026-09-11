@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
+#include <algorithm>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -324,7 +325,14 @@ public:
 
     void cancel_exposure(const std::string& camera_id) override {
         hit("cancel_exposure");
-        require_open(camera_id);
+        // Matches QHYSDKWrapper::cancel_exposure(): a missing/closed handle
+        // is a silent no-op, not NotConnected. Deliberate on the real side --
+        // this is the SDK's mechanism for interrupting a call already blocked
+        // on the SAME handle from another thread, so it can't afford to throw
+        // on a handle a racing close() just erased.
+        if (!is_open(camera_id)) {
+            return;
+        }
     }
 
     void guide(const std::string& camera_id, uint32_t qhy_direction, uint16_t duration_ms) override {
@@ -367,14 +375,20 @@ public:
     uint32_t get_num_readout_modes(const std::string& camera_id) override {
         hit("get_num_readout_modes");
         require_open(camera_id);
-        return static_cast<uint32_t>(readout_modes.size());
+        // Matches QHYSDKWrapper::get_num_readout_modes(): floors at 1 ("at
+        // least one mode"), never reports zero.
+        return std::max<uint32_t>(1, static_cast<uint32_t>(readout_modes.size()));
     }
 
     std::string get_readout_mode_name(const std::string& camera_id, uint32_t mode_index) override {
         hit("get_readout_mode_name");
         require_open(camera_id);
+        // Matches QHYSDKWrapper::get_readout_mode_name(): an out-of-range
+        // index falls back to a synthesized "Mode N" name rather than
+        // throwing -- the real SDK call just fails and the wrapper covers
+        // for it, it never surfaces InvalidValue here.
         if (mode_index >= readout_modes.size()) {
-            throw AlpacaException("fake: readout mode index out of range", AlpacaError::InvalidValue);
+            return "Mode " + std::to_string(mode_index);
         }
         return readout_modes[mode_index];
     }
@@ -382,8 +396,11 @@ public:
     void set_readout_mode(const std::string& camera_id, uint32_t mode_index) override {
         hit("set_readout_mode");
         require_open(camera_id);
+        // Matches QHYSDKWrapper::set_readout_mode(): an out-of-range index is
+        // an SDK call failure, which check_result() turns into
+        // DriverException -- not InvalidValue.
         if (mode_index >= readout_modes.size()) {
-            throw AlpacaException("fake: readout mode index out of range", AlpacaError::InvalidValue);
+            throw AlpacaException("fake: SetQHYCCDReadMode failed (index out of range)", AlpacaError::DriverException);
         }
         readout_mode_ = mode_index;
     }
@@ -439,9 +456,13 @@ private:
         }
     }
 
-    void require_open(const std::string& camera_id) const {
+    bool is_open(const std::string& camera_id) const {
         auto it = ref_counts_.find(camera_id);
-        if (it == ref_counts_.end() || it->second <= 0) {
+        return it != ref_counts_.end() && it->second > 0;
+    }
+
+    void require_open(const std::string& camera_id) const {
+        if (!is_open(camera_id)) {
             throw AlpacaException("QHY camera not open: " + camera_id, AlpacaError::NotConnected);
         }
     }
