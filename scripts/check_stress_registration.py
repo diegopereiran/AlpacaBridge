@@ -73,7 +73,6 @@ ALLOWLIST = {
     ("wandererastro", "filterwheel"),
     ("wandererastro", "rotator"),
     ("wandererastro", "switch"),
-    ("weewx", "observingconditions"),
 }
 
 
