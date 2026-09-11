@@ -65,7 +65,7 @@ public:
         // Keep a slave handle open so the master never sees EIO between the
         // driver's disconnect (close) and reconnect (open).
         keepalive_fd_ = open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
-        struct termios tty{};
+        struct termios tty {};
         if (keepalive_fd_ >= 0 && tcgetattr(keepalive_fd_, &tty) == 0) {
             cfmakeraw(&tty);
             tcsetattr(keepalive_fd_, TCSANOW, &tty);
@@ -129,7 +129,7 @@ private:
         std::string pending;
         char buf[64];
         while (!stop_.load()) {
-            struct pollfd pfd{};
+            struct pollfd pfd {};
             pfd.fd = master_fd_;
             pfd.events = POLLIN;
             const int r = poll(&pfd, 1, 20);
