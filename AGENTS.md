@@ -771,7 +771,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connect. Driver side, prefer an atomic `connected_` with a lock-free
   getter (29 drivers do, SynScan among them since the #130 fix) —
   the five above still take the mutex and rely on the router rule, and four
-  wrapper-backed switch drivers (iOptron PowerBox, ToupTek PowerBox, ZWO ASIAIR
+  wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita, ZWO ASIAIR
   and ASIAIR Plus) lock inside the wrapper's `is_open()` but release it before
   `pending_mutex_`, so they rely on the rule without creating the ABBA hazard. Regression tests:
   `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and

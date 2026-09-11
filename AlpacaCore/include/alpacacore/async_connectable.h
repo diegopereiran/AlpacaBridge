@@ -300,13 +300,13 @@ private:
             // it under pending_mutex_ is an ABBA deadlock. The drivers that
             // create that hazard are the Bisque, Celestron, iOptron, OnStep
             // and Sky-Watcher telescopes. The wrapper-backed switch drivers
-            // (iOptron PowerBox, ToupTek PowerBox, ZWO ASIAIR and ASIAIR
-            // Plus) also lock in get_connected(), via the wrapper's is_open(),
-            // but release it before their set_connected reaches
-            // pending_mutex_, so they never nest the two. The read is a
-            // momentary snapshot either way (the sync setter never held both
-            // locks at once), and a stale value is benign: the deferred
-            // transitions below are idempotent.
+            // (iOptron iMate PowerBox, ToupTek StellaVita, ZWO ASIAIR and
+            // ASIAIR Plus) also lock in get_connected(), via the wrapper's
+            // is_open(), but release it before their set_connected reaches
+            // pending_mutex_, so they never nest the two. The read here is a
+            // momentary snapshot whichever driver answers it, and a stale
+            // value is benign: the deferred transitions below are
+            // idempotent.
             //
             // SynScan is deliberately NOT in that list: its get_connected()
             // is a bare atomic load, made lock-free by the issue #130 fix
