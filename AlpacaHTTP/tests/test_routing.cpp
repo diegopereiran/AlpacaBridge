@@ -2276,6 +2276,25 @@ int main() {
         const std::string client_utc_body = R"({"UTCDate":"2001-01-01T00:00:00.000Z"})";
         const auto expected = std::chrono::system_clock::from_time_t(978307200);  // the same instant, as time_t
 
+        // desc["Value"] is nlohmann's const operator[], which is a JSON_ASSERT
+        // only -- under NDEBUG an error envelope (no "Value") dereferences
+        // end() instead of failing cleanly. Check the envelope, then read.
+        auto clock_field = [](const nlohmann::json& desc, const char* key) -> nlohmann::json {
+            if (desc.is_discarded() || !desc.contains("Value") || !desc["Value"].contains(key)) {
+                return nlohmann::json();
+            }
+            return desc["Value"][key];
+        };
+
+        // The five sub-blocks below share this stub, so each starts from a
+        // known count rather than inheriting the previous block's. Calling
+        // this is what makes a block order-independent; a block that forgets
+        // would assert against a carried-over number.
+        auto fresh_counts = [&] {
+            scope->utc_writes = 0;
+            scope->on_utc_write = nullptr;
+        };
+
         // An undisciplined host: the write must reach the setter exactly once,
         // carrying the client's value, and the driver must then be handed the
         // same instant.
@@ -2290,7 +2309,7 @@ int main() {
                                                   set_to = tp;
                                                   return true;
                                               });
-            scope->utc_writes = 0;
+            fresh_counts();
             scope->on_utc_write = [&] { set_calls_at_write = set_calls; };
             const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             scope->on_utc_write = nullptr;
@@ -2309,7 +2328,7 @@ int main() {
             // The step is now visible in the management readout.
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "client");
+            EXPECT(clock_field(desc, "ClockSource") == "client");
         }
 
         // A disciplined host (NTP/chrony/GPS) is never stepped, however wrong
@@ -2323,7 +2342,7 @@ int main() {
                                                   ++set_calls;
                                                   return true;
                                               });
-            scope->utc_writes = 0;
+            fresh_counts();
             const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
@@ -2332,8 +2351,8 @@ int main() {
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "ntp");
-            EXPECT(desc["Value"]["ClockSynchronized"] == true);
+            EXPECT(clock_field(desc, "ClockSource") == "ntp");
+            EXPECT(clock_field(desc, "ClockSynchronized") == true);
         }
 
         // The opt-out blocks the step without blocking the driver write. The
@@ -2351,15 +2370,15 @@ int main() {
                                                   ++set_calls;
                                                   return true;
                                               });
-            scope->utc_writes = 0;
+            fresh_counts();
             route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             EXPECT(set_calls == 0);
             EXPECT(scope->utc_writes == 1);
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "none");
-            EXPECT(desc["Value"]["SyncSystemClockFromClients"] == false);
+            EXPECT(clock_field(desc, "ClockSource") == "none");
+            EXPECT(clock_field(desc, "SyncSystemClockFromClients") == false);
         }
 
         // A host with no CAP_SYS_TIME: the refusal latches, so a later reader
@@ -2372,7 +2391,7 @@ int main() {
                                                   error = "operation not permitted";
                                                   return false;
                                               });
-            scope->utc_writes = 0;
+            fresh_counts();
             const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             // A refused clock step is not a failed UTCDate write: the driver
@@ -2382,7 +2401,7 @@ int main() {
 
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "none");
+            EXPECT(clock_field(desc, "ClockSource") == "none");
         }
 
         // A hardware RTC the kernel booted from is reported as the source
@@ -2394,8 +2413,8 @@ int main() {
                                               [] { return true; });
             const auto desc = nlohmann::json::parse(
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
-            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "rtc");
-            EXPECT(desc["Value"]["ClockSynchronized"] == false);
+            EXPECT(clock_field(desc, "ClockSource") == "rtc");
+            EXPECT(clock_field(desc, "ClockSynchronized") == false);
         }
 
         // Both connect paths warn when, and only when, the clock is
