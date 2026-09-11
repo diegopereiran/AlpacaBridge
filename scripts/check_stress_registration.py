@@ -46,7 +46,13 @@ STRESS_TEST_GLOB_SUFFIX = "_concurrency_stress.cpp"
 # included because the tests/ helpers (fake_mount_server.h and friends) are
 # #included by several TUs, so a TEST_CASE added to one would compile in and
 # re-inflate the vendor threshold while slipping past a *.cpp-only scan.
-TEST_GLOBS = ("AlpacaCore/tests/test_*.cpp", "AlpacaCore/tests/*.h")
+#
+# The .cpp glob is deliberately *.cpp and not test_*.cpp: AGENTS.md states the
+# rule as "a [stress] case anywhere else under AlpacaCore/tests/", and a
+# narrower glob would leave a file not named test_* outside the check while the
+# prose said otherwise. Registration files are excluded by path in
+# find_stray_stress_cases(), not by failing to match here.
+TEST_GLOBS = ("AlpacaCore/tests/*.cpp", "AlpacaCore/tests/*.h")
 
 # Anchored to the actual override, not just any DeviceType:: mention in the
 # file -- a driver that referenced a different DeviceType::X earlier (a
@@ -316,6 +322,12 @@ def self_test():
     synthetic snippets so a future edit to either regex gets caught here
     instead of only showing up as a silently wrong (vendor, device_type)
     pair. Not run as part of the normal check (no repo state needed).
+
+    It also drives main() end to end over temp files with tracked_files()
+    patched, which covers the two tag predicates AND their wiring: deleting
+    either `failures.extend(...)` line in main() fails a check here rather
+    than passing silently. Keep that property when adding cases -- a predicate
+    tested only through its own function leaves the wiring unpinned.
     """
     checks = []
 
@@ -434,14 +446,17 @@ def self_test():
             # to be shallow enough that find_drivers() skips it.
             if pattern.endswith("_driver.cpp"):
                 return []
-            # TEST_GLOB is the BROAD glob, so it must return the
-            # non-registration file too -- otherwise find_stray_stress_cases()
-            # skips everything it is handed (all of it is in `registrations`)
-            # and returns [] no matter what, leaving its main() wiring
-            # untestable. That was a real hole: deleting
-            # `failures.extend(find_stray_stress_cases())` left every check
-            # here green until this fixture grew the second file.
-            if pattern == TEST_GLOBS[0]:
+            # The broad .cpp glob must return the non-registration file too --
+            # otherwise find_stray_stress_cases() skips everything it is handed
+            # (all of it is in `registrations`) and returns [] no matter what,
+            # leaving its main() wiring untestable. That was a real hole:
+            # deleting `failures.extend(find_stray_stress_cases())` left every
+            # check here green until this fixture grew the second file.
+            #
+            # Keyed on the pattern itself rather than TEST_GLOBS[0]: reordering
+            # that tuple would otherwise silently hand the .cpp glob [] and
+            # re-open exactly the hole described above.
+            if pattern == "AlpacaCore/tests/*.cpp":
                 return [stress, core]
             if pattern in TEST_GLOBS:
                 return []
@@ -468,6 +483,16 @@ def self_test():
         offending = 'TEST_CASE("Bad", "[fakevendor][camera][stress-guard]") {}'
         check("main() FAILS when a registration file uses [stress-guard] alone",
               run_main_with(offending) == 1)
+        # Pins that the rejection is PER CASE, not per file. Every other
+        # fixture here holds a single TEST_CASE, so a per-file implementation
+        # (union the file's tags, then test) would pass all of them
+        # identically while letting this one through -- the file as a whole
+        # carries [stress], but the second case alone does not, and that case
+        # is the one that silently drops out of the vendor coverage count.
+        mixed = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {}\n'
+                 'TEST_CASE("Bad", "[fakevendor][camera][stress-guard]") {}')
+        check("main() FAILS on a [stress-guard]-only case beside a [stress] one",
+              run_main_with(mixed) == 1)
 
         # The sibling wiring: a [stress] case in a NON-registration file is the
         # regression that made CI's vendor zero-coverage grep vacuous.

@@ -524,9 +524,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Self-test the check's own regexes
+      - name: Self-test the check's own regexes and tag wiring
         # Regression guard for DEVICE_TYPE_OVERRIDE_RE / TEST_CASE_TAGS_RE
-        # against synthetic snippets, independent of repo state.
+        # against synthetic snippets, independent of repo state. It also runs
+        # the script's main() over temp files, so the two tag predicates and
+        # their wiring into main() are both covered -- deleting a
+        # `failures.extend(...)` line fails here rather than passing silently.
         run: python3 scripts/check_stress_registration.py --self-test
 
       - name: Check every vendor driver has [stress] coverage or an allow-list entry
