@@ -2114,6 +2114,72 @@ int main() {
         }
         EXPECT(found);
     }
+    {
+        // issue #408 (second item): the startup WARN for a half-configured
+        // persisted entry names the half that is missing. Two entries, one
+        // with only a latitude and one with only a longitude, loaded by a
+        // fresh Router while the log sink is captured; the text is pinned so
+        // swapping the two arms cannot pass.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9631},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 39.7392}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9632},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB9"},
+                           {"baudRate", 9600},
+                           {"siteLongitude", -104.9903}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+        std::vector<std::string> warnings;
+        std::mutex warnings_mutex;
+        auto previous_sink = alpacacore::logging::get_log_sink();
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) {
+                    std::lock_guard<std::mutex> lock(warnings_mutex);
+                    warnings.emplace_back(message);
+                }
+            });
+        alpacahttp::Router half_router;
+        static_cast<void>(route_request(half_router, "GET", "/management/v1/configureddevices"));
+        alpacacore::logging::set_log_sink(previous_sink);
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(half_router, "skywatcher", "telescope", 9631);
+        remove_device(half_router, "skywatcher", "telescope", 9632);
+        restore_original();
+        bool lat_only = false;
+        bool lon_only = false;
+        for (const auto& w : warnings) {
+            if (w.find("telescope 9631 has no site longitude and will refuse to connect") != std::string::npos) {
+                lat_only = true;
+            }
+            if (w.find("telescope 9632 has no site latitude and will refuse to connect") != std::string::npos) {
+                lon_only = true;
+            }
+        }
+        EXPECT(lat_only);
+        EXPECT(lon_only);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP

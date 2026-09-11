@@ -7406,8 +7406,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             // keeps appearing in configureddevices and stays editable in the
             // web UI; the driver refuses the connect until it is fixed.
             const char* missing = (!site_latitude.has_value() && !site_longitude.has_value()) ? "site coordinates"
-                                  : !site_latitude.has_value()                                ? "a site latitude"
-                                                                                              : "a site longitude";
+                                  : !site_latitude.has_value()                                ? "site latitude"
+                                                                                              : "site longitude";
             util::log_warning("Persisted Sky-Watcher telescope " + std::to_string(device_number) + " has no " +
                               missing + " and will refuse to connect. " + kMissingSite);
         }
