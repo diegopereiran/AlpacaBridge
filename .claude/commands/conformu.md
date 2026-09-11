@@ -162,6 +162,8 @@ gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name
 
 Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix, then `printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1` — installed is current only if it equals that maximum.
 
+On arm64, an installed **4.5.0 counts as outdated no matter what `releases/latest` says** — it is the broken build (see the arm64 exception below), so treat `installed == 4.5.0` exactly like MISSING and replace it before running anything.
+
 If MISSING or outdated, install/update it on the SBC (no confirmation needed — this is part of the standard rig setup). The linux-arm64 asset is a `.tar.xz`:
 
 ```bash
@@ -184,6 +186,11 @@ of the asset URL above:
 ```bash
 ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
 ```
+
+That URL is unpinned and unsigned: the same name can serve a different build later. Check the version line it
+prints against the build the current reports were produced with, `4.5.1.54507, Build time: Thu 27 August 2026
+11:40:17` — a different build is not automatically wrong, but note it in the log and say so in the PR rather
+than labelling the run "4.5.1" and moving on.
 
 Re-check this once 4.5.1 (or later) is a real GitHub release: at that point the ordinary
 `releases/latest` path above is correct again and this exception can go.
