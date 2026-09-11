@@ -3304,9 +3304,13 @@ Response Router::dispatch_telescope_method(
                     } else if (step.outcome == Outcome::SkippedSynchronized &&
                                (step.delta > alpacacore::util::HostClock::kClientDisagreementWarn ||
                                 step.delta < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
-                        util::log_warning(
-                            what + "; NTP-disciplined host and client disagree by more than " +
-                            std::to_string(alpacacore::util::HostClock::kClientDisagreementWarn.count() / 1000) + " s");
+                        // Rendered in ms, not seconds: the threshold is a
+                        // millisecond constant, and dividing by 1000 would
+                        // log "2 s" for a future 2500 ms value -- which
+                        // defeats the point of having one shared constant.
+                        util::log_warning(what + "; NTP-disciplined host and client disagree by more than " +
+                                          std::to_string(alpacacore::util::HostClock::kClientDisagreementWarn.count()) +
+                                          " ms");
                     } else {
                         util::log_debug(what);
                     }
