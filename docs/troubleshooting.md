@@ -106,6 +106,8 @@ scripts/sync-clock.sh astro@192.168.168.1 --rtc
 
 This keeps Alpaca timestamps correct even with no NTP reachable. The hardware RTC persists the time across reboots (as long as the RTC battery holds).
 
+**If the SBC does have NTP and a client's clock is wrong**: on the Sky-Watcher direct motor-controller driver, a client's `UTCDate` write is still reported back to that client verbatim, as the ASCOM contract requires, but it no longer feeds the pointing math. `SiderealTime`, `DestinationSideOfPier` and every goto use the SBC's own clock whenever the kernel reports it disciplined. A tablet 30 minutes out would otherwise skew RA by 7.5 degrees on a rig whose own time is good. The disagreement is logged at WARN past 2 seconds, naming the delta. On an SBC with no NTP nothing changes: the client's time is the only correct time the host will ever see, and it reaches the mount.
+
 ## Clean build
 
 If all else fails, try a clean build:

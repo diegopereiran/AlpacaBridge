@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
@@ -783,8 +784,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         // The motor controller has no clock; the host clock plus the
-        // client-set offset is the driver's time (see utc_now_locked()).
-        return utc_now_locked();
+        // client-set offset is what the client asked to read back, whatever
+        // the pointing math uses (see client_utc_now_locked()).
+        return client_utc_now_locked();
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
@@ -794,6 +796,18 @@ public:
         utc_anchor_system_ = std::chrono::system_clock::now();
         utc_anchor_steady_ = std::chrono::steady_clock::now();
         has_utc_offset_ = true;
+        // open-astro#301: sampled once, here, so the pointing path costs no
+        // syscall. A host the kernel reports as disciplined has a better clock
+        // than the client does, and the router has already refused to step it.
+        utc_offset_host_was_synchronized_ = alpacacore::util::HostClock::kernel_is_synchronized();
+        if (utc_offset_host_was_synchronized_ &&
+            (utc_offset_ > std::chrono::seconds(2) || utc_offset_ < std::chrono::seconds(-2))) {
+            ALPACA_LOG_WARN("SkyWatcher",
+                            "Client UTCDate disagrees with an NTP-disciplined host clock by " +
+                                std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(utc_offset_)
+                                                   .count()) +
+                                " ms; honouring it for the UTCDate readback but pointing by the host clock");
+        }
         invalidate_position_cache_locked();  // reported RA moves with LST
     }
 
@@ -1770,15 +1784,15 @@ private:
     // host clock plus the offset a client set through UTCDate. Before this,
     // get_utc_date() reported the offset while goto/RA math ignored it, so a
     // client time-sync corrected the readback and not the pointing.
-    // Host clock plus the client-set offset. The offset is a snapshot delta
-    // against the host clock at the time of the UTCDate write; if the host
-    // clock is stepped afterwards (Sync Time, NTP, `date`) the delta no
-    // longer describes anything, so it is dropped and the corrected host
-    // clock is used until the next UTCDate write (review of #291).
-    std::chrono::system_clock::time_point utc_now_locked() const {
-        const auto system_now = std::chrono::system_clock::now();
+    // Drops a client offset the host clock has moved out from under. The
+    // offset is a snapshot delta against the host clock at the time of the
+    // UTCDate write; if the host clock is stepped afterwards (Sync Time, NTP,
+    // a manual `date`) the delta no longer describes anything, so it goes
+    // rather than being applied on top of the corrected clock (review of
+    // #291). Returns true when an offset survives.
+    bool client_offset_survives_locked(std::chrono::system_clock::time_point system_now) const {
         if (!has_utc_offset_) {
-            return system_now;
+            return false;
         }
         if (detail::host_clock_stepped(system_now - utc_anchor_system_,
                                        std::chrono::steady_clock::now() - utc_anchor_steady_)) {
@@ -1787,6 +1801,30 @@ private:
             ALPACA_LOG_INFO("SkyWatcher",
                             "Host clock was stepped after the client's UTCDate write; dropping the "
                             "client offset and using the host clock");
+            return false;
+        }
+        return true;
+    }
+
+    // The clock the mount is AIMED by: LST, SiderealTime,
+    // DestinationSideOfPier and every goto. Honours the client's offset only
+    // when the host clock was undisciplined at the time of the write
+    // (open-astro#301); see detail::pointing_uses_client_offset().
+    std::chrono::system_clock::time_point utc_now_locked() const {
+        const auto system_now = std::chrono::system_clock::now();
+        const bool survives = client_offset_survives_locked(system_now);
+        if (!detail::pointing_uses_client_offset(survives, utc_offset_host_was_synchronized_, !survives)) {
+            return system_now;
+        }
+        return system_now + utc_offset_;
+    }
+
+    // The ASCOM UTCDate readback, which always honours a client's write:
+    // UTCDate is the client's property to set, and ConformU reads back what
+    // it wrote. Only a host clock step drops the offset here.
+    std::chrono::system_clock::time_point client_utc_now_locked() const {
+        const auto system_now = std::chrono::system_clock::now();
+        if (!client_offset_survives_locked(system_now)) {
             return system_now;
         }
         return system_now + utc_offset_;
@@ -3130,6 +3168,9 @@ private:
     // Client UTCDate offset and the anchors utc_now_locked() uses to notice a
     // host clock step underneath it. Mutable: the drop happens on a read.
     mutable bool has_utc_offset_ = false;
+    // Was the host clock NTP/PTP-disciplined when the client wrote UTCDate?
+    // Sampled once, at the write (open-astro#301).
+    bool utc_offset_host_was_synchronized_ = false;
     mutable std::chrono::system_clock::duration utc_offset_{};
     mutable std::chrono::system_clock::time_point utc_anchor_system_{};
     mutable std::chrono::steady_clock::time_point utc_anchor_steady_{};
@@ -3208,6 +3249,15 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
     const auto steady_ms = std::chrono::duration_cast<std::chrono::milliseconds>(steady_elapsed);
     const auto drift = system_ms - steady_ms;
     return drift > tolerance || drift < -tolerance;
+}
+
+bool pointing_uses_client_offset(bool has_offset, bool host_was_synchronized, bool host_clock_was_stepped) {
+    if (!has_offset || host_clock_was_stepped) {
+        return false;  // nothing to apply, or the delta no longer describes anything
+    }
+    // A disciplined host already has a better clock than the client's, and
+    // the router refused to step it for exactly that reason.
+    return !host_was_synchronized;
 }
 }  // namespace detail
 
