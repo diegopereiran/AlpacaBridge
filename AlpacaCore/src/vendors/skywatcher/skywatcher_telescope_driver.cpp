@@ -831,14 +831,20 @@ public:
         // syscall. A host the kernel reports as disciplined has a better clock
         // than the client does, and the router has already refused to step it.
         utc_offset_host_was_synchronized_ = alpacacore::util::HostClock::kernel_is_synchronized();
-        if (utc_offset_host_was_synchronized_ &&
+        // open-astro#400: once per connection. The disagreement is a
+        // configuration fact, not an event, and a client that re-writes
+        // UTCDate on a poll interval would otherwise repeat the same line for
+        // the whole session; reset_runtime_state_locked() re-arms it.
+        if (utc_offset_host_was_synchronized_ && !client_disagreement_warned_ &&
             (utc_offset_ > alpacacore::util::HostClock::kClientDisagreementWarn ||
              utc_offset_ < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
+            client_disagreement_warned_ = true;
             ALPACA_LOG_WARN(
                 "SkyWatcher",
                 "Client UTCDate disagrees with an NTP-disciplined host clock by " +
                     std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(utc_offset_).count()) +
-                    " ms; honouring it for the UTCDate readback but pointing by the host clock");
+                    " ms; honouring it for the UTCDate readback but pointing by the host clock (logged once per "
+                    "connection)");
         }
         invalidate_position_cache_locked();  // reported RA moves with LST
     }
@@ -1796,6 +1802,7 @@ private:
     void reset_runtime_state_locked() {
         target_ra_set_ = false;
         target_dec_set_ = false;
+        client_disagreement_warned_ = false;  // open-astro#400: one WARN per connection
         // open-astro#414: the client UTCDate offset and the discipline flag
         // sampled with it are session state; a reconnect starts from the
         // host clock until the client writes UTCDate again.
@@ -3239,6 +3246,7 @@ private:
     // Was the host clock NTP/PTP-disciplined when the client wrote UTCDate?
     // Sampled once, at the write (open-astro#301).
     bool utc_offset_host_was_synchronized_ = false;
+    bool client_disagreement_warned_ = false;  // open-astro#400
     mutable std::chrono::system_clock::duration utc_offset_{};
     mutable std::chrono::system_clock::time_point utc_anchor_system_{};
     mutable std::chrono::steady_clock::time_point utc_anchor_steady_{};

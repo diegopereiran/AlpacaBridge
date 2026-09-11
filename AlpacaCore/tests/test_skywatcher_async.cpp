@@ -22,11 +22,14 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <string_view>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -1782,6 +1785,45 @@ TEST_CASE("SkyWatcher async - a sync that fails after its writes still publishes
     CHECK(std::abs(driver->get_target_right_ascension() - 5.5) < 1e-9);
     CHECK(std::abs(driver->get_target_declination() + 25.0) < 1e-9);
     driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - the client-clock disagreement WARN fires once per connection (#400)",
+          "[skywatcher][async]") {
+    // Only meaningful on a disciplined host (the WARN is gated on it); on an
+    // undisciplined runner the count stays 0 on both writes and the case
+    // still passes, which is the honest outcome without a discipline seam.
+    // The sink is restored by a guard, so a REQUIRE that throws out of the
+    // case cannot leave the global sink pointing at this frame's counter.
+    std::atomic<int> warns{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("Client UTCDate disagrees") != std::string::npos) {
+                ++warns;
+            }
+        });
+    {
+        FakeSkyWatcherMount mount;
+        REQUIRE(mount.ok());
+        auto driver = connected_driver(mount);
+        const auto far = std::chrono::system_clock::now() + std::chrono::minutes(30);
+        driver->set_utc_date(far);
+        driver->set_utc_date(far + std::chrono::seconds(1));
+        driver->set_utc_date(far + std::chrono::seconds(2));
+        const int first_session = warns.load();
+        CHECK(first_session <= 1);
+        // A reconnect re-arms it.
+        driver->set_connected(false);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        driver->set_utc_date(far);
+        CHECK(warns.load() == first_session * 2);
+        driver->set_connected(false);
+    }
 }
 
 TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#304)", "[skywatcher][async]") {
