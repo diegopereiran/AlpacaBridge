@@ -2404,21 +2404,33 @@ int main() {
         // clock is the whole reason #289 exists, and nothing else would catch
         // the line being dropped from one of the two paths.
         {
-            std::vector<std::string> captured;
+            // The level is captured alongside the message: warn_if_clock_undisciplined()
+            // ends in an INFO/WARN ladder (router.cpp: an RTC-booted host that a client can
+            // still correct is INFO, everything else WARN), and a test that only matched the
+            // text would pass with the ladder inverted.
+            struct CapturedLine {
+                alpacacore::logging::LogLevel level;
+                std::string message;
+            };
+            std::vector<CapturedLine> captured;
             std::mutex captured_mutex;
             auto previous_sink = alpacacore::logging::get_log_sink();
             alpacacore::logging::set_log_sink(
-                [&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+                [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
                     std::lock_guard<std::mutex> lock(captured_mutex);
-                    captured.emplace_back(message);
+                    captured.push_back({level, std::string(message)});
                 });
 
-            auto warned_about_clock = [&] {
+            auto clock_warning_level = [&]() -> std::optional<alpacacore::logging::LogLevel> {
                 std::lock_guard<std::mutex> lock(captured_mutex);
-                return std::any_of(captured.begin(), captured.end(), [](const std::string& m) {
-                    return m.find("undisciplined host clock") != std::string::npos;
-                });
+                for (const auto& line : captured) {
+                    if (line.message.find("undisciplined host clock") != std::string::npos) {
+                        return line.level;
+                    }
+                }
+                return std::nullopt;
             };
+            auto warned_about_clock = [&] { return clock_warning_level().has_value(); };
             auto clear = [&] {
                 std::lock_guard<std::mutex> lock(captured_mutex);
                 captured.clear();
@@ -2434,6 +2446,8 @@ int main() {
                 clear();
                 route_request(clock_router, "PUT", "/api/v1/telescope/9802/connected", "Connected=true");
                 EXPECT(warned_about_clock());
+                // No RTC on this host, so the ladder's else arm: WARN, not INFO.
+                EXPECT(clock_warning_level() == alpacacore::logging::LogLevel::Warn);
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9802);
             }
 
@@ -2448,6 +2462,7 @@ int main() {
                 clear();
                 route_request(clock_router, "PUT", "/api/v1/telescope/9803/connect", "");
                 EXPECT(warned_about_clock());
+                EXPECT(clock_warning_level() == alpacacore::logging::LogLevel::Warn);
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9803);
             }
 
