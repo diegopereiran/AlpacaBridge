@@ -279,7 +279,7 @@ private:
             last_failed = true;
             // A non-std exception escaping a std::thread entry point calls
             // std::terminate. Every driver throws std:: exceptions today, but
-            // this base is now the single chokepoint for 26 drivers' connect
+            // this base is now the single chokepoint for 38 drivers' connect
             // paths — swallow-and-log rather than bet on that forever.
             ALPACA_LOG_ERROR(log_tag_, "Connection task failed: non-std exception");
         }
