@@ -1617,10 +1617,11 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
     // open-astro#292: a clock the kernel loaded from a hardware RTC at boot is
     // usually right to seconds, so it is INFO -- but still a WARN when nothing
     // is allowed to correct it.
-    // has_rtc() reads sysfs, which is an I2C transaction on a bus-attached RTC,
-    // and this sits on the connect initiator AGENTS.md times against the 1 s
-    // STANDARD target. Bounded: the probe settles after one success and is
-    // rate-limited to once per 30 s while no device is found.
+    // has_rtc() is a memory read: the probe behind it runs at startup and on
+    // the server's RTC probe thread, never here (open-astro#314). It used to read
+    // sysfs inline, which on a bus-attached RTC is an I2C transaction that can
+    // block for the adapter timeout, on the connect initiator AGENTS.md times
+    // against the 1 s STANDARD target and with the connection op mutex held.
     const bool rtc = host_clock_->has_rtc();
     // enabled() alone does not mean "a client will correct it": without
     // CAP_SYS_TIME every step is refused and the clock is never corrected at
@@ -2215,8 +2216,10 @@ Response Router::dispatch_device_method(
                 // get_connecting() first, and short-circuit: it is the one
                 // non-blocking signal the driver base guarantees, while a
                 // driver's get_connected() may take the state mutex that its
-                // connect sequence holds for the whole handshake (SynScan:
-                // 25 s on a silent handset, issue #130). Reading it
+                // connect sequence holds for the whole handshake (SynScan was
+                // the original: 25 s on a silent handset, issue #130, whose
+                // fix made that getter lock-free; five telescopes still have
+                // the shape -- see async_connectable.h). Reading it
                 // mid-transition stalled this poll for the entire connect,
                 // the very client timeout the PUT wait below exists to
                 // prevent. While a task is in flight the answer is false: a
@@ -2310,8 +2313,10 @@ Response Router::dispatch_device_method(
 
                 // get_connecting() is read first at every step here: a
                 // driver's get_connected() may block on the state mutex its
-                // connect sequence holds for the whole handshake (SynScan hand
-                // controller, issue #130), and calling it while a task is in
+                // connect sequence holds for the whole handshake (the SynScan
+                // hand controller was the original, issue #130; its getter is
+                // lock-free now, five telescopes still block), and calling it
+                // while a task is in
                 // flight stalled this handler for the entire connect, so the
                 // 8 s deadline below never fired. A connect requested while a
                 // task is in flight is still handed to the driver: the base
@@ -2356,11 +2361,10 @@ Response Router::dispatch_device_method(
                     // now do so even on a connect that finishes moments
                     // later. Accepted for this fix: the router has no
                     // general way to tell a driver whose get_connected() is
-                    // lock-free (SynScan, and 30 others — safe to read
-                    // mid-task) from one that blocks on the connect mutex
-                    // (the other five telescopes — unsafe to read mid-task,
-                    // the root cause here) without a per-driver capability
-                    // flag, which is future work.
+                    // lock-free from one that blocks on a driver or wrapper
+                    // mutex — see async_connectable.h for which is which and
+                    // why only the telescopes create the ABBA hazard — without a
+                    // per-driver capability flag, which is future work.
                 } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
                            (device->get_connecting() || device->get_connected())) {
                     // Last client out: tear down the upstream link. While other
@@ -3312,8 +3316,15 @@ Response Router::dispatch_telescope_method(
                     } else if (step.outcome == Outcome::Failed) {
                         util::log_warning(what + ": " + step.error);
                     } else if (step.outcome == Outcome::SkippedSynchronized &&
-                               (step.delta.count() > 2000 || step.delta.count() < -2000)) {
-                        util::log_warning(what + "; NTP-disciplined host and client disagree by more than 2 s");
+                               (step.delta > alpacacore::util::HostClock::kClientDisagreementWarn ||
+                                step.delta < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
+                        // Rendered in ms, not seconds: the threshold is a
+                        // millisecond constant, and dividing by 1000 would
+                        // log "2 s" for a future 2500 ms value -- which
+                        // defeats the point of having one shared constant.
+                        util::log_warning(what + "; NTP-disciplined host and client disagree by more than " +
+                                          std::to_string(alpacacore::util::HostClock::kClientDisagreementWarn.count()) +
+                                          " ms");
                     } else {
                         util::log_debug(what);
                     }
@@ -6984,7 +6995,8 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
     return response;
 }
 
-bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message) {
+bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message,
+                                         [[maybe_unused]] ConfigSource source) {
     std::string device_type_str = config.value("deviceType", "");
     std::string vendor = config.value("vendor", "");
     int device_number = config.value("deviceNumber", -1);
@@ -7361,6 +7373,29 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         }
         if (config.contains("siteElevation")) {
             site_elevation = config.value("siteElevation", 0.0);
+        }
+
+        // open-astro#274: /management/v1/configuredevice is a first-class REST
+        // API independent of the web UI, and used to accept a skywatcher
+        // config with no coordinates at all. The mount stores no site of its
+        // own, so both would then collapse to 0.0 and a southern rig would run
+        // northern pointing math -- silently undoing #250, #253 and #261. The
+        // check goes inline here, the same way the portPath/host checks below
+        // do, because this branch is a hand-written if/else chain per vendor
+        // rather than a schema layer.
+        if (!site_latitude.has_value() || !site_longitude.has_value()) {
+            static constexpr const char* kMissingSite =
+                "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no "
+                "site of its own, and tracking direction, guide sign and pier side are all hemisphere-dependent";
+            if (source == ConfigSource::Api) {
+                error_message = kMissingSite;
+                return false;
+            }
+            // Already on disk from before this rule existed. Register it so it
+            // keeps appearing in configureddevices and stays editable in the
+            // web UI; the driver refuses the connect until it is fixed.
+            util::log_warning("Persisted Sky-Watcher telescope " + std::to_string(device_number) +
+                              " has no site coordinates and will refuse to connect. " + kMissingSite);
         }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
@@ -9036,7 +9071,7 @@ void Router::load_persisted_devices() {
     for (const auto& entry : payload) {
         std::string error_message;
         try {
-            if (!register_device_from_config(entry, error_message)) {
+            if (!register_device_from_config(entry, error_message, ConfigSource::Persisted)) {
                 util::log_warning("Skipping persisted device: " + error_message);
             }
         } catch (const std::exception& e) {

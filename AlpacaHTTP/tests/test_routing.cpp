@@ -25,9 +25,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -318,12 +320,14 @@ private:
     bool connected_ = false;
 };
 
-// Mirrors the SynScan / Celestron / OnStep / Bisque / iOptron / Sky-Watcher
-// telescopes: an AsyncConnectable driver whose get_connected() takes the
-// state mutex that set_connected() holds for the whole (slow) connect. The
-// router must never read it while a connection task is in flight, or its
-// own connect-wait deadline cannot fire and a polling GET connected stalls
-// for the entire handshake (issue #130).
+// Mirrors the Celestron / OnStep / Bisque / iOptron / Sky-Watcher telescopes:
+// an AsyncConnectable driver whose get_connected() takes the state mutex that
+// set_connected() holds for the whole (slow) connect. The router must never
+// read it while a connection task is in flight, or its own connect-wait
+// deadline cannot fire and a polling GET connected stalls for the entire
+// handshake (issue #130). SynScan is deliberately absent: it was the driver
+// that produced #130, and its fix made its getter a bare atomic load, so it
+// no longer has this shape -- see async_connectable.h for the full list.
 class LockedSlowConnectStubDriver final : public alpacacore::AlpacaDriver, public alpacacore::AsyncConnectable {
 public:
     LockedSlowConnectStubDriver(int number, std::chrono::milliseconds connect_delay)
@@ -1987,20 +1991,124 @@ int main() {
     }
     {
         // skywatcher / telescope network variant: host + udpPort (UDP 11880,
-        // not tcpPort) must survive.
+        // not tcpPort) must survive. Site coordinates are mandatory on this
+        // vendor since issue #274, so they are supplied here too.
         const auto cfg = roundtrip_config(router,
                                           {{"vendor", "skywatcher"},
                                            {"deviceType", "telescope"},
                                            {"deviceNumber", 9618},
                                            {"connectionType", "network"},
                                            {"host", "192.168.4.1"},
-                                           {"udpPort", 11880}},
+                                           {"udpPort", 11880},
+                                           {"siteLatitude", -33.87},
+                                           {"siteLongitude", 151.21}},
                                           "Telescope", 9618);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("connectionType", "") == "network");
         EXPECT(cfg.value("host", "") == "192.168.4.1");
         EXPECT(cfg.value("udpPort", -1) == 11880);
+        EXPECT(cfg.value("siteLatitude", 0.0) == -33.87);
+        EXPECT(cfg.value("siteLongitude", 0.0) == 151.21);
         remove_device(router, "skywatcher", "telescope", 9618);
+    }
+    {
+        // issue #274: configuredevice is a first-class REST API independent of
+        // the web UI, and used to accept a skywatcher config with no
+        // coordinates at all. Both would then collapse to 0.0 in the driver,
+        // putting a southern rig on northern pointing math.
+        // The message is asserted, not just "some error": a config rejected
+        // for an unrelated reason (a renamed portPath key, say) would satisfy
+        // ErrorNumber != 0 on its own, and this block is about the site rule.
+        const auto reject = [&](const nlohmann::json& body) {
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find("Site latitude and longitude are required") !=
+                   std::string::npos);
+        };
+        nlohmann::json base = {{"vendor", "skywatcher"},     {"deviceType", "telescope"},  {"deviceNumber", 9619},
+                               {"connectionType", "serial"}, {"portPath", "/dev/ttyUSB7"}, {"baudRate", 9600}};
+        reject(base);  // neither coordinate
+        nlohmann::json lat_only = base;
+        lat_only["siteLatitude"] = -33.87;
+        reject(lat_only);
+        nlohmann::json lon_only = base;
+        lon_only["siteLongitude"] = 151.21;
+        reject(lon_only);
+
+        // Null island is a real place: the rule is about presence, not value.
+        nlohmann::json null_island = base;
+        null_island["siteLatitude"] = 0.0;
+        null_island["siteLongitude"] = 0.0;
+        const auto ok = route_request(router, "POST", "/management/v1/configuredevice", null_island.dump());
+        const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
+        EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
+        remove_device(router, "skywatcher", "telescope", 9619);
+    }
+    {
+        // issue #274, the other half: a config already on disk cannot be
+        // corrected by its caller. Dropping it at startup would keep it out of
+        // the device registry, and configureddevices -- the web UI's only
+        // source of devices -- would then not list it, leaving the operator no
+        // way to edit the very entry that is at fault. A persisted
+        // skywatcher entry with no coordinates must still be registered and
+        // still be listed; the driver's connect-time guard is what refuses it.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        // Only this entry, rather than appending to whatever is on disk: the
+        // second Router below re-registers EVERY entry in the file and builds
+        // that vendor's driver, and some vendors touch hardware eagerly (the
+        // astroasis by-index path AGENTS.md warns about). Appending would make
+        // this case depend on every earlier block having removed what it added,
+        // which nothing enforces. The original contents are restored below.
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9630},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+
+        // A second Router: load_persisted_devices() is one-shot per instance,
+        // so the startup path only runs on an instance that has not read the
+        // file yet.
+        alpacahttp::Router startup_router;
+        const auto listed_json = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+
+        // Put the file back BEFORE anything that can abort, and not from a
+        // destructor: EXPECT is abort(), which neither unwinds the stack nor
+        // runs a scope guard. That includes remove_device() below, which is
+        // itself an EXPECT -- and it is exactly the call that fails in the
+        // regression this block guards against, since a device that was never
+        // registered cannot be removed.
+        {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        }
+
+        // Unregister from the process-wide DeviceRegistry so later blocks do
+        // not see 9630. The file is already restored, so this rewrites it
+        // from an entry list that no longer contains the synthetic device.
+        remove_device(startup_router, "skywatcher", "telescope", 9630);
+
+        EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
+        bool found = false;
+        for (const auto& entry : listed_json["Value"]) {
+            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9630) {
+                found = true;
+            }
+        }
+        EXPECT(found);
     }
 #endif
 
@@ -2570,6 +2678,56 @@ int main() {
             }
 
             alpacacore::logging::set_log_sink(previous_sink);
+        }
+
+        // The RTC probe runs at startup and on the server's timer, never on a
+        // request path (issue #314). On a bus-attached RTC the probe is an
+        // I2C transaction that can block for the adapter timeout, and the two
+        // readers are the ITelescopeV4 connect initiator -- timed against the
+        // 1 s STANDARD target, with the connection op mutex held -- and the
+        // description endpoint the web UI polls.
+        {
+            auto probe_calls = std::make_shared<int>(0);
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [](std::chrono::system_clock::time_point, std::string&) { return true; },
+                                              [probe_calls] {
+                                                  ++*probe_calls;
+                                                  return true;
+                                              });
+            // Priming happened once, when the clock was constructed.
+            EXPECT(*probe_calls == 1);
+
+            auto scope_e = std::make_shared<TelescopeClockStubDriver>(9806);
+            EXPECT(registry.register_device(scope_e));
+
+            // Every path that reads the answer, hammered: the description
+            // endpoint the web UI polls, both connect paths, and a UTCDate
+            // write. None of them may probe.
+            for (int i = 0; i < 5; ++i) {
+                route_request(clock_router, "GET", "/management/v1/description");
+            }
+            route_request(clock_router, "PUT", "/api/v1/telescope/9806/connected", "Connected=true");
+            route_request(clock_router, "PUT", "/api/v1/telescope/9806/connected", "Connected=false");
+            route_request(clock_router, "PUT", "/api/v1/telescope/9806/connect", "");
+            route_request(clock_router, "PUT", "/api/v1/telescope/9806/utcdate", client_utc_body);
+            EXPECT(*probe_calls == 1);
+
+            // The readout still works after the clock was stepped. This asserts
+            // the "client" branch of source(), which returns before consulting
+            // has_rtc() at all -- the cached RTC answer is covered by the rtc
+            // case below, not by this line.
+            const auto desc = nlohmann::json::parse(
+                route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
+            EXPECT(!desc.is_discarded() && desc["Value"]["ClockSource"] == "client");
+            EXPECT(*probe_calls == 1);
+
+            // The off-request-path refresh the server's RTC probe thread calls is
+            // the only thing that re-probes.
+            clock_router.refresh_rtc_probe();
+            EXPECT(*probe_calls == 2);
+
+            registry.unregister_device(alpacacore::DeviceType::Telescope, 9806);
         }
 
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9801);

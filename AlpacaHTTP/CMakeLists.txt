@@ -242,7 +242,16 @@ if(ALPACAHTTP_BUILD_TESTS)
     # Test executables
     add_executable(test_routing tests/test_routing.cpp)
     target_link_libraries(test_routing alpacahttp)
-    add_test(NAME test_routing COMMAND test_routing)
+    # Own working directory (open-astro#274 review): the router resolves its
+    # state file as the relative path config/registered_devices.json, so every
+    # test binary sharing a cwd shares that file. test_routing now asserts on
+    # the file's contents surviving a Router construction, while
+    # test_persisted_devices_concurrency storms configuredevice/removedevice,
+    # each of which rewrites the whole file -- and ctest -j runs them at the
+    # same time. Separate directories make both deterministic.
+    set(TEST_ROUTING_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_routing_cwd)
+    file(MAKE_DIRECTORY ${TEST_ROUTING_DIR})
+    add_test(NAME test_routing COMMAND test_routing WORKING_DIRECTORY ${TEST_ROUTING_DIR})
 
     # Threaded storm over the router's persisted_devices_ store (audit 3.0.1
     # follow-up): configure/remove/configureddevices from concurrent threads,
@@ -250,7 +259,10 @@ if(ALPACAHTTP_BUILD_TESTS)
     # a pre-mutex router crashes/corrupts here even without it.
     add_executable(test_persisted_devices_concurrency tests/test_persisted_devices_concurrency.cpp)
     target_link_libraries(test_persisted_devices_concurrency alpacahttp)
-    add_test(NAME test_persisted_devices_concurrency COMMAND test_persisted_devices_concurrency)
+    set(TEST_PERSISTED_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_persisted_devices_cwd)
+    file(MAKE_DIRECTORY ${TEST_PERSISTED_DIR})
+    add_test(NAME test_persisted_devices_concurrency COMMAND test_persisted_devices_concurrency
+             WORKING_DIRECTORY ${TEST_PERSISTED_DIR})
     
     # Socket-level tests for the Server request-read path (read_request), which
     # test_routing.cpp bypasses. Covers the header-size (431) boundary (#129).

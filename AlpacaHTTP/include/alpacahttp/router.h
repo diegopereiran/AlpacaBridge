@@ -29,6 +29,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -83,9 +84,20 @@ public:
     //
     // Replaces the clock object rather than mutating it, so it must be called
     // before the router serves any request; no request path may be in flight.
+    // Since open-astro#314 that means before Server::start(): the RTC probe
+    // thread dereferences host_clock_ too, so the seam now has a second
+    // reader that is not a request path.
     void set_host_clock_hooks(
         alpacacore::util::HostClock::IsSynchronizedFn is_synchronized, alpacacore::util::HostClock::SetTimeFn set_time,
         alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; });
+
+    // open-astro#314: re-run the hardware-RTC probe and cache the answer.
+    // Called from the server's RTC probe thread, never from a request path
+    // and never from the reactor: the
+    // probe is an I2C transaction on a bus-attached RTC and can block for the
+    // adapter timeout, and the connect initiator it used to sit on is timed
+    // against the 1 s STANDARD target.
+    void refresh_rtc_probe() { host_clock_->refresh_rtc(); }
 
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
@@ -150,7 +162,18 @@ private:
         std::uint32_t server_tx_id
     );
 
-    bool register_device_from_config(const nlohmann::json& config, std::string& error_message);
+    // open-astro#274: where a device config came from decides what a failed
+    // validation rule means. A config arriving over
+    // /management/v1/configuredevice can still be corrected by the caller, so
+    // it is rejected. One already on disk cannot: dropping it removes the
+    // device from the registry, and /management/v1/configureddevices -- the
+    // web UI's only source of devices -- then cannot show it, leaving no way
+    // to edit the entry that is at fault. Persisted configs are registered
+    // anyway and left for the driver's connect-time guard to refuse.
+    enum class ConfigSource : std::uint8_t { Api, Persisted };
+
+    bool register_device_from_config(const nlohmann::json& config, std::string& error_message,
+                                     ConfigSource source = ConfigSource::Api);
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
     void add_or_replace_persisted_device(const nlohmann::json& config);
     bool remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
