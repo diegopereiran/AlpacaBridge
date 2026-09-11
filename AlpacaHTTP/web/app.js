@@ -3338,6 +3338,13 @@ document.getElementById('device-form').addEventListener('submit', async function
         // no site of its own, so leaving them blank used to collapse to 0.0 and
         // put a southern rig on northern pointing math. The server rejects the
         // same config; this fails fast with a clearer message than a round trip.
+        //
+        // Deliberately checked here rather than with a `required` attribute on
+        // the inputs: the vendor sections are hidden with display:none, which
+        // does not exempt a control from constraint validation. A required
+        // field inside the hidden skywatcher section would block submitting
+        // the form for EVERY other vendor, with the browser silently refusing
+        // to submit because it cannot focus the offending control.
         const skywatcherSiteLatitude = readOptionalNumber(formData, 'skywatcherSiteLatitude');
         const skywatcherSiteLongitude = readOptionalNumber(formData, 'skywatcherSiteLongitude');
         if (skywatcherSiteLatitude === null || skywatcherSiteLongitude === null) {

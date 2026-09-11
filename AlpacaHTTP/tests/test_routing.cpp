@@ -1934,9 +1934,23 @@ int main() {
         // A second Router: load_persisted_devices() is one-shot per instance,
         // so the startup path only runs on an instance that has not read the
         // file yet.
-        alpacahttp::Router startup_router;
-        const auto listed = route_request(startup_router, "GET", "/management/v1/configureddevices");
-        const auto listed_json = nlohmann::json::parse(listed.body(), nullptr, false);
+        const auto listed_json = [&] {
+            alpacahttp::Router startup_router;
+            const auto listed = route_request(startup_router, "GET", "/management/v1/configureddevices");
+            remove_device(startup_router, "skywatcher", "telescope", 9630);
+            return nlohmann::json::parse(listed.body(), nullptr, false);
+        }();
+
+        // Put the file back BEFORE asserting, not after, and not from a
+        // destructor: EXPECT is abort(), which neither unwinds the stack nor
+        // runs a scope guard. Restoring afterwards would leave device 9630 in
+        // the real config on any failure, and the next run would start from a
+        // bogus persisted entry.
+        {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        }
+
         EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
         bool found = false;
         for (const auto& entry : listed_json["Value"]) {
@@ -1945,10 +1959,6 @@ int main() {
             }
         }
         EXPECT(found);
-
-        remove_device(startup_router, "skywatcher", "telescope", 9630);
-        std::ofstream restore(persisted, std::ios::trunc);
-        restore << (original.empty() ? std::string("[]") : original);
     }
 #endif
 
