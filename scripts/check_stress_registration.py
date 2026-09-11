@@ -174,8 +174,11 @@ def find_registered_pairs(known_vendors, known_device_types):
     """
     registered = set()
     guard_failures = []
-    # One pass over each file: the [stress-guard] rejection below needs the
-    # same text, so reading it twice only costs I/O.
+    # One pass over each registration file, collecting the [stress] pairs and
+    # the [stress-guard]-without-[stress] rejections together, since both read
+    # the same text. The stray-[stress] check is NOT folded in here: it scans a
+    # different, wider set (TEST_GLOBS) and deliberately skips these files, so
+    # it lives in find_stray_stress_cases() and re-globs from scratch.
     for path in tracked_files(STRESS_TEST_GLOB_PREFIX + "*" + STRESS_TEST_GLOB_SUFFIX):
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             text = fh.read()

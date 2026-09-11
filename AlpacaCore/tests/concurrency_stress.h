@@ -142,7 +142,7 @@ public:
             if (is_expected(ex.error_code())) {
                 return;
             }
-            record("AlpacaException(code=" + std::to_string(ex.error_code()) + ")", ex.what());
+            record_alpaca(ex.error_code(), ex.what());
         } catch (const std::exception& ex) {
             // typeid(ex).name() is the ABI-mangled name on libstdc++ (e.g.
             // "St12out_of_range", not "std::out_of_range") -- fine for a
@@ -188,11 +188,26 @@ private:
         return false;
     }
 
-    void record(const std::string& type, const std::string& what) {
+    // Both overloads format INSIDE the lock, after the cap test, so a storm
+    // that throws long past kMaxSamples pays a counter bump and nothing else.
+    // Taking a ready-made std::string instead would move the formatting to
+    // the call site, where it happens on every throw however full the sample
+    // buffer is -- and an early return in here could not skip it, because the
+    // argument is already built by then. Under TSan that allocation is
+    // instrumented and the operate threads hit this path hard.
+    void record(const char* type, const char* what) {
         std::lock_guard<std::mutex> lock(mutex_);
         ++count_;
         if (samples_.size() < kMaxSamples) {
-            samples_.push_back(type + ": " + what);
+            samples_.push_back(std::string(type) + ": " + what);
+        }
+    }
+
+    void record_alpaca(int code, const char* what) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++count_;
+        if (samples_.size() < kMaxSamples) {
+            samples_.push_back("AlpacaException(code=" + std::to_string(code) + "): " + what);
         }
     }
 
