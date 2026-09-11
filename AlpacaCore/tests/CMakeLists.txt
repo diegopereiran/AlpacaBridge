@@ -83,7 +83,8 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_weewx)
-    list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp)
+    # ObservingConditions [stress] coverage over an unreachable URL, #271.
+    list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp test_weewx_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_focuser.cpp test_gemini_flatpanel.cpp test_gemini_flatpanel_v2.cpp test_gemini_flatpanel_pro.cpp
@@ -92,6 +93,8 @@ endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
          test_wandererastro_filterwheel.cpp test_wandererastro_box_switch.cpp)
+    # cover/wheel/box over the pty streamer fake + fail-fast rotator [stress], #271
+    list(APPEND TEST_SOURCES test_wandererastro_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_astroasis)
     list(APPEND TEST_SOURCES test_astroasis_focuser.cpp test_astroasis_concurrency_stress.cpp)
