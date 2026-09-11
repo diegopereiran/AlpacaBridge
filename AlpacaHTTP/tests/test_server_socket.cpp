@@ -661,12 +661,26 @@ int main() {
     // client that must be served, and a keep-alive client that lived
     // through the restart and is closed rather than leaked.
     {
+        // Counter declared before the Server, so the Router that owns the
+        // capturing lambda is destroyed first (open-astro#314 review).
+        std::atomic<int> restart_probes{0};
         alpacahttp::Config restart_config;
         restart_config.set_http_port(6875);
         restart_config.set_discovery_enabled(false);
         restart_config.set_server_name("TestServerRestart");
         restart_config.set_max_connections(3);
+        restart_config.set_rtc_probe_interval_seconds(1);
         alpacahttp::Server restart_server(restart_config);
+        // open-astro#314: the probe thread must come back with the new
+        // generation. run_server() clears rtc_probe_stop_ before respawning;
+        // deleting that line leaves the thread dead after the first restart,
+        // which every other assertion here would happily ignore.
+        restart_server.router_for_test().set_host_clock_hooks(
+            [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
+            [&restart_probes] {
+                ++restart_probes;
+                return false;
+            });
         restart_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
@@ -730,6 +744,15 @@ int main() {
                     EXPECT(ra.rfind("HTTP/1.1 200 ", 0) == 0);
                     ::close(after);
                 }
+
+                // The probe timer survived this restart: wait for a pass on
+                // the new generation rather than a fixed sleep.
+                const int probes_before = restart_probes.load();
+                const auto probe_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                while (restart_probes.load() == probes_before && std::chrono::steady_clock::now() < probe_deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                EXPECT(restart_probes.load() > probes_before);
             }
             restart_server.stop();
         } else {
@@ -820,9 +843,13 @@ int main() {
         rtc_config.set_discovery_enabled(false);
         rtc_config.set_server_name("TestServerRtcProbe");
         rtc_config.set_rtc_probe_interval_seconds(1);
-        alpacahttp::Server rtc_server(rtc_config);
 
+        // Counter first, Server second: the Router owns the lambda that
+        // captures &probes, so the Server must be destroyed first. The
+        // explicit stop() below joins the thread anyway, but that is a
+        // property of this case rather than of the declaration order.
         std::atomic<int> probes{0};
+        alpacahttp::Server rtc_server(rtc_config);
         rtc_server.router_for_test().set_host_clock_hooks(
             [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
             [&probes] {
