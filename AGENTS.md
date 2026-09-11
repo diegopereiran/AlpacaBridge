@@ -769,7 +769,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (29 drivers already do; SynScan was moved to one by the #130 fix) —
+  getter (29 drivers do, SynScan among them since the #130 fix) —
   the five above still take the mutex and rely on the router rule, and four
   wrapper-backed switch drivers (iOptron PowerBox, ToupTek PowerBox, ZWO ASIAIR
   and ASIAIR Plus) lock inside the wrapper's `is_open()` but release it before
