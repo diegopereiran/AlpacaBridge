@@ -1877,10 +1877,15 @@ int main() {
         // the web UI, and used to accept a skywatcher config with no
         // coordinates at all. Both would then collapse to 0.0 in the driver,
         // putting a southern rig on northern pointing math.
+        // The message is asserted, not just "some error": a config rejected
+        // for an unrelated reason (a renamed portPath key, say) would satisfy
+        // ErrorNumber != 0 on its own, and this block is about the site rule.
         const auto reject = [&](const nlohmann::json& body) {
             const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find("Site latitude and longitude are required") !=
+                   std::string::npos);
         };
         nlohmann::json base = {{"vendor", "skywatcher"},     {"deviceType", "telescope"},  {"deviceNumber", 9619},
                                {"connectionType", "serial"}, {"portPath", "/dev/ttyUSB7"}, {"baudRate", 9600}};
@@ -1937,22 +1942,25 @@ int main() {
         // A second Router: load_persisted_devices() is one-shot per instance,
         // so the startup path only runs on an instance that has not read the
         // file yet.
-        const auto listed_json = [&] {
-            alpacahttp::Router startup_router;
-            const auto listed = route_request(startup_router, "GET", "/management/v1/configureddevices");
-            remove_device(startup_router, "skywatcher", "telescope", 9630);
-            return nlohmann::json::parse(listed.body(), nullptr, false);
-        }();
+        alpacahttp::Router startup_router;
+        const auto listed_json = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
 
-        // Put the file back BEFORE asserting, not after, and not from a
+        // Put the file back BEFORE anything that can abort, and not from a
         // destructor: EXPECT is abort(), which neither unwinds the stack nor
-        // runs a scope guard. Restoring afterwards would leave device 9630 in
-        // the real config on any failure, and the next run would start from a
-        // bogus persisted entry.
+        // runs a scope guard. That includes remove_device() below, which is
+        // itself an EXPECT -- and it is exactly the call that fails in the
+        // regression this block guards against, since a device that was never
+        // registered cannot be removed.
         {
             std::ofstream restore(persisted, std::ios::trunc);
             restore << (original.empty() ? std::string("[]") : original);
         }
+
+        // Unregister from the process-wide DeviceRegistry so later blocks do
+        // not see 9630. The file is already restored, so this rewrites it
+        // from an entry list that no longer contains the synthetic device.
+        remove_device(startup_router, "skywatcher", "telescope", 9630);
 
         EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
         bool found = false;
