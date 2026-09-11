@@ -278,3 +278,27 @@ TEST_CASE("QHY Camera Driver - Connecting by index resolves the id and connects"
     driver->set_connected(false);
     CHECK(fake.physical_closes == 1);
 }
+
+TEST_CASE("QHY Camera Driver - an empty SDK version omits the DriverInfo suffix", "[qhy][camera][unit]") {
+    // The real wrapper returns "" until the SDK resource comes up, which is
+    // the branch get_driver_info()/get_device_sdk_version() special-case so
+    // DriverInfo never renders a malformed "(SDK )". Reachable only because
+    // the fake's version string is settable.
+    auto fake = make_fake();
+    fake.sdk_version = "";
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    CHECK(driver->get_driver_info() == "AlpacaCore QHY Camera Driver");
+    CHECK_FALSE(driver->get_device_sdk_version().has_value());
+}
+
+TEST_CASE("QHY Camera Driver - a populated SDK version is surfaced in both places", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    CHECK(driver->get_driver_info() == "AlpacaCore QHY Camera Driver (SDK fake-qhy-1.0)");
+    REQUIRE(driver->get_device_sdk_version().has_value());
+    CHECK(*driver->get_device_sdk_version() == "fake-qhy-1.0");
+}

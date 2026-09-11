@@ -1214,9 +1214,17 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   **(b) Those detachable workers must reach the seam through a captured
   `QHYSDK*`, never through `this->sdk_`** — the workers still capture `this`
   for everything else they touch; only the SDK call is required to go through
-  the raw pointer, because reaching it via the `sdk_` member from a worker
-  that may outlive the driver is a use-after-free at exactly the moment the
-  SDK call returns.
+  the raw pointer. **This narrows the use-after-free window; it does not close
+  it.** A detached worker that outlives the driver still dereferences `this`
+  afterwards (`connected_`, `mutex_`, the `exposure_superseded` re-check), and
+  that is UB whichever form the SDK call takes. What the raw pointer buys is
+  the *long* part of the window: the seam object is guaranteed to outlive
+  every driver built on it (rule 2 in `fake_qhy_sdk.h`), so a worker parked
+  inside a blocking SDK call — where it spends essentially all its time — is
+  not holding a reference into the driver for that whole duration. Reaching
+  the SDK via `sdk_` would instead touch the driver at the moment each call
+  returns, on top of the post-call touches. Treat detached workers as unsafe
+  and bound their lifetime; do not read this rule as making them safe.
 - **Poll-until-settled loops keep the sleep cadence in the driver but put the
   DECISION in `util::ConsecutiveSettle`** (`util/poll_settle.h`, issue #105):
   stability-run + poll-budget semantics, unit-tested with scripted sequences

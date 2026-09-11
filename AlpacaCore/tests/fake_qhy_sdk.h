@@ -73,6 +73,23 @@ namespace alpacacore::test {
  * when the thermal paths are what's under test, and keep it out of anything
  * that connects in a loop.
  *
+ * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
+ * wrapper, so a test passing here would not have caught a regression in the
+ * corresponding real guard. Each is tracked; none is relied on by the cases
+ * in this branch, but the [stress] follow-up (#321) will exercise all three:
+ *
+ * - open_camera() does not refuse a fresh open while a registered exposure
+ *   worker is still live (the real one throws InvalidOperation — this is the
+ *   PR #201 finding). `exposure_workers_` is written and never read here.
+ *   Reconnect storms are exactly what would go green over a break in it.
+ *   Tracked in issue #324.
+ * - move_cfw() does not enforce the position > 9 single-digit protocol
+ *   ceiling the real one throws InvalidValue for; the wheel tests pass only
+ *   because the driver guards it first. Tracked in issue #327.
+ * - set_readout_mode() does not re-run init_camera() the way the real one
+ *   re-invokes InitQHYCCD, so any init_calls assertion around a mode switch
+ *   reads differently here than on hardware. Tracked in issue #335.
+ *
  * Not thread-hardened, by design — wrap it in LockedQHYSDK for the [stress]
  * suite so ThreadSanitizer reports point at driver code, not at this file.
  */
@@ -84,6 +101,11 @@ public:
     // --- scripting knobs ---------------------------------------------------
     std::set<std::string> throw_from;
     bool sdk_resource_available = true;
+    // Set to "" to reach the empty-cache branch the driver special-cases in
+    // get_driver_info()/get_device_sdk_version(): the real wrapper returns an
+    // empty string until the SDK resource comes up, so a fake that always
+    // answers non-empty can never exercise it.
+    std::string sdk_version = "fake-qhy-1.0";
     std::vector<QHYCameraInfo> cameras;
     // Controls the drivers probe. CFWPORT present by default so the filter
     // wheel connects; add/remove to steer capability branches.
@@ -407,7 +429,7 @@ public:
 
     std::string get_sdk_version() override {
         hit("get_sdk_version");
-        return "fake-qhy-1.0";
+        return sdk_version;
     }
 
 private:

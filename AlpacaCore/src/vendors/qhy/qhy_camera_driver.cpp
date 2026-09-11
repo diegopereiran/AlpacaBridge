@@ -1730,12 +1730,18 @@ private:
     // The SDK seam (issue #321). Every background worker below that can be
     // DETACHED still captures `this` for everything else it touches, but must
     // reach the SDK itself through a captured raw QHYSDK*, never through
-    // `this->sdk_`: once detached, the driver may be destroyed while the
-    // worker is still inside its SDK call, so going through the `sdk_` member
-    // at that point would be a use-after-free at exactly the moment the call
-    // returns. The SDK object outlives every driver built on it -- the
+    // `this->sdk_`. The SDK object outlives every driver built on it -- the
     // singleton is process-scoped, and a test fake must be declared before
-    // the driver it feeds.
+    // the driver it feeds -- so a worker parked inside a blocking SDK call,
+    // which is where it spends essentially all its time, holds no reference
+    // into the driver for that whole duration. Going through `sdk_` instead
+    // would touch the driver at the moment each call returns.
+    //
+    // This NARROWS the use-after-free window; it does not close it. A
+    // detached worker that outlives the driver still dereferences `this`
+    // after the call (connected_, mutex_, the exposure_superseded re-check),
+    // and that is UB either way. Bound these workers' lifetimes; do not read
+    // the raw-pointer rule as making detachment safe.
     QHYSDK& sdk_;
     int device_number_;
     std::optional<std::string> camera_id_;

@@ -111,9 +111,13 @@ namespace guide_direction {
  * connect paths are exercisable without hardware. The QHY SDK is the one
  * vendor blob that cannot run at all on a USB-less host: the first libqhyccd
  * call spawns PnpEventListenerThread, which segfaults in
- * libusb_hotplug_register_callback when libusb_init failed. Every QHY
- * `[stress]` and connect test therefore runs against the fake, never the
- * singleton. Each create_qhy_* factory has an overload taking a QHYSDK&; the
+ * libusb_hotplug_register_callback when libusb_init failed. Any QHY connect
+ * or `[stress]` test therefore MUST run against the fake and never touch the
+ * singleton — that is the rule for anything added here, not a description of
+ * current coverage: the connect tests on this branch follow it, and the
+ * `[stress]` registration (issue #321) has to satisfy it before the two QHY
+ * entries can come off the allow-list in check_stress_registration.py.
+ * Each create_qhy_* factory has an overload taking a QHYSDK&; the
  * default overload passes the singleton.
  *
  * Contract notes for implementors (fakes included):
