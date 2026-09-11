@@ -16,6 +16,7 @@
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <deque>
@@ -81,7 +82,7 @@ namespace alpacacore::test {
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
  * corresponding real guard. Each is tracked; none is relied on by the cases
- * in this branch, but the [stress] follow-up (#321) will exercise all seven:
+ * in this branch, but the [stress] follow-up (#321) will exercise all four:
  *
  * - open_camera() does not refuse a fresh open while a registered exposure
  *   worker is still live (the real one throws InvalidOperation — this is the
@@ -101,27 +102,13 @@ namespace alpacacore::test {
  *   here, while the same change on hardware would flip has_cooler. Set the
  *   struct field (or use default_cooled_camera()) instead. Tracked in
  *   issue #337.
- * - get_mem_length() ignores binning: set_bin_mode() stores wbin_/hbin_ and
- *   nothing reads them, so the length stays full-resolution where the real
- *   GetQHYCCDMemLength() shrinks after SetQHYCCDBinMode. Nothing here exposes
- *   at all, let alone at bin > 1, but an exposure test that bins and then
- *   sizes a buffer from this would pass here and fail on hardware. Adjacent
- *   to #328 (same sizing path) and cheapest to fix with it. Tracked in
- *   issue #365.
- * - get_param() answers 0.0 for a control missing from `params`, where the
- *   real one returns GetQHYCCDParam() raw -- i.e. the QHYCCD_ERROR sentinel
- *   (0xFFFFFFFF, ~4.29e9) for an unsupported control. Nothing asks for one
- *   here (every control the drivers read is seeded, and CURTEMP/CURPWM are
- *   gated by is_control_available first), but modelling "unsupported" by
- *   dropping an entry from `params` would hand the driver a plausible 0.0
- *   where hardware hands it a sentinel to reject. Tracked in issue #373.
- * - control_temp() settles the TEC instantly: it writes the target straight
- *   into params[CURTEMP], where the real ControlQHYCCDTemp runs a PID that
- *   converges over many calls (which is why the driver polls it ~1/s). No
- *   cooled-camera case exists here, but the first thermal test would assert
- *   against an instant settle that hardware can never produce. Flagged in
- *   review of #343. Tracked in issue #390; pairs with #331, since a cooled
- *   camera is also the first case that starts a worker thread.
+ *
+ * FIXED since this list was written, kept named so a reader chasing an old
+ * comment lands somewhere: get_mem_length() now divides by the stored binning
+ * (issue #365); get_param() now answers the QHYCCD_ERROR sentinel, not 0.0,
+ * for a control missing from `params` (issue #373); and control_temp() now
+ * approaches its target by `temp_settle_step_c` per call rather than settling
+ * instantly, the way ControlQHYCCDTemp's PID does (issue #390).
  *
  * Not thread-hardened, by design — wrap it in LockedQHYSDK for the [stress]
  * suite so ThreadSanitizer reports point at driver code, not at this file.
@@ -199,6 +186,10 @@ public:
     uint32_t last_guide_direction = 0;
     uint16_t last_guide_duration_ms = 0;
     double last_temp_target = 0.0;
+    /// How far control_temp() moves CURTEMP toward its target per call. The
+    /// real ControlQHYCCDTemp is a PID that converges over many calls
+    /// (issue #390); 0.0 restores the old instant settle.
+    double temp_settle_step_c = 0.5;
     int last_cfw_target = -1;
 
     int ref_count(const std::string& id) const {
@@ -250,6 +241,27 @@ public:
         QHYCameraInfo info = default_camera(id, model);
         info.has_cooler = true;
         return info;
+    }
+
+    /// A fake holding exactly one default_camera() — the setup every QHY seam
+    /// test file needs first (issue #342). It lived as a verbatim `make_fake()`
+    /// in three of them, so a change to what a default test fake looks like (a
+    /// new entry in `controls_available`, a different canned camera) had to be
+    /// made in three places with nothing failing if it was made in two.
+    static FakeQHYSDK with_one_camera(const std::string& id = "fake-qhy-0",
+                                      const std::string& model = "FakeQHY600") {
+        FakeQHYSDK fake;
+        fake.cameras.push_back(default_camera(id, model));
+        return fake;
+    }
+
+    /// with_one_camera(), but the camera has a TEC. Read default_cooled_camera()'s
+    /// warning before using this in a connect loop.
+    static FakeQHYSDK with_one_cooled_camera(const std::string& id = "fake-qhy-0",
+                                             const std::string& model = "FakeQHY600") {
+        FakeQHYSDK fake;
+        fake.cameras.push_back(default_cooled_camera(id, model));
+        return fake;
     }
 
     // --- QHYSDK implementation ---------------------------------------------
@@ -340,11 +352,23 @@ public:
         return controls_available.count(control_id) != 0;
     }
 
+    /// What GetQHYCCDParam() returns for a control the camera does not
+    /// support: QHYCCD_ERROR, 0xFFFFFFFF, which is about 4.29e9 once the
+    /// SDK's `double` return widens it. Named here so a test can say what it
+    /// expects without spelling the constant out (issue #373).
+    static constexpr double kUnsupportedControl = 4294967295.0;
+
     double get_param(const std::string& camera_id, int control_id) override {
         hit("get_param");
         require_open(camera_id);
         auto it = params.find(control_id);
-        return it == params.end() ? 0.0 : it->second;
+        // Not 0.0: the real wrapper returns GetQHYCCDParam() raw, and the SDK
+        // answers the QHYCCD_ERROR sentinel for an unsupported control. A fake
+        // answering a plausible zero is the more dangerous of the two, because
+        // modelling "unsupported" by dropping an entry from `params` would hand
+        // the driver a value it has no reason to reject where hardware hands it
+        // one it must (issue #373).
+        return it == params.end() ? kUnsupportedControl : it->second;
     }
 
     QHYControlRange get_param_range(const std::string& camera_id, int control_id) override {
@@ -387,7 +411,15 @@ public:
         hit("get_mem_length");
         require_open(camera_id);
         const uint32_t bytes_per_px = (bits_ > 8) ? 2U : 1U;
-        return roi_.width * roi_.height * bytes_per_px;
+        // The SDK shrinks the buffer after SetQHYCCDBinMode -- a 2x2 bin
+        // quarters the frame -- so a fake that ignored wbin_/hbin_ reported a
+        // full-resolution length at every binning and an exposure test that
+        // binned would size its buffer wrong (issue #365). Integer division,
+        // matching the SDK: an ROI that does not divide evenly loses the
+        // remainder rather than rounding up.
+        const uint32_t wbin = (wbin_ == 0) ? 1U : wbin_;
+        const uint32_t hbin = (hbin_ == 0) ? 1U : hbin_;
+        return (roi_.width / wbin) * (roi_.height / hbin) * bytes_per_px;
     }
 
     bool start_single_frame(const std::string& camera_id) override {
@@ -440,7 +472,24 @@ public:
         hit("control_temp");
         require_open(camera_id);
         last_temp_target = target_temp_c;
-        params[vendor::qhy::control::CURTEMP] = target_temp_c;
+        // ControlQHYCCDTemp runs a PID over many calls -- which is why the
+        // driver polls it about once a second -- so the TEC approaches the
+        // target rather than arriving at it (issue #390). Writing the target
+        // straight into CURTEMP let a thermal test assert an instant settle
+        // that hardware can never produce, and a driver that only ever reads
+        // back its own setpoint would look correct here.
+        //
+        // The model is deliberately the simplest thing that is not instant: a
+        // fixed step per call toward the target, clamped so it never
+        // overshoots. `temp_settle_step_c = 0.0` restores the old instant
+        // settle for a case that wants to skip the ramp.
+        auto& current = params[vendor::qhy::control::CURTEMP];
+        const double delta = target_temp_c - current;
+        if (temp_settle_step_c <= 0.0 || std::abs(delta) <= temp_settle_step_c) {
+            current = target_temp_c;
+        } else {
+            current += (delta > 0.0) ? temp_settle_step_c : -temp_settle_step_c;
+        }
     }
 
     void move_cfw(const std::string& camera_id, int position) override {
