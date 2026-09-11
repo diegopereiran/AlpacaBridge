@@ -877,6 +877,54 @@ int main() {
         }
     }
 
+    // --- RTC probe thread (open-astro#314) ----------------------------------
+    // The probe was moved off the request path, then off the reactor, onto its
+    // own timer thread. Both #314 unit cases drive Router::refresh_rtc_probe()
+    // directly, so deleting the thread's spawn left every one of them green --
+    // and the bug the issue is about is precisely a host where nothing
+    // re-probes: has_rtc() no longer probes, so with the thread gone the
+    // startup answer is pinned for the life of the process.
+    //
+    // Drive it end to end instead: a real Server, a counting has_rtc hook, a
+    // 1 s interval from Config (the default 31 s is unwaitable), and an
+    // assertion that the count rises on its own.
+    {
+        alpacahttp::Config rtc_config;
+        rtc_config.set_http_port(6877);
+        rtc_config.set_discovery_enabled(false);
+        rtc_config.set_server_name("TestServerRtcProbe");
+        rtc_config.set_rtc_probe_interval_seconds(1);
+        alpacahttp::Server rtc_server(rtc_config);
+
+        std::atomic<int> probes{0};
+        rtc_server.router_for_test().set_host_clock_hooks(
+            [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
+            [&probes] {
+                ++probes;
+                return false;
+            });
+        // Installing the hooks builds a fresh HostClock, which primes the
+        // probe once in its constructor -- that is #314's other half.
+        const int primed = probes.load();
+        EXPECT(primed == 1);
+
+        rtc_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        if (rtc_server.is_running()) {
+            // No requests are sent: the whole point is that the refresh does
+            // not depend on one arriving.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1400));
+            EXPECT(probes.load() > primed);
+        }
+        rtc_server.stop();
+        EXPECT(!rtc_server.is_running());
+        // And the thread stops when the server does: no further passes after
+        // the join returns.
+        const int after_stop = probes.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        EXPECT(probes.load() == after_stop);
+    }
+
     std::cout << "All server socket tests passed!\n";
     return 0;
 }

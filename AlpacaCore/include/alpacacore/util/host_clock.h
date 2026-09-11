@@ -107,8 +107,9 @@ public:
     // "ntp" (kernel-disciplined), "client" (this process stepped it from a
     // UTCDate write), "rtc" (undisciplined and never stepped, but the kernel
     // loaded the clock from a hardware RTC at boot -- open-astro#292), or
-    // "none". The RTC read is done outside mutex_: on an I2C RTC it is a bus
-    // transaction, and step_from_client() must not queue behind it.
+    // "none". The RTC answer is a cached atomic read since open-astro#314,
+    // never a bus transaction: the probe runs on the server's timer thread,
+    // so neither this nor step_from_client() can queue behind an I2C RTC.
     std::string source() const {
         if (synchronized()) {
             return "ntp";

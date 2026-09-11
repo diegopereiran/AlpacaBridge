@@ -61,6 +61,13 @@ public:
     // Wait for server to stop
     void wait();
 
+    // Test-only seam (open-astro#314): the router this server dispatches to,
+    // so a test can install HostClock hooks before start() and then observe
+    // what the RTC probe thread does with them. Call it before start(); the
+    // router's own seam replaces the clock object and is not safe against a
+    // request in flight.
+    Router& router_for_test() { return router_; }
+
 private:
     Config config_;
     Router router_;

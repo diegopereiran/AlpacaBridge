@@ -49,6 +49,10 @@ public:
     std::size_t thread_pool_size() const { return thread_pool_size_; }
     std::size_t max_connections() const { return max_connections_; }
     int keep_alive_lifetime_seconds() const { return keep_alive_lifetime_seconds_; }
+    // open-astro#314: how often the server's timer thread re-probes the
+    // hardware RTC. Settable for the same reason the keep-alive cap is:
+    // a test cannot wait 31 s.
+    int rtc_probe_interval_seconds() const { return rtc_probe_interval_seconds_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
@@ -80,6 +84,10 @@ public:
         if (seconds < 1) seconds = 1;
         keep_alive_lifetime_seconds_ = seconds;
     }
+    void set_rtc_probe_interval_seconds(int seconds) {
+        if (seconds < 1) seconds = 1;
+        rtc_probe_interval_seconds_ = seconds;
+    }
     void set_log_directory(const std::string& dir) { log_directory_ = dir; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
@@ -107,6 +115,10 @@ private:
     // client). Settable so the cap can be tested without waiting five
     // minutes.
     int keep_alive_lifetime_seconds_ = 300;
+    // 31 s, deliberately not the probe's own 30 s rate limit: equal periods
+    // race, and a pass landing microseconds early is silently swallowed,
+    // which would make the effective period 60 s (#314).
+    int rtc_probe_interval_seconds_ = 31;
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever
