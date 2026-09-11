@@ -1337,6 +1337,16 @@ void Router::set_config_path(std::string config_path) {
     config_path_ = std::move(config_path);
 }
 
+// open-astro#302: test-only seam, see router.h.
+void Router::set_host_clock_hooks(alpacacore::util::HostClock::IsSynchronizedFn is_synchronized,
+                                  alpacacore::util::HostClock::SetTimeFn set_time,
+                                  alpacacore::util::HostClock::HasRtcFn has_rtc) {
+    const bool enabled = host_clock_->enabled();
+    host_clock_ = std::make_unique<alpacacore::util::HostClock>(std::move(is_synchronized), std::move(set_time),
+                                                                std::move(has_rtc));
+    host_clock_->set_enabled(enabled);
+}
+
 void Router::set_shutdown_callback(std::function<void()> callback) {
     shutdown_callback_ = callback;
 }
@@ -1600,8 +1610,8 @@ nlohmann::json Router::build_description_payload() const {
 // from both connect paths (legacy PUT connected and the ITelescopeV4 PUT
 // connect initiator).
 void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const {
-    if (device.get_device_type() != alpacacore::DeviceType::Telescope || host_clock_.synchronized() ||
-        host_clock_.stepped_by_client()) {
+    if (device.get_device_type() != alpacacore::DeviceType::Telescope || host_clock_->synchronized() ||
+        host_clock_->stepped_by_client()) {
         return;
     }
     // open-astro#292: a clock the kernel loaded from a hardware RTC at boot is
@@ -1611,15 +1621,15 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
     // and this sits on the connect initiator AGENTS.md times against the 1 s
     // STANDARD target. Bounded: the probe settles after one success and is
     // rate-limited to once per 30 s while no device is found.
-    const bool rtc = host_clock_.has_rtc();
+    const bool rtc = host_clock_->has_rtc();
     // enabled() alone does not mean "a client will correct it": without
     // CAP_SYS_TIME every step is refused and the clock is never corrected at
     // all, which is the one state that must not be quiet at connect.
     // A refused step is checked before the opt-out: Sync Time is the same
     // clock_settime in this process, so once the kernel has refused one, that
     // button is dead too and must not be recommended by either branch.
-    const bool refused = host_clock_.step_ever_failed();
-    const bool correctable = host_clock_.enabled() && !refused;
+    const bool refused = host_clock_->step_ever_failed();
+    const bool correctable = host_clock_->enabled() && !refused;
     const std::string msg =
         "Telescope " + std::to_string(device.get_device_number()) +
         (rtc ? " connecting on the hardware RTC's time (no NTP; the RTC's accuracy is unverified, nothing has "
@@ -1641,9 +1651,9 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
 // open-astro#289: clock state next to the server identity so the web UI and
 // clients can see whether pointing math is running on a trusted clock.
 void Router::add_clock_fields(nlohmann::json& desc) const {
-    desc["ClockSynchronized"] = host_clock_.synchronized();
-    desc["ClockSource"] = host_clock_.source();  // "ntp" | "client" | "rtc" | "none"
-    desc["SyncSystemClockFromClients"] = host_clock_.enabled();
+    desc["ClockSynchronized"] = host_clock_->synchronized();
+    desc["ClockSource"] = host_clock_->source();  // "ntp" | "client" | "rtc" | "none"
+    desc["SyncSystemClockFromClients"] = host_clock_->enabled();
 }
 
 Response Router::handle_description(const Request& request, std::uint32_t server_tx_id) {
@@ -1769,7 +1779,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 }
             }
             if (new_sync_clock) {
-                host_clock_.set_enabled(*new_sync_clock);
+                host_clock_->set_enabled(*new_sync_clock);
                 util::log_info(std::string("syncSystemClockFromClients ") + (*new_sync_clock ? "enabled" : "disabled") +
                                " by " + request.remote_address());
             }
@@ -3291,7 +3301,7 @@ Response Router::dispatch_telescope_method(
                 // clock from it when the kernel reports the clock undisciplined
                 // (never over NTP/chrony/GPS), then hand the driver the same value.
                 {
-                    const auto step = host_clock_.step_from_client(time_point);
+                    const auto step = host_clock_->step_from_client(time_point);
                     using Outcome = alpacacore::util::HostClock::Outcome;
                     const std::string what = "UTCDate from " + request.remote_address() + " for telescope/" +
                                              std::to_string(telescope->get_device_number()) + ": host clock " +
@@ -6652,6 +6662,44 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     }
 }
 
+namespace {
+
+// CSRF guard shared by the state-changing management endpoints (PR #198
+// follow-up; extended to synctime by issue #298). These endpoints are
+// unauthenticated under the trusted-LAN threat model, so a malicious page
+// open in a browser on the same LAN could otherwise fire a cross-origin
+// request at them. Browsers always attach an Origin header to a cross-origin
+// mutating request, so reject any whose Origin host does not match the Host
+// the request was addressed to. Non-browser clients (curl, native apps) send
+// no Origin and are unaffected, as is the same-origin web portal.
+//
+// Returns the 403 response to send, or std::nullopt when the request may
+// proceed. `what` names the endpoint in the error message.
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t server_tx_id,
+                                                    const char* what) {
+    if (request.method() == HttpMethod::GET || !request.has_header("Origin")) {
+        return std::nullopt;
+    }
+    const std::string origin = request.get_header("Origin");
+    const std::string host = request.get_header("Host");
+    // Strip scheme from Origin, then compare host[:port] exactly.
+    const auto scheme_end = origin.find("://");
+    const std::string origin_host = scheme_end == std::string::npos ? origin : origin.substr(scheme_end + 3);
+    if (!host.empty() && origin_host == host) {
+        return std::nullopt;
+    }
+    AlpacaResponse alpaca_response =
+        make_error_response(0, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                            std::string("Cross-origin ") + what + " requests are not allowed");
+    Response resp;
+    resp.set_content_type("application/json");
+    resp.set_status(403, "Forbidden");
+    resp.set_body(alpaca_response);
+    return resp;
+}
+
+}  // namespace
+
 Response Router::handle_sync_time(const Request& request, std::uint32_t server_tx_id) {
     // Note: like the restart/shutdown management endpoints, this is
     // intentionally unauthenticated — the web UI is served on the LAN and the
@@ -6666,6 +6714,15 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Since open-astro#291 a successful set has a second effect beyond the
+    // clock: it marks the host client-stepped, which suppresses the
+    // undisciplined-clock WARN on the next telescope connect. A cross-origin
+    // POST could otherwise move the clock by years *and* hide the log line
+    // that would have explained the resulting pointing error.
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "time synchronisation")) {
+        return *rejected;
     }
 
     // GET returns the server's current time (epoch seconds) without changing
@@ -6730,7 +6787,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         // open-astro#292: an operator who only ever presses Sync Time would
         // otherwise never trip the latch, and the connect line would keep
         // claiming the clock is about to be corrected.
-        host_clock_.mark_step_failed();
+        host_clock_->mark_step_failed();
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
             std::string("clock_settime failed (requires CAP_SYS_TIME): ") + alpacacore::util::errno_string(errno));
@@ -6739,7 +6796,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     }
     // The clock is now client-set for the management readout and the
     // connect-time warning; clock_settime alone leaves STA_UNSYNC set.
-    host_clock_.mark_stepped();
+    host_clock_->mark_stepped();
 
     AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
     alpaca_response.value = epoch_seconds;
@@ -6770,29 +6827,10 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
-    // CSRF guard for state-changing operations (PR #198 follow-up): a
-    // malicious website open in a browser on the LAN can fire cross-origin
-    // requests at this unauthenticated endpoint. Browsers always attach an
-    // Origin header to cross-origin mutating requests; reject any whose
-    // Origin host does not match the Host the request was addressed to.
-    // Non-browser clients (curl, native apps) send no Origin and are
-    // unaffected, as is the same-origin web portal.
-    if (request.method() != HttpMethod::GET && request.has_header("Origin")) {
-        std::string origin = request.get_header("Origin");
-        std::string host = request.get_header("Host");
-        // Strip scheme from Origin, then compare host[:port] exactly.
-        auto scheme_end = origin.find("://");
-        std::string origin_host = scheme_end == std::string::npos ? origin : origin.substr(scheme_end + 3);
-        if (host.empty() || origin_host != host) {
-            AlpacaResponse alpaca_response =
-                make_error_response(0, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                                    "Cross-origin WiFi management requests are not allowed");
-            Response resp;
-            resp.set_content_type("application/json");
-            resp.set_status(403, "Forbidden");
-            resp.set_body(alpaca_response);
-            return resp;
-        }
+    // CSRF guard for state-changing operations (PR #198 follow-up). Same
+    // rejection the synctime endpoint uses; see reject_cross_origin_request().
+    if (auto rejected = reject_cross_origin_request(request, server_tx_id, "WiFi management")) {
+        return *rejected;
     }
 
     const std::string& sub = match.method_name;
