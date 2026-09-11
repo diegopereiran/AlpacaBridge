@@ -2163,6 +2163,24 @@ int main() {
         const auto del_response = route_request(router, "DELETE", "/management/v1/synctime");
         const auto del_json = nlohmann::json::parse(del_response.body(), nullptr, false);
         EXPECT(!del_json.is_discarded() && del_json.value("ErrorNumber", 0) != 0);
+        // ...and without an Origin it is refused as an unsupported method, not
+        // by the guard, so the next case can attribute its 403 to the guard.
+        EXPECT(del_response.status_code() != 403);
+
+        // The guard runs before the method check, so a cross-origin DELETE is
+        // refused for being cross-origin rather than for being a DELETE. The
+        // CHANGELOG calls this out as a status change from 405 to 403; this
+        // pins it.
+        {
+            std::ostringstream raw;
+            raw << "DELETE /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n\r\n";
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 403);
+        }
 
         // CSRF guard (issue #298): this endpoint sets the system clock and,
         // since #291, marks the host client-stepped, so it takes the same
