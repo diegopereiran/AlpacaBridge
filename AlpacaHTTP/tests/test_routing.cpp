@@ -2091,15 +2091,19 @@ int main() {
         // itself an EXPECT -- and it is exactly the call that fails in the
         // regression this block guards against, since a device that was never
         // registered cannot be removed.
-        {
+        const auto restore_original = [&] {
             std::ofstream restore(persisted, std::ios::trunc);
             restore << (original.empty() ? std::string("[]") : original);
-        }
+        };
+        restore_original();
 
         // Unregister from the process-wide DeviceRegistry so later blocks do
-        // not see 9630. The file is already restored, so this rewrites it
-        // from an entry list that no longer contains the synthetic device.
+        // not see 9630. remove_device() saves from THIS router's in-memory
+        // list, which was loaded from the synthetic one-entry file, so it
+        // writes "[]" over the restore above; restore once more afterwards so
+        // the file really is the original when this block ends (#408).
         remove_device(startup_router, "skywatcher", "telescope", 9630);
+        restore_original();
 
         EXPECT(!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array());
         bool found = false;
@@ -2500,6 +2504,47 @@ int main() {
                 route_request(clock_router, "GET", "/management/v1/description").body(), nullptr, false);
             EXPECT(clock_field(desc, "ClockSource") == "none");
             EXPECT(clock_field(desc, "SyncSystemClockFromClients") == false);
+        }
+
+        // open-astro#401: the UTCDate write has the same host-level effect as
+        // the synctime endpoint (it can step the clock and latch ClockSource),
+        // so it takes the same cross-origin guard. A foreign Origin is refused
+        // with 403 before the clock or the driver is touched; a same-origin
+        // write and one with no Origin (native clients) still go through.
+        {
+            int set_calls = 0;
+            alpacahttp::Router clock_router;
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [&](std::chrono::system_clock::time_point, std::string&) {
+                                                  ++set_calls;
+                                                  return true;
+                                              });
+            fresh_counts();
+            const auto send = [&](const std::string& method, const std::string& origin) {
+                std::ostringstream raw;
+                raw << method << " " << base << "/utcdate HTTP/1.1\r\n"
+                    << "Host: localhost\r\n";
+                if (!origin.empty()) {
+                    raw << "Origin: " << origin << "\r\n";
+                }
+                raw << "Content-Type: text/plain\r\n"
+                    << "Content-Length: " << client_utc_body.size() << "\r\n\r\n"
+                    << client_utc_body;
+                alpacahttp::Request request;
+                EXPECT(request.parse(raw.str()));
+                return clock_router.route(request, 1);
+            };
+            EXPECT(send("PUT", "http://evil.example").status_code() == 403);
+            EXPECT(send("POST", "http://evil.example").status_code() == 403);
+            EXPECT(set_calls == 0);
+            EXPECT(scope->utc_writes == 0);
+
+            EXPECT(send("PUT", "http://localhost").status_code() != 403);
+            EXPECT(set_calls == 1);
+            EXPECT(scope->utc_writes == 1);
+
+            EXPECT(send("PUT", "").status_code() != 403);
+            EXPECT(scope->utc_writes == 2);
         }
 
         // A host with no CAP_SYS_TIME: the refusal latches, so a later reader
