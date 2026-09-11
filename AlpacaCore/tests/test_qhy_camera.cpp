@@ -241,3 +241,43 @@ TEST_CASE("QHY Camera Driver - Gain and offset round-trip while connected", "[qh
     driver->set_connected(false);
     CHECK(fake.underflow_closes == 0);
 }
+
+TEST_CASE("QHY Camera Driver - Connecting by index with no cameras detected fails",
+          "[qhy][camera][unit]") {
+    // The empty-enumeration branch of resolve_camera_id_locked() -- unreachable
+    // by the by-id factory, only exercisable through _by_index.
+    FakeQHYSDK fake;  // no cameras added
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0, sdk);
+
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.physical_opens == 0);
+}
+
+TEST_CASE("QHY Camera Driver - Connecting by an out-of-range index fails and leaks nothing",
+          "[qhy][camera][unit]") {
+    auto fake = make_fake();  // exactly one camera, index 0
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 5, sdk);
+
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.physical_opens == 0);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("QHY Camera Driver - Connecting by index resolves the id and connects",
+          "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0, sdk);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(fake.physical_opens == 1);
+    CHECK(fake.last_opened_id == "fake-qhy-0");
+
+    driver->set_connected(false);
+    CHECK(fake.physical_closes == 1);
+}
