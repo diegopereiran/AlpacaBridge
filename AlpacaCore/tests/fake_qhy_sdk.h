@@ -198,19 +198,28 @@ public:
     // straight from the test body, which is a data race the moment a driver
     // worker is running concurrently with that read.
     //
-    // Sound for every case in these files today: they all use default_camera()
-    // (no cooler, so no telemetry or temperature thread) and none starts an
-    // exposure or a pulse guide, so the only writer is the test thread itself.
-    // THE FIRST cooled-camera or exposure case added here breaks that, and
-    // these reads become TSan findings in test code -- exactly the noise
-    // LockedQHYSDK exists to keep out of the [stress] suite. Route them
-    // through the same lock before adding such a case. Tracked in issue #331.
+    // Sound for every case in these files today, though the reason is not
+    // simply "no cooled cameras" -- test_qhy_fake_sdk.cpp now has one, the
+    // control_temp convergence case, which reads last_temp_target straight
+    // from the test body. What makes all of them safe is that NO SECOND THREAD
+    // ever runs: that file builds no driver at all, and the camera and wheel
+    // files build drivers but never drive one into starting a background
+    // worker -- their two start_exposure() calls only assert a throw, and
+    // neither file uses a cooled camera, so no telemetry or temperature thread
+    // is ever spawned.
+    //
+    // THE FIRST case that lets a driver worker actually run breaks that -- a
+    // connected cooled camera, a real exposure, a pulse guide -- and these
+    // reads become TSan findings in test code, exactly the noise LockedQHYSDK
+    // exists to keep out of the [stress] suite. Route them through the same
+    // lock before adding such a case. Tracked in issue #331.
     //
     // The same issue covers the mirror-image race on the input side: hit()
     // bumps `calls` under calls_mutex but then reads `throw_from` outside it,
     // so a test body that arms or clears fault injection mid-storm races the
-    // call path reading it. Sound today for the same reason and unsound from
-    // the same first case, so fix both together rather than one at a time.
+    // call path reading it. Sound today for the same reason (no driver, no
+    // second thread) and unsound from the same first case, so fix both
+    // together rather than one at a time.
     std::map<std::string, int> calls;
     int physical_opens = 0;
     int physical_closes = 0;
