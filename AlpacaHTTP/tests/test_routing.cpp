@@ -2265,10 +2265,12 @@ int main() {
         auto scope = std::make_shared<TelescopeClockStubDriver>(9801);
         EXPECT(registry.register_device(scope));
         const std::string base = "/api/v1/telescope/9801";
-        // 2026-09-11T12:00:00Z, comfortably inside the 2000-2100 window and
-        // far enough from the host clock to clear the 1 s step threshold.
-        const std::string client_utc_body = R"({"UTCDate":"2026-09-11T12:00:00.000Z"})";
-        const auto expected = std::chrono::system_clock::from_time_t(1789128000);  // the same instant, as time_t
+        // 2001-01-01T00:00:00Z: inside the 2000-2100 window and an instant
+        // the host clock can never be within 1 s of, so the step is never
+        // classified as too small (a literal near "today" would fail once a
+        // year, for two seconds).
+        const std::string client_utc_body = R"({"UTCDate":"2001-01-01T00:00:00.000Z"})";
+        const auto expected = std::chrono::system_clock::from_time_t(978307200);  // the same instant, as time_t
 
         // An undisciplined host: the write must reach the setter exactly once,
         // carrying the client's value, and the driver must then be handed the
