@@ -408,9 +408,31 @@ fi
 # --- optional: ThreadSanitizer concurrency stress ---------------------------
 #
 # Mirrors the sanitizers-tsan CI job (issue #101): all-vendors TSan build of
-# the AlpacaCore tests, then the [stress] connect/disconnect/operate
-# concurrency suite. The suppressions file mutes only the uninstrumented
-# proprietary vendor blobs — never our code.
+# the AlpacaCore tests, then TWO filtered runs: the [stress] vendor
+# connect/disconnect/operate concurrency suite, and [stress-guard] for harness
+# self-tests that need TSan but are not vendor registrations (the
+# StressCallGuard concurrency case). Each run has its own zero-test grep, so
+# the vendor threshold cannot be satisfied by an unconditional harness test.
+# The suppressions file mutes only the uninstrumented proprietary vendor
+# blobs — never our code.
+#
+# On the two greps below: each binary's own exit code, via pipefail, is the
+# pass/fail gate. The grep exists solely to catch a run that executed ZERO
+# test cases, which Catch2 reports as success. [stress] is reserved for vendor
+# driver registrations, so a case wearing it in an unconditionally-compiled
+# test file would satisfy the vendor grep on its own and make it vacuous --
+# which it silently was until the AsyncConnectable case moved to
+# [stress-guard]. Harness self-tests that need TSan but are not vendor
+# registrations (StressCallGuard, AsyncConnectable) run under [stress-guard]
+# in their own invocation, with the same zero-test guard. See the matching
+# comment in ci.yml.
+#
+# This prose lives here, above the `if`, rather than inside the pipeline. The
+# gate used to carry it there as `# ...` command-substitution pseudo-comments,
+# now retired: that form is inert only because the substitution expands to an
+# empty string that word-splitting drops, so one stray backtick, $ or trailing
+# backslash in the prose would have turned a comment into a live command
+# inside the gate itself. Do not reintroduce it here.
 
 if [ "${RUN_TSAN:-0}" = "1" ]; then
   section "ThreadSanitizer (concurrency stress, all vendors)"
@@ -424,8 +446,10 @@ if [ "${RUN_TSAN:-0}" = "1" ]; then
      && [ -x "${TSAN_BUILD_DIR}/tests/alpacacore_tests" ] \
      && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
         "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log" \
-     `# binary exit code (pipefail) is the pass/fail gate; grep only guards zero-test runs` \
-     && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-run.log"; then
+     && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-run.log" \
+     && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
+        "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress-guard]" | tee "${TSAN_BUILD_DIR}/stress-guard-run.log" \
+     && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-guard-run.log"; then
     record PASS "tsan stress"
   else
     record FAIL "tsan stress"
