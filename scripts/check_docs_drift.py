@@ -17,7 +17,10 @@ Checks:
      ci_preflight.sh (AGENTS.md: "Keep the cppcheck --suppress list
      identical between ci.yml and ci_preflight.sh").
   4. VERSION matches the version in the README's changelog badge line.
-  5. Every relative path referenced in AGENTS.md's inline code spans
+  5. The QHYSDK seam's three parallel lists agree: every pure virtual on the
+     interface has a LockedQHYSDK override, every override actually takes the
+     mutex, and the forward sweep in test_qhy_fake_sdk.cpp drives all of them.
+  6. Every relative path referenced in AGENTS.md's inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
 """
@@ -184,6 +187,120 @@ def check_version_matches_readme():
     return failures
 
 
+# --- check 5: the QHYSDK seam's three parallel lists ------------------------
+#
+# issue #394. The forward sweep in test_qhy_fake_sdk.cpp drives every QHYSDK
+# method through LockedQHYSDK and asserts each landed on its own counterpart
+# exactly once, which is a genuine (mutation-verified) guard against a
+# TRANSPOSED forward. It is not a guard against an ABSENT one: the method list
+# is hand-written in the test and closed with `methods.size() == N`, a literal
+# compared to a literal. Add a pure virtual to QHYSDK and the compiler forces a
+# LockedQHYSDK override -- the class would otherwise be abstract -- but nothing
+# forces a test entry, so the sweep passes having exercised N of N+1 forwards.
+#
+# And the compiler only guarantees the forward EXISTS. Nothing guarantees it
+# takes the mutex, which is the only reason the decorator exists: its job is to
+# keep ThreadSanitizer findings pointing at driver code rather than at the
+# deliberately unhardened fake, and one unlocked forward makes the fake racy
+# under a storm and produces a TSan report naming the fake -- the exact
+# confusion the decorator was built to prevent, arriving silently.
+
+QHY_INTERFACE_HEADER = "AlpacaCore/include/alpacacore/vendor/qhy/qhy_sdk_wrapper.h"
+QHY_LOCKED_HEADER = "AlpacaCore/tests/locked_qhy_sdk.h"
+QHY_SWEEP_TEST = "AlpacaCore/tests/test_qhy_fake_sdk.cpp"
+
+PURE_VIRTUAL_RE = re.compile(r"\bvirtual\b[^;{}]*?(\w+)\s*\([^;{}]*\)\s*=\s*0\s*;", re.S)
+OVERRIDE_RE = re.compile(r"(\w+)\s*\([^;{}]*\)\s*override\s*\{", re.S)
+BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+
+def _strip_comments(text):
+    """Comments blanked (newlines kept). These headers carry long doc comments
+    whose prose contains parentheses and identifiers, and both patterns above
+    scan across whitespace -- without this a sentence in a comment is matched
+    as a method signature. No raw string literals exist in either header."""
+    text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    return LINE_COMMENT_RE.sub("", text)
+
+
+def _matching_brace(text, open_index):
+    """Index just past the `}` closing the `{` at open_index."""
+    depth = 0
+    for i in range(open_index, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def _class_body(text, class_name):
+    """The text between `class <name> ... {` and its matching brace, or None."""
+    match = re.search(r"\bclass\s+%s\b[^{;]*\{" % re.escape(class_name), text)
+    if not match:
+        return None
+    return text[match.end():_matching_brace(text, match.end() - 1) - 1]
+
+
+def check_qhy_seam_lists():
+    failures = []
+    interface_body = _class_body(_strip_comments(read(QHY_INTERFACE_HEADER)), "QHYSDK")
+    locked_body = _class_body(_strip_comments(read(QHY_LOCKED_HEADER)), "LockedQHYSDK")
+    if interface_body is None or locked_body is None:
+        return ["Could not locate class QHYSDK and/or class LockedQHYSDK -- this check's parser is broken."]
+
+    interface_methods = set(PURE_VIRTUAL_RE.findall(interface_body))
+    if not interface_methods:
+        return ["No pure virtuals found on QHYSDK -- this check's parser is broken."]
+
+    # Each override, with its body, so the lock can be checked too.
+    locked_methods = {}
+    for match in OVERRIDE_RE.finditer(locked_body):
+        open_index = match.end() - 1
+        locked_methods[match.group(1)] = locked_body[open_index:_matching_brace(locked_body, open_index)]
+
+    for name in sorted(interface_methods - set(locked_methods)):
+        failures.append(
+            "QHYSDK::%s() has no LockedQHYSDK override. (If this fires, the parser in %s is wrong: an "
+            "unimplemented pure virtual would make LockedQHYSDK abstract and fail the build.)"
+            % (name, Path(__file__).name))
+    for name in sorted(set(locked_methods) - interface_methods):
+        failures.append(
+            "LockedQHYSDK::%s() overrides nothing on QHYSDK -- stale forward, or the interface lost a "
+            "method." % name)
+
+    for name in sorted(set(locked_methods) & interface_methods):
+        if "locked(" not in locked_methods[name]:
+            failures.append(
+                "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through locked(). The decorator exists "
+                "only to take the mutex -- an unlocked forward makes the fake racy under a [stress] storm "
+                "and produces a ThreadSanitizer report naming the FAKE, which is the confusion the "
+                "decorator was built to prevent." % name)
+
+    # The hand-written sweep list in the test.
+    sweep = read(QHY_SWEEP_TEST)
+    list_match = re.search(r"const std::vector<std::string> methods\{(.*?)\};", sweep, re.S)
+    if not list_match:
+        failures.append(
+            "Could not find the `const std::vector<std::string> methods{...}` sweep list in %s."
+            % QHY_SWEEP_TEST)
+        return failures
+    swept = set(re.findall(r'"([^"]+)"', list_match.group(1)))
+    for name in sorted(interface_methods - swept):
+        failures.append(
+            "NOT SWEPT: QHYSDK::%s() is not in the forward sweep's method list in %s. The sweep is what "
+            "checks the forward reaches its own counterpart; a method missing from the list is verified "
+            "by inspection only." % (name, QHY_SWEEP_TEST))
+    for name in sorted(swept - interface_methods):
+        failures.append(
+            "STALE SWEEP ENTRY: %s is in the sweep list in %s but is not a QHYSDK method."
+            % (name, QHY_SWEEP_TEST))
+    return failures
+
+
 # --- check 5: AGENTS.md path references exist -------------------------------
 
 # Backtick-quoted spans that look like a repo-relative path: start with one of
@@ -297,6 +414,7 @@ CHECKS = [
     ("cppcheck --suppress sync (ci.yml vs ci_preflight.sh)", check_cppcheck_suppress_sync),
     ("VERSION matches README badge", check_version_matches_readme),
     ("AGENTS.md path references exist", check_agents_md_paths_exist),
+    ("QHY SDK seam lists agree (interface / LockedQHYSDK / sweep)", check_qhy_seam_lists),
 ]
 
 
