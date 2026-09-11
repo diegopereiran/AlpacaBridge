@@ -206,10 +206,10 @@ opt out (persisted as `sync_system_clock_from_clients` under `server:` in the
 config file). A telescope connecting while the clock is `none` always logs a
 WARN. On an `rtc` host the line is an INFO only while something can still
 correct the clock: it goes back to a WARN if `SyncSystemClockFromClients` is
-off, and also if a client's `UTCDate` write or a Sync Time press (`PUT
+off, and also if a client's `UTCDate` write or a Sync Time press (`POST
 /management/v1/synctime`) has already been refused (no `CAP_SYS_TIME`), because
 then nothing in the service can set the clock at all
-and the message says to set it from outside instead. A Sync Time press (`PUT /management/v1/synctime`)
+and the message says to set it from outside instead. A Sync Time press (`POST /management/v1/synctime`)
 counts as a client step: `ClockSource` reads `client` afterwards.
 
 `rtc` means the kernel loaded system time from a hardware RTC at boot: the
