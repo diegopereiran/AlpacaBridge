@@ -147,6 +147,8 @@ ssh astro@<host> 'timedatectl | grep synchronized; echo astro | sudo -S timedate
 
 Require `synchronized: yes` and an offset in the low-millisecond range. Skip for non-telescope devices.
 
+**The ConformU host's clock too.** Since #301 the Sky-Watcher direct driver ignores a client-supplied `UTCDate` for pointing whenever the SBC's kernel reports its clock NTP-disciplined, so ConformU can no longer make the driver agree with a wrong clock of its own by writing `UTCDate`. If a run flags `SiderealTime`, check the clock on the machine running ConformU before suspecting the driver (issue #412): a ConformU host more than a few minutes off produces exactly that finding against a correct driver.
+
 (Note: the earlier PR #221 "clock slew" diagnosis was wrong — the RightAscensionRate +0.0033 s/s failure was the driver re-anchoring on hardware counts inside the rate setter, fixed in the driver. Keep this check anyway; it is cheap.)
 
 ### 2g. ConformU is installed ON THE SBC and is the CURRENT release
