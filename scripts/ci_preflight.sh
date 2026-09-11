@@ -408,9 +408,13 @@ fi
 # --- optional: ThreadSanitizer concurrency stress ---------------------------
 #
 # Mirrors the sanitizers-tsan CI job (issue #101): all-vendors TSan build of
-# the AlpacaCore tests, then the [stress] connect/disconnect/operate
-# concurrency suite. The suppressions file mutes only the uninstrumented
-# proprietary vendor blobs — never our code.
+# the AlpacaCore tests, then TWO filtered runs: the [stress] vendor
+# connect/disconnect/operate concurrency suite, and [stress-guard] for harness
+# self-tests that need TSan but are not vendor registrations (the
+# StressCallGuard concurrency case). Each run has its own zero-test grep, so
+# the vendor threshold cannot be satisfied by an unconditional harness test.
+# The suppressions file mutes only the uninstrumented proprietary vendor
+# blobs — never our code.
 
 if [ "${RUN_TSAN:-0}" = "1" ]; then
   section "ThreadSanitizer (concurrency stress, all vendors)"
@@ -426,11 +430,11 @@ if [ "${RUN_TSAN:-0}" = "1" ]; then
         "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log" \
      `# binary exit code (pipefail) is the pass/fail gate; grep only guards zero-test runs` \
      `# [stress] is reserved for vendor driver registrations only -- see the` \
-     `# matching comment in ci.yml -- so this threshold can't be inflated by` \
+     `# matching comment in ci.yml -- so this threshold cannot be inflated by` \
      `# an unconditional harness self-test masking every vendor target vanishing` \
      && grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' "${TSAN_BUILD_DIR}/stress-run.log" \
      `# Harness self-tests needing TSan but not a vendor registration (e.g.` \
-     `# StressCallGuard's own concurrency case) run under [stress-guard] instead,` \
+     `# the StressCallGuard concurrency case) run under [stress-guard] instead,` \
      `# in their own invocation with the same zero-test guard.` \
      && TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1 suppressions=$(pwd)/scripts/tsan_suppressions.txt" \
         "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress-guard]" | tee "${TSAN_BUILD_DIR}/stress-guard-run.log" \
