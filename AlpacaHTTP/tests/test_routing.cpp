@@ -213,7 +213,9 @@ public:
     int get_side_of_pier() const override { return 0; }
     void set_side_of_pier(int) override {}
     int get_destination_side_of_pier(double, double) const override { return 0; }
-    alpacacore::EquatorialSystem get_equatorial_system() const override { return alpacacore::EquatorialSystem::Topocentric; }
+    alpacacore::EquatorialSystem get_equatorial_system() const override {
+        return alpacacore::EquatorialSystem::Topocentric;
+    }
     bool get_does_refraction() const override { return false; }
     void set_does_refraction(bool) override {}
     int get_slew_settle_time() const override { return 0; }
@@ -2266,8 +2268,7 @@ int main() {
         // 2026-09-11T12:00:00Z, comfortably inside the 2000-2100 window and
         // far enough from the host clock to clear the 1 s step threshold.
         const std::string client_utc_body = R"({"UTCDate":"2026-09-11T12:00:00.000Z"})";
-        const auto expected =
-            std::chrono::system_clock::from_time_t(1789128000);  // the same instant, as time_t
+        const auto expected = std::chrono::system_clock::from_time_t(1789128000);  // the same instant, as time_t
 
         // An undisciplined host: the write must reach the setter exactly once,
         // carrying the client's value, and the driver must then be handed the
@@ -2283,8 +2284,7 @@ int main() {
                                                   return true;
                                               });
             scope->utc_writes = 0;
-            const auto response =
-                route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
+            const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
             EXPECT(set_calls == 1);
@@ -2312,8 +2312,7 @@ int main() {
                                                   return true;
                                               });
             scope->utc_writes = 0;
-            const auto response =
-                route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
+            const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
             EXPECT(set_calls == 0);
@@ -2357,8 +2356,7 @@ int main() {
                                                   return false;
                                               });
             scope->utc_writes = 0;
-            const auto response =
-                route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
+            const auto response = route_request(clock_router, "PUT", base + "/utcdate", client_utc_body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             // A refused clock step is not a failed UTCDate write: the driver
             // still gets the value and the client still gets a success.
@@ -2415,8 +2413,7 @@ int main() {
                 EXPECT(registry.register_device(scope_a));
                 alpacahttp::Router clock_router;
                 clock_router.set_host_clock_hooks(
-                    [] { return false; },
-                    [](std::chrono::system_clock::time_point, std::string&) { return true; });
+                    [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
                 route_request(clock_router, "PUT", "/api/v1/telescope/9802/connected", "Connected=true");
                 EXPECT(warned_about_clock());
@@ -2430,8 +2427,7 @@ int main() {
                 EXPECT(registry.register_device(scope_b));
                 alpacahttp::Router clock_router;
                 clock_router.set_host_clock_hooks(
-                    [] { return false; },
-                    [](std::chrono::system_clock::time_point, std::string&) { return true; });
+                    [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
                 route_request(clock_router, "PUT", "/api/v1/telescope/9803/connect", "");
                 EXPECT(warned_about_clock());
@@ -2444,8 +2440,7 @@ int main() {
                 EXPECT(registry.register_device(scope_c));
                 alpacahttp::Router clock_router;
                 clock_router.set_host_clock_hooks(
-                    [] { return true; },
-                    [](std::chrono::system_clock::time_point, std::string&) { return true; });
+                    [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
                 route_request(clock_router, "PUT", "/api/v1/telescope/9804/connected", "Connected=true");
                 EXPECT(!warned_about_clock());
@@ -2459,8 +2454,7 @@ int main() {
                 EXPECT(registry.register_device(scope_d));
                 alpacahttp::Router clock_router;
                 clock_router.set_host_clock_hooks(
-                    [] { return false; },
-                    [](std::chrono::system_clock::time_point, std::string&) { return true; });
+                    [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 route_request(clock_router, "PUT", "/api/v1/telescope/9805/utcdate", client_utc_body);
                 clear();
                 route_request(clock_router, "PUT", "/api/v1/telescope/9805/connected", "Connected=true");

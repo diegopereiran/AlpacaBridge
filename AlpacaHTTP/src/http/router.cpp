@@ -1343,7 +1343,7 @@ void Router::set_host_clock_hooks(alpacacore::util::HostClock::IsSynchronizedFn 
                                   alpacacore::util::HostClock::HasRtcFn has_rtc) {
     const bool enabled = host_clock_->enabled();
     host_clock_ = std::make_unique<alpacacore::util::HostClock>(std::move(is_synchronized), std::move(set_time),
-                                                               std::move(has_rtc));
+                                                                std::move(has_rtc));
     host_clock_->set_enabled(enabled);
 }
 
