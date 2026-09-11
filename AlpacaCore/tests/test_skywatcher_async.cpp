@@ -1691,8 +1691,13 @@ TEST_CASE("SkyWatcher async - the client-clock disagreement WARN fires once per 
     // Only meaningful on a disciplined host (the WARN is gated on it); on an
     // undisciplined runner the count stays 0 on both writes and the case
     // still passes, which is the honest outcome without a discipline seam.
+    // The sink is restored by a guard, so a REQUIRE that throws out of the
+    // case cannot leave the global sink pointing at this frame's counter.
     std::atomic<int> warns{0};
-    const auto previous = alpacacore::logging::get_log_sink();
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
     alpacacore::logging::set_log_sink(
         [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
             if (level == alpacacore::logging::LogLevel::Warn &&
@@ -1718,7 +1723,6 @@ TEST_CASE("SkyWatcher async - the client-clock disagreement WARN fires once per 
         CHECK(warns.load() == first_session * 2);
         driver->set_connected(false);
     }
-    alpacacore::logging::set_log_sink(previous);
 }
 
 TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#304)", "[skywatcher][async]") {
