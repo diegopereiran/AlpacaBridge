@@ -87,7 +87,8 @@ TEST_CASE("QHY Filter Wheel Driver - Unsupported actions", "[qhy][filterwheel][u
     CHECK_THROWS_AS(driver->command_string("test", false), alpacacore::AlpacaException);
 }
 
-TEST_CASE("QHY Filter Wheel Driver - Names and focus offsets configurable while disconnected", "[qhy][filterwheel][unit]") {
+TEST_CASE("QHY Filter Wheel Driver - Names and focus offsets configurable while disconnected",
+          "[qhy][filterwheel][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(1, 0);
 
     // Slot count is unknown until connect, so no length validation is imposed yet.
@@ -295,7 +296,8 @@ TEST_CASE("QHY Filter Wheel Driver - Connecting by index with no cameras detecte
     CHECK(fake.physical_opens == 0);
 }
 
-TEST_CASE("QHY Filter Wheel Driver - Connecting by an out-of-range index fails and leaks nothing", "[qhy][filterwheel][unit]") {
+TEST_CASE("QHY Filter Wheel Driver - Connecting by an out-of-range index fails and leaks nothing",
+          "[qhy][filterwheel][unit]") {
     auto fake = make_fake();  // exactly one camera, index 0
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(0, 3, sdk);
