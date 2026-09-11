@@ -2145,11 +2145,18 @@ int main() {
         EXPECT(get_json["Value"].is_number_integer());
         EXPECT(get_json["Value"].get<std::int64_t>() > 1600000000);  // after 2020-09
 
-        // Out-of-range epochs are rejected without setting the clock.
+        // Out-of-range epochs are rejected without setting the clock. The
+        // status check is not redundant with ErrorNumber: a 403 from the
+        // cross-origin guard (issue #298) also carries a non-zero
+        // ErrorNumber, so without it this loop would keep passing if the
+        // guard ever started rejecting a request that carries no Origin at
+        // all -- which is every non-browser client, Ara included. That is the
+        // invariant most worth not breaking here.
         for (const auto* body : {"{\"Epoch\": 100}", "{\"Epoch\": 5000000000}", "{\"Epoch\": -1}", "{}", "not json"}) {
             const auto response = route_request(router, "POST", "/management/v1/synctime", body);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(response.status_code() != 403);
         }
 
         // DELETE is not a supported method.
