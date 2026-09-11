@@ -660,6 +660,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 - **iOptron Device Support** (AlpacaHTTP)
   - Web UI: iOptron connection type selector with Auto-Detect (default), Serial, and Network options, matching the Celestron configuration pattern.
   - All iOptron web UI element IDs prefixed with `ioptron-` to avoid collisions with other vendor config sections.
+- **Celestron Telescope Driver** (AlpacaCore)
   - Pulse guide rewritten to use native MC_AUX_GUIDE (0x26) hardware command instead of software-timed MoveAxis + sync. The firmware times the pulse internally — no sleep, encoder snapshotting, or sync_ra_dec_raw calls required.
   - `SideOfPier` now reports actual pier side via the HC `p` command (`W` → pierWest, `E` → pierEast) instead of always returning -1 (unknown).
   - `IsPulseGuiding` now returns actual status (time-based tracking of pulse guide end time plus completion delay) instead of always returning false.
@@ -683,6 +684,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 - **Platform Documentation**: added Raspberry Pi 3B+ to supported arm64 targets
 
 ### Fixed
+- **iOptron Telescope Driver** (AlpacaCore)
   - Fixed `:MountInfo#` response parsing: iOptron returns exactly 4 ASCII digit bytes with no `#` terminator, but the driver was waiting for a `#` and timing out silently. Changed to idle-timeout read mode (`require_hash_terminator=false`).
   - Fixed model code table: iOptron reassigned model codes in the v3 protocol (e.g., code `0025` is HEM27, not CEM25). Replaced the stale Indigo-derived table with the current INDI v3 driver's authoritative mapping.
   - Fixed stale serial buffer bytes contaminating `:MS1#`/`:MS2#` slew responses (e.g., `"1111"` instead of `"1"`). Added `flush_input()` (via `tcflush`/`PurgeComm`) before issuing slew commands.
@@ -693,6 +695,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Fixed stale device entries persisting across restarts: a single device failing to load on startup no longer prevents other devices from loading (individual try/catch per device).
   - Fixed inability to remove failed devices: `handle_remove_device` now checks both the runtime registry and the persisted device list, so devices that failed to register can still be deleted.
   - Fixed failed devices being invisible in the web UI: `handle_configured_devices` now includes persisted-but-unregistered devices marked with `LoadError: true`, displayed with a warning icon and red styling.
+- **Celestron Telescope Driver** (AlpacaCore)
   - Fixed SideOfPier race condition in RA offset learning: async slew lambda now captures target RA at dispatch time so back-to-back slews don't corrupt the running-average residual.
 
 </details>
@@ -876,6 +879,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - PulseGuide and slew-adjustment fixes: pending slew adjustment now uses a fresh mount query (no stale cache); longitude no longer restored mid-slew after GOTO retry; sync slew path clears pending flag to avoid double adjustment.
   - WiFi timing: extended equatorial cache TTL for RA/Dec reads (5 s) so FAST response target is met over high-latency links; PulseGuide no longer performs a mount query for debug logging before returning, improving STANDARD timing.
   - Platform coverage: AM5 / AM5N driver has been exercised on Linux ARMv8 (e.g., Raspberry Pi 5) in addition to Windows 11 (x64), macOS (arm64), and Linux x64; behavior and ConformU results match desktop platforms.
+- **Supported Drivers Documentation** (AlpacaCore)
   - SUPPORTED-DRIVERS.md updated: ZWO AM5N tested and working over USB and WiFi (macOS arm64).
   - Added Linux x64 platform support: ZWO AM5N telescope verified on Linux x64; ZWO Telescope Driver Notes updated with Linux x64 in Verified OS/Arch.
   - Added Linux Notes section with Linux x64 testing and serial port access: user must run `sudo usermod -aG dialout $USER` and log out/back in for USB/serial device access.
@@ -898,6 +902,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Routing tests updated for telescope/mount device type and ZWO telescope registration.
 
 ### Changed
+- **Supported Drivers Documentation** (AlpacaCore)
   - Documented ZWO AM5N in Telescope drivers table; ConformU validation (macOS arm64); driver notes (protocol, connection, tested firmware 1.8.8, USB/serial only—Bluetooth not tested).
   - ZWO AM5N known issue: firmware issue—guiding on its own can be sporadic; guiding via ST4 cable to the guide camera should still be fine.
 
@@ -934,6 +939,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - `.gitattributes` for normalized line endings (`* text=auto eol=lf`, CRLF for Windows scripts, LF for shell/CMake).
 
 ### Changed
+- **SynScan Telescope Driver** (AlpacaCore)
   - Implemented `get_axis_rate_ranges` (vector of rate ranges per ASCOM). Tertiary axis returns empty set; primary/secondary return single range. Axis validation in `get_axis_rate_range` for invalid axis.
   - Added unit tests for axis rate range behavior.
 - **Build and test scripts** (AlpacaBridge)
@@ -957,6 +963,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Added web UI configuration fields for WeeWX devices.
 
 ### Changed
+- **Supported Drivers Documentation** (AlpacaCore)
   - ObservingConditions section updated with WeeWX table, ConformU link, and driver notes.
 - **Build & Router** (AlpacaCore, AlpacaHTTP)
   - CMake option `ALPACACORE_ENABLE_WEEWX` and router/config updates for ObservingConditions.
@@ -967,6 +974,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 <summary><strong>[0.9.0] - 2026-02-03</strong></summary>
 
 ### Added
+- **SynScan Telescope Driver** (AlpacaCore)
   - Added Sky-Watcher SynScan telescope driver implementation and tests.
   - Added SynScan ConformU validation logs.
 - **Protocol Reference Docs** (AlpacaCore)
@@ -976,6 +984,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Added web UI configuration fields for SynScan devices.
 
 ### Changed
+- **Supported Drivers Documentation** (AlpacaCore)
   - Documented SynScan V3/V4 mount support, tested connection path (USB/Serial hand controller, Orion Atlas EQ-G), and validated platform (macOS arm64 only).
 - **Project Documentation** (Workspace)
   - Updated README with SynScan driver availability and setup notes.
@@ -1098,9 +1107,11 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Uses parallel cmake builds and ctest execution for faster test runs
 
 ### Changed
+- **Build System** (AlpacaCore)
   - Added libudev dependency detection and linking for ZWO driver on Linux
   - Prefer pkg-config for libudev detection, fallback to find_library
   - Require libudev on Linux (non-Apple) platforms
+- **Build Scripts** (AlpacaBridge)
   - Added automatic udev rules installation in `build_and_run.sh` for Linux
   - Configurable via `ALPACA_INSTALL_UDEV_RULES` environment variable (default: ON)
   - Automatically finds and installs all `.rules` files from `external/` directory
@@ -1108,6 +1119,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 - **Test Infrastructure** (AlpacaCore)
   - Updated all test files to use `catch2_compat.h` instead of `catch2/catch_all.hpp`
   - Improved test compatibility and consistency across test suite
+- **Documentation** (AlpacaBridge)
   - Added installation section to README.md with install script documentation
   - Updated AGENTS.md with note about udev rules installation requirement
   - Updated SUPPORTED-DRIVERS.md with Linux ARMv8 testing notes and verification status
@@ -1145,6 +1157,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Filter wheel device registration with filter wheel binding support
   - Improved device configuration validation for filter wheel devices
   - Smart filter wheel index auto-fill in web UI
+- **Web UI Enhancements** (AlpacaHTTP)
   - Filter wheel device type support in device configuration
   - ZWO filter wheel index and ID configuration fields
   - Filter names textarea input for custom filter naming
@@ -1180,14 +1193,17 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Smart auto-numbering for rotator device numbers and indices
 
 ### Changed
+- **Device Registration** (AlpacaHTTP)
   - Enhanced ZWO CAA rotator device registration with validation
   - Rotator device registration with rotator binding support
   - Improved device configuration validation for rotator devices
   - Smart rotator index auto-fill in web UI
+- **Web UI Enhancements** (AlpacaHTTP)
   - Rotator device type support in device configuration
   - ZWO rotator index and ID configuration fields
   - Auto-fill support for rotator indices
   - Enhanced vendor-specific configuration UI for ZWO rotators
+- **Documentation** (AlpacaCore)
   - Updated SUPPORTED-DRIVERS.md with ZWO CAA rotator information
   - Reordered all driver sections to match ASCOM API device type order (Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope)
   - Added placeholders for all ASCOM device types not yet implemented
@@ -1209,10 +1225,13 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Improved camera info preloading for faster device name resolution
   - Added camera info refresh mechanism to ensure accurate device information
   - Enhanced camera enumeration and info caching for better performance
+- **iOptron Telescope Driver** (AlpacaCore)
   - Updated driver description to accurately reflect supported mount series
   - Improved description clarity for all supported iOptron mount models
+- **Web UI** (AlpacaHTTP)
   - Added cache busting for device list loading to prevent stale data
   - Improved device list refresh reliability with timestamp-based cache control
+- **Documentation** (AlpacaCore)
   - Updated SUPPORTED-DRIVERS.md with ASI120MM Mini camera
   - Enhanced building guide with workspace-level script documentation
   - Improved documentation for ZWO driver support (camera, switch, focuser)
@@ -1244,14 +1263,17 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Smart auto-numbering for focuser device numbers and indices
 
 ### Changed
+- **Device Registration** (AlpacaHTTP)
   - Enhanced ZWO EAF focuser device registration with validation
   - Focuser device registration with focuser binding support
   - Improved device configuration validation for focuser devices
   - Smart focuser index auto-fill in web UI
+- **Web UI Enhancements** (AlpacaHTTP)
   - Focuser device type support in device configuration
   - ZWO focuser index and ID configuration fields
   - Auto-fill support for focuser indices
   - Enhanced vendor-specific configuration UI for ZWO focusers
+- **Documentation** (AlpacaCore)
   - Updated SUPPORTED-DRIVERS.md with ZWO EAF focuser information
   - Added Focuser Drivers section to supported drivers documentation
   - Documented EAF SDK version and platform support
@@ -1263,6 +1285,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 <summary><strong>[0.5.0] - 2026-01-05</strong></summary>
 
 ### Added
+- **ZWO Camera Driver** (AlpacaCore)
   - Complete ZWO ASI camera driver implementation with full ASCOM Alpaca Camera API support
   - SDK wrapper layer for ZWO ASI Camera SDK Version 1.40
   - Support for USB connection via libusb-1.0
@@ -1335,10 +1358,12 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Better device registration error messages for ZWO devices
   - Improved transaction ID extraction from multiple request sources (query, JSON, form)
   - Enhanced parameter parsing for query parameters, JSON bodies, and form data
+- **Device Registration** (AlpacaHTTP)
   - Enhanced ZWO camera device registration with validation
   - ZWO switch device registration with camera binding support
   - Improved device configuration validation and error reporting
   - Smart device number and camera index auto-fill in web UI
+- **Web UI Enhancements** (AlpacaHTTP)
   - Smart auto-numbering for device numbers and camera indices
   - Automatic next available number detection per device type
   - ZWO switch type selection (dew heater) in device configuration
@@ -1346,6 +1371,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Improved device configuration form with auto-fill capabilities
   - Better handling of device editing vs. new device creation
   - Enhanced vendor-specific configuration UI for ZWO devices
+- **Documentation** (AlpacaCore)
   - Updated SUPPORTED-DRIVERS.md with all ConformU-validated ZWO cameras and switches
   - Added Switch Drivers section to supported drivers documentation
   - Updated ConformU README with ZWO test results
@@ -1364,6 +1390,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - `/management/v1/logs` endpoint for retrieving log history
   - `/management/v1/loglevel` endpoint for dynamic log level control
   - Log level applied at initialization from configuration
+- **Web UI Enhancements** (AlpacaHTTP)
   - Interactive log level toggles with real-time updates
   - Log history display in web interface
   - Logo and improved styling throughout the UI
@@ -1372,6 +1399,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Improved server info display with formatted grid layout
   - Editable server location field with inline save functionality
   - Better JSON response parsing and error handling in UI
+- **Device Persistence** (AlpacaHTTP)
   - Automatic device configuration persistence to `config/registered_devices.json`
   - Device registration persists across server restarts
   - Device removal and configuration management via API
@@ -1393,6 +1421,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
 - **Version Information** (AlpacaHTTP)
   - Version header file (`version.h`) for compile-time version access
   - Centralized version management in CMake build system
+- **Workspace Infrastructure** (AlpacaBridge)
   - Consolidated CHANGELOG.md at workspace level
   - Comprehensive README.md with logo, quick start guide, and build instructions
   - Cross-platform build and test scripts (`build_and_run.sh/cmd`, `run_all_tests.sh/cmd`)
@@ -1400,6 +1429,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Workspace-level LICENSE file
 
 ### Changed
+- **Router Architecture** (AlpacaHTTP)
   - Enhanced parameter parsing for query parameters and JSON request bodies
   - Auto-parse JSON strings in response values for better compatibility
   - Improved form parsing for device configuration
@@ -1407,6 +1437,7 @@ Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findi
   - Case-insensitive query parameter lookup support
   - YAML configuration file editing for server location persistence
   - Improved error status application with proper HTTP status code mapping
+- **iOptron Telescope Driver** (AlpacaCore)
   - Improved status parsing and command handling
   - Enhanced slew completion detection
   - Better protocol compliance and error handling
