@@ -1487,12 +1487,16 @@ datagrams before each send so replies cannot get off-by-one.
   `:b`, high-speed ratio `:g`), LST computation, pier-side selection, and tracking-rate
   step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
   fast mode). The mount stores **no site or time** — site lat/long/elevation come from
-  the web UI config or the Alpaca setters. Time is the host clock plus the client-set
-  `UTCDate` offset, through one `utc_now_locked()` for every LST computation (#287); on an
-  NTP-less host the router also steps the system clock from that write (#289). The offset is
-  not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped underneath
-  it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks disagreeing
-  by more than 1 s since the write, and re-armed by the next `UTCDate` write.
+  the web UI config or the Alpaca setters. Time comes from two functions: `utc_now_locked()`
+  feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
+  client-set `UTCDate` offset only when the host clock was undisciplined (no NTP) at the moment
+  of the write, so a client's clock error never steers pointing on an NTP-good host;
+  `client_utc_now_locked()` feeds the `UTCDate` readback and always honours the client's write,
+  because that property is the client's to set and ConformU reads back what it wrote (#287,
+  #351). On an NTP-less host the router also steps the system clock from that write (#289). The
+  offset is not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped
+  underneath it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks
+  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write.
 - Pointing convention: home = counterweight down pointing at the pole, counts offset
   `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
   `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle

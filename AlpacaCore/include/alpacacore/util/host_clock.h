@@ -67,6 +67,13 @@ public:
     // A client's UTCDate carries the HTTP round trip and its own scheduling
     // jitter; stepping for sub-second deltas would only inject that noise.
     static constexpr std::chrono::milliseconds kMinStep{1000};
+    // How far a client's time may disagree with a *disciplined* host clock
+    // before either side says so out loud. The router logs it when it refuses
+    // to step (open-astro#289) and the Sky-Watcher driver logs it when it
+    // decides to point by the host clock instead (open-astro#301); the two
+    // describe the same event, so they share one threshold rather than two
+    // literals that can drift apart.
+    static constexpr std::chrono::milliseconds kClientDisagreementWarn{2000};
 
     HostClock()
         : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time, &HostClock::host_booted_from_rtc) {
