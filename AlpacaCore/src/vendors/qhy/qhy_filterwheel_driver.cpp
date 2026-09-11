@@ -454,7 +454,8 @@ private:
 // ever gains real work, this moves a libqhyccd call onto the
 // configure/management path, which on a USB-less host is the crash path this
 // whole seam exists to avoid. Keep the constructor trivial, or make these
-// overloads lazy.
+// overloads lazy -- issue #368 weighs that change, since today the constraint
+// is held by this comment and nothing mechanical.
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id) {
     return create_qhy_filterwheel(device_number, camera_id, QHYSDKWrapper::instance());
 }

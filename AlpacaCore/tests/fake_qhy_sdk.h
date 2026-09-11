@@ -80,7 +80,7 @@ namespace alpacacore::test {
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
  * corresponding real guard. Each is tracked; none is relied on by the cases
- * in this branch, but the [stress] follow-up (#321) will exercise all four:
+ * in this branch, but the [stress] follow-up (#321) will exercise all five:
  *
  * - open_camera() does not refuse a fresh open while a registered exposure
  *   worker is still live (the real one throws InvalidOperation — this is the
@@ -100,6 +100,13 @@ namespace alpacacore::test {
  *   here, while the same change on hardware would flip has_cooler. Set the
  *   struct field (or use default_cooled_camera()) instead. Tracked in
  *   issue #337.
+ * - get_mem_length() ignores binning: set_bin_mode() stores wbin_/hbin_ and
+ *   nothing reads them, so the length stays full-resolution where the real
+ *   GetQHYCCDMemLength() shrinks after SetQHYCCDBinMode. Nothing here exposes
+ *   at all, let alone at bin > 1, but an exposure test that bins and then
+ *   sizes a buffer from this would pass here and fail on hardware. Adjacent
+ *   to #328 (same sizing path) and cheapest to fix with it. Tracked in
+ *   issue #365.
  *
  * Not thread-hardened, by design — wrap it in LockedQHYSDK for the [stress]
  * suite so ThreadSanitizer reports point at driver code, not at this file.
@@ -155,6 +162,12 @@ public:
     // these reads become TSan findings in test code -- exactly the noise
     // LockedQHYSDK exists to keep out of the [stress] suite. Route them
     // through the same lock before adding such a case. Tracked in issue #331.
+    //
+    // The same issue covers the mirror-image race on the input side: hit()
+    // bumps `calls` under calls_mutex but then reads `throw_from` outside it,
+    // so a test body that arms or clears fault injection mid-storm races the
+    // call path reading it. Sound today for the same reason and unsound from
+    // the same first case, so fix both together rather than one at a time.
     std::map<std::string, int> calls;
     int physical_opens = 0;
     int physical_closes = 0;
