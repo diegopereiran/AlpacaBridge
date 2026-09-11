@@ -201,7 +201,10 @@ TEST_CASE("QHY Camera Driver - Connecting an unknown camera id fails and leaks n
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "not-a-camera", sdk);
 
-    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    // DriverException, not NotConnected: the real OpenQHYCCD returning null
+    // for an unrecognized id has no "not connected" concept, only "the open
+    // failed" (matches QHYSDKWrapper::open_camera()).
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
     CHECK(fake.physical_opens == 0);
     CHECK(fake.underflow_closes == 0);

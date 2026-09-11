@@ -183,7 +183,11 @@ public:
         hit("open_camera");
         require_resource();
         if (!known_id(camera_id)) {
-            throw AlpacaException("fake: unknown QHY camera id '" + camera_id + "'", AlpacaError::NotConnected);
+            // Matches QHYSDKWrapper::open_camera(): OpenQHYCCD returning null
+            // for an id it doesn't recognize throws DriverException, not
+            // NotConnected -- the real SDK has no concept of "not connected"
+            // at this call, only "the open failed".
+            throw AlpacaException("fake: unknown QHY camera id '" + camera_id + "'", AlpacaError::DriverException);
         }
         last_opened_id = camera_id;
         auto& count = ref_counts_[camera_id];

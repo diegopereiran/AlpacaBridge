@@ -1211,9 +1211,12 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   exposure, temperature and cooler-off workers join with a bounded timeout and
   *detach* on expiry, and its pulse-guide worker is detached by design, so a
   blocking fake leaves detached threads calling into it after the test ends.
-  **(b) Those detachable workers capture a `QHYSDK*`, never `this`** — reaching
-  the seam through the `sdk_` member from a worker that may outlive the driver
-  is a use-after-free at exactly the moment the SDK call returns.
+  **(b) Those detachable workers must reach the seam through a captured
+  `QHYSDK*`, never through `this->sdk_`** — the workers still capture `this`
+  for everything else they touch; only the SDK call is required to go through
+  the raw pointer, because reaching it via the `sdk_` member from a worker
+  that may outlive the driver is a use-after-free at exactly the moment the
+  SDK call returns.
 - **Poll-until-settled loops keep the sleep cadence in the driver but put the
   DECISION in `util::ConsecutiveSettle`** (`util/poll_settle.h`, issue #105):
   stability-run + poll-budget semantics, unit-tested with scripted sequences

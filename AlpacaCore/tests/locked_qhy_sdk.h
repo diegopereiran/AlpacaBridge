@@ -37,6 +37,17 @@ namespace alpacacore::test {
  * This decorator is only sound because no QHYSDK method blocks in a fake —
  * holding one mutex across a blocking call would serialize the storm into a
  * queue. See rule 1 in FakeQHYSDK's class comment.
+ *
+ * One production rule this decorator deliberately does NOT preserve:
+ * QHYSDKWrapper::cancel_exposure() skips the per-handle call_mutex on purpose
+ * (AGENTS.md, "Every SDK call is serialized against its physical handle"),
+ * because its whole job is to interrupt a GetQHYCCDSingleFrame blocked on
+ * another thread — serializing it the same way as every other call would
+ * deadlock it behind the very call it needs to cancel. Here, cancel_exposure()
+ * goes through the SAME mutex as everything else. That is safe only as long
+ * as the rule above holds (no fake method blocks) — the moment a fake gains a
+ * deliberate delay (to test a real timeout path, say), this decorator turns
+ * that production safety valve into a deadlock instead of a no-op.
  */
 class LockedQHYSDK : public vendor::qhy::QHYSDK {
 public:

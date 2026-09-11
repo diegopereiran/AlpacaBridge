@@ -86,13 +86,16 @@ TEST_CASE("FakeQHYSDK - per-camera calls require an open handle", "[qhy][fake][u
     }
 }
 
-TEST_CASE("FakeQHYSDK - opening an unknown id throws NotConnected", "[qhy][fake][unit]") {
+TEST_CASE("FakeQHYSDK - opening an unknown id throws DriverException", "[qhy][fake][unit]") {
+    // Matches QHYSDKWrapper::open_camera(): OpenQHYCCD returning null throws
+    // DriverException, not NotConnected -- the real SDK has no "not
+    // connected" concept at this call, only "the open failed".
     auto fake = make_fake();
     try {
         fake.open_camera("no-such-camera");
         FAIL("expected a throw");
     } catch (const AlpacaException& ex) {
-        CHECK(ex.error_code() == AlpacaError::NotConnected);
+        CHECK(ex.error_code() == AlpacaError::DriverException);
     }
     CHECK(fake.physical_opens == 0);
 }
