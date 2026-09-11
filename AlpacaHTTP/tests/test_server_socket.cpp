@@ -803,6 +803,61 @@ int main() {
         ::close(fd);
     }
 
+    // --- RTC probe thread (open-astro#314) ----------------------------------
+    // The probe was moved off the request path, then off the reactor, onto its
+    // own timer thread. Both #314 unit cases drive Router::refresh_rtc_probe()
+    // directly, so deleting the thread's spawn left every one of them green --
+    // and the bug the issue is about is precisely a host where nothing
+    // re-probes: has_rtc() no longer probes, so with the thread gone the
+    // startup answer is pinned for the life of the process.
+    //
+    // Drive it end to end instead: a real Server, a counting has_rtc hook, a
+    // 1 s interval from Config (the default 31 s is unwaitable), and an
+    // assertion that the count rises on its own.
+    {
+        alpacahttp::Config rtc_config;
+        rtc_config.set_http_port(6877);
+        rtc_config.set_discovery_enabled(false);
+        rtc_config.set_server_name("TestServerRtcProbe");
+        rtc_config.set_rtc_probe_interval_seconds(1);
+        alpacahttp::Server rtc_server(rtc_config);
+
+        std::atomic<int> probes{0};
+        rtc_server.router_for_test().set_host_clock_hooks(
+            [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
+            [&probes] {
+                ++probes;
+                return false;
+            });
+        // Installing the hooks builds a fresh HostClock, which primes the
+        // probe once in its constructor -- that is #314's other half.
+        const int primed = probes.load();
+        EXPECT(primed == 1);
+
+        rtc_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        if (rtc_server.is_running()) {
+            // No requests are sent: the whole point is that the refresh does
+            // not depend on one arriving. Poll rather than sleeping one
+            // interval and asserting: on a loaded runner thread start plus a
+            // 1 s period can exceed any fixed margin, and waiting up to 5 s
+            // for something that normally takes 1 s costs nothing when it
+            // works.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (probes.load() == primed && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            EXPECT(probes.load() > primed);
+        }
+        rtc_server.stop();
+        EXPECT(!rtc_server.is_running());
+        // And the thread stops when the server does: no further passes after
+        // the join returns.
+        const int after_stop = probes.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        EXPECT(probes.load() == after_stop);
+    }
+
     // stop() must not wait out an ACTIVE keep-alive client. Before the
     // running_ check a client that kept sending (NINA/PHD2 polling) held its
     // worker, and therefore stop(), until the 300s lifetime cap; systemd
@@ -875,61 +930,6 @@ int main() {
             EXPECT(peer_closed(fd, 2000));
             ::close(fd);
         }
-    }
-
-    // --- RTC probe thread (open-astro#314) ----------------------------------
-    // The probe was moved off the request path, then off the reactor, onto its
-    // own timer thread. Both #314 unit cases drive Router::refresh_rtc_probe()
-    // directly, so deleting the thread's spawn left every one of them green --
-    // and the bug the issue is about is precisely a host where nothing
-    // re-probes: has_rtc() no longer probes, so with the thread gone the
-    // startup answer is pinned for the life of the process.
-    //
-    // Drive it end to end instead: a real Server, a counting has_rtc hook, a
-    // 1 s interval from Config (the default 31 s is unwaitable), and an
-    // assertion that the count rises on its own.
-    {
-        alpacahttp::Config rtc_config;
-        rtc_config.set_http_port(6877);
-        rtc_config.set_discovery_enabled(false);
-        rtc_config.set_server_name("TestServerRtcProbe");
-        rtc_config.set_rtc_probe_interval_seconds(1);
-        alpacahttp::Server rtc_server(rtc_config);
-
-        std::atomic<int> probes{0};
-        rtc_server.router_for_test().set_host_clock_hooks(
-            [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
-            [&probes] {
-                ++probes;
-                return false;
-            });
-        // Installing the hooks builds a fresh HostClock, which primes the
-        // probe once in its constructor -- that is #314's other half.
-        const int primed = probes.load();
-        EXPECT(primed == 1);
-
-        rtc_server.start_async();
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        if (rtc_server.is_running()) {
-            // No requests are sent: the whole point is that the refresh does
-            // not depend on one arriving. Poll rather than sleeping one
-            // interval and asserting: on a loaded runner thread start plus a
-            // 1 s period can exceed any fixed margin, and waiting up to 5 s
-            // for something that normally takes 1 s costs nothing when it
-            // works.
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (probes.load() == primed && std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-            EXPECT(probes.load() > primed);
-        }
-        rtc_server.stop();
-        EXPECT(!rtc_server.is_running());
-        // And the thread stops when the server does: no further passes after
-        // the join returns.
-        const int after_stop = probes.load();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-        EXPECT(probes.load() == after_stop);
     }
 
     std::cout << "All server socket tests passed!\n";
