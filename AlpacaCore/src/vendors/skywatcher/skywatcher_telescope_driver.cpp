@@ -1780,10 +1780,6 @@ private:
 
     bool hemisphere_south_locked() const { return site_latitude_ < 0.0; }
 
-    // The one time source for every LST computation (open-astro#287): the
-    // host clock plus the offset a client set through UTCDate. Before this,
-    // get_utc_date() reported the offset while goto/RA math ignored it, so a
-    // client time-sync corrected the readback and not the pointing.
     // Drops a client offset the host clock has moved out from under. The
     // offset is a snapshot delta against the host clock at the time of the
     // UTCDate write; if the host clock is stepped afterwards (Sync Time, NTP,
@@ -1809,7 +1805,12 @@ private:
     // The clock the mount is AIMED by: LST, SiderealTime,
     // DestinationSideOfPier and every goto. Honours the client's offset only
     // when the host clock was undisciplined at the time of the write
-    // (open-astro#301); see detail::pointing_uses_client_offset().
+    // (open-astro#301); see detail::pointing_uses_client_offset(). History:
+    // open-astro#287 first routed every LST computation through this one
+    // function, because get_utc_date() had reported the client offset while
+    // goto/RA math ignored it; #301 then made the offset conditional here
+    // while the UTCDate readback (client_utc_now_locked) still always honours
+    // the client's write.
     std::chrono::system_clock::time_point utc_now_locked() const {
         const auto system_now = std::chrono::system_clock::now();
         const bool survives = client_offset_survives_locked(system_now);
