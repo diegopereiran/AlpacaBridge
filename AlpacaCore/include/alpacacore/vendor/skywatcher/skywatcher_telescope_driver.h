@@ -37,6 +37,28 @@ namespace detail {
 bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed,
                         std::chrono::milliseconds tolerance = std::chrono::milliseconds(1000));
+
+// Whether the POINTING math (LST, SiderealTime, DestinationSideOfPier, every
+// goto) applies the client's UTCDate offset (open-astro#301).
+//
+// The ASCOM UTCDate readback always honours a client's write; this rule is
+// only about the clock the mount is aimed by. A client's offset is applied
+// when the host clock has nothing better to offer, and ignored when the host
+// was NTP/PTP-disciplined at the moment of the write -- there, a tablet with
+// a 30-minute error would otherwise skew every goto by 7.5 degrees of RA on a
+// rig whose own time is good. The router already refuses to step a
+// disciplined clock and already warns when a client disagrees by more than
+// 2 s; this makes the driver agree with that decision.
+//
+// `host_was_synchronized` is sampled once, when the client writes UTCDate, so
+// the hot path costs no syscall. Pure, so the rule is unit-testable without
+// an NTP daemon.
+//
+// `offset_survives` folds in both "an offset was written" and "the host clock
+// has not been stepped since", because the caller's
+// client_offset_survives_locked() already answers exactly that and the two
+// can never disagree at the call site.
+bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized);
 }  // namespace detail
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
