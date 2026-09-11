@@ -12,13 +12,20 @@
 
 #pragma once
 
+#include <alpacacore/alpaca_errors.h>
 #include <alpacacore/alpacadriver.h>
+#include <alpacacore/util/error_handling.h>
 
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <initializer_list>
 #include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
 #include <thread>
+#include <typeinfo>
 #include <vector>
 
 namespace alpacacore::test {
@@ -44,6 +51,108 @@ struct StressOptions {
     int lifecycle_threads = 4;                // hammer connect()/disconnect()/set_connected()
     int op_threads = 4;                       // hammer the operate callback
     std::chrono::milliseconds duration{750};  // per-scenario wall clock
+};
+
+/**
+ * Per-call guard for an operate callback (issue #322).
+ *
+ * `run_lifecycle_stress` below wraps the WHOLE operate callback in one
+ * try/catch, not each call inside it — on a fail-fast path where every call
+ * throws, the first throw skips every call after it, and the storm exercises
+ * one line instead of nine. Every `[stress]` registration since #303 has
+ * therefore defined its own local
+ *
+ *     template <typename Fn> void call(Fn&& fn) { try { fn(); } catch (const std::exception&) {} }
+ *
+ * and the catch type has been argued in both directions by review, on the
+ * same PR batch, within a day: widen to `std::exception` so a non-Alpaca
+ * throw escaping teardown can't skip the rest of the callback, or narrow to
+ * `AlpacaException` so an unexpected exception type isn't silently
+ * indistinguishable from the expected `NotConnected`. Both are correct in
+ * isolation and pull in opposite directions; a bare catch can't do both, but
+ * a guard that RECORDS what it swallowed can:
+ *
+ * - An AlpacaException whose error_code() is in the expected set (NotConnected
+ *   by default — a racing disconnect is what every registration expects to
+ *   hit) is swallowed silently.
+ * - An AlpacaException with any other code is swallowed but COUNTED.
+ * - Any other std::exception is swallowed but COUNTED.
+ * - A non-std::exception throw is not caught here — that already reaches
+ *   run_lifecycle_stress's outer catch (or std::terminates if it escapes a
+ *   raw thread), and this guard existing must not change that.
+ *
+ * A registration ends with CHECK(guard.unexpected_count() == 0) (put
+ * guard.report() in the CHECK's message so a failure names what it saw), and
+ * opts into extra expected codes explicitly where the driver's contract needs
+ * them (e.g. {NotConnected, PropertyNotImplemented} for a getter that answers
+ * without a connection) — so a widened set is a visible per-file decision,
+ * not a silent default. Thread-safe: op_threads hits this concurrently.
+ */
+class StressCallGuard {
+public:
+    explicit StressCallGuard(std::initializer_list<int> expected_codes = {AlpacaError::NotConnected})
+        : expected_codes_(expected_codes) {}
+
+    template <typename Fn>
+    void operator()(Fn&& fn) {
+        try {
+            fn();
+        } catch (const AlpacaException& ex) {
+            if (is_expected(ex.error_code())) {
+                return;
+            }
+            record("AlpacaException(code=" + std::to_string(ex.error_code()) + ")", ex.what());
+        } catch (const std::exception& ex) {
+            record(typeid(ex).name(), ex.what());
+        }
+    }
+
+    int unexpected_count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return count_;
+    }
+
+    /// The first few recorded "<type>: <what()>" lines, newline-joined —
+    /// meant for a CHECK's message, not for parsing.
+    std::string report() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::ostringstream out;
+        for (std::size_t i = 0; i < samples_.size(); ++i) {
+            if (i != 0) {
+                out << '\n';
+            }
+            out << samples_[i];
+        }
+        if (count_ > static_cast<int>(samples_.size())) {
+            out << "\n... and " << (count_ - static_cast<int>(samples_.size())) << " more";
+        }
+        return out.str();
+    }
+
+private:
+    static constexpr std::size_t kMaxSamples = 8;
+
+    bool is_expected(int code) const {
+        for (int expected : expected_codes_) {
+            if (expected == code) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void record(const std::string& type, const std::string& what) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++count_;
+        if (samples_.size() < kMaxSamples) {
+            samples_.push_back(type + ": " + what);
+        }
+    }
+
+    std::vector<int> expected_codes_;
+    mutable std::mutex mutex_;
+    int count_ = 0;
+    std::vector<std::string> samples_;
 };
 
 /// Hammer one driver instance from many threads: async connect/disconnect,

@@ -28,6 +28,7 @@ set(TEST_SOURCES
     test_host_clock.cpp
     test_poll_settle.cpp
     test_serial_by_id_scan.cpp
+    test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
     test_units.cpp
     test_version_format.cpp
