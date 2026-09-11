@@ -153,6 +153,39 @@ TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][tele
     CHECK(driver->get_tracking_rate() == 0);
 }
 
+TEST_CASE("SkyWatcher Telescope Driver - Target properties are independently set", "[skywatcher][telescope][unit]") {
+    auto driver = make_driver(0);
+
+    // ASCOM treats the two target properties as independent: each throws
+    // ValueNotSet until that property itself has been written.
+    require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // Writing RA must not unlock Dec.
+    driver->set_target_right_ascension(7.25);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    require_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // SlewToTarget and SyncToTarget need both halves, so a half-set pair
+    // still reports ValueNotSet rather than slewing to a default Dec.
+    require_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { driver->sync_to_target(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    // Writing Dec unlocks the second property without disturbing the first.
+    driver->set_target_declination(-12.5);
+    CHECK(driver->get_target_right_ascension() == 7.25);
+    CHECK(driver->get_target_declination() == -12.5);
+}
+
+TEST_CASE("SkyWatcher Telescope Driver - Dec written first leaves RA unset", "[skywatcher][telescope][unit]") {
+    auto driver = make_driver(0);
+
+    driver->set_target_declination(41.0);
+    CHECK(driver->get_target_declination() == 41.0);
+    require_alpaca_error([&] { driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+}
+
 TEST_CASE("SkyWatcher Telescope Driver - Value range validation", "[skywatcher][telescope][unit]") {
     auto driver = make_driver(0);
 

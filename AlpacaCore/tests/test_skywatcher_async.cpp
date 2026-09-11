@@ -1605,4 +1605,38 @@ TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 
     CHECK(host_clock_stepped(milliseconds(91500), seconds(90)));
 }
 
+TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#304)", "[skywatcher][async]") {
+    // The split half of #304 that the unit cases do not reach: the three
+    // writers that set BOTH coordinates at once must keep doing so. A future
+    // edit that dropped one assignment would leave the other target property
+    // throwing ValueNotSet after a sync, and nothing else in the suite would
+    // notice -- the unit cases only exercise the per-property setters.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    // Nothing is set on a fresh connect: reset_runtime_state_locked() clears
+    // both, which is what makes ConformU's read-before-write check pass.
+    CHECK_THROWS_AS(driver->get_target_right_ascension(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->get_target_declination(), alpacacore::AlpacaException);
+
+    // Sync rather than slew: it sets the same pair through the same locked
+    // path and returns without leaving a task running.
+    driver->sync_to_coordinates(5.5, -25.0);
+    CHECK(std::abs(driver->get_target_right_ascension() - 5.5) < 1e-9);
+    CHECK(std::abs(driver->get_target_declination() + 25.0) < 1e-9);
+
+    // And a reconnect clears both again, so the pair never survives a session.
+    // get_connected() is asserted between the two calls on purpose: without
+    // it the case is self-satisfying, since a reconnect that silently failed
+    // would leave both getters throwing and everything below would pass.
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_THROWS_AS(driver->get_target_right_ascension(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->get_target_declination(), alpacacore::AlpacaException);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

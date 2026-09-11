@@ -725,7 +725,7 @@ public:
     }
 
     double get_target_declination() const override {
-        if (!target_set_) {
+        if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
         return target_dec_degrees_;
@@ -736,11 +736,11 @@ public:
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
-        if (!target_set_) {
+        if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
         return target_ra_hours_;
@@ -751,7 +751,7 @@ public:
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
         }
         target_ra_hours_ = ra;
-        target_set_ = true;
+        target_ra_set_ = true;
     }
 
     int get_tracking_rate() const override {
@@ -1347,7 +1347,8 @@ public:
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
-            target_set_ = true;
+            target_ra_set_ = true;
+            target_dec_set_ = true;
             restore_tracking_after_slew_ = tracking_;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -1399,14 +1400,14 @@ public:
     }
 
     void slew_to_target() override {
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         slew_to_coordinates(target_ra_hours_, target_dec_degrees_);
     }
 
     void slew_to_target_async() override {
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
@@ -1451,13 +1452,14 @@ public:
 
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         invalidate_position_cache_locked();
         // No post-sync read freeze: live reads land on the synced frame.
     }
 
     void sync_to_target() override {
-        if (!target_set_) {
+        if (!target_ra_set_ || !target_dec_set_) {
             throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
         sync_to_coordinates(target_ra_hours_, target_dec_degrees_);
@@ -1755,7 +1757,8 @@ private:
     }
 
     void reset_runtime_state_locked() {
-        target_set_ = false;
+        target_ra_set_ = false;
+        target_dec_set_ = false;
         parked_ = false;
         at_home_ = false;
         tracking_ = false;
@@ -2721,7 +2724,8 @@ private:
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
-        target_set_ = true;
+        target_ra_set_ = true;
+        target_dec_set_ = true;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         parked_ = false;
@@ -3158,7 +3162,8 @@ private:
 
     double target_ra_hours_ = 0.0;
     double target_dec_degrees_ = 0.0;
-    mutable bool target_set_ = false;
+    bool target_ra_set_ = false;
+    bool target_dec_set_ = false;
 
     double aperture_diameter_m_ = 0.0;
     double aperture_area_m2_ = 0.0;
