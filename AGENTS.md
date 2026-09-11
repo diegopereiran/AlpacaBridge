@@ -1773,7 +1773,8 @@ against its checklist, 2026-09-06:
 - [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
   EQM-35 specifically, but the issue's ask applies equally.
 - [x] Fake mount test double extended with a classic-board profile (`FakeMountProfile::eqm35_pro()`
-  in `AlpacaCore/tests/fake_skywatcher_mount.h`, three cases use it) (9600 baud, no home
+  in `AlpacaCore/tests/fake_skywatcher_mount.h`; seven cases construct it, three of them tagged `[eqm35]` and
+  four southern-hemisphere regressions that depend on its geometry and feature word) (9600 baud, no home
   index, older firmware string) — deliberately NOT added with invented numbers. This
   branch's `FakeMountProfile::eqm35_pro()` is a REAL hardware capture; fabricating a
   plausible HEQ5/EQ6 profile without hardware to source it from would misrepresent
