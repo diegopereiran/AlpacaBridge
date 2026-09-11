@@ -912,8 +912,15 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         if (rtc_server.is_running()) {
             // No requests are sent: the whole point is that the refresh does
-            // not depend on one arriving.
-            std::this_thread::sleep_for(std::chrono::milliseconds(1400));
+            // not depend on one arriving. Poll rather than sleeping one
+            // interval and asserting: on a loaded runner thread start plus a
+            // 1 s period can exceed any fixed margin, and waiting up to 5 s
+            // for something that normally takes 1 s costs nothing when it
+            // works.
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (probes.load() == primed && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
             EXPECT(probes.load() > primed);
         }
         rtc_server.stop();

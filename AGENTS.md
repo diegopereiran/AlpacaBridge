@@ -1047,7 +1047,10 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   - **No server thread is ever detached.** A thread `stop()` cannot join
     because it is running on it (a handler calling `stop()` synchronously;
     no current handler does) goes into `orphaned_threads_`, and the next
-    `stop()` from another thread or the destructor joins it. So nothing
+    `stop()` from another thread or the destructor joins it. The threads this
+    covers are the accept/server thread, the reactor, the worker pool and the
+    RTC probe timer (`rtc_probe_thread_`, #314) -- the last spawns and joins
+    alongside the reactor and takes no lock `stop()` holds. So nothing
     can touch a `Server`'s members, the wake pipe included, after the
     destructor returns (review round 5). Destroying a `Server` from inside
     one of its own handlers is not supported.
