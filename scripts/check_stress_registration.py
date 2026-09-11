@@ -137,6 +137,7 @@ CATCH_TEST_MACROS = (
     "TEMPLATE_PRODUCT_TEST_CASE_METHOD_SIG",
     "TEMPLATE_LIST_TEST_CASE",
     "TEMPLATE_LIST_TEST_CASE_METHOD",
+    "METHOD_AS_TEST_CASE",
 )
 # Longest first, so TEST_CASE cannot shadow TEST_CASE_METHOD in the alternation.
 _MACRO_ALTERNATION = "|".join(
@@ -441,6 +442,24 @@ def find_stray_stress_cases():
     return failures
 
 
+# `if(TARGET x)` gates a file on the vendor target existing. Two shapes look
+# like it and are not it, and a bare `"TARGET" in line` accepts both:
+# `if(NOT TARGET x)` compiles the file exactly when the vendor is ABSENT, which
+# is the opposite of gating, and any identifier merely CONTAINING the word
+# counts -- `if(CATCH2_MAIN_TARGET STREQUAL "")` is a live example in the very
+# CMakeLists this parses. Require TARGET as its own word followed by an
+# argument, and reject a negated condition outright.
+_TARGET_GATE_RE = re.compile(r"\bTARGET\s+\S")
+_NOT_TARGET_RE = re.compile(r"\bNOT\s+TARGET\b")
+
+
+def _is_target_gate(condition):
+    """True when `condition` gates on a target EXISTING."""
+    if _NOT_TARGET_RE.search(condition):
+        return False
+    return bool(_TARGET_GATE_RE.search(condition))
+
+
 def ungated_registration_files_in_cmake(cmake_text, registration_files):
     """[findings] for registration files not gated behind an `if(TARGET ...)`.
 
@@ -475,12 +494,12 @@ def ungated_registration_files_in_cmake(cmake_text, registration_files):
         stripped = line.strip()
         lowered = stripped.lower()
         if lowered.startswith("if(") or lowered.startswith("if ("):
-            depth_is_target.append("TARGET" in stripped)
+            depth_is_target.append(_is_target_gate(stripped))
         elif lowered.startswith("elseif(") or lowered.startswith("elseif ("):
             if depth_is_target:
                 # An elseif arm of a `if(TARGET ...)` block is NOT itself
                 # gated on that target, so it only counts when it names one.
-                depth_is_target[-1] = "TARGET" in stripped
+                depth_is_target[-1] = _is_target_gate(stripped)
         elif lowered.startswith("else(") or lowered == "else()":
             if depth_is_target:
                 depth_is_target[-1] = False
@@ -490,9 +509,14 @@ def ungated_registration_files_in_cmake(cmake_text, registration_files):
         gated = any(depth_is_target)
         for name in re.findall(r"[A-Za-z0-9_./-]+" + re.escape(STRESS_TEST_SUFFIX), line):
             base = name.rsplit("/", 1)[-1]
-            # Any mention that is gated is enough; a file listed twice needs
-            # only one conditional home to be safe.
-            seen[base] = seen.get(base, False) or gated
+            # EVERY mention must be gated, not just one of them. CMake
+            # de-duplicates a source named twice, so a file listed once inside
+            # if(TARGET ...) and once in the unconditional block still compiles
+            # with every vendor target absent -- the build stays green and
+            # silent, and the ungated mention is the one that decides. An `or`
+            # here let the gated mention mask the ungated one and re-opened the
+            # exact hole this rule closes.
+            seen[base] = seen.get(base, True) and gated
 
     failures = []
     for path in sorted(registration_files):
@@ -772,6 +796,31 @@ def self_test():
                        + gated)
     check("a commented CMake line does not stand in for a real one",
           ungated_registration_files_in_cmake(commented_cmake, regs) == [])
+    both_listed = ("set(TEST_SOURCES\n"
+                   "    test_zwo_concurrency_stress.cpp\n"
+                   ")\n"
+                   + gated)
+    check("a file listed BOTH ungated and gated is still rejected",
+          len(ungated_registration_files_in_cmake(both_listed, regs)) == 1)
+    both_listed_reversed = (gated
+                            + "set(TEST_SOURCES\n"
+                              "    test_zwo_concurrency_stress.cpp\n"
+                              ")\n")
+    check("the gated mention cannot mask a later ungated one either",
+          len(ungated_registration_files_in_cmake(both_listed_reversed, regs)) == 1)
+    twice_gated = gated + gated
+    check("a file listed twice, both times gated, still passes",
+          ungated_registration_files_in_cmake(twice_gated, regs) == [])
+    not_target = ("if(NOT TARGET alpacacore_zwo)\n"
+                  "    list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)\n"
+                  "endif()\n")
+    check("if(NOT TARGET ...) is not gating -- it compiles when the vendor is absent",
+          len(ungated_registration_files_in_cmake(not_target, regs)) == 1)
+    target_substring = ('if(CATCH2_MAIN_TARGET STREQUAL "")\n'
+                        "    list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)\n"
+                        "endif()\n")
+    check("an identifier merely containing TARGET does not count as gating",
+          len(ungated_registration_files_in_cmake(target_substring, regs)) == 1)
 
     # The predicate above is well covered, but main()'s USE of it was not:
     # deleting `failures.extend(guard_failures)` left every check green. Drive
@@ -782,7 +831,13 @@ def self_test():
     real_tracked_files = globals()["tracked_files"]
     real_read_text = globals()["read_text"]
     with tempfile.TemporaryDirectory() as tmp:
-        stress = os.path.join(tmp, "test_fakevendor_concurrency_stress.cpp")
+        # Deliberately WITHOUT the `test_` prefix: this is the issue #376
+        # behaviour -- a file following the documented
+        # `*_concurrency_stress.cpp` naming counts toward vendor coverage
+        # instead of being rejected as a stray [stress] case. Reverting
+        # STRESS_TEST_GLOB to the old `test_*` form must fail these checks,
+        # which it cannot do if the fixture's own file carries the prefix.
+        stress = os.path.join(tmp, "fakevendor_concurrency_stress.cpp")
         core = os.path.join(tmp, "test_fakecore.cpp")
 
         def fake_tracked_files(pattern):
@@ -806,7 +861,11 @@ def self_test():
                 return [stress, core]
             if pattern in TEST_GLOBS:
                 return []
-            if pattern == STRESS_TEST_GLOB:
+            # The literal glob, not STRESS_TEST_GLOB: keying on the constant
+            # makes this fixture match whatever the constant happens to be, so
+            # a revert of the issue #376 widening would keep every check green
+            # (it did -- all 43 passed against the old `test_*` glob).
+            if pattern == "AlpacaCore/tests/*_concurrency_stress.cpp":
                 return [stress]
             # Every glob the script asks for is named above. Fail loudly on a
             # new one rather than falling through: a silent default would hand
@@ -823,7 +882,7 @@ def self_test():
         gated_cmake = (
             "set(TEST_SOURCES test_core.cpp)\n"
             "if(TARGET alpacacore_fakevendor)\n"
-            "    list(APPEND TEST_SOURCES test_fakevendor_concurrency_stress.cpp)\n"
+            "    list(APPEND TEST_SOURCES fakevendor_concurrency_stress.cpp)\n"
             "endif()\n")
 
         def run_main_with(stress_source, core_source="", cmake_source=None):
@@ -872,7 +931,7 @@ def self_test():
 
         # The CMake gating rule's own wiring into main() (issue #396).
         ungated_cmake = ("set(TEST_SOURCES test_core.cpp\n"
-                         "    test_fakevendor_concurrency_stress.cpp)\n")
+                         "    fakevendor_concurrency_stress.cpp)\n")
         check("main() FAILS when a registration file compiles unconditionally",
               run_main_with(clean, "", ungated_cmake) == 1)
         check("main() FAILS when a registration file is in no CMakeLists at all",
