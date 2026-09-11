@@ -114,10 +114,12 @@ public:
         // open-astro#333: the idempotency check below and the protocol_ call
         // that follows it must be one atomic transition. Without this, two
         // HTTP workers could both observe connected_ == false and both reach
-        // protocol_.connect(), which assigns serial_fd_ unconditionally: the
-        // first descriptor leaks for the life of the process, and on a real
-        // MyFocuserPro2 the second open() re-asserts DTR and resets the MCU
-        // mid-session. The window is wide, not a single instruction -- the
+        // protocol_.connect(), which assigns serial_fd_ unconditionally, so
+        // the first descriptor leaks for the life of the process. (It does
+        // NOT reset the MCU: the tty is still open, connect_serial() clears
+        // HUPCL so DTR stays asserted, and Linux runs port activation only on
+        // the 0->1 open count, so a second open() on a live tty raises no DTR
+        // edge -- see the DTR/HUPCL note in AGENTS.md.) The window is wide, not a single instruction -- the
         // handshake retry ladder is ~9.1 s in the worst case.
         //
         // Deliberately NOT the base's connection mutex, and not shared with
