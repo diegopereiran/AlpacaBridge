@@ -138,6 +138,13 @@ CATCH_TEST_MACROS = (
     "TEMPLATE_LIST_TEST_CASE",
     "TEMPLATE_LIST_TEST_CASE_METHOD",
     "METHOD_AS_TEST_CASE",
+    # Catch2 3.6+. find_package(Catch2 QUIET) in AlpacaCore/tests/CMakeLists.txt
+    # is unpinned, so a runner with 3.6+ can compile one of these even though
+    # nothing in the tree writes one today.
+    "TEST_CASE_PERSISTENT_FIXTURE",
+    # REGISTER_TEST_CASE(fn, "name", "[tags]") -- the tags sit in the same
+    # third-argument position, behind one non-string leading argument.
+    "REGISTER_TEST_CASE",
 )
 # Longest first, so TEST_CASE cannot shadow TEST_CASE_METHOD in the alternation.
 _MACRO_ALTERNATION = "|".join(
@@ -500,13 +507,20 @@ def ungated_registration_files_in_cmake(cmake_text, registration_files):
                 # An elseif arm of a `if(TARGET ...)` block is NOT itself
                 # gated on that target, so it only counts when it names one.
                 depth_is_target[-1] = _is_target_gate(stripped)
-        elif lowered.startswith("else(") or lowered == "else()":
+        elif lowered.startswith("else(") or lowered.startswith("else ("):
             if depth_is_target:
                 depth_is_target[-1] = False
         elif lowered.startswith("endif"):
             if depth_is_target:
                 depth_is_target.pop()
         gated = any(depth_is_target)
+        # Any line naming the file counts as a listing, and `seen` is keyed on
+        # the basename. Both are fine for the shape this CMakeLists has (one flat
+        # directory, sources named only by set()/list(APPEND)), but a line like
+        # set_source_files_properties(<file> PROPERTIES ...) outside the
+        # if(TARGET ...) block would read as an ungated listing and fail a
+        # correctly-gated file. Nothing in the tree does that; widen this to
+        # match only source-listing commands if it ever appears.
         for name in re.findall(r"[A-Za-z0-9_./-]+" + re.escape(STRESS_TEST_SUFFIX), line):
             base = name.rsplit("/", 1)[-1]
             # EVERY mention must be gated, not just one of them. CMake
@@ -727,6 +741,18 @@ def self_test():
           stress_tag_sets_in_text(
               'TEST_CASE_METHOD(MyFixture, "Foo", "[vendor][focuser][stress]") {}')
           == [{"vendor", "focuser", "stress"}])
+    check("METHOD_AS_TEST_CASE's qualified method name does not hide the tags",
+          stress_tag_sets_in_text(
+              'METHOD_AS_TEST_CASE(MyFixture::run, "Foo", "[vendor][focuser][stress]")')
+          == [{"vendor", "focuser", "stress"}])
+    check("TEST_CASE_PERSISTENT_FIXTURE registers as [stress] coverage",
+          stress_tag_sets_in_text(
+              'TEST_CASE_PERSISTENT_FIXTURE(MyFixture, "Foo", "[vendor][focuser][stress]") {}')
+          == [{"vendor", "focuser", "stress"}])
+    check("REGISTER_TEST_CASE registers as [stress] coverage",
+          stress_tag_sets_in_text(
+              'REGISTER_TEST_CASE(myFn, "Foo", "[vendor][focuser][stress]");')
+          == [{"vendor", "focuser", "stress"}])
     check("TEMPLATE_TEST_CASE registers as [stress] coverage",
           stress_tag_sets_in_text(
               'TEMPLATE_TEST_CASE("Foo", "[vendor][focuser][stress]", int, long) {}')
@@ -792,6 +818,12 @@ def self_test():
                 "endif()\n")
     check("the else() arm of an if(TARGET ...) block does not count as gating",
           len(ungated_registration_files_in_cmake(else_arm, regs)) == 1)
+    else_arm_spaced = ("if(TARGET alpacacore_zwo)\n"
+                       "else ()\n"
+                       "    list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)\n"
+                       "endif()\n")
+    check("the spaced `else ()` arm does not count as gating either",
+          len(ungated_registration_files_in_cmake(else_arm_spaced, regs)) == 1)
     commented_cmake = ("# list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)\n"
                        + gated)
     check("a commented CMake line does not stand in for a real one",
