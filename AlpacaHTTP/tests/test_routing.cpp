@@ -320,12 +320,14 @@ private:
     bool connected_ = false;
 };
 
-// Mirrors the SynScan / Celestron / OnStep / Bisque / iOptron / Sky-Watcher
-// telescopes: an AsyncConnectable driver whose get_connected() takes the
-// state mutex that set_connected() holds for the whole (slow) connect. The
-// router must never read it while a connection task is in flight, or its
-// own connect-wait deadline cannot fire and a polling GET connected stalls
-// for the entire handshake (issue #130).
+// Mirrors the Celestron / OnStep / Bisque / iOptron / Sky-Watcher telescopes:
+// an AsyncConnectable driver whose get_connected() takes the state mutex that
+// set_connected() holds for the whole (slow) connect. The router must never
+// read it while a connection task is in flight, or its own connect-wait
+// deadline cannot fire and a polling GET connected stalls for the entire
+// handshake (issue #130). SynScan is deliberately absent: it was the driver
+// that produced #130, and its fix made its getter a bare atomic load, so it
+// no longer has this shape -- see async_connectable.h for the full list.
 class LockedSlowConnectStubDriver final : public alpacacore::AlpacaDriver, public alpacacore::AsyncConnectable {
 public:
     LockedSlowConnectStubDriver(int number, std::chrono::milliseconds connect_delay)

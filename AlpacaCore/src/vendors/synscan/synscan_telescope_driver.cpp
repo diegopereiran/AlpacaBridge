@@ -255,7 +255,8 @@ public:
     // entire connect (25 s measured against a silent hand controller: five
     // 5 s timeouts), so the router's 8 s deadline never fired and clients
     // reported "Dynamic client timeout for method Connected" (issue #130).
-    // Same atomic-flag pattern as the other 30 drivers.
+    // Same atomic-flag pattern as the other 28 lock-free drivers (29 of the
+    // 38 AsyncConnectable getters are lock-free, this one included).
     bool get_connected() const override { return connected_.load(); }
 
     void connect() override {
