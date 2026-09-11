@@ -471,6 +471,24 @@ TEST_CASE("FakeQHYSDK - get_mem_length tracks the ROI, which the driver binds", 
     CHECK(fake.get_mem_length("fake-qhy-0") == 32U * 24U);
 }
 
+TEST_CASE("FakeQHYSDK - the two capability sources agree in the default seeding", "[qhy][fake][unit]") {
+    // Since get_param() answers the QHYCCD_ERROR sentinel for anything missing
+    // from `params` (issue #373), membership there reads as "supported" -- so a
+    // control seeded in `params` but absent from `controls_available` makes the
+    // fake's two capability sources contradict each other in the DEFAULT
+    // scaffolding every QHY case builds on, which is the trap the
+    // get_chip_info() parity gap warns about. CURTEMP and CURPWM were exactly
+    // that. This case fails if either list drops one of them.
+    auto fake = make_fake();
+    fake.open_camera("fake-qhy-0");
+
+    for (const int ctrl : {alpacacore::vendor::qhy::control::CURTEMP, alpacacore::vendor::qhy::control::CURPWM}) {
+        INFO("control " << ctrl);
+        CHECK(fake.is_control_available("fake-qhy-0", ctrl));
+        CHECK(fake.get_param("fake-qhy-0", ctrl) != alpacacore::test::FakeQHYSDK::kUnsupportedControl);
+    }
+}
+
 TEST_CASE("FakeQHYSDK - get_single_frame never exceeds get_mem_length", "[qhy][fake][unit]") {
     // The driver sizes its frame buffer from get_mem_length() and hands that
     // exact buffer to get_single_frame() (qhy_camera_driver.cpp: mem_length ->
