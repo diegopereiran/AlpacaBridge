@@ -1880,12 +1880,8 @@ int main() {
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         };
-        nlohmann::json base = {{"vendor", "skywatcher"},
-                               {"deviceType", "telescope"},
-                               {"deviceNumber", 9619},
-                               {"connectionType", "serial"},
-                               {"portPath", "/dev/ttyUSB7"},
-                               {"baudRate", 9600}};
+        nlohmann::json base = {{"vendor", "skywatcher"},     {"deviceType", "telescope"},  {"deviceNumber", 9619},
+                               {"connectionType", "serial"}, {"portPath", "/dev/ttyUSB7"}, {"baudRate", 9600}};
         reject(base);  // neither coordinate
         nlohmann::json lat_only = base;
         lat_only["siteLatitude"] = -33.87;
@@ -1898,8 +1894,7 @@ int main() {
         nlohmann::json null_island = base;
         null_island["siteLatitude"] = 0.0;
         null_island["siteLongitude"] = 0.0;
-        const auto ok =
-            route_request(router, "POST", "/management/v1/configuredevice", null_island.dump());
+        const auto ok = route_request(router, "POST", "/management/v1/configuredevice", null_island.dump());
         const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
         EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
         remove_device(router, "skywatcher", "telescope", 9619);
