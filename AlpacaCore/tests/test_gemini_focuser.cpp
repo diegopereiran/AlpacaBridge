@@ -128,10 +128,10 @@ TEST_CASE("Gemini Focuser Driver - concurrent set_connected(true) is one transit
     // The focuser was the only Gemini driver without a transition mutex, so
     // set_connected() was a check-then-act on a plain atomic. Two HTTP workers
     // could both observe connected_ == false and both reach
-    // protocol_.connect(), which assigns serial_fd_ with no prior close: the
-    // first descriptor leaks for the life of the process, and on a real
-    // MyFocuserPro2 the second open() re-asserts DTR and resets the MCU
-    // mid-session.
+    // protocol_.connect(), which assigns serial_fd_ with no prior close, so
+    // the first descriptor leaks for the life of the process. (Not an MCU
+    // reset: the first fd is still open and connect_serial() clears HUPCL,
+    // so a second open() on a live tty raises no DTR edge.)
     //
     // The window is the handshake ladder, up to ~9.1 s on hardware. The fake
     // holds its handshake reply so the race is reproducible rather than
@@ -173,7 +173,7 @@ TEST_CASE("Gemini protocol wrapper - a second connect on a live wrapper throws (
     // The driver's transition mutex keeps this unreachable through the
     // driver, so the guard is pinned directly: a live wrapper refuses a
     // second connect with InvalidOperation instead of leaking the first
-    // descriptor and resetting the MCU with a second open().
+    // descriptor.
     alpacacore::test::FakeGeminiFocuser fake;
     alpacacore::vendor::gemini::GeminiProtocolWrapper wrapper;
     alpacacore::vendor::gemini::ConnectionConfig config;
