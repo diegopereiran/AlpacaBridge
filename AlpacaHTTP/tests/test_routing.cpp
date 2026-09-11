@@ -2162,7 +2162,7 @@ int main() {
         // Origin check the wifi endpoints use. A cross-origin mutating
         // request is rejected with 403 before the body is even parsed.
         {
-            const std::string body = "{\"Epoch\": 1757500000}";
+            const std::string body = "{\"Epoch\": 100}";
             std::ostringstream raw;
             raw << "POST /management/v1/synctime HTTP/1.1\r\n"
                 << "Host: localhost\r\n"
@@ -2176,10 +2176,17 @@ int main() {
             EXPECT(response.status_code() == 403);
         }
 
-        // A same-origin request passes the guard. It still fails here,
-        // because setting the clock needs CAP_SYS_TIME, but not with 403.
+        // A same-origin request passes the guard. It still fails here --
+        // the epoch is deliberately outside the handler's 2000-2100 window,
+        // so the request is refused after the guard and clock_settime is
+        // never reached. Both cases above use an out-of-range epoch for that
+        // reason: a run with CAP_SYS_TIME (sudo, a root container, a root
+        // shell on a test SBC) would otherwise set the machine's clock from
+        // a unit test, which AlpacaCore/tests/test_host_clock.cpp forbids.
+        // The distinction the case needs is still visible: 403 means the
+        // guard fired, 200 with a non-zero ErrorNumber means it did not.
         {
-            const std::string body = "{\"Epoch\": 1757500000}";
+            const std::string body = "{\"Epoch\": 100}";
             std::ostringstream raw;
             raw << "POST /management/v1/synctime HTTP/1.1\r\n"
                 << "Host: localhost\r\n"
