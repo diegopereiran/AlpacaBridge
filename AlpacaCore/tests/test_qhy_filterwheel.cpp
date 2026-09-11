@@ -235,6 +235,12 @@ TEST_CASE("QHY Filter Wheel Driver - A move reports -1 in transit then settles",
     CHECK(fake.last_cfw_target == 3);
     // A transit reading that is not the commanded slot is masked to -1 rather
     // than passed through -- NINA read a passing slot number as an arrival.
+    //
+    // The script MUST be assigned after set_position(): move_cfw() clears any
+    // pending script (see "a move clears any pending script" in
+    // test_qhy_fake_sdk.cpp), so hoisting this line above the move would wipe
+    // it and leave the case asserting against a settled position instead of a
+    // transit -- passing for the wrong reason.
     fake.cfw_position_script = {1, 2, 3};
     CHECK(driver->get_position() == -1);
     CHECK(driver->get_position() == -1);

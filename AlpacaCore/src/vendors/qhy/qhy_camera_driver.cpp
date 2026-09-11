@@ -683,11 +683,14 @@ public:
         auto running_flag = std::make_shared<std::atomic<bool>>(true);
         cooler_off_thread_ = std::thread([this, running_flag, sdk = &sdk_]() {
             // Clear the in-flight flag on every exit path, including throws.
-            // Captures the shared_ptr (not `this`): if join_cooler_off_thread()
-            // times out and detaches this thread while it's still stuck inside
-            // SetQHYCCDParam below, this is the ONLY thing that runs after the
-            // blocking call returns, and it must not touch a driver that may
-            // by then be destroyed.
+            // The GUARD below holds only the shared_ptr -- the enclosing lambda
+            // does capture `this`, but the guard's destructor deliberately does
+            // not touch it: if join_cooler_off_thread() times out and detaches
+            // this thread while it's still stuck inside SetQHYCCDParam below,
+            // the destructor is the ONLY thing that runs after the blocking
+            // call returns, and it must not touch a driver that may by then be
+            // destroyed. Everything else in this lambda that uses `this` runs
+            // BEFORE that point, while the bounded join still holds.
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
