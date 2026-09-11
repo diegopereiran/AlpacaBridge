@@ -68,7 +68,8 @@ public:
     bool sync_system_clock_from_clients() const { return host_clock_->enabled(); }
 
     // Test-only seam (open-astro#302): replace the host clock with one whose
-    // two syscalls are fakes, so the #289 wiring -- the UTCDate PUT stepping
+    // three probes are fakes (adjtimex, clock_settime and the sysfs RTC
+    // read), so the #289 wiring -- the UTCDate PUT stepping
     // the clock before the driver sees the value, and the connect-time
     // warning -- can be driven in a test without touching the real system
     // clock. NOT the synctime endpoint: handle_sync_time() calls

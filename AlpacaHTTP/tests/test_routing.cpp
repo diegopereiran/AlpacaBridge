@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -2478,6 +2479,18 @@ int main() {
                 captured.clear();
             };
 
+            // Route and assert the request itself succeeded. Without this the
+            // two negative cases below (a disciplined host, an already-stepped
+            // one) would pass vacuously if the PUT failed before reaching
+            // warn_if_clock_undisciplined() -- a future guard throwing earlier
+            // in the handler would look exactly like "no warning was logged".
+            auto connect_ok = [&](alpacahttp::Router& router_under_test, const std::string& path,
+                                  const std::string& body) {
+                const auto response = route_request(router_under_test, "PUT", path, body);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            };
+
             // Legacy PUT connected, undisciplined host: warns.
             {
                 auto scope_a = std::make_shared<TelescopeClockStubDriver>(9802);
@@ -2486,7 +2499,7 @@ int main() {
                 clock_router.set_host_clock_hooks(
                     [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9802/connected", "Connected=true");
+                connect_ok(clock_router, "/api/v1/telescope/9802/connected", "Connected=true");
                 EXPECT(warned_about_clock());
                 // No RTC on this host, so the ladder's else arm: WARN, not INFO.
                 EXPECT(clock_warning_level() == alpacacore::logging::LogLevel::Warn);
@@ -2502,7 +2515,7 @@ int main() {
                 clock_router.set_host_clock_hooks(
                     [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9803/connect", "");
+                connect_ok(clock_router, "/api/v1/telescope/9803/connect", "");
                 EXPECT(warned_about_clock());
                 EXPECT(clock_warning_level() == alpacacore::logging::LogLevel::Warn);
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9803);
@@ -2516,7 +2529,7 @@ int main() {
                 clock_router.set_host_clock_hooks(
                     [] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9804/connected", "Connected=true");
+                connect_ok(clock_router, "/api/v1/telescope/9804/connected", "Connected=true");
                 EXPECT(!warned_about_clock());
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9804);
             }
@@ -2531,7 +2544,7 @@ int main() {
                     [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
                 route_request(clock_router, "PUT", "/api/v1/telescope/9805/utcdate", client_utc_body);
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9805/connected", "Connected=true");
+                connect_ok(clock_router, "/api/v1/telescope/9805/connected", "Connected=true");
                 EXPECT(!warned_about_clock());
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9805);
             }
@@ -2549,7 +2562,7 @@ int main() {
                     [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
                     [] { return true; });
                 clear();
-                route_request(clock_router, "PUT", "/api/v1/telescope/9806/connected", "Connected=true");
+                connect_ok(clock_router, "/api/v1/telescope/9806/connected", "Connected=true");
                 // Same phrase the WARN cases match, so the two arms are
                 // distinguished by level alone.
                 EXPECT(rtc_line_level() == alpacacore::logging::LogLevel::Info);
