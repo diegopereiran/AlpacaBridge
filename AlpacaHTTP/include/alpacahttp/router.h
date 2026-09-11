@@ -29,6 +29,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -138,7 +139,7 @@ private:
     // web UI's only source of devices -- then cannot show it, leaving no way
     // to edit the entry that is at fault. Persisted configs are registered
     // anyway and left for the driver's connect-time guard to refuse.
-    enum class ConfigSource { Api, Persisted };
+    enum class ConfigSource : std::uint8_t { Api, Persisted };
 
     bool register_device_from_config(const nlohmann::json& config, std::string& error_message,
                                      ConfigSource source = ConfigSource::Api);
