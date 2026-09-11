@@ -2474,12 +2474,12 @@ int main() {
         {
             auto probe_calls = std::make_shared<int>(0);
             alpacahttp::Router clock_router;
-            clock_router.set_host_clock_hooks(
-                [] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
-                [probe_calls] {
-                    ++*probe_calls;
-                    return true;
-                });
+            clock_router.set_host_clock_hooks([] { return false; },
+                                              [](std::chrono::system_clock::time_point, std::string&) { return true; },
+                                              [probe_calls] {
+                                                  ++*probe_calls;
+                                                  return true;
+                                              });
             // Priming happened once, when the clock was constructed.
             EXPECT(*probe_calls == 1);
 
