@@ -830,7 +830,10 @@ public:
                     std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(utc_offset_).count()) +
                     " ms; honouring it for the UTCDate readback but pointing by the host clock");
         }
-        invalidate_position_cache_locked();  // reported RA moves with LST
+        // Unconditional on purpose: reported RA moves with LST only on the
+        // undisciplined branch (#301), but one refetch is cheaper than
+        // reasoning here about which branch the next read will take.
+        invalidate_position_cache_locked();
     }
 
     // FindHome is an asynchronous initiator (ITelescopeV4). Boards without a
