@@ -1587,8 +1587,10 @@ TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 
     // The offset is a delta against the host clock at write time. When the
     // host clock is corrected afterwards (Sync Time, NTP, `date`), applying
     // the stale delta on top of it would move every LST-derived value by the
-    // old error, so utc_now_locked() drops it. The rule is pure: the system
-    // clock and the steady clock must have advanced by the same amount.
+    // old error, so client_offset_survives_locked() drops it -- for the
+    // UTCDate readback as well as for pointing, since both time paths ask it
+    // (#301). The rule is pure: the system clock and the steady clock must
+    // have advanced by the same amount.
     using namespace std::chrono;
     using alpacacore::vendor::skywatcher::detail::host_clock_stepped;
     // Both clocks advanced together: no step.
