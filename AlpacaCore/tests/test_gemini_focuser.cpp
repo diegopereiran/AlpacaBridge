@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
+#include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
@@ -165,6 +166,25 @@ TEST_CASE("Gemini Focuser Driver - concurrent set_connected(true) is one transit
 
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Gemini protocol wrapper - a second connect on a live wrapper throws (#333)",
+          "[gemini][focuser][concurrency]") {
+    // The driver's transition mutex keeps this unreachable through the
+    // driver, so the guard is pinned directly: a live wrapper refuses a
+    // second connect with InvalidOperation instead of leaking the first
+    // descriptor and resetting the MCU with a second open().
+    alpacacore::test::FakeGeminiFocuser fake;
+    alpacacore::vendor::gemini::GeminiProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    CHECK(wrapper.connect(config) > 0);
+    CHECK(wrapper.is_connected());
+    require_alpaca_error([&]() { wrapper.connect(config); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(wrapper.is_connected());
+    CHECK(fake.connects() == 1);  // the refused connect never reached the wire
+    wrapper.disconnect();
+    CHECK_FALSE(wrapper.is_connected());
 }
 
 TEST_CASE("Gemini Focuser Driver - a connect racing a disconnect settles once (#333)",
