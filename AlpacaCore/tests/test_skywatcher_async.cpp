@@ -39,7 +39,18 @@ struct ProbeGuard {
     explicit ProbeGuard(bool disciplined) {
         alpacacore::vendor::skywatcher::detail::set_host_synchronized_probe([disciplined] { return disciplined; });
     }
-    ~ProbeGuard() { alpacacore::vendor::skywatcher::detail::set_host_synchronized_probe(nullptr); }
+    explicit ProbeGuard(std::function<bool()> probe, std::chrono::milliseconds resample_interval)
+        : previous_interval_(alpacacore::vendor::skywatcher::detail::host_discipline_resample_interval()) {
+        alpacacore::vendor::skywatcher::detail::set_host_synchronized_probe(std::move(probe));
+        alpacacore::vendor::skywatcher::detail::set_host_discipline_resample_interval(resample_interval);
+    }
+    ~ProbeGuard() {
+        // Restore the interval BEFORE the probe: from here on nothing may
+        // call the lambda this guard installed, whatever it captured.
+        alpacacore::vendor::skywatcher::detail::set_host_discipline_resample_interval(previous_interval_);
+        alpacacore::vendor::skywatcher::detail::set_host_synchronized_probe(nullptr);
+    }
+    std::chrono::milliseconds previous_interval_{30000};
 };
 }  // namespace
 
@@ -1703,11 +1714,11 @@ TEST_CASE("SkyWatcher async - discipline gained after the write stops the client
     // was already close), which the step detector cannot see. The pointing
     // path re-samples the probe at most once per interval and drops back to
     // the host clock; the UTCDate readback keeps honouring the client.
-    using alpacacore::vendor::skywatcher::detail::set_host_discipline_resample_interval;
-    using alpacacore::vendor::skywatcher::detail::set_host_synchronized_probe;
+    // Process-wide probe state is installed and restored by the guard, so a
+    // REQUIRE that throws out of the case cannot leave a lambda that
+    // captures this frame in the global slot.
     std::atomic<bool> disciplined{false};
-    set_host_synchronized_probe([&] { return disciplined.load(); });
-    set_host_discipline_resample_interval(std::chrono::milliseconds(50));
+    const ProbeGuard probe_guard([&] { return disciplined.load(); }, std::chrono::milliseconds(50));
     {
         FakeSkyWatcherMount mount;
         REQUIRE(mount.ok());
@@ -1732,8 +1743,6 @@ TEST_CASE("SkyWatcher async - discipline gained after the write stops the client
         CHECK(std::abs(readback.count()) < 500);
         driver->set_connected(false);
     }
-    set_host_discipline_resample_interval(std::chrono::milliseconds(30000));
-    set_host_synchronized_probe(nullptr);
 }
 
 TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#304)", "[skywatcher][async]") {
