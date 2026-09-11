@@ -2450,9 +2450,12 @@ it is never reachable through `router.cpp` or the web UI.
   (3.5.1). 2.4 GHz is exempt: ch 1-11 are world-domain legal, which is why
   the shipped images default to 2.4 GHz ch 6.
 - The review bot login is `github-actions`; every push restarts a full
-  review round — batch fixes. Test rig persisted-device state under
-  `AlpacaHTTP/build/config/` makes `test_routing` fail with "already
-  registered" — `rm -rf build/config` before local runs.
+  review round — batch fixes. Test rig persisted-device state makes
+  `test_routing` fail with "already registered". Since #274 each of the two
+  router-backed binaries runs in its own ctest `WORKING_DIRECTORY`, so the
+  files to clear are `AlpacaHTTP/build/test_routing_cwd/config/` and
+  `AlpacaHTTP/build/test_persisted_devices_cwd/config/`, not
+  `build/config/`.
 
 ## General Notes
 
