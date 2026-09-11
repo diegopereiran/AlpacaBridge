@@ -151,7 +151,7 @@ Require `synchronized: yes` and an offset in the low-millisecond range. Skip for
 
 ### 2g. ConformU is installed ON THE SBC and is the CURRENT release
 
-ConformU lives at `/home/astro/conformu/conformu` on the SBC. Validation logs advertise the ConformU version they were produced with, so always test with the latest release. Get the installed and newest upstream versions:
+ConformU lives at `/home/astro/conformu/conformu` on the SBC. Validation logs advertise the ConformU version they were produced with, so always test with the latest release, **except that the linux-arm64 4.5.0 release is unusable for timing** (see the arm64 exception below). Get the installed and newest upstream versions:
 
 ```bash
 ssh astro@<host> '~/conformu/conformu --version 2>/dev/null | tail -1 || echo MISSING'
@@ -170,6 +170,23 @@ ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz
 ```
 
 (If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/` directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a version that wasn't used.
+
+**arm64 exception: never install or validate against 4.5.0 on an SBC.** The official
+`conformu.linux-arm64.tar.xz` 4.5.0 asset was published without `PublishReadyToRun`, so .NET JIT-compiles
+each generic-over-value-type instantiation on first use and the *first* member returning each distinct
+response type is charged ~0.13-0.22 s "OUTSIDE FAST RESPONSE TIME TARGET" no matter whose driver answers
+(Camera: `CameraState`, `CameraXSize`, `SensorType`; Telescope: `AlignmentMode`, `EquatorialSystem`,
+`SideOfPier`). That is a ConformU bug, not a driver regression
+([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)). Until a formal 4.5.1 GitHub release
+exists, `releases/latest` still resolves to 4.5.0, so on arm64 take the maintainer's fixed 4.5.1 beta instead
+of the asset URL above:
+
+```bash
+ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
+```
+
+Re-check this once 4.5.1 (or later) is a real GitHub release: at that point the ordinary
+`releases/latest` path above is correct again and this exception can go.
 
 ## Step 3 — Run ConformU (on the SBC, detached)
 
