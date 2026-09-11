@@ -760,7 +760,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   true — the connect side of the rule above** (SynScan hand controller,
   2026-09, issue #130). Five telescope drivers (Celestron, OnStep, Bisque,
   iOptron, Sky-Watcher) answer `get_connected()` under the state
-  mutex that their `set_connected(true)` holds for the entire handshake, so
+  mutex that their `set_connected(true)` holds for the entire handshake --
+  and the four wrapper-backed switch drivers block the same way, since their
+  `is_open()` waits out the wrapper's own `open()` -- so
   a `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
   fired (25 s on a silent handset: five 5 s query timeouts). Every router

@@ -2346,11 +2346,13 @@ Response Router::dispatch_device_method(
                     // now do so even on a connect that finishes moments
                     // later. Accepted for this fix: the router has no
                     // general way to tell a driver whose get_connected() is
-                    // lock-free (SynScan, and 30 others — safe to read
-                    // mid-task) from one that blocks on the connect mutex
-                    // (the other five telescopes — unsafe to read mid-task,
-                    // the root cause here) without a per-driver capability
-                    // flag, which is future work.
+                    // lock-free (SynScan among them — safe to read mid-task)
+                    // from one that blocks (the five telescopes listed in
+                    // async_connectable.h, which hold the driver mutex across
+                    // the handshake, and the four wrapper-backed switches,
+                    // whose is_open() blocks for the whole wrapper open —
+                    // unsafe to read mid-task, the root cause here) without a
+                    // per-driver capability flag, which is future work.
                 } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
                            (device->get_connecting() || device->get_connected())) {
                     // Last client out: tear down the upstream link. While other
