@@ -537,7 +537,7 @@ jobs:
         # Regression guard for DEVICE_TYPE_OVERRIDE_RE / TEST_CASE_TAGS_RE
         # against synthetic snippets, independent of repo state. It also runs
         # the script's main() over temp files, so the two tag predicates and
-        # their wiring into main() are both covered -- deleting a
+        # the CMake gating rule are all wired-up and covered -- deleting a
         # `failures.extend(...)` line fails here rather than passing silently.
         run: python3 scripts/check_stress_registration.py --self-test
 
