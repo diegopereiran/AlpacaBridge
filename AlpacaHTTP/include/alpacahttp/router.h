@@ -69,9 +69,12 @@ public:
 
     // Test-only seam (open-astro#302): replace the host clock with one whose
     // two syscalls are fakes, so the #289 wiring -- the UTCDate PUT stepping
-    // the clock before the driver sees the value, the synctime endpoint
-    // marking the source, and the connect-time warning -- can be driven in a
-    // test without touching the real system clock. The current
+    // the clock before the driver sees the value, and the connect-time
+    // warning -- can be driven in a test without touching the real system
+    // clock. NOT the synctime endpoint: handle_sync_time() calls
+    // clock_settime() directly and only its mark_stepped()/mark_step_failed()
+    // bookkeeping goes through this object, so a test must never POST it an
+    // in-range epoch even with the hooks installed. The current
     // syncSystemClockFromClients setting carries over.
     //
     // Replaces the clock object rather than mutating it, so it must be called
