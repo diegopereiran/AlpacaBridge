@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <initializer_list>
 #include <memory>
@@ -108,6 +109,11 @@ struct StressOptions {
  *
  * Neither copyable nor movable (it owns a std::mutex) — a registration must
  * capture it by reference in the operate lambda, not by value.
+ *
+ * Never call report() or unexpected_count() from INSIDE a guarded call --
+ * operator()'s recording path and both readers take the same non-recursive
+ * mutex_, so guard([&]{ ... guard.report() ... }) self-deadlocks. Read them
+ * after the storm has joined, which is the only point they mean anything.
  *
  * The constructor is explicit, so brace-init needs its own parens:
  *     StressCallGuard guard({AlpacaError::NotConnected, AlpacaError::InvalidValue});
