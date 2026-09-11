@@ -87,6 +87,9 @@ struct StressOptions {
  * them (e.g. {NotConnected, PropertyNotImplemented} for a getter that answers
  * without a connection) — so a widened set is a visible per-file decision,
  * not a silent default. Thread-safe: op_threads hits this concurrently.
+ *
+ * Neither copyable nor movable (it owns a std::mutex) — a registration must
+ * capture it by reference in the operate lambda, not by value.
  */
 class StressCallGuard {
 public:

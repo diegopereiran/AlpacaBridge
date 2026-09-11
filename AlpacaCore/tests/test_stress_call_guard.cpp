@@ -28,21 +28,21 @@ using alpacacore::AlpacaException;
 using alpacacore::test::StressCallGuard;
 namespace AlpacaError = alpacacore::AlpacaError;
 
-TEST_CASE("StressCallGuard - a call that does not throw is not counted", "[stress][unit]") {
+TEST_CASE("StressCallGuard - a call that does not throw is not counted", "[unit]") {
     StressCallGuard guard;
     guard([] {});
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.report().empty());
 }
 
-TEST_CASE("StressCallGuard - the default expected code (NotConnected) is swallowed silently", "[stress][unit]") {
+TEST_CASE("StressCallGuard - the default expected code (NotConnected) is swallowed silently", "[unit]") {
     StressCallGuard guard;
     guard([] { throw AlpacaException("racing a disconnect", AlpacaError::NotConnected); });
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.report().empty());
 }
 
-TEST_CASE("StressCallGuard - an AlpacaException with an unexpected code is counted", "[stress][unit]") {
+TEST_CASE("StressCallGuard - an AlpacaException with an unexpected code is counted", "[unit]") {
     StressCallGuard guard;
     guard([] { throw AlpacaException("bug", AlpacaError::DriverException); });
     CHECK(guard.unexpected_count() == 1);
@@ -51,7 +51,7 @@ TEST_CASE("StressCallGuard - an AlpacaException with an unexpected code is count
     CHECK(guard.report().find(std::to_string(AlpacaError::DriverException)) != std::string::npos);
 }
 
-TEST_CASE("StressCallGuard - any other std::exception is counted, not silently dropped", "[stress][unit]") {
+TEST_CASE("StressCallGuard - any other std::exception is counted, not silently dropped", "[unit]") {
     // The exact failure mode #322 exists to fix: a non-Alpaca throw escaping
     // teardown (e.g. std::system_error from serial/curl) must not be
     // indistinguishable from an expected NotConnected.
@@ -61,7 +61,7 @@ TEST_CASE("StressCallGuard - any other std::exception is counted, not silently d
     CHECK(guard.report().find("index out of range") != std::string::npos);
 }
 
-TEST_CASE("StressCallGuard - a caller-specified expected code is swallowed", "[stress][unit]") {
+TEST_CASE("StressCallGuard - a caller-specified expected code is swallowed", "[unit]") {
     // e.g. WeeWX's PropertyNotImplemented getters that answer without a
     // connection — a widened set is an explicit per-file opt-in, not a
     // silent default.
@@ -70,7 +70,7 @@ TEST_CASE("StressCallGuard - a caller-specified expected code is swallowed", "[s
     CHECK(guard.unexpected_count() == 0);
 }
 
-TEST_CASE("StressCallGuard - a call after an unexpected throw still keeps isolation", "[stress][unit]") {
+TEST_CASE("StressCallGuard - a call after an unexpected throw still keeps isolation", "[unit]") {
     // The whole point: the FIRST throw must not skip the calls after it, the
     // way run_lifecycle_stress's outer catch would.
     StressCallGuard guard;
@@ -82,7 +82,7 @@ TEST_CASE("StressCallGuard - a call after an unexpected throw still keeps isolat
     CHECK(guard.unexpected_count() == 2);
 }
 
-TEST_CASE("StressCallGuard - a non-std::exception throw is not intercepted", "[stress][unit]") {
+TEST_CASE("StressCallGuard - a non-std::exception throw is not intercepted", "[unit]") {
     // Must reach the caller (and from there, run_lifecycle_stress's outer
     // catch, or std::terminate on a raw thread) exactly as it does today.
     StressCallGuard guard;
@@ -90,7 +90,7 @@ TEST_CASE("StressCallGuard - a non-std::exception throw is not intercepted", "[s
     CHECK(guard.unexpected_count() == 0);
 }
 
-TEST_CASE("StressCallGuard - report() caps the number of stored samples", "[stress][unit]") {
+TEST_CASE("StressCallGuard - report() caps the number of stored samples", "[unit]") {
     StressCallGuard guard;
     for (int i = 0; i < 20; ++i) {
         guard([i] { throw std::runtime_error("failure " + std::to_string(i)); });
@@ -101,7 +101,7 @@ TEST_CASE("StressCallGuard - report() caps the number of stored samples", "[stre
     CHECK(report.find("more") != std::string::npos);
 }
 
-TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "[stress][unit]") {
+TEST_CASE("StressCallGuard - concurrent hits from many threads count exactly", "[unit]") {
     // op_threads hits one guard concurrently in real registrations.
     StressCallGuard guard;
     constexpr int kThreads = 8;
