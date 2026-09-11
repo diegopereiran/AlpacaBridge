@@ -59,7 +59,8 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
 // The ASCOM UTCDate readback always honours a client's write; this rule is
 // only about the clock the mount is aimed by. A client's offset is applied
 // when the host clock has nothing better to offer, and ignored when the host
-// was NTP/PTP-disciplined at the moment of the write -- there, a tablet with
+// is NTP/PTP-disciplined, whether at the moment of the write or found so by a
+// later re-sample (#405) -- there, a tablet with
 // a 30-minute error would otherwise skew every goto by 7.5 degrees of RA on a
 // rig whose own time is good. The router already refuses to step a
 // disciplined clock and already warns when a client disagrees by more than
