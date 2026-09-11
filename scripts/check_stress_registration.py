@@ -69,7 +69,6 @@ TAG_RE = re.compile(r"\[([^\]]+)\]")
 # still-covered entry left behind is itself a failure (see main()), so
 # nothing here can silently go stale.
 ALLOWLIST = {
-    ("playerone", "switch"),
     ("qhy", "camera"),
     ("qhy", "filterwheel"),
     ("wandererastro", "covercalibrator"),
