@@ -147,8 +147,11 @@ refresh any channel pickers.
 
 ## Cross-origin protection
 
-State-changing requests (PUT/POST/DELETE) that carry a browser `Origin`
-header not matching the request's `Host` are rejected with HTTP 403. This
+Every request except `GET` that carries a browser `Origin` header not
+matching the request's `Host` is rejected with HTTP 403. That covers the
+state-changing methods these endpoints accept (`PUT`/`POST`/`DELETE`) and
+anything unrecognised, which the server treats as an unknown method and the
+guard refuses before the endpoint's own method check runs. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
 unaffected) or the same-origin web portal.
@@ -184,6 +187,9 @@ has no NTP, so the client's clock becomes the time source:
   `{"Value": …}`) — sets the SBC's system clock. Rejected outside the
   sanity range 2000-01-01..2100-01-01 UTC. Send the client's epoch captured
   at request time; add half the observed round-trip if you want to be exact.
+  Since 3.6.0 this also takes the cross-origin guard above: a browser-based
+  client posting from a different origin gets HTTP 403 before the body is
+  read. `GET` is unaffected, so a live-clock poll works from any origin.
 
 Same Alpaca envelope, same trusted-LAN model as the WiFi endpoints.
 
