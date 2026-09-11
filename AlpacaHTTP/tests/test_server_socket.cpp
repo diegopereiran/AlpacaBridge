@@ -959,6 +959,78 @@ int main() {
         }
     }
 
+    // Issue #402: a run_server() that fails early must not leave a joinable
+    // std::thread behind.
+    {
+        // bind() fails when the port is already in use. run_server() logs,
+        // sets running_ = false and returns -- on the thread start_async()
+        // already created and stored. stop() then early-returned on
+        // `if (!running_)` without joining, and ~Server() destroyed a still
+        // joinable std::thread, which calls std::terminate(). So a port
+        // conflict became an abort at destruction rather than a clean failure
+        // the caller could report, and the caller's own is_running() check
+        // did not help: it correctly returned false and the crash came later.
+        //
+        // This case is the shape an embedder actually writes -- construct,
+        // start_async(), see is_running() == false, destroy, try another port
+        // -- so if the fix regresses, this binary aborts rather than failing
+        // an assertion.
+        alpacahttp::Config holder_config;
+        holder_config.set_http_port(6879);
+        holder_config.set_discovery_enabled(false);
+        holder_config.set_server_name("TestServerPortHolder");
+        alpacahttp::Server holder(holder_config);
+        holder.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (holder.is_running()) {
+            {
+                alpacahttp::Config conflict_config;
+                conflict_config.set_http_port(6879);  // already held
+                conflict_config.set_discovery_enabled(false);
+                conflict_config.set_server_name("TestServerPortConflict");
+                alpacahttp::Server conflicted(conflict_config);
+                conflicted.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                EXPECT(!conflicted.is_running());
+                // An explicit stop() before the destructor is the other order
+                // an embedder writes; it must also be a no-crash no-op.
+                conflicted.stop();
+                EXPECT(!conflicted.is_running());
+                // ...and the destructor runs here, on a Server whose thread
+                // stop() has already reaped.
+            }
+
+            {
+                // Retrying on a free port after the failure: start_async()
+                // assigns over server_thread_, which is also std::terminate()
+                // if the dead thread was never joined.
+                alpacahttp::Config retry_config;
+                retry_config.set_http_port(6879);
+                retry_config.set_discovery_enabled(false);
+                retry_config.set_server_name("TestServerPortRetry");
+                alpacahttp::Server retried(retry_config);
+                retried.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                EXPECT(!retried.is_running());
+
+                retry_config.set_http_port(6880);
+                alpacahttp::Server second(retry_config);
+                second.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                // The retry really came up, so the first failure left nothing
+                // broken behind it.
+                EXPECT(second.is_running());
+                second.stop();
+                EXPECT(!second.is_running());
+            }
+
+        }
+
+        holder.stop();
+        EXPECT(!holder.is_running());
+    }
+
     std::cout << "All server socket tests passed!\n";
     return 0;
 }

@@ -3093,6 +3093,135 @@ int main() {
         ::unlink(config_path.c_str());
     }
 
+    // Issue #384: the cross-origin 403 echoes the client's transaction id.
+    {
+        alpacahttp::Router router;
+
+        // Both callers of reject_cross_origin_request() had already parsed the
+        // real ClientTransactionID and passed it to every other error path in
+        // the same handler; only this one returned a hardcoded 0. The Alpaca
+        // convention is that ClientTransactionID echoes what the client sent,
+        // and clients are allowed to match responses to requests on it -- so
+        // the one reply whose explanation a client most needs to surface was
+        // the one reply it could not attribute.
+        const auto rejected = [&router](const std::string& path, const std::string& body) {
+            std::ostringstream raw;
+            raw << "PUT " << path << "?ClientTransactionID=4242 HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            return router.route(request, 1);
+        };
+
+        for (const char* path : {"/management/v1/synctime", "/management/v1/wifi/connect"}) {
+            const auto response = rejected(path, "{}");
+            EXPECT(response.status_code() == 403);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            EXPECT(json.value("ClientTransactionID", 0U) == 4242U);
+            // Still the cross-origin rejection and not some other error that
+            // happens to echo the id.
+            EXPECT(json.value("ErrorMessage", "").find("Cross-origin") != std::string::npos);
+        }
+
+        // A request that sends no ClientTransactionID still gets 0 back, which
+        // is what the Alpaca default means -- the fix is an echo, not a
+        // synthesised value.
+        {
+            std::ostringstream raw;
+            raw << "PUT /management/v1/synctime HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n"
+                << "Content-Type: application/json\r\n"
+                << "Content-Length: 2\r\n\r\n{}";
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 403);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ClientTransactionID", 99U) == 0U);
+        }
+    }
+
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+    // Issue #388: an explicit JSON null in a device config reads as absence,
+    // not as a type error.
+    {
+        alpacahttp::Router router;
+
+        // `contains()` is true for an explicit null and json::value() throws
+        // type_error rather than returning the default, so this used to throw
+        // out of the vendor branch, get caught by the handler's outer catch,
+        // and come back as an nlohmann type complaint instead of the specific
+        // message the field has. Since #274/#353 these two fields decide
+        // whether the device connects at all, so the difference matters.
+        nlohmann::json config = {{"vendor", "skywatcher"},
+                                 {"deviceType", "telescope"},
+                                 {"deviceNumber", 0},
+                                 {"connectionType", "serial"},
+                                 {"portPath", "/dev/null"},
+                                 {"siteLatitude", nullptr},
+                                 {"siteLongitude", nullptr}};
+        const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        const std::string message = json.value("ErrorMessage", "");
+        EXPECT(message.find("Site latitude and longitude are required") != std::string::npos);
+        // The failure mode this replaces: any nlohmann type_error text.
+        EXPECT(message.find("json.exception") == std::string::npos);
+    }
+
+    // Issue #398: site coordinates are range-checked, not just checked for
+    // presence.
+    {
+        alpacahttp::Router router;
+
+        // The driver already rejects exactly these through the ASCOM setters
+        // (InvalidValue outside +/-90 and +/-180), so a client could not do
+        // this at runtime -- only a config could. Latitude 200 reads as
+        // northern to hemisphere_south_locked() and longitude 999 goes into
+        // every LST computation at face value.
+        int next_device_number = 40;  // clear of the devices other cases register
+        const auto configure = [&router, &next_device_number](const nlohmann::json& overrides) {
+            nlohmann::json config = {{"vendor", "skywatcher"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", next_device_number++},
+                                     {"connectionType", "serial"},
+                                     {"portPath", "/dev/null"},
+                                     {"siteLatitude", -43.5},
+                                     {"siteLongitude", 172.6}};
+            config.update(overrides);
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
+            return nlohmann::json::parse(response.body(), nullptr, false);
+        };
+
+        for (const auto& bad : {nlohmann::json{{"siteLatitude", 200.0}}, nlohmann::json{{"siteLatitude", -90.5}},
+                                nlohmann::json{{"siteLongitude", 999.0}},
+                                nlohmann::json{{"siteLongitude", -180.5}}}) {
+            const auto json = configure(bad);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find("out of range") != std::string::npos);
+        }
+
+        // The limits are inclusive, and the poles and the antimeridian are
+        // real places.
+        for (const auto& edge : {nlohmann::json{{"siteLatitude", 90.0}}, nlohmann::json{{"siteLatitude", -90.0}},
+                                 nlohmann::json{{"siteLongitude", 180.0}},
+                                 nlohmann::json{{"siteLongitude", -180.0}}}) {
+            // A unique device number per iteration, so this is the real
+            // "accepted and registered" path rather than a later
+            // "device already exists" refusal that happens not to say
+            // "out of range".
+            const auto json = configure(edge);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        }
+    }
+#endif  // ALPACACORE_ENABLE_SKYWATCHER
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

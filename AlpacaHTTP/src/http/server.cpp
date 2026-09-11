@@ -142,6 +142,13 @@ void Server::start_async() {
         return;
     }
 
+    // Same hazard as stop()'s !running_ path (issue #402): a previous
+    // start_async() whose run_server() failed early left a joinable thread in
+    // server_thread_, and assigning over a joinable std::thread also calls
+    // std::terminate(). An embedder retrying on another port does exactly
+    // this. The thread has already finished; the join just reaps it.
+    join_server_thread(std::this_thread::get_id());
+
     shutdown_requested_ = false;
     reset_queues_for_start();
     running_ = true;
@@ -150,6 +157,17 @@ void Server::start_async() {
 
 void Server::stop() {
     if (!running_) {
+        // Not "nothing to do". run_server() can return early with running_
+        // already false -- an out-of-range port, a bind() that failed because
+        // the port is in use or a previous instance has not released it, or a
+        // missing reactor wake pipe -- and start_async() has by then created
+        // the thread and stored it. Returning here without joining left a
+        // joinable std::thread for ~Server() to destroy, which calls
+        // std::terminate(): a port conflict became an abort at destruction
+        // instead of a clean failure the caller could report, and the caller's
+        // own is_running() check did not help, because it correctly returned
+        // false and the crash came later (issue #402).
+        join_server_thread(std::this_thread::get_id());
         return;
     }
 
@@ -239,17 +257,22 @@ void Server::stop() {
         util::socket_close(fd);
     }
 
-    if (server_thread_.joinable()) {
-        if (server_thread_.get_id() == current_id) {
-            // Unreachable (run_server() never calls stop()); kept as an
-            // orphan rather than a detach for the same reason as above.
-            std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
-            orphaned_threads_.push_back(std::move(server_thread_));
-        } else {
-            server_thread_.join();
-        }
-    }
+    join_server_thread(current_id);
     util::log_info("HTTP server stopped");
+}
+
+void Server::join_server_thread(std::thread::id current_id) {
+    if (!server_thread_.joinable()) {
+        return;
+    }
+    if (server_thread_.get_id() == current_id) {
+        // Unreachable from stop() (run_server() never calls stop()); kept as
+        // an orphan rather than a detach for the same reason as above.
+        std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+        orphaned_threads_.push_back(std::move(server_thread_));
+        return;
+    }
+    server_thread_.join();
 }
 
 // Destructor only, after every thread has been joined. The pipe is never

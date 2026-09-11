@@ -188,6 +188,13 @@ private:
     void wake_reactor();
     void close_wake_pipe();
     void join_orphaned_threads(std::thread::id current_id);
+    // Joins server_thread_ if it is joinable, keeping it as an orphan when it
+    // IS the calling thread. Called from the end of stop(), and from stop()'s
+    // and start_async()'s !running_ paths: a run_server() that returned early
+    // (bad port, bind() failure, no wake pipe) leaves a joinable thread behind
+    // with running_ already false, and destroying a joinable std::thread calls
+    // std::terminate() (issue #402).
+    void join_server_thread(std::thread::id current_id);
     void reset_queues_for_start();
     void handle_shutdown_request();
     void handle_restart_request();
