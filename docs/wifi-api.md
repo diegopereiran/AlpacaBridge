@@ -148,9 +148,10 @@ refresh any channel pickers.
 ## Cross-origin protection
 
 Every request except `GET` that carries a browser `Origin` header not
-matching the request's `Host` is rejected with HTTP 403. In practice that
-means the state-changing methods (`PUT`/`POST`/`DELETE`), since those are
-the only ones these endpoints accept. This
+matching the request's `Host` is rejected with HTTP 403. That covers the
+state-changing methods these endpoints accept (`PUT`/`POST`/`DELETE`) and
+anything unrecognised, which the server treats as an unknown method and the
+guard refuses before the endpoint's own method check runs. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
 unaffected) or the same-origin web portal.
