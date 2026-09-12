@@ -77,12 +77,6 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
 // client_offset_survives_locked() already answers exactly that and the two
 // can never disagree at the call site.
 bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized);
-
-// The signed 6 h home term for a dec-axis angle: which side of the dec axis
-// the OTA sits on (+6 h for angle >= 0, -6 h below), NOT which hemisphere the
-// mount is in. Decided on the sign bit, so a -0.0 from the negative branch at
-// the exact pole keeps its branch (open-astro#459). Pure, so unit-testable.
-double home_hour_angle_offset(double dec_axis_degrees);
 }  // namespace detail
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
