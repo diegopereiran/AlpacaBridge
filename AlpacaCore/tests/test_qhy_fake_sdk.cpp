@@ -674,6 +674,31 @@ TEST_CASE("FakeQHYSDK - open_camera refuses while a zombie exposure worker is li
     fake.close_camera("fake-qhy-0");
 }
 
+TEST_CASE("FakeQHYSDK - a shared open during a live exposure still succeeds", "[qhy][fake][unit]") {
+    // The other half of the #324 refusal, from the review on PR #463.
+    // QHYSDKWrapper::open_camera() reuses a live handle FIRST (open_count > 0
+    // just bumps the count) and consults the zombie-worker flag only when
+    // there is no handle to reuse. The camera + CFW pairing AGENTS.md
+    // documents relies on that: the wheel connecting while the camera is
+    // mid-exposure is an ordinary shared open, not a reopen over a zombie.
+    // The fake once checked the flag before the reuse branch, so that
+    // pairing threw InvalidOperation here where production returns.
+    auto fake = FakeQHYSDK::with_one_camera();
+    auto running = std::make_shared<std::atomic<bool>>(true);
+
+    fake.open_camera("fake-qhy-0");                        // camera driver connects
+    fake.register_exposure_worker("fake-qhy-0", running);  // exposure in flight
+    const int opens_before = fake.physical_opens;
+
+    CHECK_NOTHROW(fake.open_camera("fake-qhy-0"));  // paired CFW driver connects
+    CHECK(fake.physical_opens == opens_before);     // reused, not reopened
+
+    fake.close_camera("fake-qhy-0");
+    fake.close_camera("fake-qhy-0");
+    // With every owner gone the refusal applies again.
+    require_alpaca_error([&] { fake.open_camera("fake-qhy-0"); }, alpacacore::AlpacaError::InvalidOperation);
+}
+
 TEST_CASE("FakeQHYSDK - move_cfw enforces the single-digit protocol ceiling", "[qhy][fake][unit]") {
     // open-astro#324 (absorbed from #327). The CFW wire protocol is one ASCII
     // digit, so the real wrapper throws InvalidValue above 9. The fake took

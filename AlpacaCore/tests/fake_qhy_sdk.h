@@ -347,17 +347,26 @@ public:
         // fail a reconnect storm here -- and a reconnect storm is the single
         // most likely [stress] scenario for this driver, i.e. the guard most
         // likely to regress with every test still green.
+        //
+        // Same order as production: a live handle is reused FIRST, and the
+        // zombie flag is consulted only when there is none. The camera + CFW
+        // pairing (AGENTS.md, shared handle) has the wheel connect while the
+        // camera is mid-exposure; that is a shared open, not a reopen over a
+        // zombie, and refusing it here would fail a [stress] run with a false
+        // red on the filter-wheel driver (review finding on PR #463).
+        last_opened_id = camera_id;
+        auto& count = ref_counts_[camera_id];
+        if (count > 0) {
+            ++count;
+            return;
+        }
         auto flag_it = exposure_workers_.find(camera_id);
         if (flag_it != exposure_workers_.end() && flag_it->second && flag_it->second->load()) {
             throw AlpacaException(
                 "Camera cannot reopen while a previous exposure download is still finishing; try again shortly",
                 AlpacaError::InvalidOperation);
         }
-        last_opened_id = camera_id;
-        auto& count = ref_counts_[camera_id];
-        if (count == 0) {
-            ++physical_opens;
-        }
+        ++physical_opens;
         ++count;
     }
 
