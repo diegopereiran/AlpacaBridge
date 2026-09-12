@@ -1568,14 +1568,20 @@ async function updateHeaderBuildBadge() {
     if (!badge) return;
     try {
         const response = await fetch(API_BASE + '/management/v1/buildinfo');
-        // Any HTTP answer settles it, including a 404 from a server too old
-        // to have the endpoint -- re-asking every poll would buy nothing. A
-        // fetch that THROWS (server restarting mid-load, link dropped) is
-        // the transient case, and leaves the flag clear so the next
-        // loadServerInfo() retries.
-        _buildBadgeChecked = true;
-        if (!response.ok) return;
+        // Any COMPLETE HTTP answer settles it, including a 404 from a server
+        // too old to have the endpoint -- re-asking every poll would buy
+        // nothing. Anything that THROWS (server restarting mid-load, link
+        // dropped, a body that ends mid-JSON) is the transient case and must
+        // leave the flag clear so the next loadServerInfo() retries. The
+        // latch therefore sits after the parse, not before it: setting it
+        // first meant a truncated body hid the badge for the life of the
+        // page, which is the one outcome this feature exists to prevent.
+        if (!response.ok) {
+            _buildBadgeChecked = true;
+            return;
+        }
         const data = await response.json();
+        _buildBadgeChecked = true;
         if (data.ErrorNumber !== 0) return;
         const view = buildBadgeLabel(parseResponseValue(data.Value) || {});
         if (!view) {
