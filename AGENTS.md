@@ -1919,8 +1919,9 @@ below was one of them.
   zero-interval guards, both `sleep_unlocked()` supersession exits, the three exits inside the
   attempt-0 recovery (the stop-wait losing the axis, tracking going off while it settled, and the
   restart itself throwing), and the two catch blocks (a position read throwing mid-window, and
-  the caller's catch around the whole check, which fires when `check_connected()` throws out of
-  the sample sleep). Review of this branch found three of those silent, including one that fires
+  the caller's catch around the whole check, which fires when `stop_axis_and_wait_locked()`
+  throws inside the recovery; a `check_connected()` throw out of the sample sleep lands in the
+  position-read catch). Review of this branch found three of those silent, including one that fires
   with the RA axis already stopped by the check's own stop, and a second review found the three
   exception paths silent too. A check that RAN and found the rate correct logs
   nothing -- that is the ordinary case, once per goto, and the grep is for slews that were
