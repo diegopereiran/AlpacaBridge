@@ -1648,7 +1648,12 @@ datagrams before each send so replies cannot get off-by-one.
   `read_site_coordinates()` used by all seven vendor branches that take a site, and on the
   persisted path the offending coordinate is **cleared** so the driver's unset handling covers it. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
-  run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
+  run northern pointing math: the #432 sky frame (both the `a1` term and dec), the RA
+  tracking direction (#250, restored by #432) and the Dec rate / pulse-guide sign (#253).
+  **Not #261**, despite what this line said before #432 and what the `#274` CHANGELOG entry
+  still says as history: the pier-side branch and label are picked from the sky hour angle
+  and are hemisphere-independent, which is one of #432's findings. The driver comment on the
+  connect-time guard says the same. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
   client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
   the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
