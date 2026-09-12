@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail on [stress] tag mistakes: missing vendor coverage, and misplaced tags.
 
-Four rules, not one:
+Five rule families, not one:
 
 1. Every vendor (driver, device type) pair needs a `[stress]` TEST_CASE or an
    ALLOWLIST entry.
@@ -19,8 +19,15 @@ Four rules, not one:
    (issue #396), and without it appending a correctly-named, correctly-tagged
    registration to the unconditional `TEST_SOURCES` list passes every other
    rule while making the TSan zero-test grep vacuous again.
+5. A registration file must use `StressCallGuard` the way AGENTS.md documents
+   it (issues #379, #334), or be named in `GUARD_ALLOWLIST` with a reason:
+   the guard present, `CHECK(...unexpected_count())`, `INFO(...report())`,
+   `CHECK(...total_calls())`, and no local `call()` helper in either of the
+   two forms this repo has used (a file-scope function/template, or an
+   `auto call = [...]` lambda). A stale allow-list entry is itself a failure.
+   See check_guard_usage().
 
-Rules 1-3 read C++ with the comments stripped (issue #386), so an illustrative
+Rules 1-3 and 5 read C++ with the comments stripped (issue #386), so an illustrative
 case macro in a doc comment -- `concurrency_stress.h` is the documentation hub
 for this pattern -- is documentation, not a registration. String literals are
 deliberately NOT stripped. The scans also cover every Catch2 registration
