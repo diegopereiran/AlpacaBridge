@@ -32,8 +32,10 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "test_assert.h"
 
@@ -1089,6 +1091,66 @@ int main() {
             // join of an already-reaped thread.
             concurrent.stop();
             EXPECT(!concurrent.is_running());
+        }
+    }
+
+    {
+        // The loser of the ownership race must not return from stop() early.
+        // ~Server() runs straight after stop() and destroys the wake pipe, the
+        // config and the connection maps that run_server() still reads, so a
+        // stop() that returns while the accept loop is unwinding is a
+        // use-after-free -- which is exactly what "return if another caller
+        // took the thread" does.
+        //
+        // Both stoppers are joined before the Server is destroyed: a stopper
+        // still inside stop() when the object dies is a *different* hazard
+        // (the caller must outlive the callee) and not what this PR claims to
+        // fix, so racing it here would only make the test unsound. What this
+        // does exercise, many times over, is the interleaving itself -- one
+        // caller in the !running_ branch winning the thread while the other
+        // runs the full phases -- and the ASan and TSan pre-flight gates are
+        // what turn a surviving run_server() into a report.
+        //
+        // The early-return regression was confirmed against this loop under
+        // ASan by deleting the condition-variable wait in
+        // join_server_thread(): heap-use-after-free in run_server() reading
+        // the destroyed Server's running_ flag, on every run.
+        for (int round = 0; round < 25; ++round) {
+            alpacahttp::Config teardown_config;
+            teardown_config.set_http_port(6882);
+            teardown_config.set_discovery_enabled(false);
+            teardown_config.set_server_name("TestServerStopThenDestroy");
+
+            auto server = std::make_unique<alpacahttp::Server>(teardown_config);
+            server->start_async();
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            if (!server->is_running()) {
+                break;
+            }
+
+            alpacahttp::Server* raw = server.get();
+            std::atomic<bool> go{false};
+            std::atomic<int> returned{0};
+            std::thread other([&]() {
+                while (!go.load()) {
+                    std::this_thread::yield();
+                }
+                raw->stop();
+                returned.fetch_add(1);
+            });
+
+            go.store(true);
+            raw->stop();
+            returned.fetch_add(1);
+
+            other.join();
+            EXPECT(returned.load() == 2);
+            EXPECT(!raw->is_running());
+
+            // Destroyed only once both stop() calls have returned. With the
+            // wait in place that means the server thread is already reaped;
+            // without it, run_server() can still be live here.
+            server.reset();
         }
     }
 

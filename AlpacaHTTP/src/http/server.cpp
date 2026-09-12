@@ -156,7 +156,11 @@ void Server::start_async() {
         // Same guard as join_server_thread(): the assignment is the other half
         // of server_thread_'s ownership, and assigning over a joinable thread
         // is std::terminate() too.
-        std::lock_guard<std::mutex> guard(server_thread_mutex_);
+        std::unique_lock<std::mutex> guard(server_thread_mutex_);
+        // join_server_thread() above already waited, but re-check: another
+        // caller could have started a join in the gap. Assigning over a
+        // joinable thread is std::terminate() too.
+        server_thread_cv_.wait(guard, [this] { return !server_thread_joining_; });
         server_thread_ = std::thread(&Server::run_server, this);
     }
 }
@@ -280,22 +284,54 @@ void Server::join_server_thread(std::thread::id current_id) {
     // The join happens OUTSIDE the lock deliberately: it blocks until the
     // accept loop unwinds, and holding a lock that any other stop() caller
     // needs for that long is how this turns into a deadlock instead.
+    // Take sole ownership of the thread, join it with the lock released, and
+    // make every OTHER caller wait until that join has finished. Both halves
+    // matter:
+    //
+    //  - Exactly one caller may join. stop() is re-entrant from another thread
+    //    (the shutdown endpoint's detached thread runs the shutdown callback,
+    //    which can make the embedder's own loop call stop() too), and
+    //    concurrent join() on one std::thread is UB -- in practice the second
+    //    pthread_join throws std::system_error that nothing catches.
+    //
+    //  - Every caller must still return only once the thread is GONE, because
+    //    ~Server() runs straight after stop() and tears down the wake pipe,
+    //    the config and the connection maps that run_server() is still using.
+    //    Simply returning when another caller won the move loses that: the
+    //    loser's stop() returns while the accept loop is still unwinding.
+    //
+    // The join is outside the lock: it blocks until the accept loop unwinds,
+    // and the waiters need the mutex free to sit on the condition variable.
+    // No deadlock with the winner -- the caller that runs stop()'s phases
+    // closes the listener before it ever reaches this point, so the join it
+    // waits on can always complete.
     std::thread owned;
     {
-        std::lock_guard<std::mutex> guard(server_thread_mutex_);
+        std::unique_lock<std::mutex> guard(server_thread_mutex_);
+        server_thread_cv_.wait(guard, [this] { return !server_thread_joining_; });
         if (!server_thread_.joinable()) {
+            // Either never started, or a join that has already COMPLETED
+            // reaped it -- the wait above is what makes that distinction safe.
             return;
         }
         owned = std::move(server_thread_);
+        server_thread_joining_ = true;
     }
+
     if (owned.get_id() == current_id) {
         // Unreachable from stop() (run_server() never calls stop()); kept as
         // an orphan rather than a detach for the same reason as above.
         std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
         orphaned_threads_.push_back(std::move(owned));
-        return;
+    } else {
+        owned.join();
     }
-    owned.join();
+
+    {
+        std::lock_guard<std::mutex> guard(server_thread_mutex_);
+        server_thread_joining_ = false;
+    }
+    server_thread_cv_.notify_all();
 }
 
 // Destructor only, after every thread has been joined. The pipe is never

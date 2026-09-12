@@ -85,6 +85,13 @@ private:
     // held across the join itself -- the thread is moved out first -- so a
     // worker that calls stop() cannot deadlock against it.
     std::mutex server_thread_mutex_;
+    // Set while one caller is inside owned.join(). Every other caller waits on
+    // server_thread_cv_ until it clears, so join_server_thread() returns only
+    // once the server thread is really gone -- for the loser as well as the
+    // winner. Without that wait the loser returns while run_server() is still
+    // unwinding, and ~Server() then tears the object down underneath it.
+    bool server_thread_joining_{false};
+    std::condition_variable server_thread_cv_;
 
     // One client connection. Owned by exactly one party at a time: the accept
     // loop (briefly, until it is parked), the reactor (while idle, waiting for
