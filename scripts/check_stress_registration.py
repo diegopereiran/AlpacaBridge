@@ -382,12 +382,14 @@ def check_guard_usage():
                 "INFO(guard.report()). CHECK takes no message argument, so a real finding arrives as a "
                 "bare `0 == 1` naming nothing it swallowed." % path
             )
-        if not re.search(r"CHECK\s*\(\s*[\w.]*total_calls\s*\(\s*\)", text):
+        # The comparison is part of the rule: `total_calls() >= 0` is exactly
+        # as vacuous as the hole #334 closes, so only `> 0` / `>= 1` count.
+        if not re.search(r"CHECK\s*\(\s*[\w.]*total_calls\s*\(\s*\)\s*(?:>\s*0|>=\s*1)\s*\)", text):
             failures.append(
-                "GUARD COUNT VACUOUS: %s CHECKs unexpected_count() without also CHECKing total_calls(). "
-                "A guard that was never invoked reports zero unexpected throws, exactly like one that saw "
-                "a hundred clean calls, so a storm that silently stopped exercising the driver still "
-                "passes (issue #334)." % path
+                "GUARD COUNT VACUOUS: %s CHECKs unexpected_count() without also CHECKing "
+                "total_calls() > 0 (or >= 1). A guard that was never invoked reports zero unexpected "
+                "throws, exactly like one that saw a hundred clean calls, so a storm that silently "
+                "stopped exercising the driver still passes (issue #334)." % path
             )
         if LOCAL_CALL_HELPER_RE.search(text):
             failures.append(
@@ -1189,6 +1191,15 @@ def self_test():
                    "  CHECK(guard.unexpected_count() == 0);\n}")
         check("main() FAILS when total_calls() is not CHECKed (vacuous zero)",
               run_main_with(vacuous) == 1)
+        # The comparison matters: `>= 0` always holds, so it is the same hole
+        # with a CHECK line present (review note on PR #465).
+        vacuous_cmp = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
+                       "  alpacacore::test::StressCallGuard guard;\n"
+                       "  INFO(guard.report());\n"
+                       "  CHECK(guard.unexpected_count() == 0);\n"
+                       "  CHECK(guard.total_calls() >= 0);\n}")
+        check("main() FAILS when total_calls() is CHECKed against >= 0",
+              run_main_with(vacuous_cmp) == 1)
 
         local_call = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                       + GUARDED_BODY +
