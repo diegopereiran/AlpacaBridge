@@ -806,11 +806,15 @@ def check_tsan_filtered_runs_sync():
 # AlpacaCore/external/ is third-party and never scanned.
 LICENSE_HEADER_PREFIXES = (
     "AlpacaCore/src/", "AlpacaCore/include/", "AlpacaCore/tests/",
+    "AlpacaCore/examples/",
     "AlpacaHTTP/src/", "AlpacaHTTP/include/", "AlpacaHTTP/tests/",
     "AlpacaHTTP/examples/",
 )
 LICENSE_HEADER_EXTENSIONS = (".h", ".hpp", ".c", ".cc", ".cpp")
-LICENSE_HEADER_LINES = 25  # the header is the first thing in the file
+# The header must START within this many lines. The block itself is matched
+# against the whole file from that point, so a block that begins on line 20
+# is not cut mid-way and misreported as missing.
+LICENSE_HEADER_LINES = 25
 
 # The current form, one block per component. Matched as a whole, not by a
 # single token: grepping for `AGPL` misses nothing but reports the old form
@@ -844,11 +848,13 @@ def check_license_headers():
                 "regressed" % (len(files), MIN_LICENSE_HEADER_FILES)]
     for f in files:
         component = f.split("/", 1)[0]
-        head = "".join(read(f).splitlines(keepends=True)[:LICENSE_HEADER_LINES])
+        text = read(f)
+        head = "".join(text.splitlines(keepends=True)[:LICENSE_HEADER_LINES])
         if "This file is part of %s." % component not in head:
             failures.append("%s: missing the 'This file is part of %s.' line in its "
                             "first %d lines" % (f, component, LICENSE_HEADER_LINES))
-        if LICENSE_HEADER_FORM.format(c=component) in head:
+        block_at = text.find(LICENSE_HEADER_FORM.format(c=component))
+        if block_at >= 0 and text.count("\n", 0, block_at) < LICENSE_HEADER_LINES:
             continue
         if LICENSE_HEADER_OLD_FORM_MARK in head:
             failures.append("%s: carries the pre-#113 long-form GNU header, which names "
