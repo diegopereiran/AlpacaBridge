@@ -810,13 +810,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
   fired (25 s on a silent handset: five 5 s query timeouts). The
-  wrapper-backed switch drivers can block too — their `is_open()` waits for the
-  wrapper mutex, which `open()` holds throughout and `close()` holds for its
-  two locked phases (it unlocks to join the PWM workers) — but that work is
-  all local, so the window is microseconds to milliseconds rather than a
-  multi-second serial handshake. Do not describe it more precisely than that
-  in prose: the mechanism has been restated wrongly three times, and the bound
-  is what the rule depends on. The rule applies to both; only the mutex-holding
+  wrapper-backed switch drivers (iMate PowerBox, StellaVita, ASIAIR, ASIAIR
+  Plus) used to block too, inside the wrapper's `is_open()`; since issue #382
+  each wrapper publishes its open state as an atomic written only inside its
+  own `open()`/`close()` critical sections, `is_open()` is a lock-free read,
+  and `check_docs_drift.py` classifies those drivers as lock-free only while
+  that stays true. The rule applies to every driver; only the mutex-holding
   telescopes make it urgent. Every router
   site now reads `get_connecting()` first and short-circuits; while a task
   is in flight `Connected` reports false. A connect request that arrives
@@ -825,10 +824,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connect. Driver side, prefer an atomic `connected_` with a lock-free
   getter (every driver does except the ones `async_connectable.h` names --
   SynScan is among those that DO have a lock-free getter, since the #130 fix) —
-  the telescopes it lists still take the mutex and rely on the router rule, and the
-  wrapper-backed switch drivers it lists lock inside the wrapper's `is_open()` but
-  release it before
-  `pending_mutex_`, so they rely on the rule without creating the ABBA hazard.
+  the telescopes it lists still take the mutex and rely on the router rule; the
+  wrapper-backed switch list is empty since #382 and the gate keeps it so.
   **`async_connectable.h`'s comment is the single source for both lists, it is
   gated, and no count is stated anywhere** (issue #381):
   `scripts/check_docs_drift.py` classifies every `get_connected()` override
@@ -848,13 +845,11 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   alternative (reading `get_connected()` directly) is the phantom-link bug
   this rule fixes; there is no per-driver signal yet for which
   `get_connected()` implementations are safe to read mid-task (the lock-free
-  majority) versus which aren't (the telescopes above and the
-  wrapper-backed switches).
+  majority) versus which aren't (the telescopes above).
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
-  can still block on a mutex-holding driver's handshake for the telescopes above and the
-  wrapper-backed switches (their wrapper `open()` holds the same mutex `is_open()` takes).
+  can still block on a mutex-holding driver's handshake for the telescopes above.
   Far narrower than the bug this rule fixes (needs a second request to land
   in a specific few-instruction window, not just a slow connect), and not
   worth a structural fix here: closing it means every driver exposing one

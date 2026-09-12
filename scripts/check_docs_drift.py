@@ -338,13 +338,36 @@ def _matching_brace(text, open_index):
     return len(text)
 
 
+IS_OPEN_BODY_RE = re.compile(r"\bis_open\s*\(\s*\)\s*const\s*\{")
+
+
+def _vendor_is_open_locks(vendor_dir):
+    """True if any is_open() body in the vendor's wrapper sources takes a lock.
+
+    A pimpl forward (`return impl_->is_open();`) does not count; the Impl's
+    own body does. No is_open() at all also counts as locking: an unknown
+    shape must classify as blocking, never silently as lock-free.
+    """
+    found = False
+    for path in sorted(vendor_dir.glob("*wrapper*.cpp")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in IS_OPEN_BODY_RE.finditer(text):
+            found = True
+            open_index = match.end() - 1
+            body = text[open_index:_matching_brace(text, open_index)]
+            if re.search(r"\b(lock_guard|unique_lock|scoped_lock)\b", body):
+                return True
+    return not found
+
+
 def classify_get_connected_bodies():
     """({basename: kind}, [findings]) for every vendor get_connected() override.
 
     kind is "driver-mutex" (takes a lock_guard/unique_lock, so it blocks behind
-    the connect sequence that holds the same mutex), "wrapper" (reaches the
-    vendor wrapper's is_open(), which takes the wrapper mutex that open() holds
-    throughout), or "lock-free".
+    the connect sequence that holds the same mutex), "wrapper" (reaches a
+    vendor wrapper is_open() that takes the wrapper mutex open() holds
+    throughout), or "lock-free" (an atomic load, a plain return, or a wrapper
+    is_open() that is itself lock-free, issue #382).
     """
     kinds = {}
     failures = []
@@ -359,7 +382,13 @@ def classify_get_connected_bodies():
             if re.search(r"\b(lock_guard|unique_lock|scoped_lock)\b", body):
                 kind = "driver-mutex"
             elif re.search(r"(\.|->)is_open\s*\(\s*\)", body):
-                kind = "wrapper"
+                # Blocking only while the wrapper's is_open() itself takes a
+                # lock. Since issue #382 the four wrapper-backed switches read
+                # an atomic the wrapper publishes, and this is what pins that:
+                # re-adding the lock_guard to any is_open() in the vendor's
+                # wrapper turns the driver back into "wrapper" (blocking) and
+                # the empty switch list in async_connectable.h fails.
+                kind = "wrapper" if _vendor_is_open_locks(path.parent) else "lock-free"
             elif re.search(r"\bload\s*\(|\breturn\s+connected_\s*;", body):
                 kind = "lock-free"
             else:
