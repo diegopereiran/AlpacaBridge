@@ -69,10 +69,11 @@ public:
 
     explicit LockedQHYSDK(QHYSDK& inner) : inner_(inner) {}
 
-    /// The longest any single forward through this decorator has spent INSIDE
-    /// the inner call, in milliseconds (open-astro#339); time queued behind
-    /// another forward on mutex_ is not counted, since the clock starts after
-    /// the lock is taken. Every fake method is pure bookkeeping,
+    /// The longest any forward through locked() has spent INSIDE the inner
+    /// call, in milliseconds (open-astro#339); time queued behind another
+    /// forward on mutex_ is not counted, since the clock starts after the
+    /// lock is taken, and cancel_exposure() is not observed at all because it
+    /// is the one forward outside locked(). Every fake method is pure bookkeeping,
     /// so this stays at or near zero; a test asserts a generous ceiling on it
     /// to catch a fake method that has gained a blocking call, which would
     /// otherwise show up as a hung [stress] run.

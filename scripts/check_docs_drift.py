@@ -576,7 +576,12 @@ def check_qhy_seam_lists():
     for name in sorted(set(locked_methods) & interface_methods):
         body = locked_methods[name]
         if name == CANCEL_EXEMPT:
-            if "cancel_mutex_" not in body:
+            # Mechanical, not a substring: the body must take the lock_guard on
+            # cancel_mutex_ AND must not go through locked(). A body that does
+            # both (shared mutex plus a mention of cancel_mutex_) is the
+            # inverted shape #339 fixed, and a substring test passed it.
+            takes_own = re.search(r"lock_guard\s*<\s*std::mutex\s*>\s*\w+\s*\(\s*cancel_mutex_\s*\)", body)
+            if not takes_own or "locked(" in body:
                 failures.append(
                     "LockedQHYSDK::cancel_exposure() must take cancel_mutex_ -- its own lock, separate "
                     "from the shared one, per open-astro#339. Through the shared mutex it queues behind "
