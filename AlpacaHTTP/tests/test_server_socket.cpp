@@ -858,8 +858,12 @@ int main() {
                 ++probes;
                 return false;
             });
-        // Installing the hooks builds a fresh HostClock, which primes the
-        // probe once in its constructor -- that is #314's other half.
+        // Installing the hooks primes the probe exactly once -- that is
+        // #314's other half. Since open-astro#399 the single call comes from
+        // the refresh_rtc() at the end of HostClock::set_hooks() rather than
+        // from a fresh HostClock's constructor, because the seam no longer
+        // builds a clock. The count is what matters either way: one probe at
+        // install, and none on a request path.
         const int primed = probes.load();
         EXPECT(primed == 1);
 
