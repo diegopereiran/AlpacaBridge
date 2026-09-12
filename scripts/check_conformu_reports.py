@@ -193,6 +193,7 @@ def self_test():
         two is pinned as well (a report that fails check_json() must fail
         main()).
     """
+    import hashlib
     import os
     import subprocess as sp
     import tempfile
@@ -314,10 +315,16 @@ def self_test():
         clean_json = '{"ErrorCount": 0, "IssueCount": 0, "TimingIssuesCount": 0}\n'
 
         def clean_txt_for(rel):
-            # Each report gets distinct content. With identical files, git's
-            # rename detection pairs the deleted report with whichever added
-            # one it likes, and the R100 rule below then skips the wrong path.
-            return "%s\nreport for %s\n" % (SUCCESS_PATTERNS[0], rel)
+            # Each report gets a distinct BODY, not just a distinct path line.
+            # With identical files, git's rename detection pairs the deleted
+            # report with whichever added one it likes, and the R100 rule
+            # below then skips the wrong path; with bodies that differ only in
+            # one line the pairing still depends on git's similarity scoring
+            # (Removed vs Cafe scored ~93%). Eight lines keyed on the path's
+            # hash keep every pair well under the 50% rename threshold.
+            digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()
+            body = "".join("%s %d %s\n" % (digest, i, rel) for i in range(8))
+            return "%s\nreport for %s\n%s" % (SUCCESS_PATTERNS[0], rel, body)
 
         def write_report(rel, suffix=""):
             write(rel, clean_txt_for(rel) + suffix)

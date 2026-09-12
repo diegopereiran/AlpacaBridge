@@ -205,9 +205,12 @@ def main():
                 for cp, enc in hits:
                     findings.append("%s: contains %s-encoded U+%04X %s" % (path, enc, cp, FORBIDDEN[cp]))
 
-    # A scan that inspected nothing is a broken gate, not a clean tree: if
+    # A scan that listed nothing is a broken gate, not a clean tree: if
     # tracked_files() ever stops yielding (a changed git invocation, a wrong
     # working directory), this must fail rather than print the OK line.
+    # `scanned` counts files LISTED, not files whose text was inspected: a
+    # tree of nothing but looks_binary() files would pass this floor. The
+    # floor targets an empty `git ls-files`, which is the failure seen.
     if scanned == 0:
         findings.append("no tracked files were scanned -- the file list is empty, "
                         "so nothing was checked (run from the repo root)")
@@ -316,7 +319,7 @@ def self_test():
 
         def write(rel, data):
             path = os.path.join(repo, rel)
-            os.makedirs(os.path.dirname(path) or path, exist_ok=True)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as fh:
                 fh.write(data)
             return path
