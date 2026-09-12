@@ -1046,7 +1046,7 @@ public:
     void pulse_guide(int direction, int duration) override {
         int axis = -1;
         bool ra_rate_adjust = false;
-        bool ra_pulse_restart = false;  // pulse rate <= 0: axis must reverse
+        bool ra_pulse_restart = false;  // pulse opposes the tracking sense
         double dec_rate_deg_per_sec = 0.0;
         double ra_pulse_rate_deg_per_sec = 0.0;
         double ra_restore_rate_deg_per_sec = kSiderealDegPerSec;
@@ -1221,9 +1221,11 @@ public:
                     // kick alone. ConformU's 5 s pulses are always verified.
                     verify_dispatch_rate = duration >= kMinPulseForRateVerifyMs;
                 } else if (restore_tracking) {
-                    // Pulse rate is non-positive (direction reversal): a live
-                    // ":I" write cannot reverse the axis — stop and restart in
-                    // the pulse direction instead.
+                    // The pulse runs against the axis's own tracking sense
+                    // (the guard is on axis_sign * rate, so this is a rate <= 0
+                    // north of the equator and >= 0 south of it): a live ":I"
+                    // write cannot reverse the axis — stop and restart in the
+                    // pulse direction instead.
                     start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate);
                 } else {
                     // Not tracking: nudge the RA axis directly like DEC, in
@@ -1962,19 +1964,23 @@ private:
     // the visible celestial pole. Axis angles are signed degrees from home,
     // positive in the board's increasing-count direction.
     //
-    // MECHANICAL frame (the geometry of a German equatorial, valid in either
-    // hemisphere once the mount faces its own pole):
+    // MECHANICAL frame (the geometry of a German equatorial, written here
+    // with the northern sense of the RA axis):
     //   Branch A (dec axis angle >= 0): dec_mech = 90 - a2, ha_mech = a1/15 + 6.
     //   Branch B (dec axis angle <  0): dec_mech = 90 + a2, ha_mech = a1/15 - 6.
+    // The code carries the two terms separately: `ha_mech_hours` below holds
+    // the a1 term alone, and home_hour_angle_offset() adds the 6 h term after
+    // the hemisphere sign, which is what the SKY frame paragraph describes.
     // The 6 h term is the counterweight-down home: with the counterweight bar
     // vertical the dec axis lies IN the meridian plane, so a pure dec
     // rotation sweeps the OTA along the HA = +/-6 h great circle, and the
     // meridian is reached only with the bar horizontal (a1 = +/-90). Both
     // branches therefore keep a1 inside +/-90 for every reachable target,
     // which is the counterweight-never-above-horizontal rule every GEM
-    // driver enforces. This is exactly indi-eqmod's EncoderToHours()
-    // (`range24(result + 6.0)`) once its DE zero is re-expressed relative to
-    // its home (DEStepHome = DEStepInit + steps/4).
+    // driver enforces. North of the equator this is exactly indi-eqmod's
+    // EncoderToHours() (`range24(result + 6.0)`) once its DE zero is
+    // re-expressed relative to its home (DEStepHome = DEStepInit + steps/4);
+    // south of it the two differ by 12 h, see the SKY frame note below.
     //
     // SKY frame: the mount faces the visible pole, so south of the equator
     // the same RA-axis rotation runs the sky's hour angle the other way,
@@ -1983,6 +1989,14 @@ private:
     //   HA = s * (a1/15) + (a2 >= 0 ? +6 : -6),  dec = s * (90 - |a2|),
     //   with s = +1 north, -1 south. Tracking therefore DEcreases a1 south of
     //   the equator, which ra_axis_sign_locked() applies to the drive rate.
+    //
+    // KNOWN LIMIT (#458): the 6 h term not flipping with s holds for the two
+    // configurations this was measured on -- an EQM-35 Pro in the south and
+    // the Wave 150i in the north -- and those two cannot tell a hemisphere
+    // effect apart from a per-board dec-axis count sense. Rigid-body geometry
+    // says the term must flip, which makes the general form
+    // `s * eps_board * 6 * branch`. A Synta board in the north or a Wave in
+    // the south is 12 h out until that is settled with a reading per board.
     //   The ASCOM pier side stays (a2 >= 0) -> pierEast in both hemispheres:
     //   the branch is chosen from the sky hour angle, so the two agree by
     //   construction (open-astro#261).

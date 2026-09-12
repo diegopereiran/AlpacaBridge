@@ -871,14 +871,15 @@ TEST_CASE("SkyWatcher southern hemisphere - tracking turns RA the right way",
     // model that read the RA axis angle as the hour angle in both
     // hemispheres; #432 showed the model was wrong (the counterweight-down
     // home puts the dec-axis sweep on the HA = +/-6 h circle, and south of
-    // the equator the mount faces the other pole, so HA = -(a1/15 +/- 6)).
+    // the equator the mount faces the other pole, so HA = -(a1/15) +/- 6).
     // With the corrected model, holding a star below the equator needs the
     // counts to go DOWN -- indi-eqmod's `RAInverted = (Hemisphere == SOUTH)`.
     //
     // The RATE was correct the whole time (0.99995x sidereal on hardware);
-    // only the direction is at stake, so this asserts the sign. The physical
-    // (oracle-checked) version of this assertion is in
-    // test_skywatcher_pointing.cpp.
+    // only the direction is at stake, so this asserts the sign. The
+    // hardware-anchored version of this assertion is in
+    // test_skywatcher_pointing.cpp, which checks the same tracking sense
+    // against the measured rows rather than against the driver's report.
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
     REQUIRE(mount.ok());
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
@@ -1013,11 +1014,12 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
 // These tests assert the ASCOM contract only: the reported side flips with
 // hour angle and agrees with DestinationSideOfPier (the same shape OnStep's
 // ConformU-validated fix above requires: "WE", not constant). Which
-// MECHANICAL branch realises each side is the #261 question, and it is
-// settled by the physical oracle in test_skywatcher_pointing.cpp (#432):
-// the pierEast branch is a2 >= 0 north of the equator and a2 < 0 south of
-// it, because the mount faces the opposite pole there. The labels below are
-// therefore the same in both hemispheres while the axis branch mirrors.
+// MECHANICAL branch realises each side is the #261 question, and #432
+// settled it: the goto picks the branch from the SKY hour angle, so
+// HA >= 0 takes the a2 >= 0 branch and get_side_of_pier() reads pierEast
+// (0) back off it. That rule is the same in both hemispheres -- the branch
+// does NOT mirror south of the equator -- which is why the labels below are
+// identical to the northern case.
 
 TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and agrees with destination",
           "[skywatcher][telescope][eqm35][hemisphere]") {

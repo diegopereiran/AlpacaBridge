@@ -1609,7 +1609,10 @@ datagrams before each send so replies cannot get off-by-one.
   (`a1 = ±90`); every reachable target keeps `|a1| <= 90`, which is the
   counterweight-never-above-horizontal rule falling out of the geometry. Its SIGN follows
   which side of the dec axis the tube is on and does NOT flip with hemisphere; the `a1`
-  term does, because the mount faces the other pole. Pier side is hemisphere-independent
+  term does, because the mount faces the other pole. **That asymmetry is measured, not
+  derived, and #458 is open on it**: geometry says the 6 h term must flip too, and the
+  two mounts it was fitted to (EQM-35 Pro south, Wave 150i north) cannot separate a
+  hemisphere effect from a per-board dec-axis count sense. Pier side is hemisphere-independent
   (`a2 >= 0` -> pierEast), since the goto picks the branch from the sky hour angle.
   Tracking, `RightAscensionRate` and East/West pulses go through `ra_axis_sign_locked()`
   (counts up north, down south); `MoveAxis`, goto deltas and AutoHome are mechanical and
@@ -1976,7 +1979,7 @@ with the fix reverted to the raw equality check, and passes with it restored.
     it commands, so those checks could not see that the RA-axis/hour-angle relation was
     missing its 6 h home offset and its southern sign (#432, found from a Wave 150i sky
     test in the north). The dec relation was right; the RA relation is now
-    `HA = -(a1/15 ± 6)` here. Treat every "reported coordinates matched" line in this
+    `HA = -(a1/15) ± 6` here. Treat every "reported coordinates matched" line in this
     section as a consistency check, not a sky check.
   - `MoveAxis` verified semantically in all four directions, not just for motion:
     each button was checked against the change in REPORTED RA/Dec. N: Dec +15.59

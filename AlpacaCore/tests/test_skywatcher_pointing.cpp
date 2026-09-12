@@ -19,12 +19,20 @@
 // agrees with itself and a wrong pointing model is invisible. That is how a
 // six-hour error shipped and passed conformance on three different boards.
 //
-// The reference below is NOT derived from the driver. It is the relation
-// measured on hardware on 2026-09-12: an EQM-35 Pro at latitude -37.2 was
-// driven to known axis positions with the shipped (wrong) 3.5.1 build, and
-// the tube's real direction was read off the mount by hand. Those rows are
-// asserted literally in the first test case. A fourth, northern row comes
-// from the Wave 150i report that opened the issue.
+// WHAT IS AND IS NOT AN EXTERNAL ANCHOR HERE. The four hardware rows in the
+// first test case are: an EQM-35 Pro at latitude -37.2 was driven to known
+// axis positions on 2026-09-12 with the shipped (wrong) 3.5.1 build and the
+// tube's real direction was read off the mount by hand (three rows), and a
+// fourth, northern row comes from the Wave 150i report that opened the
+// issue. Those four, and the alt/az cross-check against what was observed,
+// are the only checks in this file that the driver cannot satisfy by
+// agreeing with itself.
+//
+// `sky_from_axes()` below is a transcription of the driver's own formula, so
+// the goto cases downstream of it pin the goto path against the model rather
+// than against the sky. They are still worth having -- they catch a goto that
+// stops commanding what the model says -- but they are not independent
+// evidence for the model. #458 tracks the vector oracle that would be.
 //
 // If you change the pointing model, this file is what has to justify it, and
 // a new hardware row is what has to extend it. Do not "verify" a change here
