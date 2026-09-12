@@ -204,15 +204,18 @@ public:
     // Sound for every case in these files today, though the reason is not
     // simply "no cooled cameras" -- test_qhy_fake_sdk.cpp has one, the
     // control_temp convergence case, which reads last_temp_target straight
-    // from the test body, and since open-astro#323 test_qhy_camera.cpp
-    // connects a cooled camera, which spawns BOTH the telemetry and the
-    // temperature worker. What keeps every read safe is that NO OTHER THREAD
-    // is touching the fake at the moment the test body reads: the fake-only
-    // file builds no driver; the wheel file and the uncooled camera cases
-    // build drivers but never start a background worker (their two
-    // start_exposure() calls only assert a throw); and the one cooled case
-    // reads no fake field from its body at all, and its workers are joined by
-    // the disconnect it measures before the driver is destroyed.
+    // from the test body, and since open-astro#323 test_qhy_camera.cpp has
+    // cooled cases (the two disconnect-timing cases) that connect a cooled
+    // camera, which spawns BOTH the telemetry and the temperature worker.
+    // What keeps every read safe is that NO OTHER THREAD is touching the
+    // fake at the moment the test body reads: the fake-only file builds no
+    // driver; the wheel file and the uncooled camera cases build drivers but
+    // never start a background worker (their two start_exposure() calls only
+    // assert a throw); and the RULE for a cooled case, which every one of
+    // them follows, is that its body reads no fake field at all and its
+    // workers are joined by the disconnect it measures before the driver is
+    // destroyed. A new cooled case that wants to read a counter afterwards
+    // must disconnect first, or route the read through the lock.
     //
     // THE FIRST case that reads one of these fields while a driver worker is
     // still running breaks that -- a connected cooled camera whose body then
