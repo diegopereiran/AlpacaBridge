@@ -2875,10 +2875,10 @@ run `/deploy-test` + `/conformu` against a real body and update both this sectio
 SUPPORTED-DRIVERS.md with what actually happened.
 
 SDK: **system packages**, not vendored — `libgphoto2-dev` + `libraw-dev` via pkg-config
-(`AlpacaCore/src/vendors/gphoto/CMakeLists.txt`). Unlike every other camera vendor, there is
-nothing under `AlpacaCore/external/gphoto/`: libgphoto2 and libraw are open-source and already
-packaged for Debian/Ubuntu, so there's no proprietary SDK to vendor or clean up (Step 4's SDK
-cleanup checklist does not apply here).
+(`AlpacaCore/src/vendors/gphoto/CMakeLists.txt`). Unlike every other camera vendor, gphoto has no
+`gphoto/` subdirectory under `AlpacaCore/external/`: libgphoto2 and libraw are open-source and
+already packaged for Debian/Ubuntu, so there's no proprietary SDK to vendor or clean up (Step 4's
+SDK cleanup checklist does not apply here).
 
 - **Enumeration is USB-autodetect-by-index, matching the other SDK-enumerated cameras**: no
   serial/network auto-detection was implemented (per the driver-build guide's "SDK-enumerated

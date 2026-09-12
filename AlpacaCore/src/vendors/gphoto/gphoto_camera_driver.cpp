@@ -375,6 +375,9 @@ double lookup_known_pixel_size_um(const std::string& model) {
 
 class GPhotoCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
+    // Issue #358: hand the connect-failure reason to the router.
+    ALPACA_EXPOSE_CONNECT_ERROR()
+
     GPhotoCameraDriver(int device_number, int camera_index)
         : AsyncConnectable("GPhoto"),
           device_number_(device_number),

@@ -116,6 +116,8 @@ if(TARGET alpacacore_svbony)
 endif()
 if(TARGET alpacacore_gphoto)
     list(APPEND TEST_SOURCES test_gphoto_camera.cpp)
+    # Camera lifecycle storm (issue #241); run under the sanitizers-tsan CI job.
+    list(APPEND TEST_SOURCES test_gphoto_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_telescope.cpp)
