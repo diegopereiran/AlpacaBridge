@@ -25,6 +25,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -3105,9 +3106,16 @@ int main() {
                 clear();
                 const auto now = std::chrono::system_clock::now();
                 const std::time_t now_t = std::chrono::system_clock::to_time_t(now);
+                // Carry the milliseconds: to_time_t truncates to the second,
+                // which alone ate up to ~1 s of the 2 s agreement margin
+                // before any request time was added.
+                const auto now_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
                 char stamp[32];
-                std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S.000Z", std::gmtime(&now_t));
-                const std::string agreeing_body = std::string(R"({"UTCDate":")") + stamp + R"("})";
+                std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", std::gmtime(&now_t));
+                char stamp_ms[8];
+                std::snprintf(stamp_ms, sizeof(stamp_ms), ".%03lldZ", static_cast<long long>(now_ms));
+                const std::string agreeing_body = std::string(R"({"UTCDate":")") + stamp + stamp_ms + R"("})";
                 const auto response = route_request(clock_router, "PUT", base + "/utcdate", agreeing_body);
                 const auto json = nlohmann::json::parse(response.body(), nullptr, false);
                 EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
@@ -3318,8 +3326,8 @@ int main() {
                         if (line.message.find("hardware RTC's time") == std::string::npos) {
                             continue;
                         }
-                        refused_text = line.message.find("setting the clock was refused") != std::string::npos;
-                        sync_time_recommended = line.message.find("Use the web UI's Sync Time") != std::string::npos;
+                        refused_text |= line.message.find("setting the clock was refused") != std::string::npos;
+                        sync_time_recommended |= line.message.find("Use the web UI's Sync Time") != std::string::npos;
                     }
                     EXPECT(refused_text);
                     EXPECT(!sync_time_recommended);
@@ -3347,7 +3355,7 @@ int main() {
                     bool opt_out_text = false;
                     for (const auto& line : captured) {
                         if (line.message.find("hardware RTC's time") != std::string::npos) {
-                            opt_out_text =
+                            opt_out_text |=
                                 line.message.find("syncSystemClockFromClients is off") != std::string::npos &&
                                 line.message.find("Use the web UI's Sync Time") != std::string::npos;
                         }
