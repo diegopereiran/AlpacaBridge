@@ -2347,10 +2347,10 @@ private:
                 }
 
                 bool have_temp = false;
-                double t = 0.0;
+                double temp_c = 0.0;
                 try {
                     if (sdk.is_control_available(id, control::CURTEMP)) {
-                        t = sdk.get_param(id, control::CURTEMP);
+                        temp_c = sdk.get_param(id, control::CURTEMP);
                         have_temp = true;
                     }
                 } catch (const std::exception& e) {
@@ -2369,7 +2369,7 @@ private:
                 }
                 if (have_temp) {
                     std::lock_guard<std::mutex> lk(mutex_);
-                    telemetry_ccd_temp_c_ = t;
+                    telemetry_ccd_temp_c_ = temp_c;
                     telemetry_temp_valid_ = true;
                 }
 
