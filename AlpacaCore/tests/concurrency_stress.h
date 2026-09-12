@@ -128,8 +128,10 @@ struct StressOptions {
  *
  * What IS true: a read taken while the storm is still running is a torn
  * snapshot, not a hang -- count_ and samples_ are consistent with each other
- * at that instant but say nothing about calls still in flight. Read them
- * after the threads join, which is the only point they mean anything.
+ * at that instant, total_calls_ and expected_calls_ are relaxed atomics read
+ * outside the lock entirely, and none of the four says anything about calls
+ * still in flight. Read them after the threads join, which is the only point
+ * they mean anything.
  *
  * The constructor is explicit, so brace-init needs its own parens:
  *     StressCallGuard guard({AlpacaError::NotConnected, AlpacaError::InvalidValue});
