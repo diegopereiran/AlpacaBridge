@@ -59,9 +59,10 @@ namespace alpacacore::test {
  *
  * TWO RULES THIS FAKE MUST KEEP (they are not stylistic):
  *
- * 1. NOTHING HERE MAY BLOCK. The camera driver's exposure, temperature and
- *    cooler-off workers join with a bounded timeout and DETACH on expiry, and
- *    its pulse-guide worker is detached by design. A fake that blocks turns
+ * 1. NOTHING HERE MAY BLOCK. The camera driver's exposure, temperature,
+ *    cooler-off and telemetry workers join with a bounded timeout and DETACH
+ *    on expiry (telemetry since issue #323, so the rule is load-bearing for
+ *    it too), and its pulse-guide worker is detached by design. A fake that blocks turns
  *    those into detached threads still calling into it after the test body
  *    has moved on — i.e. a use-after-free of the fake itself.
  * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT, including those
