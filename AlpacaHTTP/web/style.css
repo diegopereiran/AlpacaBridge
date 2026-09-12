@@ -97,6 +97,10 @@ header {
     font-size: 11.5px;
     font-weight: 600;
     color: var(--warn);
+    /* The badge is an <a>, and there is no global anchor reset in this file,
+       so without this the UA underline runs through the pill and it stops
+       matching the .version / .profile-name pills beside it. */
+    text-decoration: none;
 }
 
 .title .profile-name {

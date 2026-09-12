@@ -61,7 +61,10 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.git")
 
     # Normalize the origin remote to a browsable https://github.com/<owner>/<repo>
     # URL (handles both https and ssh remote forms) so the build badge can link
-    # straight to the branch, without hardcoding a fork's own path.
+    # straight to the commit, without hardcoding a fork's own path. The commit
+    # and not the branch: a PR head fetched under an arbitrary local name has
+    # no matching branch ref on the remote, but the commit object always
+    # resolves there (see updateHeaderBuildBadge in web/app.js).
     execute_process(
         COMMAND ${GIT_EXECUTABLE} remote get-url origin
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}

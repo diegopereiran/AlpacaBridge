@@ -1556,49 +1556,36 @@ function updateHeaderProfileName(profileName) {
 }
 
 // Shows a badge next to the version number when this build isn't coming from
-// main -- e.g. a PR branch checked out for local testing -- so it can't be
-// mistaken for an official release. kVersion (VERSION file) stays the same
-// on every branch; GitBranch/GitCommit come from the actual checkout.
+// a release tag -- e.g. a PR branch or a PR head checked out for local
+// testing -- so it can't be mistaken for an official release. kVersion
+// (VERSION file) stays the same on every branch; GitBranch/GitCommit come
+// from the actual checkout. buildBadgeLabel() (format.js) holds the rule and
+// is unit-tested; everything here is DOM wiring.
 let _buildBadgeChecked = false;
 async function updateHeaderBuildBadge() {
     if (_buildBadgeChecked) return;
-    _buildBadgeChecked = true;
     const badge = document.getElementById('header-build-badge');
     if (!badge) return;
     try {
         const response = await fetch(API_BASE + '/management/v1/buildinfo');
+        // Any HTTP answer settles it, including a 404 from a server too old
+        // to have the endpoint -- re-asking every poll would buy nothing. A
+        // fetch that THROWS (server restarting mid-load, link dropped) is
+        // the transient case, and leaves the flag clear so the next
+        // loadServerInfo() retries.
+        _buildBadgeChecked = true;
         if (!response.ok) return;
         const data = await response.json();
         if (data.ErrorNumber !== 0) return;
-        const info = parseResponseValue(data.Value) || {};
-        const branch = info.GitBranch || info.gitBranch || '';
-        const commit = info.GitCommit || info.gitCommit || '';
-        const dirty = !!(info.GitDirty !== undefined ? info.GitDirty : info.gitDirty);
-        const isRelease = !!(info.GitIsRelease !== undefined ? info.GitIsRelease : info.gitIsRelease);
-        const remoteUrl = info.GitRemoteUrl || info.gitRemoteUrl || '';
-        // isRelease (HEAD sits exactly on a vX.Y.Z tag) is the ONLY release
-        // check. `git rev-parse --abbrev-ref HEAD` prints the literal "HEAD"
-        // for every detached checkout, not just a release one: a bare
-        // `git checkout <sha>`, a `git checkout FETCH_HEAD` of a PR head and
-        // any actions/checkout build all land there. Testing for it here as
-        // well hid the badge on exactly the unofficial builds it exists to
-        // flag, so a detached non-release build is labelled, not hidden.
-        if (isRelease || !branch || branch === 'unknown') {
+        const view = buildBadgeLabel(parseResponseValue(data.Value) || {});
+        if (!view) {
             badge.hidden = true;
             return;
         }
-        const branchLabel = branch === 'HEAD' ? 'detached' : branch;
-        badge.textContent = branchLabel + (commit && commit !== 'unknown' ? '@' + commit : '') + (dirty ? '*' : '');
-        badge.title = 'Running from a non-release checkout: branch ' + branchLabel +
-            (commit && commit !== 'unknown' ? ', commit ' + commit : '') +
-            (dirty ? ' (uncommitted changes present)' : '') +
-            (remoteUrl ? ' -- click to open this commit on GitHub' : '');
-        // Link to the commit, not the branch: a local checkout's branch name
-        // (e.g. a PR head fetched under an arbitrary local name) often has no
-        // matching ref on the remote, but the commit itself is always valid
-        // there since it's the same object fetched from origin.
-        if (remoteUrl && commit && commit !== 'unknown') {
-            badge.href = remoteUrl + '/commit/' + encodeURIComponent(commit);
+        badge.textContent = view.label;
+        badge.title = view.title;
+        if (view.href) {
+            badge.href = view.href;
         } else {
             badge.removeAttribute('href');
         }
