@@ -293,8 +293,19 @@ QHY_INTERFACE_HEADER = "AlpacaCore/include/alpacacore/vendor/qhy/qhy_sdk_wrapper
 QHY_LOCKED_HEADER = "AlpacaCore/tests/locked_qhy_sdk.h"
 QHY_SWEEP_TEST = "AlpacaCore/tests/test_qhy_fake_sdk.cpp"
 
-PURE_VIRTUAL_RE = re.compile(r"\bvirtual\b[^;{}]*?(\w+)\s*\([^;{}]*\)\s*=\s*0\s*;", re.S)
-OVERRIDE_RE = re.compile(r"(\w+)\s*\([^;{}]*\)\s*override\s*\{", re.S)
+# The cv/exception qualifiers between the closing paren and `= 0` / `override`
+# are optional but must be TOLERATED: without them a `const` method is invisible
+# to both patterns, so a 27th pure virtual that happens to be const would be
+# omitted from every set, all three differences would come out empty, and the
+# gate would pass on exactly the drift it exists to catch. (A developer who did
+# add the sweep entry got the opposite: a STALE SWEEP ENTRY naming the wrong
+# cause.) Nothing on this seam is const today, so the hole was only reachable
+# by the next method added -- which is the whole population this gate is for.
+_QUALIFIERS = r"(?:\s*(?:const|noexcept|final|override))*"
+PURE_VIRTUAL_RE = re.compile(
+    r"\bvirtual\b[^;{}]*?(\w+)\s*\([^;{}]*\)" + _QUALIFIERS + r"\s*=\s*0\s*;", re.S)
+OVERRIDE_RE = re.compile(
+    r"(\w+)\s*\([^;{}]*\)(?:\s*(?:const|noexcept|final))*\s*override\s*\{", re.S)
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 
