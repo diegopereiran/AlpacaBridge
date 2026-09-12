@@ -1329,6 +1329,22 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   (target-reached OR stabilized) — forcing it onto the poll-budget API would
   fake a parameter. Unify if a third instance of that extended shape appears.
 
+### pty-backed fakes: never write to the master with a blocking write
+
+A fake that answers a driver over a pseudo-terminal must open its master
+non-blocking and write through `pty_write_bounded()` from
+`AlpacaCore/tests/fake_pty_write.h`, passing its own `stop_` flag. A bare
+`write(master_fd_, ...)` on a blocking master parks the fake's worker thread as
+soon as the driver stops draining — which is normal as a concurrency test winds
+down — and the destructor's `join()` then never returns, because the thread is
+asleep in `write()` and never reaches the `stop_` check. The result is a hung
+process, not a failing test, and it is a race, so it shows up as an occasional
+CI hang rather than a reproducible red (#424, the shape #364 describes).
+
+Dropping a reply is the correct answer here: a reply the driver is not draining
+is one it was never going to read, and a fake whose destructor can hang is worse
+than one that drops a frame.
+
 ### Test CMake Integration
 
 When adding a test file for a new vendor device:
@@ -1596,6 +1612,13 @@ datagrams before each send so replies cannot get off-by-one.
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
   `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
+  Since #380 that rule is not left to each branch to remember: `Router::reject_invalid_config()`
+  takes the source and the reason and returns whether the caller must refuse, and
+  `Router::normalize_persisted_connection_type()` does the same for an unrecognised
+  `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
+  config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
+  attaching to whatever mount answers. Use them rather than an inline `return false`; the
+  `portPath`, `host` and `connectionType` checks in every telescope branch do.
   Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
   the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
   config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the
