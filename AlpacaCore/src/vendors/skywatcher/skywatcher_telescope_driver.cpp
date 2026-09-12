@@ -1399,8 +1399,20 @@ public:
             goto_in_progress_ = false;
             throw;
         }
+        // Same order as the async task: Slewing stays true until tracking is
+        // running again. restore_tracking_after_slew_locked() now releases
+        // mutex_ for the post-slew rate check (450 ms, and up to ~3 s more if
+        // the stop/restart retry fires), so clearing the flag first let a
+        // client polling Slewing see the slew finish and fire PulseGuide or
+        // MoveAxis into exactly the restart window this check exists to
+        // protect.
+        try {
+            restore_tracking_after_slew_locked(lock);
+        } catch (...) {
+            goto_in_progress_ = false;
+            throw;
+        }
         goto_in_progress_ = false;
-        restore_tracking_after_slew_locked(lock);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -2972,6 +2984,28 @@ private:
         if (expected_cps <= 0.0) {
             return;
         }
+        // ":j" is whole counts and both reads truncate, so a sample carries
+        // up to ~2 counts of error -- the same limit verify_live_rate_or_rekick
+        // reasons about above. If the window cannot accumulate enough counts
+        // to tell the expected rate from its quantisation, every possible
+        // reading lands outside the tolerance and the check condemns a
+        // healthy axis: with RightAscensionRate near-cancelling sidereal
+        // (the documented satellite/geostationary use), expected_cps can be
+        // ~5, so a 300 ms window expects 1.48 counts and :j1 can only answer
+        // 1 or 2 -- both outside 25%. That produced a stop, a restart, a
+        // second failed sample and a "restart did not correct it" WARN on an
+        // axis that was tracking correctly. Below the resolution floor there
+        // is nothing to verify, so say so once and leave the axis alone.
+        constexpr double kMinResolvableDeltaCounts = 4.0;
+        const double expected_counts_in_window =
+            expected_cps * std::chrono::duration<double>(kPostSlewRateWindow).count();
+        if (expected_counts_in_window < kMinResolvableDeltaCounts) {
+            ALPACA_LOG_INFO("SkyWatcher", "Post-slew tracking rate check skipped: expected " +
+                                              std::to_string(expected_counts_in_window) +
+                                              " counts in the sample window, below the " +
+                                              std::to_string(kMinResolvableDeltaCounts) + " needed to resolve it");
+            return;
+        }
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
             lock.unlock();
             std::this_thread::sleep_for(d);
@@ -2982,15 +3016,24 @@ private:
         for (int attempt = 0; attempt < 2; ++attempt) {
             uint32_t before = 0;
             uint32_t after = 0;
+            // Measured, not nominal: the real gap between the two :j1 reads is
+            // kPostSlewRateWindow plus the mutex_ re-acquisition plus a serial
+            // round trip. Dividing by the nominal window biases observed_cps
+            // low by that overhead, which under GET polling can approach the
+            // 25% tolerance and stop-and-restart the RA axis after every slew.
+            std::chrono::steady_clock::time_point sampled_at{};
+            double elapsed = 0.0;
             try {
                 if (!sleep_unlocked(kRateVerifySettle)) {
                     return;
                 }
                 before = protocol.inquire_position(kAxisRa);
+                sampled_at = std::chrono::steady_clock::now();
                 if (!sleep_unlocked(kPostSlewRateWindow)) {
                     return;
                 }
                 after = protocol.inquire_position(kAxisRa);
+                elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - sampled_at).count();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher",
                                 std::string("Post-slew tracking rate check could not read position: ") + e.what());
@@ -3000,8 +3043,10 @@ private:
             if (delta > static_cast<int32_t>(kCountsMask >> 1)) {
                 delta -= static_cast<int32_t>(kCountsMask) + 1;
             }
-            const double observed_cps =
-                std::abs(static_cast<double>(delta)) / std::chrono::duration<double>(kPostSlewRateWindow).count();
+            if (elapsed <= 0.0) {
+                return;
+            }
+            const double observed_cps = std::abs(static_cast<double>(delta)) / elapsed;
             if (std::abs(observed_cps - expected_cps) <= kPostSlewRateTolerance * expected_cps) {
                 return;
             }

@@ -1917,4 +1917,174 @@ TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#30
     driver->set_connected(false);
 }
 
+// ---------------------------------------------------------------------------
+// PR #448: the post-slew tracking-rate check, the landing-settle wait, and the
+// Slewing/restore ordering. Before these, deleting either
+// verify_post_slew_tracking_rate_locked() or wait_axis_stationary_locked()
+// left the suite green.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SkyWatcher async - a goto whose tracking restarts at the wrong rate is stopped and restarted",
+          "[skywatcher][async]") {
+    // The #432 failure this check exists for: the goto lands, tracking is
+    // re-applied, but the board latches the previous (slew) step period, so
+    // the mount creeps at the wrong rate with Tracking reporting true. The
+    // sampled :j1 check is the only thing that can see it -- ":i" agrees with
+    // the driver, so nothing in the command path notices.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const int stops_before = mount.stop_count(1);
+
+    // Swallow the restore's step-period write so the axis re-latches the
+    // slew rate on the following ":J" -- the axis runs, ":i" disagrees, and
+    // only the sampled position check can see it.
+    mount.drop_tracking_restore_rate_write(1, 1);
+
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 0.15 + 24.0, 24.0), 20.0);
+
+    // The recovery is a genuine stop/restart of the RA axis, not another
+    // in-place ":I": that is what distinguishes this check from the
+    // RightAscensionRate re-kick above, which never stops the axis.
+    REQUIRE(wait_until([&] { return mount.stop_count(1) > stops_before; }, 15000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));
+    // Slewing is still true here by design -- the restore owns the slew until
+    // the rate check finishes -- so wait it out rather than sampling it.
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - the rate check's restart waits for the axis to stop ramping", "[skywatcher][async]") {
+    // wait_axis_stationary_locked(): ":K" is acknowledged long before a real
+    // axis has decelerated. Restarting tracking into a still-moving axis is
+    // what produced the wrong latched period in the first place, so the
+    // restart must not be issued until the axis is actually stationary.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);  // ":K" acked, axis keeps running for 800 ms
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const int stops_before = mount.stop_count(1);
+    mount.drop_tracking_restore_rate_write(1, 1);
+
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 0.15 + 24.0, 24.0), 22.0);
+
+    REQUIRE(wait_until([&] { return mount.stop_count(1) > stops_before; }, 15000));
+    // Between the stop and the restart the axis must have been observed
+    // stationary. Sampling it here would race the ramp, so assert the end
+    // state instead: the axis is running again and the driver is not still
+    // reporting a slew, which can only happen after the wait returned.
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 10000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - the synchronous slew reports Slewing until tracking is restored", "[skywatcher][async]") {
+    // Review finding on PR #448: the async task was reordered to clear
+    // goto_in_progress_ AFTER restore_tracking_after_slew_locked(), but the
+    // synchronous slew_to_coordinates() still cleared it before. Since the
+    // restore now releases mutex_ for the rate check (450 ms, and seconds
+    // more if the retry fires), a client polling Slewing saw the slew finish
+    // and could fire MoveAxis/PulseGuide into the restart window.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // Force the slow path: the restore's rate write is swallowed, so the
+    // check must run its sample window and then stop/restart the axis. All of
+    // that has to happen while Slewing is still true.
+    mount.drop_tracking_restore_rate_write(1, 1);
+
+    // The slew runs on its own thread so this one can watch Slewing while the
+    // synchronous call is still inside restore_tracking_after_slew_locked().
+    // Polling cannot start until Slewing has gone true, or it samples the
+    // legitimately-false state before the slew begins.
+    std::atomic<bool> saw_slewing_false_early{false};
+    std::atomic<bool> slew_returned{false};
+    const double lst = driver->get_sidereal_time();
+    std::thread slewer([&] {
+        driver->slew_to_coordinates(std::fmod(lst - 0.15 + 24.0, 24.0), 18.0);
+        slew_returned.store(true);
+    });
+
+    REQUIRE(wait_until([&] { return driver->get_slewing() || slew_returned.load(); }, 5000));
+    while (!slew_returned.load()) {
+        if (!driver->get_slewing()) {
+            saw_slewing_false_early.store(true);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    slewer.join();
+
+    // Slewing may only go false after the synchronous call has returned, by
+    // which point tracking is restored.
+    CHECK_FALSE(saw_slewing_false_early.load());
+    REQUIRE_FALSE(driver->get_slewing());
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a near-cancelled RA rate is not condemned by the post-slew check",
+          "[skywatcher][async]") {
+    // Review finding on PR #448: observed_cps is a whole-count delta over a
+    // fixed window judged against a fixed 25% tolerance, so when the
+    // effective RA rate nearly cancels sidereal -- RightAscensionRate = 0.9,
+    // the documented satellite/geostationary use -- the window expects ~1.5
+    // counts and ":j1" can only answer 1 or 2. BOTH are outside the
+    // tolerance, so the check condemned an axis that was tracking correctly:
+    // a stop, a restart, a second failed sample and a "restart did not
+    // correct it" WARN after every slew for the rest of the session.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    driver->set_right_ascension_rate(0.9);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // Counting stops cannot isolate this: refine_goto_landing's re-gotos each
+    // stop the axis too. The rate check's own verdict is what matters, so
+    // capture its WARN -- it is emitted only when the check decides the axis
+    // is running at the wrong rate.
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    std::atomic<bool> condemned{false};
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("Post-slew tracking restart") != std::string_view::npos) {
+                condemned.store(true);
+            }
+        });
+
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 0.15 + 24.0, 24.0), 21.0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+
+    // The axis is healthy, so the check must leave it alone entirely.
+    CHECK_FALSE(condemned.load());
+    REQUIRE(mount.axis_running(1));
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

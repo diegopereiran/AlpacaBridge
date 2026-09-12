@@ -214,6 +214,19 @@ public:
         ax(axis).ignore_start_relatches = n;
     }
 
+    /// Acknowledge but silently DROP the next @p n ":I" writes that arrive on
+    /// an axis that is STOPPED and not mid-goto -- i.e. the step period the
+    /// driver writes when it restarts tracking after a slew. The axis then
+    /// re-latches its PREVIOUS T1 on the following ":J" and runs at the slew
+    /// rate instead of the tracking rate, with ":i" disagreeing: the #432
+    /// shape, where the mount creeps at the wrong rate while Tracking reports
+    /// true. Distinct from drop_step_period_writes(), which also swallows the
+    /// goto's own writes and so cannot isolate the restore.
+    void drop_tracking_restore_rate_write(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).drop_idle_step_period_writes = n;
+    }
+
     /// Refuse the next @p n ":J" on an axis with "!2" (Motor not stopped):
     /// the start/re-latch throws in the wrapper. Models a transport-level
     /// failure of the ":J" kick that follows a live ":I" (#249 review).
@@ -259,7 +272,8 @@ private:
         uint32_t indexer = 0;
         int start_count = 0;
         int stop_count = 0;
-        int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
+        int drop_step_period_writes = 0;       // ":I" writes to ack-but-ignore (test knob)
+        int drop_idle_step_period_writes = 0;  // ":I" on a stopped, non-goto axis to ack-but-ignore (test knob)
         int stall_live_rate_writes = 0;   // ":I" writes on a running axis to store but not apply (test knob)
         int ignore_start_relatches = 0;   // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
         int reject_starts = 0;            // ":J" to refuse with "!2" (test knob)
@@ -395,6 +409,10 @@ private:
                 if (a.drop_step_period_writes > 0) {
                     --a.drop_step_period_writes;
                     return "=";  // acked, not stored -- ":i" will disagree
+                }
+                if (!a.running && !a.in_goto && a.drop_idle_step_period_writes > 0) {
+                    --a.drop_idle_step_period_writes;
+                    return "=";  // the post-slew tracking restore, swallowed
                 }
                 a.t1 = parse_u24(data);
                 if (a.running && a.stall_live_rate_writes > 0) {
