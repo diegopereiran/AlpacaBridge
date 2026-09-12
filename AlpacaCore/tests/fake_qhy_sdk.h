@@ -601,16 +601,19 @@ public:
 
     void move_cfw(const std::string& camera_id, int position) override {
         hit("move_cfw");
-        require_open(camera_id);
         // open-astro#324 (absorbed from #327): the CFW wire protocol is one
         // ASCII digit, so QHYSDKWrapper::move_cfw() throws InvalidValue above
         // 9. The fake accepted any int, so the filter-wheel case "A slot above
         // the protocol ceiling issues no move" passed on the DRIVER's own copy
         // of the guard and would have stayed green if that copy were narrowed.
+        // Same order as production: the ceiling is checked before the handle
+        // lookup, so a closed camera with position 10 answers InvalidValue,
+        // not NotConnected.
         if (position > 9) {
             throw AlpacaException("Filter position out of range for QHY CFW protocol (max 9)",
                                   AlpacaError::InvalidValue);
         }
+        require_open(camera_id);
         last_cfw_target = position;
         cfw_position_ = position;
         cfw_position_script.clear();
