@@ -257,7 +257,13 @@ private:
 
     // Both overloads format INSIDE the lock, and only on the FIRST occurrence
     // of a mode, so a storm that repeats one throw thousands of times pays a
-    // counter bump and a short scan and nothing else. Taking a ready-made
+    // counter bump and a short scan and nothing else -- while the mode is
+    // still SAMPLED. Once more than kMaxSamples distinct modes have been seen,
+    // a repeat of an unsampled one scans the samples and then the key list too
+    // (up to kMaxSamples + kMaxUnsampledModes comparisons under mutex_). That
+    // path only exists in a case that is already failing with a lot of
+    // distinct modes, in a test helper, so it is not worth optimising -- but
+    // do not read the sentence above as covering it. Taking a ready-made
     // std::string instead would move the formatting to the call site, where it
     // happens on every throw however full the sample buffer is -- and an early
     // return in here could not skip it, because the argument is already built
@@ -292,6 +298,11 @@ private:
         note_unsampled(code, "", what);
     }
 
+    // const, not just conventionally read-only: is_expected() reads this
+    // without mutex_ (safe only because it's never written after
+    // construction), and const makes that invariant load-bearing rather than
+    // something a later "add an expect() mutator" change could quietly break
+    // into a data race.
     const std::vector<int> expected_codes_;
     mutable std::mutex mutex_;
     int count_ = 0;

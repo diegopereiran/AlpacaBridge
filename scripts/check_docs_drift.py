@@ -522,6 +522,27 @@ def check_qhy_seam_lists():
     if not interface_methods:
         return ["No pure virtuals found on QHYSDK -- this check's parser is broken."]
 
+    # Cross-check the count against the literal the sweep test already asserts
+    # (CHECK(methods.size() == N)). Everything else here is set differences, so
+    # a method the regex fails to see drops out of ALL of them and the gate goes
+    # quietly green -- which is exactly what a const method did until round 2.
+    # Comparing against a number maintained elsewhere turns the next such miss
+    # into a loud failure, and pins that literal at the same time.
+    sweep_text = read(QHY_SWEEP_TEST)
+    size_match = re.search(r"\bmethods\.size\(\)\s*==\s*(\d+)", sweep_text)
+    if size_match is None:
+        failures.append(
+            "Could not find the `CHECK(methods.size() == N)` literal in %s -- this check uses it to "
+            "detect a method its regexes silently missed, so losing it would make that failure "
+            "invisible again." % QHY_SWEEP_TEST)
+    elif int(size_match.group(1)) != len(interface_methods):
+        failures.append(
+            "QHY SEAM COUNT MISMATCH: %s asserts methods.size() == %s, but %d pure virtuals were "
+            "parsed off QHYSDK. Either the sweep literal is stale, or a method's declaration has a "
+            "shape the parser in %s does not match (a const or noexcept qualifier did exactly that "
+            "once) -- in which case the set comparisons below would pass while missing it."
+            % (QHY_SWEEP_TEST, size_match.group(1), len(interface_methods), Path(__file__).name))
+
     # Each override, with its body, so the lock can be checked too.
     locked_methods = {}
     for match in OVERRIDE_RE.finditer(locked_body):
