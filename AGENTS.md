@@ -932,9 +932,19 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   getter that curl answers in ~2 ms is not driver latency, but don't assume
   transport either — the `socket()`/`connect()` adjacency in the first trace
   was coincidental, not causal; correlate both processes on one clock and
-  confirm before writing up the mechanism. Unresolved and outside
-  AlpacaBridge's control; a Pi 5 (faster cores) is the next thing worth
-  trying, not another transport change.
+  confirm before writing up the mechanism. **Resolved 2026-09-12**: the stall
+  was ConformU 4.5.0's own arm64 release bug, not AlpacaBridge or a Pi 3B
+  hardware limit. The official `linux-arm64.tar.xz` 4.5.0 asset ships without
+  `PublishReadyToRun`, so .NET JIT-compiles each generic-over-value-type
+  instantiation on first use, charging the first member of each response
+  type ~130-220 ms regardless of how fast the driver answers
+  ([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31),
+  fixed in 4.5.1; see `SUPPORTED-DRIVERS.md`'s General Notes). Confirmed on
+  this exact rig, same driver build, only ConformU swapped for 4.5.1 (PR
+  #462): `CameraState` 0.187s→0.015s, `CameraXSize` 0.168s→0.005s,
+  `SensorType` 0.172s→0.004s. The mount's identical three-member signature is
+  presumed the same cause, not independently re-confirmed on a Pi 3B. No
+  Pi 5 needed — install 4.5.1 and re-run.
 - **Persistent connections are capped at `kMaxRequestsPerConnection` (1000
   requests)** (2026-09-08). Making connections persistent removed the
   per-request handshake cost, but also removed the only thing that used to
