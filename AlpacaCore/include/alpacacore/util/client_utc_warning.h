@@ -90,6 +90,8 @@ public:
     /// with a multi-second per-command timeout, so sampling afterwards
     /// against a 2 s threshold would report a perfectly set client clock as
     /// seconds out on a mount that was slow to ack (review note on #471).
+    /// The OnStep slow-ack case in test_onstep_telescope.cpp is the one that
+    /// pins this ordering; the other drivers' cases write to fast fakes.
     static bool warn_once(const std::string& component, std::chrono::system_clock::duration client_minus_host,
                           bool& warned) {
         if (warned) {
@@ -102,7 +104,7 @@ public:
         warned = true;
         ALPACA_LOG_WARN(component, "Client UTCDate disagrees with an NTP-disciplined host clock by " +
                                        std::to_string(offset->count()) +
-                                       " ms; the mount's clock and pointing now follow the client (logged once "
+                                       " ms; the driver's pointing now follows the client (logged once "
                                        "per connection)");
         return true;
     }

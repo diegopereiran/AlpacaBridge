@@ -1684,7 +1684,7 @@ datagrams before each send so replies cannot get off-by-one.
   the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
   clock state (#395). **This split is Sky-Watcher-only.** A mount with its own clock (OnStep,
   Celestron, SynScan, iOptron, ZWO AM) has the ASCOM `UTCDate` setter write the MOUNT's time,
-  and its goto and sidereal logic then run on that clock, so those drivers keep aiming by the
+  and the driver's goto and sidereal logic then run on that clock (the mount itself may discard the write, as an aligned Celestron does), so those drivers keep aiming by the
   client's instant on purpose; what they share with #301 is the once-per-connection WARN when
   an NTP-disciplined host disagrees with the client by more than
   `HostClock::kClientDisagreementWarn`, through `alpacacore/util/client_utc_warning.h`

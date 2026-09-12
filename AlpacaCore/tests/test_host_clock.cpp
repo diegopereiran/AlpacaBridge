@@ -486,7 +486,7 @@ TEST_CASE("ClientUtcWarning - warn_once logs once per flag on a disciplined host
     CHECK(ClientUtcWarning::warn_once("Test", far, warned));
     CHECK(warned);
     CHECK(counter.warns.load() == 1);
-    CHECK(counter.last.find("the mount's clock and pointing now follow the client") != std::string::npos);
+    CHECK(counter.last.find("the driver's pointing now follows the client") != std::string::npos);
     CHECK(counter.last.find(" ms;") != std::string::npos);
 
     // Repeats within the same connection are silent.
