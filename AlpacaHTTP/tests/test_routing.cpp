@@ -1689,6 +1689,18 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_GPHOTO
+    {
+        // gphoto / camera
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "gphoto"}, {"deviceType", "camera"}, {"deviceNumber", 9620}, {"cameraIndex", 1}},
+            "Camera", 9620);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("cameraIndex", -1) == 1);
+        remove_device(router, "gphoto", "camera", 9620);
+    }
+#endif
+
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
     {
         // touptek / switch (StellaVita PowerBox) — field survival, not just

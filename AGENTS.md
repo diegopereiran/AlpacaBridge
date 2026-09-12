@@ -2861,6 +2861,84 @@ it is never reachable through `router.cpp` or the web UI.
   fixed), which is why that failure mode is documented even though the saved log is clean of it.
   See `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.
 
+### GPhoto (DSLR/mirrorless cameras — Canon, Nikon, Sony via libgphoto2)
+
+Devices: Camera.
+
+**STATUS: implemented but NOT YET ConformU-validated on real hardware.** Built from
+libgphoto2/libraw API documentation and source reading, plus the reference indi-gphoto driver
+(`indilib/indi-3rdparty`) for protocol shape — no physical DSLR was available in this session
+(issue #241, target hardware: a contributor's Nikon D5300). Do not add an entry to
+SUPPORTED-DRIVERS.md until a real camera has been run through `/conformu` per the project's
+"only ConformU-verified drivers are listed" policy. The next session with hardware access should
+run `/deploy-test` + `/conformu` against a real body and update both this section and
+SUPPORTED-DRIVERS.md with what actually happened.
+
+SDK: **system packages**, not vendored — `libgphoto2-dev` + `libraw-dev` via pkg-config
+(`AlpacaCore/src/vendors/gphoto/CMakeLists.txt`). Unlike every other camera vendor, there is
+nothing under `AlpacaCore/external/gphoto/`: libgphoto2 and libraw are open-source and already
+packaged for Debian/Ubuntu, so there's no proprietary SDK to vendor or clean up (Step 4's SDK
+cleanup checklist does not apply here).
+
+- **Enumeration is USB-autodetect-by-index, matching the other SDK-enumerated cameras**: no
+  serial/network auto-detection was implemented (per the driver-build guide's "SDK-enumerated
+  devices" category) — `cameraIndex` indexes into `gp_camera_autodetect()`'s result list, same
+  contract as ZWO/QHY/SVBONY/PlayerOne/ToupTek's `cameraIndex`. `open_camera()` then does an
+  explicit model+port `gp_abilities_list_lookup_model` / `gp_port_info_list_lookup_path` init
+  (mirroring `indi-gphoto`'s default path) rather than a bare `gp_camera_init` auto-probe, so
+  opening one detected camera can't race another USB-attached camera's enumeration.
+- **Sensor geometry is unknown until the first successful exposure** — this is the single
+  biggest departure from every other camera driver in this project. libgphoto2 has no
+  "sensor size" query; `CameraXSize`/`CameraYSize`/`BayerOffsetX`/`BayerOffsetY`/`MaxADU` are all
+  derived from decoding an actual captured RAW frame with libraw (`LibRaw::imgdata.sizes`,
+  `LibRaw::COLOR(row,col)` + `cdesc` for Bayer phase, `imgdata.color.maximum` for MaxADU).
+  `CameraXSize`/`CameraYSize` read `0` and `BayerOffsetX`/`BayerOffsetY` throw
+  `InvalidOperation` ("not yet known") until that first exposure completes; after that they
+  serve the decoded frame's real values for the rest of the session. **This will very likely need
+  a ConformU-driven fix** — the ASCOM Camera contract generally expects these properties readable
+  before any exposure, so hardware validation may require either a lightweight "priming" capture
+  at connect, or a per-model dimension table (D5300 sensor is 6000×4000 per public specs, but
+  that shouldn't be hardcoded into a vendor-generic driver without confirming the RAW crop
+  libgphoto2/libraw actually deliver matches it).
+- **`PixelSizeX`/`PixelSizeY` return `0.0`** — libgphoto2 exposes no pixel-pitch query and there
+  is no per-model table yet. Likely a ConformU finding; fix by adding a small model→pitch lookup
+  if validation requires a nonzero value.
+- **ISO is a discrete `Gains()` list, not a continuous register** — deliberate departure from
+  every other camera driver here (ZWO/QHY/SVBONY/PlayerOne/ToupTek all throw
+  `PropertyNotImplemented` for `get_gains()` and treat `Gain` as a raw numeric register). A DSLR's
+  ISO is fundamentally a fixed choice list (the "iso" libgphoto2 widget's `choices`), so `Gain` is
+  the index into `Gains()` (the ISO value strings themselves), matching the ASCOM convention for
+  named/discrete gain lists. If a future non-ISO-list camera type is added to this vendor, don't
+  reflexively copy this shape — it exists because ISO specifically is a fixed list on this
+  hardware class.
+- **Offset is unsupported** (`PropertyNotImplemented`/`NotImplemented`, unconditionally, no
+  `ensure_connected()` gate) — DSLRs have no analog-offset register concept over PTP.
+- **Bulb capture drives the standalone `"bulb"` toggle widget only** (confirmed present in
+  libgphoto2 2.5.31's `ptp2.so` camlib via `strings`, which is the single camlib handling
+  Canon/Nikon/Sony PTP — not a per-vendor code branch, so this should generalize across brands):
+  set the shutter-speed widget to its `"bulb"` choice if the choice list has one, flip `"bulb"`
+  toggle on, sleep (in a driver-owned abortable loop so `StopExposure`/`AbortExposure` can close
+  the shutter early), flip `"bulb"` off, then `gp_camera_wait_for_event` for
+  `GP_EVENT_FILE_ADDED` and download. **The classic Canon `eosremoterelease` press/release bulb
+  sequence (older EOS bodies with no standalone `"bulb"` widget) is NOT implemented** — a camera
+  in that category will report bulb support as unavailable (native shutter-speed ceiling only)
+  rather than fail confusingly; add the press/release path if/when tested against real hardware.
+  This whole sequence is unverified against physical hardware — treat any bulb-mode ConformU
+  failure or timeout as expected first-pass friction, not a design red flag.
+- **RAW format selection**: at connect, the driver scans the `"imageformat"`/`"imagequality"`
+  widget's choices for one containing `raw`/`nef`/`cr2`/`cr3`/`arw` (case-insensitive), preferring
+  a pure-RAW choice over a combined RAW+JPEG one, and sets it. If no RAW choice is found, capture
+  proceeds anyway (logged as a warning) and will fail at libraw's `open_buffer`/`unpack` step —
+  surfaced as a clear `DriverException`, not a silent misdecode.
+- **Sensor temperature**: best-effort only, read from libraw's
+  `imgdata.makernotes.common.SensorTemperature` after each decoded exposure (populated mainly for
+  Canon RAW files per LibRaw's own docs/INDI precedent); throws `PropertyNotImplemented` when
+  absent. Do not expect Nikon NEF files to populate this.
+- **No pulse guiding** — a plain USB gphoto2 camera has no ST-4/autoguider port; `PulseGuide`
+  throws `NotImplemented` once connected (matches `CanPulseGuide=false`).
+- **`HasShutter=true`** — the one camera vendor in this project where that's actually true (every
+  CMOS SDK camera here reports `false`); a DSLR has a real mechanical shutter.
+
 ### WiFi manager (AlpacaHTTP, 3.4.0)
 
 - NM D-Bus property types matter: `ActiveConnection`, `Ip4Config`, and

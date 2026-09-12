@@ -99,6 +99,9 @@
 #ifdef ALPACACORE_ENABLE_SVBONY
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_GPHOTO
+#include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #endif
@@ -8550,6 +8553,25 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "gphoto" && device_type_str == "camera") {
+#ifdef ALPACACORE_ENABLE_GPHOTO
+        int camera_index = config_get(config, "cameraIndex", 0);
+
+        auto camera = alpacacore::vendor::gphoto::create_gphoto_camera(device_number, camera_index);
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
+            util::log_info("Registered gphoto camera");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "gphoto support not enabled. Rebuild with -DALPACACORE_ENABLE_GPHOTO=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "touptek" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_TOUPTEK
         int camera_index = config_get(config, "cameraIndex", 0);
@@ -9272,6 +9294,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         // (sanitize_device_config strips anything not allowlisted).
         copy_if_present("filterNames");
     } else if (vendor == "svbony") {
+        copy_if_present("cameraIndex");
+    } else if (vendor == "gphoto") {
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
         if (device_type == "switch") {
