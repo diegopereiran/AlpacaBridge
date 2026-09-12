@@ -146,7 +146,10 @@ def _ci_job_block(ci_text, job_name):
     start += 1
     # Search from the end of the job's own line, not from an arithmetic
     # offset that hard-codes the indent and the colon.
-    m = _CI_JOB_RE.search(ci_text, ci_text.index("\n", start))
+    line_end = ci_text.find("\n", start)
+    if line_end == -1:
+        return ci_text[start:]
+    m = _CI_JOB_RE.search(ci_text, line_end)
     return ci_text[start:m.start()] if m else ci_text[start:]
 
 
@@ -754,8 +757,9 @@ def check_agents_md_paths_exist():
 # (review finding on PR #472: with `tee` mandatory, such a run was invisible
 # to the whole check).
 TSAN_RUN_RE = re.compile(
-    r'([^\s"]*)/tests/alpacacore_tests"?\s+"(\[[^"]+\])"(?:\s*\|\s*tee\s+"?([^\s"]+)"?)?')
-TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'\s+\"?([^\s\"]+)\"?")
+    r'([^\s"]*)/tests/alpacacore_tests"?\s+"(\[[^"]+\])"'
+    r'(?:\s*(?:2>&1\s*)?\|&?\s*tee\s+"?([^\s"]+)"?)?')
+TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'\s+(?:<\s*)?\"?([^\s\"<]+)\"?")
 # ci_preflight.sh spells the build directory through a variable; this is its
 # one assignment, so the two paths can be compared by basename.
 TSAN_BUILD_DIR_RE = re.compile(r'^\s*TSAN_BUILD_DIR="?([^"\n]+?)"?\s*$', re.MULTILINE)
