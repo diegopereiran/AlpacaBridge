@@ -12,6 +12,7 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -476,6 +477,7 @@ public:
         auto reset_session_state_for_connect = [&](bool keep_telemetry_caches = false) {
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            client_disagreement_warned_ = false;  // open-astro#409: once per connection
             slew_force_until_ = std::chrono::steady_clock::time_point{};
             pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
             ra_offset_hours_ = 0.0;
@@ -1712,6 +1714,11 @@ public:
         last_utc_valid_ = true;
         timezone_offset_minutes_ = offset_minutes;
         timezone_valid_ = true;
+        if (connected_.load()) {
+            // The mount now runs on the client's clock and so does the cached
+            // pointing time; on a disciplined host say so once (open-astro#409).
+            alpacacore::util::ClientUtcWarning::warn_once("ZWO", utc, client_disagreement_warned_);
+        }
     }
 
     void find_home() override {
@@ -2890,6 +2897,7 @@ private:
     std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
+    bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     std::string mount_info_;
 

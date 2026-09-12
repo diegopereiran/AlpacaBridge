@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
@@ -216,6 +217,7 @@ public:
             altaz_cache_valid_ = false;
             site_info_valid_ = false;
             last_utc_valid_ = false;
+            client_disagreement_warned_ = false;
             target_ra_set_ = false;
             target_dec_set_ = false;
             manual_axis_slewing_[0] = false;
@@ -1212,6 +1214,9 @@ private:
         last_utc_set_ = utc;
         last_utc_set_monotonic_ = std::chrono::steady_clock::now();
         last_utc_valid_ = true;
+        // The mount now runs on the client's clock and so does the LST above;
+        // on a disciplined host say so once (open-astro#409).
+        alpacacore::util::ClientUtcWarning::warn_once("OnStep", utc, client_disagreement_warned_);
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
@@ -1228,6 +1233,7 @@ private:
     ConnectionInfo connection_info_;
     mutable std::mutex mutex_;
     bool connected_;
+    bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     double target_ra_hours_ = 0.0;
     double target_dec_degrees_ = 0.0;
