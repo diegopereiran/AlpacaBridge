@@ -79,9 +79,10 @@ public:
     // refresh_rtc() that lands sooner returns the cached answer. The server's
     // probe timer (Config::rtc_probe_interval_seconds) must run SLOWER than
     // this, or passes are swallowed and each one costs the process an extra
-    // interval with nothing failing (exactly every other pass, i.e. a doubled
-    // period, when the two are equal); Config derives its default from this constant so
-    // the two cannot drift apart (open-astro#406).
+    // interval with nothing failing (with equal periods a pass that lands
+    // even slightly early is swallowed, so the effective period can double);
+    // Config derives its default from this constant so the two cannot drift
+    // apart (open-astro#406).
     static constexpr std::chrono::seconds kRtcProbeRateLimit{30};
 
     // CONSTRUCTION CONTRACT (open-astro#406): the default constructor primes

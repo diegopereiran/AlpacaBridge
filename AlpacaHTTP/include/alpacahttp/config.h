@@ -53,7 +53,7 @@ public:
     int keep_alive_lifetime_seconds() const { return keep_alive_lifetime_seconds_; }
     // open-astro#314: how often the server's timer thread re-probes the
     // hardware RTC. Settable for the same reason the keep-alive cap is:
-    // a test cannot wait 31 s.
+    // a test cannot wait out the default (kRtcProbeRateLimit + 1 s).
     int rtc_probe_interval_seconds() const { return rtc_probe_interval_seconds_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
@@ -89,7 +89,8 @@ public:
     // Values at or below HostClock::kRtcProbeRateLimit are a TEST seam
     // (test_server_socket.cpp drives the thread at 1 s): the probe's own
     // limiter still swallows the extra passes, so in production such a value
-    // buys nothing and the default below is what a deployment runs on.
+    // buys nothing; there is no config-file key for it at all, so only a test
+    // can reach this setter and the default below is what a deployment runs on.
     void set_rtc_probe_interval_seconds(int seconds) {
         if (seconds < 1) seconds = 1;
         rtc_probe_interval_seconds_ = seconds;
