@@ -1141,7 +1141,11 @@ def self_test():
         # identically while letting this one through -- the file as a whole
         # carries [stress], but the second case alone does not, and that case
         # is the one that silently drops out of the vendor coverage count.
-        mixed = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {}\n'
+        # The first case carries the full idiom so the guard rules (rule 5)
+        # are satisfied and the ONLY thing left to fail on is the tag: with
+        # two empty bodies this fixture failed on NO STRESS GUARD instead, and
+        # deleting both tag rules left it green (review finding on PR #465).
+        mixed = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n' + GUARDED_BODY + "}\n"
                  'TEST_CASE("Bad", "[fakevendor][camera][stress-guard]") {}')
         check("main() FAILS on a [stress-guard]-only case beside a [stress] one",
               run_main_with(mixed) == 1)
