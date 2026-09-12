@@ -2115,6 +2115,64 @@ int main() {
         EXPECT(found);
     }
     {
+        // issue #398, the persisted half: an out-of-range coordinate already on
+        // disk is WARNED about and CLEARED, not rejected and not applied. The
+        // API half (reject with a message) is covered above; this arm has the
+        // opposite shape on purpose (#353): dropping the entry would keep it
+        // out of configureddevices, which is the web UI's only source of
+        // devices, leaving the operator no way to edit the entry at fault.
+        //
+        // The assertion that matters is the CLEAR. Replacing the warn-and-skip
+        // with `*field.out = value;` -- which restores the #398 bug for every
+        // device already on disk, the larger population -- still registers the
+        // device, so registration alone proves nothing. SkyWatcher's
+        // get_site_latitude() just returns the stored value under its mutex,
+        // with no connection check, so the value itself is observable here.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9633},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 200.0},
+                           {"siteLongitude", 172.6}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+
+        alpacahttp::Router startup_router;
+        const auto lat_json = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/api/v1/telescope/9633/sitelatitude").body(), nullptr, false);
+        const auto lon_json = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/api/v1/telescope/9633/sitelongitude").body(), nullptr, false);
+
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(startup_router, "skywatcher", "telescope", 9633);
+        restore_original();
+
+        // Registered despite the bad coordinate, and the bad coordinate did
+        // NOT reach the driver.
+        EXPECT(!lat_json.is_discarded() && lat_json.value("ErrorNumber", -1) == 0);
+        EXPECT(lat_json["Value"].get<double>() != 200.0);
+        // The valid sibling on the same entry is still applied -- the skip is
+        // per field, not per entry.
+        EXPECT(!lon_json.is_discarded() && lon_json.value("ErrorNumber", -1) == 0);
+        EXPECT(std::abs(lon_json["Value"].get<double>() - 172.6) < 1e-9);
+    }
+    {
         // issue #408 (second item): the startup WARN for a half-configured
         // persisted entry names the half that is missing. Two entries, one
         // with only a latitude and one with only a longitude, loaded by a
