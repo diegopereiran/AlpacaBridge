@@ -33,6 +33,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -167,6 +168,209 @@ void store_cached_sensor_geometry(const std::string& model, const CachedSensorGe
         << '\t' << g.max_adu << '\n';
 }
 
+// Physical pixel pitch (microns) for interchangeable-lens Nikon/Canon bodies
+// libgphoto2 recognizes. Unlike sensor width/height/Bayer phase (learned
+// from a decoded RAW frame, see prime_sensor_geometry_and_cache above),
+// pixel pitch cannot be derived at runtime -- LibRaw exposes crop geometry,
+// not photosite spacing, and libgphoto2's own metadata has no field for it
+// either. This table is sourced from each model's published sensor
+// width/resolution spec, not from anything the camera itself reports, so
+// PixelSizeX/Y stay 0.0 (ASCOM "unknown") for any model not listed here --
+// every fixed-lens compact/camcorder gphoto2 also supports, plus any
+// interchangeable-lens body released after this table was last updated.
+// Canon's Rebel/Kiss/EOS-number triplets are the same physical sensor sold
+// under different regional names, so they appear as separate entries here
+// with identical values -- libgphoto2 reports whichever name matches the
+// camera's actual USB product ID, which varies by region for some bodies.
+const std::unordered_map<std::string, double>& known_pixel_size_um_table() {
+    static const std::unordered_map<std::string, double> table = {
+        {"Canon Digital Rebel XT", 6.4},
+        {"Canon EOS 1000D", 5.7},
+        {"Canon EOS 100D", 4.3},
+        {"Canon EOS 10D", 7.4},
+        {"Canon EOS 1100D", 5.2},
+        {"Canon EOS 1200D", 4.3},
+        {"Canon EOS 1300D", 4.3},
+        {"Canon EOS 1500D", 3.72},
+        {"Canon EOS 1D C", 6.95},
+        {"Canon EOS 1D Mark II", 8.2},
+        {"Canon EOS 1D Mark III", 7.2},
+        {"Canon EOS 1D Mark IV", 5.7},
+        {"Canon EOS 1D X", 6.9},
+        {"Canon EOS 1D X MarkII", 6.56},
+        {"Canon EOS 1D X MarkIII", 6.56},
+        {"Canon EOS 2000D", 3.72},
+        {"Canon EOS 200D", 3.72},
+        {"Canon EOS 20D", 6.4},
+        {"Canon EOS 250D", 3.72},
+        {"Canon EOS 300D", 7.4},
+        {"Canon EOS 30D", 6.4},
+        {"Canon EOS 350D", 6.4},
+        {"Canon EOS 4000D", 4.3},
+        {"Canon EOS 400D", 5.7},
+        {"Canon EOS 40D", 5.7},
+        {"Canon EOS 450D", 5.2},
+        {"Canon EOS 500D", 4.7},
+        {"Canon EOS 50D", 4.7},
+        {"Canon EOS 550D", 4.3},
+        {"Canon EOS 5D", 8.2},
+        {"Canon EOS 5D Mark II", 6.4},
+        {"Canon EOS 5D Mark III", 6.25},
+        {"Canon EOS 5D Mark IV", 5.36},
+        {"Canon EOS 5DS", 4.14},
+        {"Canon EOS 5DS R", 4.14},
+        {"Canon EOS 600D", 4.3},
+        {"Canon EOS 60D", 4.3},
+        {"Canon EOS 650D", 4.3},
+        {"Canon EOS 6D", 6.55},
+        {"Canon EOS 6d Mark II", 5.75},
+        {"Canon EOS 700D", 4.3},
+        {"Canon EOS 70D", 4.1},
+        {"Canon EOS 750D", 3.72},
+        {"Canon EOS 760D", 3.72},
+        {"Canon EOS 77D", 3.72},
+        {"Canon EOS 7D", 4.3},
+        {"Canon EOS 7D MarkII", 4.1},
+        {"Canon EOS 800D", 3.72},
+        {"Canon EOS 80D", 3.72},
+        {"Canon EOS 850D", 3.72},
+        {"Canon EOS 90D", 3.2},
+        {"Canon EOS D30", 10.5},
+        {"Canon EOS D60", 7.4},
+        {"Canon EOS Digital Rebel", 7.4},
+        {"Canon EOS Digital Rebel XTi", 5.7},
+        {"Canon EOS Kiss Digital", 7.4},
+        {"Canon EOS Kiss Digital N", 6.4},
+        {"Canon EOS Kiss Digital X", 5.7},
+        {"Canon EOS Kiss X2", 5.2},
+        {"Canon EOS Kiss X3", 4.7},
+        {"Canon EOS M", 4.3},
+        {"Canon EOS M10", 4.3},
+        {"Canon EOS M100", 3.72},
+        {"Canon EOS M2", 4.3},
+        {"Canon EOS M200", 3.72},
+        {"Canon EOS M3", 3.72},
+        {"Canon EOS M5", 3.72},
+        {"Canon EOS M50", 3.72},
+        {"Canon EOS M50m2", 3.72},
+        {"Canon EOS M6", 3.72},
+        {"Canon EOS M6 Mark II", 3.2},
+        {"Canon EOS R", 5.34},
+        {"Canon EOS R10", 3.72},
+        {"Canon EOS R5", 4.39},
+        {"Canon EOS R5 C", 4.39},
+        {"Canon EOS R6", 6.56},
+        {"Canon EOS R6m2", 5.98},
+        {"Canon EOS R7", 3.2},
+        {"Canon EOS RP", 5.75},
+        {"Canon EOS Rebel T1i", 4.7},
+        {"Canon EOS Rebel T6", 4.3},
+        {"Canon EOS Rebel T7i", 3.72},
+        {"Canon EOS Rebel T8i", 3.72},
+        {"Canon EOS Rebel XSi", 5.2},
+        {"Canon Rebel T2i", 4.3},
+        {"Canon Rebel T3", 5.2},
+        {"Canon Rebel T3i", 4.3},
+        {"Canon Rebel T4i", 4.3},
+        {"Nikon D100", 7.8},
+        {"Nikon D2H SLR", 9.6},
+        {"Nikon D2Hs", 9.6},
+        {"Nikon D2X SLR", 5.5},
+        {"Nikon D3", 8.45},
+        {"Nikon D50", 7.8},
+        {"Nikon DSC D100", 7.8},
+        {"Nikon DSC D200", 6.1},
+        {"Nikon DSC D2Xs", 5.5},
+        {"Nikon DSC D300", 5.5},
+        {"Nikon DSC D3000", 6.1},
+        {"Nikon DSC D300s", 5.5},
+        {"Nikon DSC D3100", 5.0},
+        {"Nikon DSC D3200", 3.86},
+        {"Nikon DSC D3300", 3.92},
+        {"Nikon DSC D3400", 3.92},
+        {"Nikon DSC D3500", 3.92},
+        {"Nikon DSC D3s", 8.45},
+        {"Nikon DSC D3x", 5.94},
+        {"Nikon DSC D4", 7.3},
+        {"Nikon DSC D40", 7.8},
+        {"Nikon DSC D40x", 6.1},
+        {"Nikon DSC D4s", 7.3},
+        {"Nikon DSC D5", 6.45},
+        {"Nikon DSC D500", 4.2},
+        {"Nikon DSC D5000", 5.5},
+        {"Nikon DSC D5100", 4.78},
+        {"Nikon DSC D5200", 3.92},
+        {"Nikon DSC D5300", 3.91},
+        {"Nikon DSC D5500", 3.92},
+        {"Nikon DSC D5600", 3.92},
+        {"Nikon DSC D6", 6.45},
+        {"Nikon DSC D60", 6.1},
+        {"Nikon DSC D600", 5.97},
+        {"Nikon DSC D610", 5.97},
+        {"Nikon DSC D70", 7.8},
+        {"Nikon DSC D700", 8.45},
+        {"Nikon DSC D7000", 4.78},
+        {"Nikon DSC D70s", 7.8},
+        {"Nikon DSC D7100", 3.92},
+        {"Nikon DSC D7200", 3.92},
+        {"Nikon DSC D750", 5.97},
+        {"Nikon DSC D7500", 4.2},
+        {"Nikon DSC D780", 5.94},
+        {"Nikon DSC D80", 6.1},
+        {"Nikon DSC D800", 4.88},
+        {"Nikon DSC D800E", 4.88},
+        {"Nikon DSC D810", 4.88},
+        {"Nikon DSC D810A", 4.88},
+        {"Nikon DSC D850", 4.35},
+        {"Nikon DSC D90", 5.5},
+        {"Nikon DSC Df", 7.3},
+        {"Nikon J1", 3.4},
+        {"Nikon J2", 3.4},
+        {"Nikon J3", 2.87},
+        {"Nikon J4", 2.52},
+        {"Nikon J5", 2.37},
+        {"Nikon S1", 3.4},
+        {"Nikon S2", 2.87},
+        {"Nikon V1", 3.4},
+        {"Nikon V2", 2.87},
+        {"Nikon V3", 2.52},
+        {"Nikon Z30", 4.2},
+        {"Nikon Z5", 5.97},
+        {"Nikon Z50", 4.2},
+        {"Nikon Z6", 5.94},
+        {"Nikon Z6_2", 5.94},
+        {"Nikon Z7", 4.35},
+        {"Nikon Z7_2", 4.35},
+        {"Nikon Z8", 4.35},
+        {"Nikon Z9", 4.35},
+        {"Nikon Zfc", 4.2},
+    };
+    return table;
+}
+
+// A handful of pre-PTP-era Nikon bodies (e.g. the D100) are reachable over
+// two different protocols and libgphoto2 names them differently depending
+// which one matched -- strip any such suffix so both spellings resolve to
+// the same table entry above (whose keys are already suffix-free).
+std::string strip_connection_mode_suffix(const std::string& model) {
+    static const std::vector<std::string> kSuffixes = {
+        " (PTP mode)", " (PTP Mode)", " (PTP)", " (normal mode)", " (Normal mode)", " (Sierra Mode)"};
+    for (const auto& suffix : kSuffixes) {
+        if (model.size() > suffix.size() && model.compare(model.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            return model.substr(0, model.size() - suffix.size());
+        }
+    }
+    return model;
+}
+
+double lookup_known_pixel_size_um(const std::string& model) {
+    const auto& table = known_pixel_size_um_table();
+    auto it = table.find(model);
+    if (it != table.end()) return it->second;
+    it = table.find(strip_connection_mode_suffix(model));
+    return it != table.end() ? it->second : 0.0;
+}
+
 } // namespace
 
 class GPhotoCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
@@ -267,6 +471,7 @@ public:
             handle_ = opened_handle;
             camera_info_ = info;
             camera_info_valid_ = true;
+            pixel_size_um_ = lookup_known_pixel_size_um(info.model);
             reset_exposure_state_locked();
             connected_.store(true);
 
@@ -584,8 +789,18 @@ public:
         return std::clamp(percent, 0.0, 100.0);
     }
 
-    double get_pixel_size_x() const override { return 0.0; } // unknown; libgphoto2 has no pixel-pitch query
-    double get_pixel_size_y() const override { return 0.0; }
+    // 0.0 (ASCOM "unknown") unless this exact model is in the static
+    // known_pixel_size_um_table above -- libgphoto2 has no protocol-level
+    // pixel-pitch query and it can't be derived from a decoded RAW frame
+    // either, unlike CameraXSize/YSize.
+    double get_pixel_size_x() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pixel_size_um_;
+    }
+    double get_pixel_size_y() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pixel_size_um_;
+    }
 
     int get_readout_mode() const override { return 0; }
     void set_readout_mode(int mode) override {
@@ -662,6 +877,17 @@ public:
             if (duration > get_exposure_max_locked()) {
                 throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
             }
+            if (geometry_known_) {
+                if (num_x_ <= 0 || num_y_ <= 0) {
+                    throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
+                }
+                if (start_x_ < 0 || start_y_ < 0 || start_x_ >= camera_x_size_ || start_y_ >= camera_y_size_) {
+                    throw AlpacaException("Start position outside sensor bounds", AlpacaError::InvalidValue);
+                }
+                if (start_x_ + num_x_ > camera_x_size_ || start_y_ + num_y_ > camera_y_size_) {
+                    throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
+                }
+            }
             active_handle = handle_;
             use_bulb = has_bulb_ && duration > max_native_shutter_seconds_ + 1e-9;
             shutter_choice = use_bulb ? bulb_choice_ : nearest_shutter_choice_locked(duration);
@@ -718,6 +944,7 @@ private:
 
     GPhotoCameraInfo camera_info_{};
     bool camera_info_valid_{false};
+    double pixel_size_um_{0.0}; // 0.0 = unknown; see known_pixel_size_um_table above
 
     // Widget capability caches, populated at connect (configure_after_connect_locked).
     std::vector<std::string> iso_choices_;
