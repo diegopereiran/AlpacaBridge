@@ -524,19 +524,19 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Self-test check 8's pairing and job-scoping helpers
+        # Literal fixtures, one per mutation the TSan pairing check exists
+        # to catch, plus the next-job scoping rule checks 3 and 8 share
+        # (issue #455). A matcher that stops matching fails here instead of
+        # silently degrading the gate to its floor.
+        run: python3 scripts/check_docs_drift.py --self-test
+
       - name: Check docs/config for self-inconsistency
         # Catches drift between the repo's own docs and its actual config
-        # (CMake options vs docs/development.md, zizmor/cppcheck pins between
-        # ci.yml and ci_preflight.sh, VERSION vs the README badge, stale
-        # paths in AGENTS.md, async_connectable.h's blocking-get_connected()
-        # lists vs the drivers -- including a count of either list stated
-        # anywhere, issue #381 -- this workflow's own TSan filtered runs
-        # and their zero-test greps vs ci_preflight.sh's, issue #341, and
-        # repo paths in the Cursor rule files and external/README.md,
-        # resolved against their component, issue #457) that
-        # nothing previously caught automatically.
-        # The script's module docstring is the authoritative list; keep this
-        # summary in step with it or drop it rather than letting it go stale.
+        # that nothing previously caught automatically. The script's module
+        # docstring is the authoritative, numbered list of what it checks;
+        # this comment deliberately does not repeat it (a summary here went
+        # stale twice, issue #455).
         run: python3 scripts/check_docs_drift.py
 
   connect-error-hook:
