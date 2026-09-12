@@ -69,10 +69,10 @@ public:
 
     explicit LockedQHYSDK(QHYSDK& inner) : inner_(inner) {}
 
-    /// The longest any forward through locked() has spent INSIDE the inner
-    /// call, in milliseconds (open-astro#339); time queued behind another
-    /// forward on mutex_ is not counted, since the clock starts after the
-    /// lock is taken, and cancel_exposure() is not observed at all because it
+    /// The longest any of the 26 forwards has spent INSIDE the inner call,
+    /// in milliseconds (open-astro#339); time queued behind another forward
+    /// on a mutex is not counted, since the clock starts after the lock is
+    /// taken. cancel_exposure() is timed too, by its own Guard, even though it
     /// is the one forward outside locked(). Every fake method is pure bookkeeping,
     /// so this stays at or near zero; a test asserts a generous ceiling on it
     /// to catch a fake method that has gained a blocking call, which would
@@ -159,6 +159,12 @@ public:
         // in-flight exposure to interrupt -- so it cannot race the call it
         // overtakes.
         std::lock_guard<std::mutex> lock(cancel_mutex_);
+        // Timed like every other forward (review round 4 on PR #463): this
+        // is the one body outside locked(), so without its own Guard a fake
+        // cancel that gained a block was the single method the watchdog
+        // could not name.
+        const auto started = std::chrono::steady_clock::now();
+        Guard guard{started, slowest_call_ms_};
         inner_.cancel_exposure(camera_id);
     }
 
