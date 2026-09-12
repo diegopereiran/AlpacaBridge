@@ -20,7 +20,7 @@
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   unicode        scan sources for Trojan-Source / invisible Unicode
 #   shellcheck     lint the project's shell scripts
-#   javascript     node --check the hand-written web UI JavaScript
+#   javascript     node --check AND node --test the hand-written web UI JavaScript
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
 #
@@ -624,7 +624,8 @@ jobs:
 
       - name: Syntax-check web UI JavaScript
         # The web UI is hand-written static JS served as-is (no bundler/build
-        # step), so `node --check` is its only automated gate. It parses each
+        # step). `node --check` is the first half of its gate -- the unit-test
+        # step below is the other -- and it parses each
         # file and reports syntax errors (stray braces, etc.) without executing
         # anything. Kept in sync with the javascript gate in
         # scripts/ci_preflight.sh.
