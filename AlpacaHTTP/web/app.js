@@ -1323,6 +1323,7 @@ async function loadServerInfo() {
             headerVersion.textContent = manufacturerVersion !== 'N/A' ? 'v' + manufacturerVersion : '';
         }
         updateHeaderProfileName(profileName);
+        updateHeaderBuildBadge();
 
         serverInfo.innerHTML = `
             <div class="server-info-grid">
@@ -1551,6 +1552,54 @@ function updateHeaderProfileName(profileName) {
     const headerProfile = document.getElementById('header-profile');
     if (headerProfile) {
         headerProfile.textContent = profileName || '';
+    }
+}
+
+// Shows a badge next to the version number when this build isn'''t coming from
+// main -- e.g. a PR branch checked out for local testing -- so it can'''t be
+// mistaken for an official release. kVersion (VERSION file) stays the same
+// on every branch; GitBranch/GitCommit come from the actual checkout.
+let _buildBadgeChecked = false;
+async function updateHeaderBuildBadge() {
+    if (_buildBadgeChecked) return;
+    _buildBadgeChecked = true;
+    const badge = document.getElementById('header-build-badge');
+    if (!badge) return;
+    try {
+        const response = await fetch(API_BASE + '/management/v1/buildinfo');
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.ErrorNumber !== 0) return;
+        const info = parseResponseValue(data.Value) || {};
+        const branch = info.GitBranch || info.gitBranch || '';
+        const commit = info.GitCommit || info.gitCommit || '';
+        const dirty = !!(info.GitDirty !== undefined ? info.GitDirty : info.gitDirty);
+        const isRelease = !!(info.GitIsRelease !== undefined ? info.GitIsRelease : info.gitIsRelease);
+        const remoteUrl = info.GitRemoteUrl || info.gitRemoteUrl || '';
+        // isRelease (HEAD sits exactly on a vX.Y.Z tag) is the real release
+        // check -- packaging checks out the tag as a detached HEAD, so
+        // branch alone would read as "HEAD", not "main", on a real release.
+        if (isRelease || !branch || branch === 'unknown' || branch === 'HEAD') {
+            badge.hidden = true;
+            return;
+        }
+        badge.textContent = branch + (commit && commit !== 'unknown' ? '@' + commit : '') + (dirty ? '*' : '');
+        badge.title = 'Running from a non-release checkout: branch ' + branch +
+            (commit && commit !== 'unknown' ? ', commit ' + commit : '') +
+            (dirty ? ' (uncommitted changes present)' : '') +
+            (remoteUrl ? ' -- click to open this commit on GitHub' : '');
+        // Link to the commit, not the branch: a local checkout's branch name
+        // (e.g. a PR head fetched under an arbitrary local name) often has no
+        // matching ref on the remote, but the commit itself is always valid
+        // there since it's the same object fetched from origin.
+        if (remoteUrl && commit && commit !== 'unknown') {
+            badge.href = remoteUrl + '/commit/' + encodeURIComponent(commit);
+        } else {
+            badge.removeAttribute('href');
+        }
+        badge.hidden = false;
+    } catch (e) {
+        console.error('Error loading build info:', e);
     }
 }
 
