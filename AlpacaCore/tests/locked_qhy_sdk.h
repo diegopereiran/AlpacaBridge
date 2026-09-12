@@ -15,12 +15,15 @@
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "fake_qhy_sdk.h"
 
 namespace alpacacore::test {
 
@@ -62,6 +65,13 @@ public:
     using QHYControlRange = vendor::qhy::QHYControlRange;
 
     explicit LockedQHYSDK(QHYSDK& inner) : inner_(inner) {}
+
+    /// The longest any single forward through this decorator has taken, in
+    /// milliseconds (open-astro#339). Every fake method is pure bookkeeping,
+    /// so this stays at or near zero; a test asserts a generous ceiling on it
+    /// to catch a fake method that has gained a blocking call, which would
+    /// otherwise show up as a hung [stress] run.
+    long long slowest_call_ms() const { return slowest_call_ms_.load(std::memory_order_relaxed); }
 
     std::vector<QHYCameraInfo> enumerate_cameras() override {
         return locked([&] { return inner_.enumerate_cameras(); });
@@ -123,7 +133,15 @@ public:
         return locked([&] { return inner_.get_single_frame(camera_id, buffer, width, height, bpp, channels); });
     }
     void cancel_exposure(const std::string& camera_id) override {
-        locked([&] { inner_.cancel_exposure(camera_id); });
+        // open-astro#339: UNLOCKED, matching production exactly.
+        // QHYSDKWrapper::cancel_exposure() deliberately skips the per-handle
+        // call mutex, because its whole job is to interrupt a
+        // GetQHYCCDSingleFrame already blocked on the same handle from another
+        // thread. Forwarding it through this decorator's one mutex inverted
+        // that invariant: the safety valve would queue behind the very call it
+        // exists to interrupt. Safe only while no fake method blocks -- which
+        // is a convention, so the watchdog below makes it enforceable instead.
+        inner_.cancel_exposure(camera_id);
     }
 
     void guide(const std::string& camera_id, uint32_t qhy_direction, uint16_t duration_ms) override {
@@ -159,11 +177,82 @@ private:
     template <typename Fn>
     auto locked(Fn&& fn) -> decltype(fn()) {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto started = std::chrono::steady_clock::now();
+        Guard guard{started, slowest_call_ms_};
         return fn();
     }
 
+    // open-astro#339: the "no QHY fake method may block" rule was prose in two
+    // headers, and two things depend on it -- the camera driver's detachable
+    // workers (a blocking fake turns a timed-out join into a detached thread
+    // still calling into a fake the test body has already destroyed) and the
+    // cancel_exposure exemption above. A future fake method gaining a
+    // perfectly reasonable-looking sleep_for silently broke both, and the
+    // symptom was a HUNG [stress] run rather than a named failure.
+    //
+    // Recording the slowest forward turns that into something a test can
+    // assert on. Every fake method is pure bookkeeping, so the bar is orders
+    // of magnitude of headroom rather than a tight timing assertion -- this
+    // must not become a flaky test on a loaded CI box.
+    struct Guard {
+        std::chrono::steady_clock::time_point started;
+        std::atomic<long long>& slowest;
+        ~Guard() {
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
+                    .count();
+            long long previous = slowest.load(std::memory_order_relaxed);
+            while (elapsed > previous && !slowest.compare_exchange_weak(previous, elapsed, std::memory_order_relaxed)) {
+            }
+        }
+    };
+
     QHYSDK& inner_;
     std::mutex mutex_;
+    std::atomic<long long> slowest_call_ms_{0};
+};
+
+/**
+ * Owns the fake, the locking decorator and the driver in ONE object, so the
+ * lifetime rule cannot be written wrong (open-astro#338).
+ *
+ * Every QHY seam test must outlive the driver with the fake: the driver holds
+ * a QHYSDK& and its detachable workers capture a raw QHYSDK*, so a case that
+ * declares them the other way round -- or stashes the driver in a Catch2
+ * fixture member, a vector, or anything outliving the fake -- compiles
+ * cleanly and is undefined behaviour, most likely a use-after-free inside a
+ * detached worker. That is the failure mode hardest to attribute when it
+ * surfaces, and the [stress] storms raise the stakes: exposure, temperature,
+ * cooler-off, pulse-guide and telemetry workers are all detachable.
+ *
+ * The rule was stated in three places (the QHYSDK interface comment, the
+ * FakeQHYSDK class comment, and AGENTS.md) and enforced by nothing. Member
+ * declaration order here gives the right destruction order once, in one
+ * place: driver first, then the decorator, then the fake.
+ */
+template <typename Driver>
+class QHYSeamFixture {
+public:
+    /// `make` receives the decorator and returns the driver, so the driver is
+    /// built from a decorator that is already a member of this object rather
+    /// than from a caller's local.
+    template <typename MakeDriver>
+    QHYSeamFixture(FakeQHYSDK fake, MakeDriver&& make) : fake_(std::move(fake)), sdk_(fake_), driver_(make(sdk_)) {}
+
+    FakeQHYSDK& fake() { return fake_; }
+    LockedQHYSDK& sdk() { return sdk_; }
+    Driver& driver() { return *driver_; }
+    Driver* operator->() { return driver_.get(); }
+
+private:
+    // DECLARATION ORDER IS THE CONTRACT. Members destroy in reverse, so the
+    // driver goes first (joining or detaching its workers), then the
+    // decorator, then the fake those workers may still be calling into.
+    // Reordering these three lines reintroduces exactly the bug this exists
+    // to make unwritable.
+    FakeQHYSDK fake_;
+    LockedQHYSDK sdk_;
+    std::unique_ptr<Driver> driver_;
 };
 
 }  // namespace alpacacore::test

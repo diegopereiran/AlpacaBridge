@@ -16,10 +16,12 @@
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -95,14 +97,6 @@ namespace alpacacore::test {
  *   size -- but a test that calls set_bin_mode() alone and expects the length
  *   to shrink, the way the real GetQHYCCDMemLength() does after
  *   SetQHYCCDBinMode, will not see it. Tracked in issue #365.
- * - open_camera() does not refuse a fresh open while a registered exposure
- *   worker is still live (the real one throws InvalidOperation — this is the
- *   PR #201 finding). `exposure_workers_` is written and never read here.
- *   Reconnect storms are exactly what would go green over a break in it.
- *   Tracked in issue #324.
- * - move_cfw() does not enforce the position > 9 single-digit protocol
- *   ceiling the real one throws InvalidValue for; the wheel tests pass only
- *   because the driver guards it first. Tracked in issue #327.
  * - set_readout_mode() does not re-run init_camera() the way the real one
  *   re-invokes InitQHYCCD, so any init_calls assertion around a mode switch
  *   reads differently here than on hardware. Tracked in issue #335.
@@ -139,6 +133,10 @@ public:
 
     // --- scripting knobs ---------------------------------------------------
     std::set<std::string> throw_from;
+
+    /// Test-only hook, run at the top of every forward (open-astro#339).
+    /// Null in every ordinary case. See hit().
+    std::function<void(const std::string&)> before_call;
     bool sdk_resource_available = true;
     // Set to "" to reach the empty-cache branch the driver special-cases in
     // get_driver_info()/get_device_sdk_version(): the real wrapper returns an
@@ -336,6 +334,25 @@ public:
             // at this call, only "the open failed".
             throw AlpacaException("fake: unknown QHY camera id '" + camera_id + "'", AlpacaError::DriverException);
         }
+        // open-astro#324: model QHYSDKWrapper::open_camera()'s zombie-worker
+        // refusal (qhy_sdk_wrapper.cpp, the PR #201 finding). A previous
+        // exposure worker that timed out its join and was DETACHED can still
+        // be blocked inside GetQHYCCDSingleFrame on the old handle after
+        // close_camera() erased the entry; opening a second handle to the same
+        // physical device then is undefined territory for the vendor SDK, and
+        // is reachable from either the camera driver or the paired CFW driver
+        // reconnecting.
+        //
+        // exposure_workers_ was written and never read, so the fake could not
+        // fail a reconnect storm here -- and a reconnect storm is the single
+        // most likely [stress] scenario for this driver, i.e. the guard most
+        // likely to regress with every test still green.
+        auto flag_it = exposure_workers_.find(camera_id);
+        if (flag_it != exposure_workers_.end() && flag_it->second && flag_it->second->load()) {
+            throw AlpacaException(
+                "Camera cannot reopen while a previous exposure download is still finishing; try again shortly",
+                AlpacaError::InvalidOperation);
+        }
         last_opened_id = camera_id;
         auto& count = ref_counts_[camera_id];
         if (count == 0) {
@@ -472,7 +489,15 @@ public:
         // hardware cannot deliver an image larger than GetQHYCCDMemLength().
         // The contract case "get_single_frame never exceeds get_mem_length"
         // pins that pairing at bin > 1.
-        return roi_.width * roi_.height * bytes_per_px;
+        const uint32_t length = roi_.width * roi_.height * bytes_per_px;
+        // open-astro#328: remember what this call promised. get_single_frame()
+        // clamps its write to it, so a set_resolution()/set_bits_mode() landing
+        // between the driver's get_mem_length() -> allocate -> get_single_frame()
+        // sequence cannot make the fake write more bytes than the caller's
+        // buffer actually holds. LockedQHYSDK serialises individual calls, not
+        // that three-step sequence, and the [stress] storms race exactly it.
+        last_mem_length_ = length;
+        return length;
     }
 
     bool start_single_frame(const std::string& camera_id) override {
@@ -494,7 +519,22 @@ public:
         channels = 1;
         if (frame_ok && buffer != nullptr) {
             const uint32_t bytes_per_px = (bits_ > 8) ? 2U : 1U;
-            std::memset(buffer, 0, static_cast<std::size_t>(width) * height * bytes_per_px);
+            const uint32_t current = width * height * bytes_per_px;
+            // open-astro#328: the real GetQHYCCDSingleFrame has no length
+            // parameter either -- the vendor SDK trusts the caller to have
+            // sized imgdata from a prior GetQHYCCDMemLength(). So do what that
+            // contract assumes rather than what the fake's CURRENT state says:
+            // never write more than the last get_mem_length() promised, which
+            // is exactly the size the driver allocated local_buf for.
+            //
+            // Without this, a storm widening roi_ in the window between the
+            // two calls makes this memset run past the end of a heap buffer --
+            // a real out-of-bounds write, in the test double rather than in
+            // the driver under test, which is the worst place to spend a day
+            // root-causing an ASan report.
+            const uint32_t promised = last_mem_length_;
+            const uint32_t safe = (promised == 0) ? current : std::min(current, promised);
+            std::memset(buffer, 0, static_cast<std::size_t>(safe));
         }
         return frame_ok;
     }
@@ -548,6 +588,15 @@ public:
     void move_cfw(const std::string& camera_id, int position) override {
         hit("move_cfw");
         require_open(camera_id);
+        // open-astro#324 (absorbed from #327): the CFW wire protocol is one
+        // ASCII digit, so QHYSDKWrapper::move_cfw() throws InvalidValue above
+        // 9. The fake accepted any int, so the filter-wheel case "A slot above
+        // the protocol ceiling issues no move" passed on the DRIVER's own copy
+        // of the guard and would have stayed green if that copy were narrowed.
+        if (position > 9) {
+            throw AlpacaException("Filter position out of range for QHY CFW protocol (max 9)",
+                                  AlpacaError::InvalidValue);
+        }
         last_cfw_target = position;
         cfw_position_ = position;
         cfw_position_script.clear();
@@ -642,6 +691,16 @@ private:
             std::lock_guard<std::mutex> lock(sync_.calls_mutex);
             ++calls[fn];
         }
+        // open-astro#339: the ONE deliberate way to make a fake method block.
+        // Left null by every ordinary test, so the "no fake method may block"
+        // rule still holds; a case that sets it is opting into a violation in
+        // order to prove something about it -- that LockedQHYSDK's watchdog
+        // notices, or that cancel_exposure still gets through while another
+        // forward holds the mutex. Read without calls_mutex on purpose: a
+        // hook that blocks must not also hold the ledger lock.
+        if (before_call) {
+            before_call(fn);
+        }
         if (throw_from.count(fn) != 0) {
             throw AlpacaException(std::string("fake: injected failure in ") + fn, AlpacaError::DriverException);
         }
@@ -683,6 +742,14 @@ private:
 
     std::map<std::string, int> ref_counts_;
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> exposure_workers_;
+    // open-astro#328: the frame size the most recent get_mem_length() promised.
+    // A plain member, guarded exactly as roi_ and bits_ are: every seam test
+    // reaches this fake through LockedQHYSDK, which serialises all 26 forwards
+    // through one mutex, so both the write here and the read in
+    // get_single_frame() are already mutually exclusive. Making it atomic
+    // would buy nothing and would cost FakeQHYSDK its move constructor, which
+    // the default_camera()/make_fake() factories return by value.
+    uint32_t last_mem_length_ = 0;
     ROI roi_{};
     uint32_t wbin_ = 1;
     uint32_t hbin_ = 1;
