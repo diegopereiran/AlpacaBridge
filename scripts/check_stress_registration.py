@@ -1241,13 +1241,30 @@ def self_test():
                      "}\n")
         check("main() passes when call() is only invoked, not defined",
               run_main_with(call_site) == 0)
-        keyword_site = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
-                        "  auto f = [&] { return call(1); };\n"
-                        "  if (f()) {} else call(2);\n"
+        # Line-LEADING uses: the regex is anchored at ^, so a keyword must be
+        # the first token for the lookahead to matter (a mid-line use never
+        # matched to begin with).
+        keyword_site = ('static bool helper(int x) {\n'
+                        "    if (x)\n"
+                        "        return call(x);\n"
+                        "    else\n"
+                        "        call(0);\n"
+                        "    throw call(1);\n"
+                        "}\n"
+                        'TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                         + GUARDED_BODY +
                         "}\n")
         check("main() passes when call() follows a keyword (a use, not a definition)",
               run_main_with(keyword_site) == 0)
+        # The return-type class stays on one line: a type on one line and
+        # `call(` on the next is not read as one definition.
+        wrapped = ('int x = 0;\n'
+                   "  call(x);\n"
+                   'TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
+                   + GUARDED_BODY +
+                   "}\n")
+        check("main() passes when a type ends one line and call( starts the next",
+              run_main_with(wrapped) == 0)
         # Rule 5 reads comment-stripped text, like rules 1-3: a closing CHECK
         # that has been commented out must not count as present.
         commented_out = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
