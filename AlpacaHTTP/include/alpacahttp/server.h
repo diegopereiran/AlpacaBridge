@@ -62,10 +62,17 @@ public:
     void wait();
 
     // Test-only seam (open-astro#314): the router this server dispatches to,
-    // so a test can install HostClock hooks before start() and then observe
-    // what the RTC probe thread does with them. Call it before start(); the
-    // router's own seam replaces the clock object and is not safe against a
-    // request in flight.
+    // so a test can install HostClock hooks and then observe what the RTC
+    // probe thread does with them.
+    //
+    // Since open-astro#399 the router's clock seam replaces only the clock's
+    // PROBES, in place -- the HostClock object is never destroyed -- so the
+    // clock seam alone no longer has a rule about being called before start()
+    // or before the router serves a request. That clearance is for the clock
+    // seam only: the rest of the Router this returns (set_config_path(),
+    // device registration, set_server_info()) is still not safe against a
+    // live reactor. See the seam's own comment in router.h for what carries
+    // over across a re-install.
     Router& router_for_test() { return router_; }
 
 private:
