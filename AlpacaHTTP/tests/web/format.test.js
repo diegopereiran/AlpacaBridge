@@ -37,8 +37,12 @@ function withFormat(fn) {
 }
 
 // The instant every case uses: 2026-09-11 11:30:48 UTC. Chosen so the hour is
-// unambiguous in both halves of the day and so Pacific/Auckland lands on the
-// NEXT calendar date, which is what makes the date-shift assertion meaningful.
+// unambiguous in both halves of the day (23:30 local in Auckland, so a 12-hour
+// engine renders "11:30 PM" and the guard for that is exercised) and so the
+// offset is a whole 12 hours. It does NOT cross a date boundary: NZST is
+// UTC+12 in September (NZDT starts 2026-09-27), so 11:30 UTC is 23:30 the SAME
+// day locally. The date-shift path is covered by the local-midnight case
+// below, which is the only one that rolls the date.
 const INSTANT = new Date(Date.UTC(2026, 8, 11, 11, 30, 48));
 
 const SHAPE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(.+\)$/;
@@ -68,7 +72,8 @@ test('renders the log lines\' own YYYY-MM-DD HH:MM:SS shape with a zone label', 
 test('renders the instant in the viewer\'s zone, not UTC', () => {
     // The whole point of #354: a viewer twelve hours from Greenwich should not
     // have to do the arithmetic to match a header reading against a log line.
-    // NZST is UTC+12, so this instant is the next calendar day locally.
+    // NZST is UTC+12, so 11:30 UTC renders as 23:30 on the SAME date -- the
+    // date roll is the separate midnight case below.
     withTZ('Pacific/Auckland', () => withFormat(({ formatServerClock }) => {
         const rendered = formatServerClock(INSTANT);
         assert.match(rendered, SHAPE);
