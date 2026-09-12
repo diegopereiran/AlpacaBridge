@@ -780,7 +780,7 @@ def check_rule_file_paths_exist():
     # fifth .mdc added later is silently unchecked -- the drift class this
     # check exists for (review note on PR #474).
     listed = {doc for doc, _, _ in RULE_FILE_PATH_CHECKS}
-    tracked_rule_files = [f for f in _run_git(["ls-files", "*/.cursor/rules/*.mdc"]).stdout.splitlines() if f]
+    tracked_rule_files = [f for f in _run_git(["ls-files", "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"]).stdout.splitlines() if f]
     for f in sorted(set(tracked_rule_files) - listed):
         failures.append("%s is a tracked Cursor rule file but is not in RULE_FILE_PATH_CHECKS -- add it "
                         "with its component and a floor" % f)
