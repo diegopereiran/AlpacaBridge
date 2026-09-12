@@ -28,6 +28,7 @@ Checks:
      that looks like a real repo path actually exists.
 """
 
+import glob
 import re
 import subprocess
 import sys
@@ -381,10 +382,17 @@ def check_blocking_get_connected_list():
         r"\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
         r"(?:named\s+|more\s+)?(?:telescopes?|wrapper-backed\s+switch(?:es)?)\b",
         re.IGNORECASE)
-    for path in ("AGENTS.md",
-                 "AlpacaCore/include/alpacacore/async_connectable.h",
-                 "AlpacaHTTP/src/http/router.cpp",
-                 "AlpacaHTTP/tests/test_routing.cpp"):
+    # Globbed, not a hand-written file list: the first version of this loop
+    # named four files and missed synscan_telescope_driver.cpp, which carried
+    # the counts -- a gate against drift that itself drifts is worth very
+    # little. CHANGELOG.md is deliberately out of scope: its historical entries
+    # describe what was true when they were written.
+    counted_paths = sorted(
+        p for pattern in ("AGENTS.md", "docs/**/*.md", "AlpacaCore/include/**/*.h",
+                          "AlpacaCore/src/**/*.cpp", "AlpacaHTTP/include/**/*.h",
+                          "AlpacaHTTP/src/**/*.cpp", "AlpacaHTTP/tests/**/*.cpp")
+        for p in glob.glob(pattern, recursive=True))
+    for path in counted_paths:
         for match in count_re.finditer(read(path)):
             failures.append(
                 "COUNTED BLOCKING DRIVERS: %s says %r. These lists are gated by name; a count is a "

@@ -256,7 +256,7 @@ public:
     // 5 s timeouts), so the router's 8 s deadline never fired and clients
     // reported "Dynamic client timeout for method Connected" (issue #130).
     // Same atomic-flag pattern as every other AsyncConnectable driver except
-    // the five telescopes and the four wrapper-backed switches named in
+    // the telescopes and the wrapper-backed switches named in
     // async_connectable.h. Stated as the rule rather than as a count: a bare
     // number in a comment has nothing tying it to the code it describes, and
     // every new driver invalidates it silently (open-astro#381).
