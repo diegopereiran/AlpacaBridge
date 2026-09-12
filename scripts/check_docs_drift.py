@@ -652,8 +652,16 @@ def _is_gitignored(path):
     return _run_git(["check-ignore", "-q", path], check=False).returncode == 0
 
 
+_TRACKED_PATHS_CACHE = None
+
+
 def _tracked_paths():
-    """(tracked files, tracked directories with a trailing slash)."""
+    """(tracked files, tracked directories with a trailing slash), computed once
+    per invocation: six documents share it and the listing walks the vendored
+    SDK trees."""
+    global _TRACKED_PATHS_CACHE
+    if _TRACKED_PATHS_CACHE is not None:
+        return _TRACKED_PATHS_CACHE
     # core.quotePath=false: a tracked path with non-ASCII bytes must not
     # come back quoted, or it would never match a span.
     tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines())
@@ -662,7 +670,8 @@ def _tracked_paths():
         parts = f.split("/")
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]) + "/")
-    return tracked, tracked_dirs
+    _TRACKED_PATHS_CACHE = (tracked, tracked_dirs)
+    return _TRACKED_PATHS_CACHE
 
 
 def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefixes=()):
@@ -744,8 +753,11 @@ def check_agents_md_paths_exist():
 # is here for `include/alpacacore/...`; a vendor SDK's own `include/` is
 # not a repo-relative path and must be written out from `external/` (the
 # ZWO block was, in #457).
+# No `docs/` here: PATH_PREFIXES already holds it and is tried first, so a
+# `docs/x` span in a rule file always resolves at the repo root (neither
+# component has a docs/ tree of its own today).
 RULE_FILE_RELATIVE_PREFIXES = (
-    "src/", "include/", "tests/", "external/", "conformu/", "docs/", "examples/", "web/",
+    "src/", "include/", "tests/", "external/", "conformu/", "examples/", "web/",
 )
 # (document, component root, floor). Floors are per file, as the issue asks,
 # so a matcher that stops working on one of them fails rather than reporting
@@ -764,6 +776,14 @@ RULE_FILE_PATH_CHECKS = (
 
 def check_rule_file_paths_exist():
     failures = []
+    # The tuple is hand-written; every tracked rule file must be in it, or a
+    # fifth .mdc added later is silently unchecked -- the drift class this
+    # check exists for (review note on PR #474).
+    listed = {doc for doc, _, _ in RULE_FILE_PATH_CHECKS}
+    tracked_rule_files = [f for f in _run_git(["ls-files", "*/.cursor/rules/*.mdc"]).stdout.splitlines() if f]
+    for f in sorted(set(tracked_rule_files) - listed):
+        failures.append("%s is a tracked Cursor rule file but is not in RULE_FILE_PATH_CHECKS -- add it "
+                        "with its component and a floor" % f)
     for doc, component, floor in RULE_FILE_PATH_CHECKS:
         doc_failures, _ = _check_doc_path_refs(
             doc, floor, "its RULE_FILE_PATH_CHECKS floor", component, RULE_FILE_RELATIVE_PREFIXES)
