@@ -3340,6 +3340,36 @@ int main() {
         EXPECT(message.find("json.exception") == std::string::npos);
     }
 
+    {
+        // Issue #388, the other half: a config field of a genuinely wrong TYPE
+        // is still an error -- silently falling back would accept a typo'd
+        // config and register a device with defaults nobody asked for -- but
+        // config_get() reports it as an AlpacaException naming the field
+        // rather than letting nlohmann's type_error reach the outer catch.
+        //
+        // The null case above does NOT cover this: it asserts only the absence
+        // of "json.exception" text, and passes with or without the try/catch,
+        // because a null never reaches get<T>() at all. Deleting the catch in
+        // config_get() must fail HERE.
+        alpacahttp::Router router;
+        nlohmann::json config = {{"vendor", "skywatcher"},
+                                 {"deviceType", "telescope"},
+                                 {"deviceNumber", 50},
+                                 {"connectionType", "serial"},
+                                 {"portPath", "/dev/null"},
+                                 {"siteLatitude", "-43.5"},  // a string, not a number
+                                 {"siteLongitude", 172.6}};
+        const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        const std::string message = json.value("ErrorMessage", "");
+        // Names the field, and says what it got.
+        EXPECT(message.find("siteLatitude") != std::string::npos);
+        EXPECT(message.find("wrong type") != std::string::npos);
+        // The failure mode this replaces: a raw nlohmann type_error naming nothing.
+        EXPECT(message.find("json.exception") == std::string::npos);
+    }
+
     // Issue #398: site coordinates are range-checked, not just checked for
     // presence.
     {
