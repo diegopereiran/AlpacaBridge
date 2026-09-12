@@ -1312,6 +1312,35 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 
 namespace alpacahttp {
 
+namespace {
+// Issue #358: a driver that refuses a connect explains why, and the client
+// never saw it -- the reason reached the server log and stopped there, so
+// every "why won't it connect" question started with asking the operator for
+// the log. AsyncConnectable now keeps the reason; this reads it back for the
+// 38 drivers that derive from it, and falls back to the old constant for
+// anything that does not, or when the failure produced no text.
+//
+// The text goes out verbatim. Driver messages are written for logs and can
+// name host paths (a serial port, a config field), which is exactly what an
+// operator needs to act on and is no more than the same message already
+// visible in the log file the web UI serves.
+std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
+    std::string reason = device.get_last_connect_error();
+    return reason.empty() ? std::string("Connection failed") : reason;
+}
+
+// Defined further down with the management guards, but declared here because
+// every state-changing management handler needs it and handle_description()
+// is the first of them in file order. Also used by the one device setter with
+// a host-level side effect (open-astro#401).
+//
+// Takes the client's ClientTransactionID as well as the server's: the 403 body
+// echoes it like every other error path in these handlers (open-astro#384).
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
+                                                    std::uint32_t server_tx_id, const char* what);
+
+}  // namespace
+
 Router::Router() {
     set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "", "");
     load_persisted_devices();
@@ -1673,6 +1702,21 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // PUT/POST here rewrites the server description and the
+    // SyncSystemClockFromClients opt-out, and that opt-out is what keeps a
+    // cross-origin clock step from being accepted at all -- so leaving this
+    // endpoint unguarded would have handed back the guard on synctime.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "server description")) {
+        return *rejected;
+    }
+
     try {
         if (request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT) {
             if (request.body().empty()) {
@@ -1894,6 +1938,29 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 } catch (const std::exception& e) {
                     util::log_warning("SDK version query failed for " + cap.name + ": " + e.what());
                 }
+
+                // Issue #358, the Platform 7 half. PUT /connect returns success
+                // immediately by design and completion is observed through
+                // Connecting, so when the task fails there is no response left
+                // to carry an error: the client -- NINA 3.x prefers this path
+                // -- sees Connecting go false and Connected stay false, with
+                // no message anywhere in the protocol. The reason has nowhere
+                // to go in ASCOM, so it surfaces here instead, where the web
+                // UI can show the operator what the driver actually said.
+                // Present only while a failure stands; the next attempt clears
+                // it. Like Firmware and SdkVersion, deliberately not part of
+                // any ASCOM response.
+                // try/catch like the two hooks above it: every implementation
+                // today is the macro (a mutex and a string copy) so nothing can
+                // throw in practice, but an override that does must not take
+                // the whole device listing down with it.
+                try {
+                    if (std::string reason = driver->get_last_connect_error(); !reason.empty()) {
+                        device["LastConnectError"] = reason;
+                    }
+                } catch (const std::exception& e) {
+                    util::log_warning("Connect-error query failed for " + cap.name + ": " + e.what());
+                }
             }
             devices.push_back(device);
         }
@@ -2046,11 +2113,6 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 }
 
 namespace {
-// Defined further down with the management guards; also used by the one
-// device setter with a host-level side effect (open-astro#401).
-std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
-                                                    std::uint32_t server_tx_id, const char* what);
-
 void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
     const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
     for (auto it = clients.begin(); it != clients.end();) {
@@ -2352,9 +2414,11 @@ Response Router::dispatch_device_method(
                     if (!device->get_connecting() && !device->get_connected()) {
                         // Failed connect: this client holds no live link.
                         unregister_client_connection(device.get(), client_key);
-                        throw alpacacore::AlpacaException(
-                            "Connection failed",
-                            alpacacore::AlpacaError::NotConnected);
+                        // The driver's own words when it has them; the error
+                        // number is unchanged, so a client matching on it is
+                        // unaffected.
+                        throw alpacacore::AlpacaException(connect_failure_reason(*device),
+                                                          alpacacore::AlpacaError::NotConnected);
                     }
                     // Still connecting at the deadline: reply now, the client
                     // observes completion through Connecting/Connected. Until
@@ -6184,7 +6248,19 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
-    
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Rewrites persisted device configuration, which survives a restart.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device configuration")) {
+        return *rejected;
+    }
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
@@ -6273,7 +6349,19 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
-    
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Removes a configured device, taking its persisted entry with it.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device removal")) {
+        return *rejected;
+    }
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
@@ -6400,6 +6488,20 @@ Response Router::handle_log_level(const Request& request, std::uint32_t server_t
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Changing verbosity is the quiet one: it is how evidence of any of the
+    // others gets turned down after the fact. GET is exempt, so the web UI's
+    // polling of the current level is unaffected.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log level")) {
+        return *rejected;
     }
 
     auto send_payload = [&](std::uint32_t ctx_id) {
@@ -6583,6 +6685,15 @@ Response Router::handle_log_files_list(const Request& request, std::uint32_t ser
     }
 
     if (request.method() == HttpMethod::DELETE_) {
+        // Issue #348: the collection DELETE removes EVERY log file, which is
+        // the same evidence-removal shape as the per-file DELETE next to it
+        // and as turning the log level down. Guarding the per-file form and
+        // not this one would have been the accident the audit exists to
+        // remove. The web UI's deleteAllLogFiles() is same-origin, so this is
+        // a no-op for it; GET (the listing) stays exempt.
+        if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log files")) {
+            return *rejected;
+        }
         const auto files = util::list_log_files();
         const std::filesystem::path log_directory = util::get_log_directory();
         std::size_t deleted = 0;
@@ -6730,6 +6841,14 @@ Response Router::handle_log_file_item(const Request& request,
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
 
+    // Issue #348: DELETE here destroys a log file, which is the same
+    // evidence-removal shape as turning the log level down. Placed before the
+    // filename validation so a cross-origin caller learns nothing about which
+    // names exist. GET is exempt, so the web UI's log viewer is unaffected.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "log file")) {
+        return *rejected;
+    }
+
     if (!util::is_valid_log_filename(filename)) {
         response.set_content_type("application/json");
         AlpacaResponse err = make_error_response(
@@ -6808,7 +6927,19 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
-    
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Stops the daemon. On a remote rig undoing this needs physical access.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "shutdown")) {
+        return *rejected;
+    }
+
     // Only allow POST or PUT requests
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
         AlpacaResponse alpaca_response = make_error_response(
@@ -7139,6 +7270,19 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // Issue #348: the whole management surface is unauthenticated under the
+    // documented trusted-LAN threat model, which is a deliberate stance; the
+    // point is that every state-changing endpoint should take that stance on
+    // purpose rather than differ by accident. A POST with Content-Type:
+    // text/plain is not preflighted and the handlers parse the body
+    // regardless of content type, so nothing on the browser side stops a
+    // drive-by request from reaching this.
+    // Restarts the daemon, dropping every connected client mid-session --
+    // an imaging run lost to a page the operator merely had open.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "restart")) {
+        return *rejected;
     }
 
     if (request.method() != HttpMethod::POST && request.method() != HttpMethod::PUT) {
