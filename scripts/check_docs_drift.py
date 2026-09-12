@@ -565,8 +565,25 @@ def check_qhy_seam_lists():
             "LockedQHYSDK::%s() overrides nothing on QHYSDK -- stale forward, or the interface lost a "
             "method." % name)
 
+    # cancel_exposure is the one documented exception (open-astro#339): the real
+    # QHYSDKWrapper::cancel_exposure() deliberately skips the per-handle call
+    # mutex so it can interrupt a GetQHYCCDSingleFrame already blocked on the
+    # same handle, and routing it through the shared mutex here inverted that
+    # invariant. It still takes A mutex -- its own -- so it is not an unlocked
+    # forward and the fake stays non-racy; it just does not queue behind the
+    # call it exists to interrupt.
+    CANCEL_EXEMPT = "cancel_exposure"
     for name in sorted(set(locked_methods) & interface_methods):
-        if "locked(" not in locked_methods[name]:
+        body = locked_methods[name]
+        if name == CANCEL_EXEMPT:
+            if "cancel_mutex_" not in body:
+                failures.append(
+                    "LockedQHYSDK::cancel_exposure() must take cancel_mutex_ -- its own lock, separate "
+                    "from the shared one, per open-astro#339. Through the shared mutex it queues behind "
+                    "the in-flight call it exists to interrupt; with no mutex at all it becomes the one "
+                    "racy forward in the decorator.")
+            continue
+        if "locked(" not in body:
             failures.append(
                 "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through locked(). The decorator exists "
                 "only to take the mutex -- an unlocked forward makes the fake racy under a [stress] storm "

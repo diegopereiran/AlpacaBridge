@@ -133,14 +133,26 @@ public:
         return locked([&] { return inner_.get_single_frame(camera_id, buffer, width, height, bpp, channels); });
     }
     void cancel_exposure(const std::string& camera_id) override {
-        // open-astro#339: UNLOCKED, matching production exactly.
+        // open-astro#339: its OWN mutex, not the shared one.
+        //
         // QHYSDKWrapper::cancel_exposure() deliberately skips the per-handle
         // call mutex, because its whole job is to interrupt a
         // GetQHYCCDSingleFrame already blocked on the same handle from another
         // thread. Forwarding it through this decorator's one mutex inverted
-        // that invariant: the safety valve would queue behind the very call it
-        // exists to interrupt. Safe only while no fake method blocks -- which
-        // is a convention, so the watchdog below makes it enforceable instead.
+        // exactly that invariant: the safety valve would queue behind the very
+        // call it exists to interrupt.
+        //
+        // The issue offered two fixes -- forward unlocked, or give the cancel
+        // its own mutex. Unlocked is what production does, but it would make
+        // this the one racy forward in the decorator, which is the confusion
+        // the decorator was built to prevent (and which check_docs_drift.py
+        // rightly refuses). A second mutex keeps every forward serialised
+        // while letting a cancel proceed against an in-flight call, which is
+        // the property production actually needs. It is sound here because
+        // the fake's cancel_exposure body touches no shared state -- it has no
+        // in-flight exposure to interrupt -- so it cannot race the call it
+        // overtakes.
+        std::lock_guard<std::mutex> lock(cancel_mutex_);
         inner_.cancel_exposure(camera_id);
     }
 
@@ -209,6 +221,9 @@ private:
 
     QHYSDK& inner_;
     std::mutex mutex_;
+    // open-astro#339: cancel-only, so a cancel never queues behind the call
+    // it exists to interrupt. See cancel_exposure().
+    std::mutex cancel_mutex_;
     std::atomic<long long> slowest_call_ms_{0};
 };
 
