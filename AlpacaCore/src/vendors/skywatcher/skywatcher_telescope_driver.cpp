@@ -280,9 +280,12 @@ public:
             // open-astro#274: the mount stores no site of its own, so an
             // unconfigured device would run on 0.0/0.0. hemisphere_south_locked()
             // is site_latitude_ < 0.0, which silently puts a southern rig on
-            // northern pointing math and undoes #250 (RA tracking direction),
-            // #253 (Dec rate and pulse-guide sign) and #261 (SideOfPier and the
-            // goto pier-side branch). Refuse rather than point wrongly.
+            // northern pointing math: the #432 sky frame (both the a1 term and
+            // dec), the RA tracking direction (#250, restored by #432) and the
+            // Dec rate / pulse-guide sign (#253). NOT #261: the pier-side
+            // branch and label are picked from the sky hour angle and are
+            // hemisphere-independent, which is one of #432's findings. Refuse
+            // rather than point wrongly.
             if (!site_coordinates_known_locked()) {
                 throw AlpacaException(
                     "Site latitude and longitude must be set before connecting: this mount stores no site of its "
@@ -637,10 +640,15 @@ public:
         if (rate == ra_rate_sec_per_sidereal_sec_) {
             return;  // idempotent rewrite
         }
-        if (axes_busy_locked()) {
-            // A goto/park/home/pulse/manual motion owns the RA axis: store
-            // the rate only — the operation's restore path re-applies the
-            // effective (offset-folded) drive rate when it releases the axis.
+        if (axis_busy_locked(kAxisRa)) {
+            // An operation that owns the RA AXIS is in flight: store the rate
+            // only — its restore path re-applies the effective (offset-folded)
+            // drive rate when it releases the axis. Per axis, not the
+            // whole-mount axes_busy_locked() this used to ask: a Dec pulse or
+            // a Dec MoveAxis owns only the Dec axis and its restore never
+            // touches RA, so the rate write was stranded with nothing
+            // scheduled to apply it (round-2 review note; the same shape as
+            // the set_site_latitude() defect fixed in the commit before this).
             ra_rate_sec_per_sidereal_sec_ = rate;
             double eff = effective_ra_rate_locked();
             bool defer_duty =
@@ -804,8 +812,14 @@ public:
                 if (!dec_busy) {
                     apply_dec_rate_offset_locked(lock);
                 }
-                need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
             }
+            // Unconditional, exactly as set_declination_rate() computes it:
+            // reap_duty_task() above JOINED the worker, so a still_crossing
+            // that went false in the window (a goto or park taking both axes
+            // while the mutex was released) would otherwise leave a live
+            // sub-floor rate with no worker until the next rate write or
+            // tracking toggle (round-2 review note).
+            need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
         }
         if (need_duty) {
             start_duty_thread();

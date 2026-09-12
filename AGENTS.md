@@ -2077,10 +2077,16 @@ pre-fix setter with the RA axis still counting the old way.
 guard has to name the axis it is talking about, and the reviewer's question is always:
 does the operation that owns the busy axis actually re-derive THIS value? A mount-wide
 busy flag can only answer that when the operation owns every axis -- a goto, park, home
-or slew does; a pulse or a manual nudge does not. The same audit applies to
-`set_right_ascension_rate()`, whose busy branch carries the identical assumption for a
-plain rate change (no hemisphere involved, so a declination operation in flight can still
-strand an RA rate write until the next re-apply); it predates #432 and is unfixed.
+or slew does; a pulse or a manual nudge does not.
+
+The audit found one more instance, `set_right_ascension_rate()`, fixed with it: no
+hemisphere is involved there, but a declination operation in flight still made the
+whole-mount predicate true and stranded the rate write with nothing scheduled to apply
+it, so a client's `RightAscensionRate` silently did nothing until the next re-apply.
+Every "skip while busy" guard in this driver now names its axis. When adding a new one,
+grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are
+the ones asking "is the mount doing anything at all", such as the duty worker's
+`connected_ && tracking_ && !axes_busy_locked()` start gate.
 
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):

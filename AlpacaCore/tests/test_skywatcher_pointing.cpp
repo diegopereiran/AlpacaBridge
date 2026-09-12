@@ -372,6 +372,75 @@ TEST_CASE("SkyWatcher pointing - tracking holds the physical hour angle in both 
     }
 }
 
+TEST_CASE("SkyWatcher pointing - an East guide pulse with Tracking off runs the southern way",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // Round-2 review finding: pulse_guide()'s not-tracking RA branch is the
+    // SECOND call site of ra_axis_sign_locked() and had no case of its own.
+    // Every other pulse test connects at latitude +39.7392, where the sign is
+    // +1 and the factor is a no-op, and the southern East-pulse case below
+    // enables tracking, so it takes the ra_rate_adjust branch instead. Delete
+    // `ra_axis_sign_locked() *` from that line and the whole suite stayed
+    // green while an autoguider pulsing a parked-rate mount below the equator
+    // pushed the star the wrong way.
+    //
+    // Sky sense, south: guide East = RA increasing. dec = -(90 - |a2|) and
+    // HA = -(a1/15) + 6 on this branch, so RA = LST - HA rises when a1 rises:
+    // the axis must run in the INCREASING-count direction, the opposite of
+    // the same pulse in the north.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0, 150.0, 80.0);
+    driver->set_connected(true);
+    mount.jump_axis_degrees(2, 45.0);
+    REQUIRE_FALSE(driver->get_tracking());
+
+    const double a1_before = mount.physical_degrees(1);
+    driver->pulse_guide(2, 1500);  // East, 1.5 s, no tracking to fold it into
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    const double moved = mount.physical_degrees(1) - a1_before;
+
+    INFO("south, Tracking off, East pulse: axis 1 moved " << moved << " deg");
+    CHECK(moved > 0.0);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a southern East guide pulse stays on the in-place rate change",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // Round-2 review finding, the other unguarded sign: the in-place-versus-
+    // stop-and-restart guard is `axis_sign * ra_pulse_rate <= kMinInPlace...`.
+    // Drop the axis_sign factor and every southern pulse rate is negative, so
+    // the guard is always true and EVERY guide correction takes the full
+    // stop-and-restart path -- the mount stops and re-accelerates the RA axis
+    // on every cycle of a guiding session. Magnitude and direction both still
+    // come out right on that path, which is why the direction case below
+    // passes either way; only the stop count can see it.
+    //
+    // This is the southern twin of the northern assertion in
+    // test_skywatcher_async.cpp ("a kick, never a stop/restart").
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0, 150.0, 80.0);
+    driver->set_connected(true);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));  // past the ramp
+    const int stops_before = mount.stop_count(1);
+
+    driver->pulse_guide(2, 1200);  // East, at the 0.5x default guide rate
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+
+    INFO("south, tracking, East pulse: RA stops " << stops_before << " -> " << mount.stop_count(1));
+    CHECK(mount.stop_count(1) == stops_before);
+    CHECK(mount.axis_running(1));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher pointing - an East guide pulse slows the axis in the tracking sense, south",
           "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
     // Guide East means the tube falls behind the sky, so the RA axis must run

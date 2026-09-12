@@ -1088,6 +1088,49 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher - a RightAscensionRate write during a DEC pulse is applied, not stranded",
+          "[skywatcher][telescope][hemisphere]") {
+    // Round-2 review note: set_right_ascension_rate() asked the whole-mount
+    // axes_busy_locked() for the same "the owner's restore will re-apply it"
+    // skip that set_site_latitude() had to learn is a per-axis question. A
+    // North/South pulse makes that predicate true while owning only the DEC
+    // axis, and its restore path never touches RA, so the new rate sat in the
+    // field with nothing scheduled to drive it -- the client's
+    // RightAscensionRate silently did nothing until the next re-apply.
+    //
+    // Not hemisphere-specific (no sign is involved), which is why it needs its
+    // own case rather than riding on the latitude ones above.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_travel = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return std::abs(mount.physical_degrees(1) - p0);
+    };
+    const double plain_travel = ra_travel();
+    REQUIRE(plain_travel > 0.0);
+
+    // A North pulse owns the Dec axis only; RA is still tracking.
+    driver->pulse_guide(0, 1200);  // North, 1.2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->set_right_ascension_rate(driver->get_right_ascension_rate() + 0.5);
+
+    // +0.5 s/s slows the drive: the axis must already be travelling less far
+    // per unit time, without waiting for the Dec pulse to end.
+    const double offset_travel = ra_travel();
+    INFO("plain travel " << plain_travel << " deg, with +0.5 s/s during a Dec pulse " << offset_travel << " deg");
+    CHECK(offset_travel < plain_travel);
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 6000));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-applies the RA drive",
           "[skywatcher][telescope][hemisphere]") {
     // The MoveAxis half of the same finding: manual_axis_slewing_[1] made
