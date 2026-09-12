@@ -65,7 +65,12 @@ namespace alpacacore::test {
  *    cooler-off workers join with a bounded timeout and DETACH on expiry, and
  *    its pulse-guide worker is detached by design. A fake that blocks turns
  *    those into detached threads still calling into it after the test body
- *    has moved on — i.e. a use-after-free of the fake itself.
+ *    has moved on — i.e. a use-after-free of the fake itself. The ONE
+ *    sanctioned exception is `before_call`, null in every ordinary test: a
+ *    case that sets it to block a named method owns the consequences and
+ *    must release the block before its driver is destroyed (the two #339
+ *    cases). LockedQHYSDK::slowest_call_ms() is the mechanical check that no
+ *    method has quietly gained a block; the 26-forward sweep asserts it.
  * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT, including those
  *    detachable workers, which reach the SDK through a captured QHYSDK*
  *    rather than through the driver's `sdk_` member. (All but pulse-guide
@@ -73,7 +78,8 @@ namespace alpacacore::test {
  *    they are not safe to outlive the driver either -- the capture narrows
  *    that window, it does not remove it.) Declare the fake before the driver
  *    (locals destroy in reverse order); never stash a driver beyond the
- *    fake's scope.
+ *    fake's scope. QHYSeamFixture (locked_qhy_sdk.h, #338) owns fake,
+ *    decorator and driver in that order so a case cannot get this wrong.
  *
  * default_camera() reports NO cooler. That is deliberate: has_cooler starts
  * the driver's telemetry thread, whose loop sleeps 1s between polls, so every
@@ -359,20 +365,23 @@ public:
         // camera is mid-exposure; that is a shared open, not a reopen over a
         // zombie, and refusing it here would fail a [stress] run with a false
         // red on the filter-wheel driver (review finding on PR #463).
-        last_opened_id = camera_id;
-        auto& count = ref_counts_[camera_id];
-        if (count > 0) {
-            ++count;
+        auto existing = ref_counts_.find(camera_id);
+        if (existing != ref_counts_.end() && existing->second > 0) {
+            last_opened_id = camera_id;
+            ++existing->second;
             return;
         }
         auto flag_it = exposure_workers_.find(camera_id);
         if (flag_it != exposure_workers_.end() && flag_it->second && flag_it->second->load()) {
+            // A refused open records nothing: no last_opened_id, no
+            // ref_counts_ entry, exactly as the open did not happen.
             throw AlpacaException(
                 "Camera cannot reopen while a previous exposure download is still finishing; try again shortly",
                 AlpacaError::InvalidOperation);
         }
+        last_opened_id = camera_id;
         ++physical_opens;
-        ++count;
+        ref_counts_[camera_id] = 1;
     }
 
     void init_camera(const std::string& camera_id) override {
