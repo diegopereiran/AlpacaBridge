@@ -114,4 +114,4 @@ private:
     std::unique_ptr<Impl> pimpl_;
 };
 
-} // namespace alpacacore::vendor::gphoto
+}  // namespace alpacacore::vendor::gphoto

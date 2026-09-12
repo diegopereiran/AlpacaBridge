@@ -16,7 +16,6 @@
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 #include <alpacacore/vendor/gphoto/gphoto_sdk_wrapper.h>
 #include <alpacacore/version.h>
-
 #include <libraw/libraw.h>
 
 #include <algorithm>
@@ -135,7 +134,7 @@ std::optional<CachedSensorGeometry> load_cached_sensor_geometry(const std::strin
 
 void store_cached_sensor_geometry(const std::string& model, const CachedSensorGeometry& g) {
     if (model.find('\t') != std::string::npos || model.find('\n') != std::string::npos) {
-        return; // Defensive: a model string can't corrupt the flat-file format.
+        return;  // Defensive: a model string can't corrupt the flat-file format.
     }
     std::filesystem::path path(kSensorCacheRelativePath);
     std::error_code ec;
@@ -164,8 +163,8 @@ void store_cached_sensor_geometry(const std::string& model, const CachedSensorGe
     for (const auto& line : other_lines) {
         out << line << '\n';
     }
-    out << model << '\t' << g.width << '\t' << g.height << '\t' << g.bayer_offset_x << '\t' << g.bayer_offset_y
-        << '\t' << g.max_adu << '\n';
+    out << model << '\t' << g.width << '\t' << g.height << '\t' << g.bayer_offset_x << '\t' << g.bayer_offset_y << '\t'
+        << g.max_adu << '\n';
 }
 
 // Physical pixel pitch (microns) for interchangeable-lens Nikon/Canon bodies
@@ -353,8 +352,8 @@ const std::unordered_map<std::string, double>& known_pixel_size_um_table() {
 // which one matched -- strip any such suffix so both spellings resolve to
 // the same table entry above (whose keys are already suffix-free).
 std::string strip_connection_mode_suffix(const std::string& model) {
-    static const std::vector<std::string> kSuffixes = {
-        " (PTP mode)", " (PTP Mode)", " (PTP)", " (normal mode)", " (Normal mode)", " (Sierra Mode)"};
+    static const std::vector<std::string> kSuffixes = {" (PTP mode)",    " (PTP Mode)",    " (PTP)",
+                                                       " (normal mode)", " (Normal mode)", " (Sierra Mode)"};
     for (const auto& suffix : kSuffixes) {
         if (model.size() > suffix.size() && model.compare(model.size() - suffix.size(), suffix.size(), suffix) == 0) {
             return model.substr(0, model.size() - suffix.size());
@@ -371,7 +370,7 @@ double lookup_known_pixel_size_um(const std::string& model) {
     return it != table.end() ? it->second : 0.0;
 }
 
-} // namespace
+}  // namespace
 
 class GPhotoCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
@@ -379,9 +378,7 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     GPhotoCameraDriver(int device_number, int camera_index)
-        : AsyncConnectable("GPhoto"),
-          device_number_(device_number),
-          camera_index_(camera_index) {
+        : AsyncConnectable("GPhoto"), device_number_(device_number), camera_index_(camera_index) {
         preload_camera_info_locked();
     }
 
@@ -390,7 +387,7 @@ public:
         stop_exposure_thread();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kLogTag, "Error during destruction: " + std::string(e.what()));
             }
@@ -427,7 +424,7 @@ public:
         return "libgphoto2 " + version;
     }
 
-    int get_interface_version() const override { return 4; } // ICameraV4 (Platform 7)
+    int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
     bool get_connected() const override { return connected_.load(); }
     void connect() override { start_connection_task(true); }
@@ -448,7 +445,7 @@ public:
             return;
         }
         if (connected == connected_.load()) {
-            return; // Idempotent (ASCOM)
+            return;  // Idempotent (ASCOM)
         }
 
         auto& sdk = GPhotoSDKWrapper::instance();
@@ -499,9 +496,10 @@ public:
             try {
                 prime_sensor_geometry_and_cache(priming_handle, priming_model);
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN(kLogTag, "Sensor geometry priming capture failed (will learn on first real "
-                                         "exposure instead): " +
-                                             std::string(e.what()));
+                ALPACA_LOG_WARN(kLogTag,
+                                "Sensor geometry priming capture failed (will learn on first real "
+                                "exposure instead): " +
+                                    std::string(e.what()));
             }
             return;
         }
@@ -576,8 +574,9 @@ public:
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
-                ALPACA_LOG_WARN(kLogTag, "Exposure deadline exceeded; forcing CameraState=Idle. "
-                                         "Exposure thread may still be blocked inside libgphoto2.");
+                ALPACA_LOG_WARN(kLogTag,
+                                "Exposure deadline exceeded; forcing CameraState=Idle. "
+                                "Exposure thread may still be blocked inside libgphoto2.");
                 exposure_active_.store(false);
                 exposure_deadline_valid_ = false;
                 return CameraState::Idle;
@@ -627,7 +626,7 @@ public:
     }
 
     double get_cooler_power() const override { return 0.0; }
-    double get_electrons_per_adu() const override { return 1.0; } // unknown; ConformU rejects 0
+    double get_electrons_per_adu() const override { return 1.0; }  // unknown; ConformU rejects 0
 
     double get_exposure_max() const override {
         ensure_connected();
@@ -655,7 +654,7 @@ public:
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
 
-    double get_full_well_capacity() const override { return 0.0; } // unknown for DSLR sensors
+    double get_full_well_capacity() const override { return 0.0; }  // unknown for DSLR sensors
 
     int get_gain() const override {
         ensure_connected();
@@ -704,7 +703,7 @@ public:
         return iso_choices_;
     }
 
-    bool get_has_shutter() const override { return true; } // DSLRs have a real mechanical shutter
+    bool get_has_shutter() const override { return true; }  // DSLRs have a real mechanical shutter
 
     double get_heat_sink_temperature() const override { return get_ccd_temperature(); }
 
@@ -763,18 +762,10 @@ public:
     }
     void set_num_y(int num_y) override { set_roi_dimension_locked(&num_y_, num_y); }
 
-    int get_offset() const override {
-        throw AlpacaException("Offset not supported", AlpacaError::NotImplemented);
-    }
-    void set_offset(int) override {
-        throw AlpacaException("Offset not supported", AlpacaError::NotImplemented);
-    }
-    int get_offset_max() const override {
-        throw AlpacaException("Offset not supported", AlpacaError::NotImplemented);
-    }
-    int get_offset_min() const override {
-        throw AlpacaException("Offset not supported", AlpacaError::NotImplemented);
-    }
+    int get_offset() const override { throw AlpacaException("Offset not supported", AlpacaError::NotImplemented); }
+    void set_offset(int) override { throw AlpacaException("Offset not supported", AlpacaError::NotImplemented); }
+    int get_offset_max() const override { throw AlpacaException("Offset not supported", AlpacaError::NotImplemented); }
+    int get_offset_min() const override { throw AlpacaException("Offset not supported", AlpacaError::NotImplemented); }
     std::vector<std::string> get_offsets() const override {
         throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
     }
@@ -859,7 +850,7 @@ public:
 
     void start_exposure(double duration, bool light) override {
         ensure_connected();
-        (void)light; // A DSLR's mechanical shutter always opens; dark frames require capping the lens.
+        (void)light;  // A DSLR's mechanical shutter always opens; dark frames require capping the lens.
 
         if (duration < 0.0) {
             throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
@@ -912,9 +903,10 @@ public:
             exposure_active_.store(true);
         }
 
-        exposure_thread_ = std::thread([this, active_handle, shutter_choice, shutter_widget_name, use_bulb, duration]() {
-            run_exposure(active_handle, shutter_choice, shutter_widget_name, use_bulb, duration);
-        });
+        exposure_thread_ =
+            std::thread([this, active_handle, shutter_choice, shutter_widget_name, use_bulb, duration]() {
+                run_exposure(active_handle, shutter_choice, shutter_widget_name, use_bulb, duration);
+            });
     }
 
     void stop_exposure() override {
@@ -947,15 +939,15 @@ private:
 
     GPhotoCameraInfo camera_info_{};
     bool camera_info_valid_{false};
-    double pixel_size_um_{0.0}; // 0.0 = unknown; see known_pixel_size_um_table above
+    double pixel_size_um_{0.0};  // 0.0 = unknown; see known_pixel_size_um_table above
 
     // Widget capability caches, populated at connect (configure_after_connect_locked).
     std::vector<std::string> iso_choices_;
     int current_iso_index_{0};
     bool has_bulb_{false};
-    std::string bulb_choice_;              // shutter-speed choice string selecting bulb mode
-    std::vector<std::pair<std::string, double>> native_shutter_choices_; // sorted ascending by seconds
-    std::string shutter_widget_name_{"shutterspeed2"}; // whichever of the fallback names was found at connect
+    std::string bulb_choice_;  // shutter-speed choice string selecting bulb mode
+    std::vector<std::pair<std::string, double>> native_shutter_choices_;  // sorted ascending by seconds
+    std::string shutter_widget_name_{"shutterspeed2"};  // whichever of the fallback names was found at connect
     double min_native_shutter_seconds_{0.001};
     double max_native_shutter_seconds_{30.0};
     std::optional<std::string> format_widget_name_;
@@ -1043,9 +1035,7 @@ private:
         }
     }
 
-    double get_exposure_max_locked() const {
-        return has_bulb_ ? 3600.0 : max_native_shutter_seconds_;
-    }
+    double get_exposure_max_locked() const { return has_bulb_ ? 3600.0 : max_native_shutter_seconds_; }
 
     std::string nearest_shutter_choice_locked(double duration) const {
         if (native_shutter_choices_.empty()) {
@@ -1148,7 +1138,7 @@ private:
             bulb_choice_.clear();
         }
         std::sort(native_shutter_choices_.begin(), native_shutter_choices_.end(),
-                 [](const auto& a, const auto& b) { return a.second < b.second; });
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
         if (!native_shutter_choices_.empty()) {
             min_native_shutter_seconds_ = native_shutter_choices_.front().second;
             max_native_shutter_seconds_ = native_shutter_choices_.back().second;
@@ -1170,8 +1160,8 @@ private:
         }
         if (!raw_format_choice_.has_value()) {
             ALPACA_LOG_WARN(kLogTag,
-                "No RAW image-quality choice found on this camera; captures will fail to "
-                "decode unless the camera's current format is already RAW.");
+                            "No RAW image-quality choice found on this camera; captures will fail to "
+                            "decode unless the camera's current format is already RAW.");
         }
 
         // Geometry (sensor size, Bayer phase, max ADU) is not knowable until
@@ -1224,9 +1214,8 @@ private:
             set_geometry_locked(decoded.width, decoded.height, decoded.bayer_offset_x, decoded.bayer_offset_y,
                                 decoded.max_adu, decoded.sensor_type);
         }
-        store_cached_sensor_geometry(
-            model, CachedSensorGeometry{decoded.width, decoded.height, decoded.bayer_offset_x,
-                                        decoded.bayer_offset_y, decoded.max_adu});
+        store_cached_sensor_geometry(model, CachedSensorGeometry{decoded.width, decoded.height, decoded.bayer_offset_x,
+                                                                 decoded.bayer_offset_y, decoded.max_adu});
     }
 
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
@@ -1317,8 +1306,8 @@ private:
         frame.height = sizes.height;
         frame.pixels.resize(static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height));
         for (int row = 0; row < frame.height; ++row) {
-            const ushort* src_row = raw_image + static_cast<std::size_t>(row + sizes.top_margin) * sizes.raw_width +
-                                    sizes.left_margin;
+            const ushort* src_row =
+                raw_image + static_cast<std::size_t>(row + sizes.top_margin) * sizes.raw_width + sizes.left_margin;
             std::int32_t* dst_row = frame.pixels.data() + static_cast<std::size_t>(row) * frame.width;
             for (int col = 0; col < frame.width; ++col) {
                 dst_row[col] = static_cast<std::int32_t>(src_row[col]);
@@ -1339,11 +1328,9 @@ private:
                 }
             }
         }
-        frame.sensor_type = SensorType::RGGB; // Nikon/Canon/Sony DSLR sensors are all standard Bayer RGGB variants
+        frame.sensor_type = SensorType::RGGB;  // Nikon/Canon/Sony DSLR sensors are all standard Bayer RGGB variants
 
-        frame.max_adu = processor.imgdata.color.maximum > 0
-                            ? static_cast<int>(processor.imgdata.color.maximum)
-                            : 65535;
+        frame.max_adu = processor.imgdata.color.maximum > 0 ? static_cast<int>(processor.imgdata.color.maximum) : 65535;
 
         float sensor_temp = processor.imgdata.makernotes.common.SensorTemperature;
         if (sensor_temp > -273.15f) {
@@ -1393,8 +1380,8 @@ private:
         } else {
             last_image_.data.resize(static_cast<std::size_t>(crop_w) * crop_h);
             for (int row = 0; row < crop_h; ++row) {
-                const std::int32_t* src_row = frame.pixels.data() +
-                    static_cast<std::size_t>(row + origin_y) * frame.width + origin_x;
+                const std::int32_t* src_row =
+                    frame.pixels.data() + static_cast<std::size_t>(row + origin_y) * frame.width + origin_x;
                 std::int32_t* dst_row = last_image_.data.data() + static_cast<std::size_t>(row) * crop_w;
                 std::copy(src_row, src_row + crop_w, dst_row);
             }
@@ -1409,4 +1396,4 @@ std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera
     return std::make_unique<GPhotoCameraDriver>(device_number, camera_index);
 }
 
-} // namespace alpacacore::vendor::gphoto
+}  // namespace alpacacore::vendor::gphoto

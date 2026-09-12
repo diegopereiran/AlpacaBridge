@@ -957,8 +957,8 @@ void append_int(std::string& out, std::int64_t value) {
 // an RK3568-class ARM SBC -- enough to clear ConformU's 10s
 // ImageArrayVariant timeout that the naive pattern was blowing through on
 // real DSLR-resolution frames from AlpacaCore's gphoto2 driver.
-std::vector<std::int32_t> transpose_xy(const std::vector<std::int32_t>& data, std::uint32_t width,
-                                       std::uint32_t height, std::uint32_t channels) {
+std::vector<std::int32_t> transpose_xy(const std::vector<std::int32_t>& data, std::uint32_t width, std::uint32_t height,
+                                       std::uint32_t channels) {
     std::vector<std::int32_t> out(static_cast<std::size_t>(width) * height * channels, 0);
     constexpr std::uint32_t kBlock = 64;
     for (std::uint32_t by = 0; by < height; by += kBlock) {
@@ -9313,9 +9313,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         // names too, or they silently revert to "Filter N" after a save
         // (sanitize_device_config strips anything not allowlisted).
         copy_if_present("filterNames");
-    } else if (vendor == "svbony") {
-        copy_if_present("cameraIndex");
-    } else if (vendor == "gphoto") {
+    } else if (vendor == "svbony" || vendor == "gphoto") {
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
         if (device_type == "switch") {

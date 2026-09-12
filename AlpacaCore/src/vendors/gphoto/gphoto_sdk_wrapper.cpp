@@ -13,7 +13,6 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/gphoto/gphoto_sdk_wrapper.h>
-
 #include <gphoto2/gphoto2-camera.h>
 #include <gphoto2/gphoto2-context.h>
 #include <gphoto2/gphoto2-file.h>
@@ -44,7 +43,7 @@ CameraWidget* find_widget_or_null(CameraWidget* root, const std::string& name) {
     return widget;
 }
 
-} // namespace
+}  // namespace
 
 class GPhotoSDKWrapper::Impl {
 public:
@@ -118,8 +117,7 @@ public:
 
             int model_index = gp_abilities_list_lookup_model(abilities_list, model.c_str());
             if (model_index < GP_OK) {
-                throw AlpacaException("Camera model not recognized by libgphoto2: " + model,
-                                      AlpacaError::InvalidValue);
+                throw AlpacaException("Camera model not recognized by libgphoto2: " + model, AlpacaError::InvalidValue);
             }
             CameraAbilities abilities;
             result = gp_abilities_list_get_abilities(abilities_list, model_index, &abilities);
@@ -224,7 +222,7 @@ public:
             throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
         }
         char* value = nullptr;
-        int result = gp_widget_get_value(widget, &value);
+        int result = gp_widget_get_value(widget, static_cast<void*>(&value));
         std::string out = (result == GP_OK && value != nullptr) ? value : "";
         gp_widget_free(root);
         if (result != GP_OK) {
@@ -296,7 +294,7 @@ public:
             throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
         }
         char* value = nullptr;
-        int result = gp_widget_get_value(widget, &value);
+        int result = gp_widget_get_value(widget, static_cast<void*>(&value));
         std::string out = (result == GP_OK && value != nullptr) ? value : "";
         gp_widget_free(root);
         if (result != GP_OK) {
@@ -447,29 +445,19 @@ GPhotoSDKWrapper& GPhotoSDKWrapper::instance() {
     return wrapper;
 }
 
-std::vector<GPhotoCameraInfo> GPhotoSDKWrapper::enumerate_cameras() {
-    return pimpl_->enumerate_cameras();
-}
+std::vector<GPhotoCameraInfo> GPhotoSDKWrapper::enumerate_cameras() { return pimpl_->enumerate_cameras(); }
 
 int GPhotoSDKWrapper::open_camera(const std::string& model, const std::string& port) {
     return pimpl_->open_camera(model, port);
 }
 
-void GPhotoSDKWrapper::close_camera(int handle) {
-    pimpl_->close_camera(handle);
-}
+void GPhotoSDKWrapper::close_camera(int handle) { pimpl_->close_camera(handle); }
 
-std::string GPhotoSDKWrapper::get_gphoto_version() {
-    return pimpl_->get_gphoto_version();
-}
+std::string GPhotoSDKWrapper::get_gphoto_version() { return pimpl_->get_gphoto_version(); }
 
-std::string GPhotoSDKWrapper::get_camera_summary(int handle) {
-    return pimpl_->get_camera_summary(handle);
-}
+std::string GPhotoSDKWrapper::get_camera_summary(int handle) { return pimpl_->get_camera_summary(handle); }
 
-bool GPhotoSDKWrapper::has_widget(int handle, const std::string& name) {
-    return pimpl_->has_widget(handle, name);
-}
+bool GPhotoSDKWrapper::has_widget(int handle, const std::string& name) { return pimpl_->has_widget(handle, name); }
 
 std::vector<std::string> GPhotoSDKWrapper::get_choices(int handle, const std::string& name) {
     return pimpl_->get_choices(handle, name);
@@ -495,12 +483,10 @@ std::string GPhotoSDKWrapper::get_text_value(int handle, const std::string& name
     return pimpl_->get_text_value(handle, name);
 }
 
-GPhotoCaptureResult GPhotoSDKWrapper::capture_and_download(int handle) {
-    return pimpl_->capture_and_download(handle);
-}
+GPhotoCaptureResult GPhotoSDKWrapper::capture_and_download(int handle) { return pimpl_->capture_and_download(handle); }
 
 GPhotoCaptureResult GPhotoSDKWrapper::wait_for_bulb_file_and_download(int handle) {
     return pimpl_->wait_for_bulb_file_and_download(handle);
 }
 
-} // namespace alpacacore::vendor::gphoto
+}  // namespace alpacacore::vendor::gphoto

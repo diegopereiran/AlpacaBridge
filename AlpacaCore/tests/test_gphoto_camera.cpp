@@ -29,7 +29,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE("GPhoto Camera Driver - Defaults", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
@@ -41,7 +41,7 @@ TEST_CASE("GPhoto Camera Driver - Defaults", "[gphoto][camera][unit]") {
     // autodetect always comes back empty and the driver serves this literal
     // fallback name (see get_name()/preload_camera_info_locked).
     CHECK(driver->get_name() == "gphoto2 Camera");
-    CHECK(driver->get_has_shutter() == true); // DSLRs have a real mechanical shutter
+    CHECK(driver->get_has_shutter() == true);  // DSLRs have a real mechanical shutter
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == true);
     CHECK(driver->get_can_asymmetric_bin() == false);
@@ -56,7 +56,7 @@ TEST_CASE("GPhoto Camera Driver - Device metadata", "[gphoto][camera][unit]") {
     CHECK(driver->get_description() == "libgphoto2 DSLR/Mirrorless Camera Driver");
     CHECK(driver->get_driver_info() == "AlpacaCore GPhoto Camera Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
-    CHECK(driver->get_interface_version() == 4); // ICameraV4 (Platform 7)
+    CHECK(driver->get_interface_version() == 4);  // ICameraV4 (Platform 7)
     CHECK(driver->get_unique_id() == "GPHOTO_3");
     REQUIRE(driver->get_device_sdk_version().has_value());
     CHECK(driver->get_device_sdk_version()->find("libgphoto2") != std::string::npos);

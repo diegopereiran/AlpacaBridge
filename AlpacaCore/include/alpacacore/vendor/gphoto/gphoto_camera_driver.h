@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+
 #include <memory>
 
 namespace alpacacore::vendor::gphoto {
@@ -27,4 +28,4 @@ namespace alpacacore::vendor::gphoto {
  */
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index);
 
-} // namespace alpacacore::vendor::gphoto
+}  // namespace alpacacore::vendor::gphoto
