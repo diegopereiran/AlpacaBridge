@@ -2319,7 +2319,8 @@ Response Router::dispatch_device_method(
                 // driver's get_connected() may block on the state mutex its
                 // connect sequence holds for the whole handshake (the SynScan
                 // hand controller was the original, issue #130; its getter is
-                // lock-free now, the telescopes named there still block), and calling it
+                // lock-free now, the telescopes named in async_connectable.h
+                // still block), and calling it
                 // while a task is in
                 // flight stalled this handler for the entire connect, so the
                 // 8 s deadline below never fired. A connect requested while a

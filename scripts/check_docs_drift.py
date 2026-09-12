@@ -350,9 +350,16 @@ def check_blocking_get_connected_list():
     if span_failures:
         return failures
 
+    listed_names = {which: set(_names_in_span(which, span)) for which, span in spans.items()}
+
     def named(entry):
+        # Whole parsed names, not a substring of the sentence: substring
+        # matching is only safe here because no name is a prefix of another
+        # WITHIN one list today, and that is not a property worth depending on
+        # (it already failed across the two lists -- "iOptron" inside "iOptron
+        # iMate PowerBox").
         prose, which = entry
-        return prose in spans[which]
+        return prose in listed_names[which]
 
     # Parse the names OUT of each list, so a name that should not be there is
     # caught even when no driver file maps to it. Probing only for the names in
@@ -392,11 +399,20 @@ def check_blocking_get_connected_list():
     # the counts -- a gate against drift that itself drifts is worth very
     # little. CHANGELOG.md is deliberately out of scope: its historical entries
     # describe what was true when they were written.
+    # ROOT.glob, not glob.glob: the latter is cwd-relative, so running this
+    # from anywhere but the repo root would return nothing and turn the rule
+    # into a silent no-op -- the same failure shape as the hand-written file
+    # list it replaced. Headers and tests are in scope too; a count is just as
+    # stale in test_async_connectable.cpp as in a driver.
     counted_paths = sorted(
-        p for pattern in ("AGENTS.md", "docs/**/*.md", "AlpacaCore/include/**/*.h",
-                          "AlpacaCore/src/**/*.cpp", "AlpacaHTTP/include/**/*.h",
-                          "AlpacaHTTP/src/**/*.cpp", "AlpacaHTTP/tests/**/*.cpp")
-        for p in glob.glob(pattern, recursive=True))
+        str(p.relative_to(ROOT))
+        for pattern in ("AGENTS.md", "README.md", "docs/**/*.md",
+                        "AlpacaCore/include/**/*.h", "AlpacaCore/src/**/*.h",
+                        "AlpacaCore/src/**/*.cpp", "AlpacaCore/tests/**/*.h",
+                        "AlpacaCore/tests/**/*.cpp",
+                        "AlpacaHTTP/include/**/*.h", "AlpacaHTTP/src/**/*.cpp",
+                        "AlpacaHTTP/tests/**/*.cpp")
+        for p in ROOT.glob(pattern))
     for path in counted_paths:
         for match in count_re.finditer(read(path)):
             failures.append(
