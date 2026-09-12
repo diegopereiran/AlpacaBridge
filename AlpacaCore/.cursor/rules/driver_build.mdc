@@ -130,10 +130,11 @@ For each SDK, identify **only the files you need**:
 
 ### Step 3: Document SDK Structure in CMake
 
-In your driver's CMakeLists.txt, document the SDK folder name and which files are used. You'll need to search for the SDK folder since the name varies:
+In your driver's CMakeLists.txt, set the SDK root as a literal path and record the layout in a
+comment, so the next reader can see which files are used without opening the SDK:
 
 ```cmake
-# ZWO SDK Structure (example - actual folder name may vary):
+# ZWO SDK structure (the path is fixed; each vendor's differs):
 # - external/ZWO/ASI_Camera_SDK/include/ASICamera2.h (header)
 # - external/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.a (Linux arm64 static lib)
 ```
@@ -331,10 +332,11 @@ See [CMake Configuration](#cmake-configuration) section below.
 
 ## CMake Configuration
 
-### Finding the SDK Folder
+### Pointing CMake at the SDK
 
-For ZWO, the SDK subset is vendored in `external/ZWO/ASI_Camera_SDK`, so use the
-fixed path. For other vendors, you can still search for a known header file.
+Every vendor's SDK is vendored at a fixed path and named literally — none of them are
+searched for. The ZWO block below is the shape to copy: set the root, then hard-fail
+with that same path in the message so a missing SDK says where it was expected.
 
 ```cmake
 set(ZWO_SDK_DIR "${CMAKE_SOURCE_DIR}/external/ZWO/ASI_Camera_SDK")
@@ -623,8 +625,8 @@ above: a QHY camera is identified by a **string** id, never an integer index, an
 **Test seam**: the drivers reach the SDK through the abstract `QHYSDK` interface in that same header,
 so they are testable without hardware. `QHYSDKWrapper` is the production implementation; every
 `create_qhy_*` factory has an overload taking a `QHYSDK&`, which the tests use to inject the scripted
-fake in `tests/fake_qhy_sdk.h`. Under `[stress]`, wrap the fake in the mutex-taking decorator from
-`tests/locked_qhy_sdk.h` — the fake is deliberately unhardened, so an unlocked call produces a
+fake in `tests/fake_qhy_sdk.h`. Wrap the fake in the mutex-taking decorator from `tests/locked_qhy_sdk.h`, which is what the QHY
+tests do throughout — the fake is deliberately unhardened, so an unlocked call produces a
 ThreadSanitizer report naming the fake rather than the driver.
 
 **CMake**: no discovery. `src/vendors/qhy/CMakeLists.txt` sets the SDK root explicitly and fails at
@@ -660,8 +662,9 @@ tells you exactly where it looked.
 2. If the vendor shipped a newer versioned folder, update the SDK root in
    `src/vendors/<vendor>/CMakeLists.txt` — nothing globs for it, so a new folder name is invisible
    until that path is edited
-3. Check the architecture first if the failure came earlier than the header check: the build is
-   arm64-only and each vendor's CMake fails outright on anything else
+3. Check the architecture if the failure is not about a header at all: the build is arm64-only and
+   every vendor's CMake hard-fails on anything else. QHY checks the architecture before its
+   headers, ZWO after, so which failure you see first depends on the vendor
 
 ### Linker Errors
 
