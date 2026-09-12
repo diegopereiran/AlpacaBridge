@@ -368,8 +368,14 @@ elif ensure_tool node nodejs; then
   # Node 20 but Node 22 resolves the path as a module and dies with
   # MODULE_NOT_FOUND. Kept identical to the CI step for that reason.
   mapfile -t JS_TEST_FILES < <(git ls-files 'AlpacaHTTP/tests/web/*.test.js')
-  if [ "${js_ok}" -eq 1 ] && [ "${#JS_TEST_FILES[@]}" -gt 0 ] \
-      && ! node --test "${JS_TEST_FILES[@]}"; then
+  if [ "${js_ok}" -eq 1 ] && [ "${#JS_TEST_FILES[@]}" -eq 0 ]; then
+    # FAIL, not skip: CI's step exits 1 on an empty list, so skipping here
+    # would let a branch that renames the tests out of the glob pass locally
+    # and fail in CI -- the divergence both files' "kept in sync" comments
+    # exist to prevent.
+    echo "No web UI JavaScript tests matched AlpacaHTTP/tests/web/*.test.js."
+    js_ok=0
+  elif [ "${js_ok}" -eq 1 ] && ! node --test "${JS_TEST_FILES[@]}"; then
     echo "Web UI JavaScript unit tests failed."
     js_ok=0
   fi
