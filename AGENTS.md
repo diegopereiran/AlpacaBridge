@@ -1904,10 +1904,13 @@ below was one of them.
   RightAscensionRate ~0.9 nearly cancelling sidereal, is the way in). Grep for that WARN if a
   2x ever recurs, and for "rate check skipped" if a slew was never verified: **every exit that
   does not complete a measurement logs that phrase** -- the entry guards, the zero-rate and
-  zero-interval guards, both `sleep_unlocked()` supersession exits, and both exits inside the
-  attempt-0 recovery (the stop-wait losing the axis, and tracking going off while it settled).
-  Review of this branch found three of those silent, including one that fires with the RA axis
-  already stopped by the check's own stop. A check that RAN and found the rate correct logs
+  zero-interval guards, both `sleep_unlocked()` supersession exits, the three exits inside the
+  attempt-0 recovery (the stop-wait losing the axis, tracking going off while it settled, and the
+  restart itself throwing), and the two catch blocks (a position read throwing mid-window, and
+  the caller's catch around the whole check, which fires when `check_connected()` throws out of
+  the sample sleep). Review of this branch found three of those silent, including one that fires
+  with the RA axis already stopped by the check's own stop, and a second review found the three
+  exception paths silent too. A check that RAN and found the rate correct logs
   nothing -- that is the ordinary case, once per goto, and the grep is for slews that were
   never verified, not for slews that passed. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
   event followed a 26 s full-speed slew) but was not proven.

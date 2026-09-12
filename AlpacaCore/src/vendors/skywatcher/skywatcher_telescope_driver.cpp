@@ -3181,7 +3181,9 @@ private:
                 verify_post_slew_tracking_rate_locked(lock);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher",
-                                std::string("Tracking restarted, but the post-slew rate check failed: ") + e.what());
+                                std::string("Post-slew tracking rate check skipped: tracking is running, but the check "
+                                            "threw before it completed a measurement: ") +
+                                    e.what());
             }
         }
     }
@@ -3270,7 +3272,10 @@ private:
                 // when a slew was never verified (review note on #448). Every
                 // exit that does NOT complete a measurement says so -- this
                 // one, the entry guards, the zero-rate and zero-interval
-                // guards, and both exits inside the attempt-0 recovery. A
+                // guards, the three exits inside the attempt-0 recovery
+                // (including the restart throwing), the catch around the
+                // position reads, and the catch in the caller that wraps
+                // the whole check. A
                 // check that ran and found the rate correct is deliberately
                 // silent: it is the ordinary case, once per goto, and the
                 // grep is for slews that were never verified.
@@ -3307,7 +3312,7 @@ private:
                 elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - sampled_at).count();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher",
-                                std::string("Post-slew tracking rate check could not read position: ") + e.what());
+                                std::string("Post-slew tracking rate check skipped: could not read position: ") + e.what());
                 return;
             }
             int32_t delta = static_cast<int32_t>((after - before) & kCountsMask);
@@ -3363,8 +3368,8 @@ private:
                     // the client decide to re-enable it.
                     tracking_ = false;
                     ALPACA_LOG_WARN("SkyWatcher",
-                                    std::string("Post-slew tracking restart failed; RA axis left stopped and "
-                                                "Tracking now reports false: ") +
+                                    std::string("Post-slew tracking rate check skipped: the restart failed; RA axis "
+                                                "left stopped and Tracking now reports false: ") +
                                         e.what());
                     return;
                 }
