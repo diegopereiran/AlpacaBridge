@@ -2337,15 +2337,31 @@ private:
                     continue;
                 }
 
+                bool have_temp = false;
+                double t = 0.0;
                 try {
                     if (sdk.is_control_available(id, control::CURTEMP)) {
-                        double t = sdk.get_param(id, control::CURTEMP);
-                        std::lock_guard<std::mutex> lk(mutex_);
-                        telemetry_ccd_temp_c_ = t;
-                        telemetry_temp_valid_ = true;
+                        t = sdk.get_param(id, control::CURTEMP);
+                        have_temp = true;
                     }
                 } catch (const std::exception& e) {
                     ALPACA_LOG_DEBUG("QHY", "Telemetry CURTEMP read failed: " + std::string(e.what()));
+                }
+                // Recheck the stop flag immediately after the blocking SDK
+                // calls, BEFORE touching `this` again (same rule as the temp
+                // worker above): both calls queue on the wrapper's per-handle
+                // call_mutex, which a wedged-and-detached exposure download
+                // can hold for a minute, and since open-astro#323 this
+                // worker's join is bounded too. If join_worker_thread() timed
+                // out and detached this thread while it was inside get_param,
+                // `this` may already be destroyed by the time we get here.
+                if (stop_flag->stopped()) {
+                    break;
+                }
+                if (have_temp) {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    telemetry_ccd_temp_c_ = t;
+                    telemetry_temp_valid_ = true;
                 }
 
                 stop_flag->wait_for(std::chrono::seconds(1));
