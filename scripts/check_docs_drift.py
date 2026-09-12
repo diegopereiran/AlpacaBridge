@@ -643,7 +643,6 @@ def check_qhy_seam_lists():
 # these top-level dirs/files (spaces allowed only for a verbatim tracked path), and are not a bare CLI flag
 # or a URL.
 PATH_PREFIXES = (
-    ".cursor/",
     "AlpacaCore/", "AlpacaHTTP/", "scripts/", "docs/", ".github/",
     ".claude/", "debian/",
 )
@@ -790,8 +789,10 @@ def check_agents_md_paths_exist():
 # No `docs/` here: PATH_PREFIXES already holds it and is tried first, so a
 # `docs/x` span in a rule file always resolves at the repo root (neither
 # component has a docs/ tree of its own today).
+# `.cursor/` is component-relative on purpose: there is no repo-root .cursor/
+# tree, and the rule files cross-reference each other as `.cursor/rules/...`.
 RULE_FILE_RELATIVE_PREFIXES = (
-    "src/", "include/", "tests/", "external/", "conformu/", "examples/", "web/",
+    "src/", "include/", "tests/", "external/", "conformu/", "examples/", "web/", ".cursor/",
 )
 # (document, component root, floor). Floors are per file, as the issue asks,
 # so a matcher that stops working on one of them fails rather than reporting
