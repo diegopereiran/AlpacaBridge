@@ -1255,6 +1255,36 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   the SDK via `sdk_` would instead touch the driver at the moment each call
   returns, on top of the post-call touches. Treat detached workers as unsafe
   and bound their lifetime; do not read this rule as making them safe.
+- **When a fake and the real SDK disagree, the fake must be the HARSHER of the
+  two** (`fake_qhy_sdk.h`, issues #373/#365/#390). A fake that answers a
+  plausible value where hardware answers a sentinel, or that settles instantly
+  where hardware converges, produces green tests for driver code that breaks on
+  the bench — and the plausible answer is the dangerous one precisely because
+  nothing looks wrong. Three QHY examples, two now fixed and one re-scoped and all worth
+  recognising in the next fake: `get_param()` answered `0.0` for an unsupported
+  control where `GetQHYCCDParam()` answers `QHYCCD_ERROR` (~4.29e9), so
+  "unsupported" and "reads zero" were indistinguishable; `get_mem_length()`
+  was reported as ignoring the binning it had been told about, and acting on
+  that entry literally made the fake worse, which is its own lesson: **a gap
+  entry is a claim about the real SDK, and it can be wrong.** Check the
+  units against the only caller before "fixing" one. It also exposed a
+  second, sharper rule: **a fake's paired calls must agree with each other**,
+  since `get_mem_length()` and `get_single_frame()` are used together (size a
+  buffer from one, fill it with the other) and hardware cannot deliver an
+  image larger than `GetQHYCCDMemLength()`. Fixing one of a pair alone turned
+  a parity gap into a heap-buffer-overflow inside the fake, which reads as a
+  driver bug in an ASan/TSan job. Write the units down where the state lives
+  (`roi_` is in binned pixels, because that is what the driver passes) and
+  pin the pairing with a case, not just the single call; and
+  `control_temp()` wrote its target straight into `CURTEMP`, an instant settle
+  the real `ControlQHYCCDTemp` PID can never produce, which would have let a
+  driver that merely reads back its own setpoint pass a thermal test. Keep the
+  `KNOWN PARITY GAPS` block at the top of a fake exhaustive, and prefer closing
+  a gap to documenting it. **Give a fake's shared setup ONE home**: the
+  one-camera `make_fake()` was copied verbatim into three QHY test files
+  (issue #342) and is now `FakeQHYSDK::with_one_camera()` next to the canned
+  camera it builds, so a change to what a default test fake looks like cannot
+  be made in two files out of three.
 - **Poll-until-settled loops keep the sleep cadence in the driver but put the
   DECISION in `util::ConsecutiveSettle`** (`util/poll_settle.h`, issue #105):
   stability-run + poll-budget semantics, unit-tested with scripted sequences
