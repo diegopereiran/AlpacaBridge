@@ -5892,10 +5892,7 @@ Response Router::handle_build_info(const Request& request, std::uint32_t server_
     } catch (const std::exception& e) {
         util::log_error("Error getting build info: " + std::string(e.what()));
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
-            util::exception_to_error_message(e)
-        );
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
         response.set_body(alpaca_response);
     }
 
