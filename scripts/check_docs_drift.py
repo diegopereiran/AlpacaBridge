@@ -613,6 +613,7 @@ def check_qhy_seam_lists():
 # these top-level dirs/files (spaces allowed only for a verbatim tracked path), and are not a bare CLI flag
 # or a URL.
 PATH_PREFIXES = (
+    ".cursor/",
     "AlpacaCore/", "AlpacaHTTP/", "scripts/", "docs/", ".github/",
     ".claude/", "debian/",
 )
@@ -684,6 +685,9 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
     document. Returns (failures, checked).
     """
     failures = []
+    if not (ROOT / doc).is_file():
+        return (["%s is listed for path checking but does not exist -- it was renamed or deleted; "
+                 "update the list" % doc], 0)
     text = FENCED_BLOCK_RE.sub("", read(doc))
     text = DOUBLE_BACKTICK_SPAN_RE.sub("", text)
     # With fences gone every backtick must pair up; one stray backtick would
@@ -780,7 +784,8 @@ def check_rule_file_paths_exist():
     # fifth .mdc added later is silently unchecked -- the drift class this
     # check exists for (review note on PR #474).
     listed = {doc for doc, _, _ in RULE_FILE_PATH_CHECKS}
-    tracked_rule_files = [f for f in _run_git(["ls-files", "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"]).stdout.splitlines() if f]
+    tracked_rule_files = [f for f in _run_git(["-c", "core.quotePath=false", "ls-files",
+                                               "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"]).stdout.splitlines() if f]
     for f in sorted(set(tracked_rule_files) - listed):
         failures.append("%s is a tracked Cursor rule file but is not in RULE_FILE_PATH_CHECKS -- add it "
                         "with its component and a floor" % f)
