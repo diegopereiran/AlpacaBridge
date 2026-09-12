@@ -197,27 +197,32 @@ public:
     // worker is running concurrently with that read.
     //
     // Sound for every case in these files today, though the reason is not
-    // simply "no cooled cameras" -- test_qhy_fake_sdk.cpp now has one, the
+    // simply "no cooled cameras" -- test_qhy_fake_sdk.cpp has one, the
     // control_temp convergence case, which reads last_temp_target straight
-    // from the test body. What makes all of them safe is that NO SECOND THREAD
-    // ever runs: that file builds no driver at all, and the camera and wheel
-    // files build drivers but never drive one into starting a background
-    // worker -- their two start_exposure() calls only assert a throw, and
-    // neither file uses a cooled camera, so no telemetry or temperature thread
-    // is ever spawned.
+    // from the test body. What keeps every read safe is that NO OTHER THREAD
+    // is touching the fake when the test body reads: the two cases in
+    // test_qhy_fake_sdk.cpp that do spawn std::threads (the LockedQHYSDK
+    // slowest-forward and cancel-overtake cases) join them before anything is
+    // read, and the QHYSeamFixture case builds a CameraDriver but connects an
+    // uncooled camera and never starts an exposure, so the driver spawns no
+    // telemetry, temperature or exposure worker before physical_opens is
+    // read. The camera and wheel files build drivers but never drive one into
+    // starting a background worker -- their two start_exposure() calls only
+    // assert a throw, and neither file uses a cooled camera.
     //
-    // THE FIRST case that lets a driver worker actually run breaks that -- a
-    // connected cooled camera, a real exposure, a pulse guide -- and these
-    // reads become TSan findings in test code, exactly the noise LockedQHYSDK
-    // exists to keep out of the [stress] suite. Route them through the same
-    // lock before adding such a case. Tracked in issue #331.
+    // THE FIRST case that reads one of these while a driver worker is still
+    // running breaks that -- a connected cooled camera, a real exposure in
+    // flight, a pulse guide -- and the read becomes a TSan finding in test
+    // code, exactly the noise LockedQHYSDK exists to keep out of the [stress]
+    // suite. Route them through the same lock before adding such a case.
+    // Tracked in issue #331.
     //
     // The same issue covers the mirror-image race on the input side: hit()
     // bumps `calls` under calls_mutex but then reads `throw_from` outside it,
     // so a test body that arms or clears fault injection mid-storm races the
-    // call path reading it. Sound today for the same reason (no driver, no
-    // second thread) and unsound from the same first case, so fix both
-    // together rather than one at a time.
+    // call path reading it. Sound today for the same reason (nothing else is
+    // calling into the fake while the body writes it) and unsound from the
+    // same first case, so fix both together rather than one at a time.
     std::map<std::string, int> calls;
     int physical_opens = 0;
     int physical_closes = 0;
