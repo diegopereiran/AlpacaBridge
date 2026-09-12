@@ -2079,14 +2079,27 @@ does the operation that owns the busy axis actually re-derive THIS value? A moun
 busy flag can only answer that when the operation owns every axis -- a goto, park, home
 or slew does; a pulse or a manual nudge does not.
 
-The audit found one more instance, `set_right_ascension_rate()`, fixed with it: no
-hemisphere is involved there, but a declination operation in flight still made the
-whole-mount predicate true and stranded the rate write with nothing scheduled to apply
-it, so a client's `RightAscensionRate` silently did nothing until the next re-apply.
+The audit found two more instances, both fixed with it, and it took three review rounds
+to find all three -- each fix's own claim of completeness was what exposed the next one.
+No hemisphere is involved in either:
+
+- `set_right_ascension_rate()`: a declination operation in flight made the whole-mount
+  predicate true and stranded the rate write with nothing scheduled to apply it, so a
+  client's `RightAscensionRate` silently did nothing until the next re-apply.
+- `set_declination_rate()`, which passes the predicate down as
+  `apply_dec_rate_offset_locked(defer_motion=)`: an East/West pulse or an RA `MoveAxis`
+  made it true while owning only the RA axis, and the pulse's `stop_axis()` restore
+  rewrites the RA step period without ever calling `apply_dec_rate_offset_locked()`, so a
+  continuous Dec offset was stranded the same way. Comet or satellite tracking while
+  autoguiding is the way in. Only the continuous branch was affected: a sub-floor rate
+  recovers on its own through the duty worker's start gate.
+
 Every "skip while busy" guard in this driver now names its axis. When adding a new one,
 grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are
 the ones asking "is the mount doing anything at all", such as the duty worker's
-`connected_ && tracking_ && !axes_busy_locked()` start gate.
+`connected_ && tracking_ && !axes_busy_locked()` start gate. **And do the grep before
+writing the claim** -- this section asserted the sweep was complete twice before it was,
+and each time the assertion itself was the review finding.
 
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):

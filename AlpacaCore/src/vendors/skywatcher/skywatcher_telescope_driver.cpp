@@ -533,7 +533,19 @@ public:
                                       AlpacaError::InvalidOperation);
             }
             dec_rate_arcsec_per_sec_ = rate;
-            const bool busy = axes_busy_locked();
+            // Per axis, for the same reason set_right_ascension_rate() and
+            // set_site_latitude() ask per axis: only an operation that owns
+            // the DEC axis re-applies the Dec offset when it releases it. An
+            // East/West pulse or an RA MoveAxis made the whole-mount
+            // predicate true while owning only RA, and its restore rewrites
+            // the RA step period and never calls apply_dec_rate_offset_locked(),
+            // so a continuous (at-or-above-floor) offset was stranded until
+            // the next DeclinationRate write, tracking toggle or slew --
+            // comet or satellite tracking while autoguiding is the way in
+            // (round-3 review finding). The sub-floor duty path recovered on
+            // its own through the duty worker's start gate; the continuous
+            // one did not.
+            const bool busy = axis_busy_locked(kAxisDec);
             if (!busy) {
                 anchor_model_locked();  // continuous anchor: no position jump on a rate change
             }

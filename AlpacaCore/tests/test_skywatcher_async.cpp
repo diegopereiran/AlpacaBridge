@@ -1088,6 +1088,49 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher - a DeclinationRate write during an RA pulse is applied, not stranded",
+          "[skywatcher][telescope][hemisphere]") {
+    // Round-3 review finding, and the third instance of the same guard: the
+    // whole-mount predicate reaches apply_dec_rate_offset_locked() as
+    // defer_motion, so an East/West pulse -- which owns only the RA axis --
+    // made it true and the continuous branch returned without starting any
+    // Dec motion. The pulse's stop_axis() restore only rewrites the RA step
+    // period and never calls apply_dec_rate_offset_locked(), so the offset
+    // was stranded until the next DeclinationRate write, tracking toggle or
+    // slew. Comet or satellite tracking while autoguiding is the way in.
+    //
+    // Only the CONTINUOUS branch: a sub-floor rate is recovered by the duty
+    // worker's own start gate once the axes are free, so 10 arcsec/s (well
+    // above the ~0.26 arcsec/s floor) is the rate that shows it.
+    //
+    // No hemisphere is involved, so this is northern like the RA sibling.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    REQUIRE_FALSE(mount.axis_running(2));
+
+    // An East pulse owns the RA axis only, and is long enough that the Dec
+    // motion below cannot be the pulse's own restore path.
+    driver->pulse_guide(2, 3000);  // East, 3 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    REQUIRE(driver->get_is_pulse_guiding());
+
+    driver->set_declination_rate(10.0);  // arcsec/s, continuous (above the floor)
+    REQUIRE(driver->get_declination_rate() == 10.0);
+
+    // The Dec axis must start while the RA pulse is still in flight.
+    CHECK(wait_until([&] { return mount.axis_running(2); }, 1500));
+    CHECK(driver->get_is_pulse_guiding());
+
+    driver->set_declination_rate(0.0);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher - a RightAscensionRate write during a DEC pulse is applied, not stranded",
           "[skywatcher][telescope][hemisphere]") {
     // Round-2 review note: set_right_ascension_rate() asked the whole-mount
