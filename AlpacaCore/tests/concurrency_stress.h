@@ -285,8 +285,8 @@ private:
             return;
         }
         if (samples_.size() < kMaxSamples) {
-            samples_.push_back(Sample{code, "", what,
-                                      "AlpacaException(code=" + std::to_string(code) + "): " + what, 1});
+            samples_.push_back(
+                Sample{code, "", what, "AlpacaException(code=" + std::to_string(code) + "): " + what, 1});
             return;
         }
         note_unsampled(code, "", what);
