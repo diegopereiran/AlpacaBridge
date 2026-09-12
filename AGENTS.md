@@ -761,9 +761,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
 - **The router must never call `get_connected()` while `get_connecting()` is
   true — the connect side of the rule above** (SynScan hand controller,
   2026-09, issue #130). The telescope drivers named in
-  `async_connectable.h` (Celestron, OnStep, Bisque,
-  iOptron, Sky-Watcher; SynScan was in this list until the #130 fix made its
-  getter lock-free) answer `get_connected()` under the state mutex that their
+  `async_connectable.h`'s blocking list -- **that comment is the list; this
+  paragraph deliberately does not repeat it, because a second copy is what
+  went stale for SynScan** -- answer `get_connected()` under the state mutex that their
   `set_connected(true)` holds for the entire handshake, so a
   `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
@@ -781,13 +781,14 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (every driver does except the ones named here, SynScan among them
-  since the #130 fix) —
-  the telescopes above still take the mutex and rely on the router rule, and the
-  wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita, ZWO ASIAIR
-  and ASIAIR Plus) lock inside the wrapper's `is_open()` but release it before
+  getter (every driver does except the ones `async_connectable.h` names --
+  SynScan is among those that DO have a lock-free getter, since the #130 fix) —
+  the telescopes it lists still take the mutex and rely on the router rule, and the
+  wrapper-backed switch drivers it lists lock inside the wrapper's `is_open()` but
+  release it before
   `pending_mutex_`, so they rely on the rule without creating the ABBA hazard.
-  **These lists are gated, and no count is stated anywhere** (issue #381):
+  **`async_connectable.h`'s comment is the single source for both lists, it is
+  gated, and no count is stated anywhere** (issue #381):
   `scripts/check_docs_drift.py` classifies every `get_connected()` override
   under `AlpacaCore/src/vendors/` by its body and fails if a blocking one is
   missing from `async_connectable.h`'s list, if a lock-free one is still named
