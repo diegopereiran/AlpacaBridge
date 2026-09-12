@@ -44,11 +44,8 @@ constexpr uint32_t kHomeCounts = 0x800000;
 // along the HA = +/-6 h circle (see the pointing-model comment in the driver).
 constexpr double kHomeHourAngleOffsetHours = 6.0;
 
-// Signed 6 h home term for a dec-axis angle: which side of the dec axis the
-// OTA sits on, NOT which hemisphere the mount is in.
-inline double home_hour_angle_offset(double dec_axis_degrees) {
-    return dec_axis_degrees >= 0.0 ? kHomeHourAngleOffsetHours : -kHomeHourAngleOffsetHours;
-}
+// home_hour_angle_offset() lives in namespace detail (below, and declared in
+// the header) so the negative-zero rule it carries is unit-testable.
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
@@ -2270,7 +2267,7 @@ private:
         ha_mech_hours = a1 / kHoursToDegrees;
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec = sky_sign * dec_mech;
-        const double ha_hours = wrap_hour_angle(sky_sign * ha_mech_hours + home_hour_angle_offset(a2));
+        const double ha_hours = wrap_hour_angle(sky_sign * ha_mech_hours + detail::home_hour_angle_offset(a2));
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ra = wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
@@ -4014,6 +4011,15 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
     const auto steady_ms = std::chrono::duration_cast<std::chrono::milliseconds>(steady_elapsed);
     const auto drift = system_ms - steady_ms;
     return drift > tolerance || drift < -tolerance;
+}
+
+double home_hour_angle_offset(double dec_axis_degrees) {
+    // std::signbit, not `>= 0.0`: at the exact pole the dec-axis angle is
+    // `branch * (90 - 90)`, which is -0.0 on the negative branch, and IEEE 754
+    // has -0.0 >= 0.0 compare true. That lost the branch and reported RA 12 h
+    // out for a slew to the pole with a negative hour angle (open-astro#459).
+    // The sign bit is the branch the hour angle asked for, zero or not.
+    return std::signbit(dec_axis_degrees) ? -kHomeHourAngleOffsetHours : kHomeHourAngleOffsetHours;
 }
 
 bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized) {

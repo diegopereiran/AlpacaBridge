@@ -477,3 +477,25 @@ TEST_CASE("SkyWatcher pointing - an East guide pulse slows the axis in the track
 }
 
 #endif  // !_WIN32
+
+TEST_CASE("SkyWatcher pointing - the home term keeps its branch at the exact pole (#459)",
+          "[skywatcher][telescope][unit]") {
+    // ra_dec_to_axis_degrees_locked() computes the dec-axis angle as
+    // branch * (90 - dec_mech); at the visible pole that is +0.0 or -0.0
+    // depending on the hour angle's sign, and the readback derives the 6 h
+    // home term from that angle. A `>= 0.0` test collapsed -0.0 onto the
+    // positive branch (IEEE 754: -0.0 >= 0.0 is true), so a slew to
+    // dec = +90 with a negative hour angle read back 12 h out in RA. Only
+    // the reported coordinate was wrong (RA is degenerate at the pole), but
+    // a conformance client comparing readback to target sees the 12 h.
+    using alpacacore::vendor::skywatcher::detail::home_hour_angle_offset;
+    CHECK(home_hour_angle_offset(45.0) == 6.0);
+    CHECK(home_hour_angle_offset(-45.0) == -6.0);
+    CHECK(home_hour_angle_offset(0.0) == 6.0);
+    // The literal shape the driver produces on the negative branch at the pole.
+    const double branch = -1.0;
+    const double a2_at_pole = branch * (90.0 - 90.0);
+    REQUIRE(std::signbit(a2_at_pole));  // the fixture really is -0.0
+    CHECK(home_hour_angle_offset(a2_at_pole) == -6.0);
+    CHECK(home_hour_angle_offset(-0.0) == -6.0);
+}
