@@ -745,8 +745,14 @@ def check_agents_md_paths_exist():
 # captured too: the first so a build-directory rename in one file only is
 # visible, the second so each zero-test grep can be paired with the log its
 # run actually wrote (issue #455).
+# The tag is what makes an invocation a run; the `| tee <log>` that follows is
+# OPTIONAL in the match so a run written without one is still counted, still
+# tag-compared and still required to have a guard -- which it cannot have,
+# since no grep can read a log it never wrote, so the pairing reports it
+# (review finding on PR #472: with `tee` mandatory, such a run was invisible
+# to the whole check).
 TSAN_RUN_RE = re.compile(
-    r'([^\s"]*)/tests/alpacacore_tests"?\s+"(\[[^"]+\])"\s*\|\s*tee\s+"?([^\s"]+)"?')
+    r'([^\s"]*)/tests/alpacacore_tests"?\s+"(\[[^"]+\])"(?:\s*\|\s*tee\s+"?([^\s"]+)"?)?')
 TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'\s+\"?([^\s\"]+)\"?")
 # ci_preflight.sh spells the build directory through a variable; this is its
 # one assignment, so the two paths can be compared by basename.
@@ -771,10 +777,13 @@ def _tsan_events(block):
     ("grep", pattern, log), all paths reduced to their basename so ci.yml's
     literal `stress-run.log` pairs with ci_preflight.sh's
     `"${TSAN_BUILD_DIR}/stress-run.log"` without expanding the variable.
+    A run with no `| tee` has tee_log None: it is still a run, and the
+    pairing below reports it, because no grep can guard a log never written.
     """
     events = []
     for m in TSAN_RUN_RE.finditer(block):
-        events.append((m.start(), ("run", m.group(2), _basename(m.group(1)), _basename(m.group(3)))))
+        tee_log = _basename(m.group(3)) if m.group(3) else None
+        events.append((m.start(), ("run", m.group(2), _basename(m.group(1)), tee_log)))
     for m in TSAN_GREP_RE.finditer(block):
         events.append((m.start(), ("grep", m.group(1), _basename(m.group(2)))))
     return [event for _, event in sorted(events)]
@@ -798,7 +807,7 @@ def _pair_tsan_runs(label, events, failures):
                     "%s: filtered TSan run %s is not followed by a zero-test "
                     "grep of its log %s before the next run -- every filtered "
                     "run needs its own guard, or the run reports success having "
-                    "executed nothing" % (label, pending[1], pending[3]))
+                    "executed nothing" % (label, pending[1], pending[3] or "(no tee)"))
             pending = event
             continue
         _, pattern, log = event
@@ -807,6 +816,13 @@ def _pair_tsan_runs(label, events, failures):
                 "%s: zero-test grep of %s has no filtered TSan run before it -- "
                 "an unpaired guard means the two files have drifted"
                 % (label, log))
+            continue
+        if pending[3] is None:
+            failures.append(
+                "%s: filtered TSan run %s does not `| tee` a log, so the grep of "
+                "%s that follows it cannot be reading that run's output -- pipe "
+                "the run into a log and grep that log" % (label, pending[1], log))
+            pending = None
             continue
         if log != pending[3]:
             failures.append(
@@ -820,7 +836,7 @@ def _pair_tsan_runs(label, events, failures):
             "%s: filtered TSan run %s is not followed by a zero-test grep of "
             "its log %s -- every filtered run needs its own guard, or the run "
             "reports success having executed nothing"
-            % (label, pending[1], pending[3]))
+            % (label, pending[1], pending[3] or "(no tee)"))
     return pairs
 
 
