@@ -5,10 +5,10 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 ## Quick Start
 
 1. **Download the vendor SDK** from the vendor's official website
-2. **Extract the SDK archive** - the vendor's SDK will typically extract into a folder (e.g., `ASI_Camera_SDK/`, `qhy_sdk/`, etc.)
-3. **Place the extracted SDK folder** directly into this `external/` directory
-   - No need to create subdirectories or reorganize files
-   - Use the SDK structure exactly as provided by the vendor
+2. **Extract the SDK archive** - the vendor's SDK extracts into a folder of the vendor's naming (e.g., `ASI_Camera_SDK/`, `sdk_linux_arm64_26.06.04/`)
+3. **Place the extracted SDK folder** under this vendor's directory here, at the exact path that vendor's `src/vendors/<vendor>/CMakeLists.txt` sets and hard-fails on (e.g., `external/ZWO/ASI_Camera_SDK/`, `external/QHY/sdk_linux_arm64_26.06.04/`)
+   - Nothing searches for the SDK: the path is literal and differs per vendor, so read it from the CMakeLists before extracting
+   - Use the SDK structure exactly as provided by the vendor below that folder
 4. **Build with vendor support**:
    ```bash
    mkdir build && cd build
