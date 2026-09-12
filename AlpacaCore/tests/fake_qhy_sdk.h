@@ -141,7 +141,10 @@ public:
     std::set<std::string> throw_from;
 
     /// Test-only hook, run at the top of every forward (open-astro#339).
-    /// Null in every ordinary case. See hit().
+    /// Null in every ordinary case. See hit(). Read by hit() with NO
+    /// synchronisation, like every other knob here: assign and clear it only
+    /// while no other thread is inside the fake (the two #339 cases do so
+    /// single-threaded, and clear it after joining), never mid-[stress].
     std::function<void(const std::string&)> before_call;
     bool sdk_resource_available = true;
     // Set to "" to reach the empty-cache branch the driver special-cases in
