@@ -18,6 +18,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <alpacahttp/util/host_timezone.h>
 #include <alpacahttp/version.h>
 #include <unistd.h>
 
@@ -463,6 +464,69 @@ void put_connected(alpacahttp::Router& router, const std::string& path_base, con
 } // namespace
 
 int main() {
+    // open-astro#354: host_time_zone() resolution table, through the seam
+    // (explicit TZ and an /etc stand-in under a temp dir) so the answer does
+    // not depend on the build host's own zone.
+    {
+        using alpacahttp::util::host_time_zone;
+        using alpacahttp::util::looks_like_iana_zone;
+        namespace fs = std::filesystem;
+
+        EXPECT(looks_like_iana_zone("America/Denver"));
+        EXPECT(looks_like_iana_zone("Etc/UTC"));
+        EXPECT(looks_like_iana_zone("America/Argentina/Buenos_Aires"));
+        EXPECT(looks_like_iana_zone("Etc/GMT+12"));
+        EXPECT(!looks_like_iana_zone(""));
+        EXPECT(!looks_like_iana_zone("UTC"));      // no '/': Intl accepts it, but so does "EST5EDT" by this shape
+        EXPECT(!looks_like_iana_zone("EST5EDT"));  // POSIX rule string, not an IANA name
+        EXPECT(!looks_like_iana_zone("localtime"));
+        EXPECT(!looks_like_iana_zone("/America/Denver"));
+        EXPECT(!looks_like_iana_zone("America/Denver/"));
+        EXPECT(!looks_like_iana_zone("America//Denver"));
+        EXPECT(!looks_like_iana_zone("America/Den ver"));
+        EXPECT(!looks_like_iana_zone("../../etc/passwd"));
+
+        char tmpl[] = "/tmp/ab_tz_etc_XXXXXX";
+        const char* etc = ::mkdtemp(tmpl);
+        EXPECT(etc != nullptr);
+        const std::string etc_dir = etc ? etc : "";
+        const std::string zoneinfo = etc_dir + "/zoneinfo";
+        fs::create_directories(zoneinfo + "/Pacific");
+        { std::ofstream(zoneinfo + "/Pacific/Auckland") << "TZif"; }
+
+        // Nothing configured: "".
+        EXPECT(host_time_zone(nullptr, etc_dir) == "");
+
+        // TZ wins outright, with the tzset() ':' prefix stripped and the
+        // absolute-path form reduced to its zone.
+        EXPECT(host_time_zone("Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+        EXPECT(host_time_zone(":Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+        EXPECT(host_time_zone(":/usr/share/zoneinfo/Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+
+        // /etc/timezone, trimmed.
+        { std::ofstream(etc_dir + "/timezone") << "America/Denver\n"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "America/Denver");
+        // A set-but-unusable TZ governs localtime_r() and must not be
+        // contradicted by the file: "" rather than "America/Denver".
+        EXPECT(host_time_zone("EST5EDT", etc_dir) == "");
+        EXPECT(host_time_zone("", etc_dir) == "");
+
+        // A junk /etc/timezone falls through to the symlink.
+        { std::ofstream(etc_dir + "/timezone") << "not a zone\n"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "");
+        fs::create_symlink(zoneinfo + "/Pacific/Auckland", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Pacific/Auckland");
+        // Debian's relative symlink form resolves the same way.
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("../usr/share/zoneinfo/Etc/UTC", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Etc/UTC");
+        // A regular-file /etc/localtime (no symlink) yields "".
+        fs::remove(etc_dir + "/localtime");
+        { std::ofstream(etc_dir + "/localtime") << "TZif"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "");
+
+        fs::remove_all(etc_dir);
+    }
     std::cout << "Testing routing...\n";
 
     alpacahttp::Router router;
@@ -3541,6 +3605,14 @@ int main() {
         EXPECT(v["ClockSynchronized"].get<bool>() == (source == "ntp"));
         EXPECT(v.value("SyncSystemClockFromClients", false) == true);
         EXPECT(clock_router.sync_system_clock_from_clients());
+        // open-astro#354: the host zone rides along as an IANA name or "".
+        // What it resolves to depends on the build host, so pin only the
+        // shape here; the resolver's own table is the block below.
+        EXPECT(v.contains("TimeZone") && v["TimeZone"].is_string());
+        {
+            const std::string tz = v["TimeZone"].get<std::string>();
+            EXPECT(tz.empty() || alpacahttp::util::looks_like_iana_zone(tz));
+        }
 
         // Boolean and string forms are both accepted; the value persists to the config file.
         auto put = route_request(clock_router, "PUT", "/management/v1/description",
