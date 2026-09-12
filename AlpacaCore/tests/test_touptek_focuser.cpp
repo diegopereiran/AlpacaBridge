@@ -18,6 +18,7 @@
 #include <variant>
 
 #include "catch2_compat.h"
+#include "fake_touptek_sdk.h"
 
 namespace {
 
@@ -39,9 +40,12 @@ TEST_CASE("ToupTek AAF Focuser Driver - Defaults", "[touptek][focuser][unit]") {
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_name() == "ToupTek AAF");
+    // open-astro#309: TempCompAvailable and TempComp are properties, so a
+    // disconnected read refuses rather than answering. These used to assert
+    // the value, which is what let the missing connection check survive.
     CHECK(driver->get_absolute() == true);
-    CHECK(driver->get_temp_comp_available() == false);
-    CHECK(driver->get_temp_comp() == false);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("ToupTek AAF Focuser Driver - Device metadata", "[touptek][focuser][unit]") {
@@ -101,11 +105,12 @@ TEST_CASE("ToupTek AAF Focuser Driver - Absolute focuser semantics",
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_index(2, 0);
 
     // Absolute focuser, no temperature compensation, step size unsupported.
+    // Disconnected, the two TempComp properties refuse rather than answer
+    // (open-astro#309).
     CHECK(driver->get_absolute() == true);
-    CHECK(driver->get_temp_comp_available() == false);
-    CHECK(driver->get_temp_comp() == false);
-    require_alpaca_error([&]() { driver->get_step_size(); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("ToupTek AAF Focuser Driver - Value range validation",
@@ -121,9 +126,10 @@ TEST_CASE("ToupTek AAF Focuser Driver - Value range validation",
     require_alpaca_error([&]() { driver->move(100000000); },
                          alpacacore::AlpacaError::NotConnected);
 
-    // Set temp comp is unsupported regardless of connection state.
-    require_alpaca_error([&]() { driver->set_temp_comp(true); },
-                         alpacacore::AlpacaError::NotImplemented);
+    // Set temp comp is unsupported, but the connection check answers first
+    // while disconnected (open-astro#309). The NotImplemented answer on a
+    // connected focuser is unchanged.
+    require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("ToupTek AAF Focuser Driver - State machine", "[touptek][focuser][unit]") {
@@ -150,18 +156,20 @@ TEST_CASE("ToupTek AAF Focuser Driver - State machine", "[touptek][focuser][unit
                          alpacacore::AlpacaError::NotConnected);
 }
 
-TEST_CASE("ToupTek AAF Focuser Driver - Unsupported methods", "[touptek][focuser][unit]") {
+TEST_CASE("ToupTek AAF Focuser Driver - unsupported methods refuse while disconnected", "[touptek][focuser][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_index(0, 0);
 
     // Step size is not exposed because the AAF firmware does not report a
     // mechanically-valid microns-per-step value for arbitrary focuser setups.
-    require_alpaca_error([&]() { driver->get_step_size(); },
-                         alpacacore::AlpacaError::PropertyNotImplemented);
+    // Disconnected, the connection check answers first (open-astro#309): the
+    // driver does not report on a capability of hardware it has not opened.
+    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::NotConnected);
 
     // Temperature compensation is not implemented (no AAF action exists for
-    // it) and must report NotImplemented rather than DriverException.
-    require_alpaca_error([&]() { driver->set_temp_comp(true); },
-                         alpacacore::AlpacaError::NotImplemented);
+    // it) and must report NotImplemented rather than DriverException on a
+    // CONNECTED focuser. Disconnected, as here, the connection check answers
+    // first (open-astro#309).
+    require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("ToupTek AAF Focuser Driver - Device number assignment",
@@ -183,4 +191,33 @@ TEST_CASE("ToupTek AAF Focuser Driver - Create by id", "[touptek][focuser][unit]
     CHECK(driver->get_device_number() == 7);
     CHECK(driver->get_unique_id() == "TOUPTEK_AAF_tp-aaf-test-id");
     CHECK(driver->get_connected() == false);
+}
+
+// open-astro#309 follow-up: the connection check now answers first while
+// disconnected, so the not-implemented answers these methods give a CONNECTED
+// focuser are no longer reachable from the disconnected cases above. Without
+// this, deleting either throw would leave the whole suite green -- which is
+// exactly what a review of that PR caught.
+TEST_CASE("ToupTek AAF Focuser Driver - connected, StepSize and TempComp are not implemented",
+          "[touptek][focuser][unit][fake]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    alpacacore::test::FakeToupTekSDK::ToupFocuserInfo focuser;
+    focuser.id = "fake-aaf-0";
+    focuser.name = "FakeAAF";
+    focuser.model_name = "AAF";
+    fake.focusers.push_back(focuser);
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", fake);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // AGENTS.md pins the AAF rule: NotImplemented, not DriverException.
+    require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotImplemented);
+
+    // The two getters answer honestly once there is a connection to answer about.
+    CHECK(driver->get_temp_comp_available() == false);
+    CHECK(driver->get_temp_comp() == false);
+
+    driver->set_connected(false);
 }
