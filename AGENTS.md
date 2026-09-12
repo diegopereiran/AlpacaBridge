@@ -1688,8 +1688,9 @@ datagrams before each send so replies cannot get off-by-one.
   client's instant on purpose; what they share with #301 is the once-per-connection WARN when
   an NTP-disciplined host disagrees with the client by more than
   `HostClock::kClientDisagreementWarn`, through `alpacacore/util/client_utc_warning.h`
-  (`ClientUtcWarning::warn_once()` after the write, flag re-armed on connect, probe seam
-  `set_host_synchronized_probe()` for tests; #409). A new driver that caches a client-set time
+  (`ClientUtcWarning::warn_once()` after the write, flag re-armed on each real connect but
+  NOT on a `Connected=true`-while-connected no-op, or a client that re-sends both would get a
+  line per poll; probe seam `set_host_synchronized_probe()` for tests; #409). A new driver that caches a client-set time
   the same way calls it too.
 - Pointing convention (#432): home = counterweight down, tube parallel to the polar axis
   pointing at the visible pole, counts offset `0x800000`, axis angles `a1`/`a2` in degrees
