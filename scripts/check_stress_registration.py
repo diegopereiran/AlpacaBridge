@@ -1208,6 +1208,13 @@ def self_test():
                        "  CHECK(guard.total_calls() >= 0);\n}")
         check("main() FAILS when total_calls() is CHECKed against >= 0",
               run_main_with(vacuous_cmp) == 1)
+        ge_one = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
+                  "  alpacacore::test::StressCallGuard guard;\n"
+                  "  INFO(guard.report());\n"
+                  "  CHECK(guard.unexpected_count() == 0);\n"
+                  "  CHECK(guard.total_calls() >= 1);\n}")
+        check("main() passes when total_calls() is CHECKed against >= 1",
+              run_main_with(ge_one) == 0)
 
         local_call = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                       + GUARDED_BODY +
