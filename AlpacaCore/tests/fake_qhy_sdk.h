@@ -761,9 +761,11 @@ private:
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> exposure_workers_;
     // open-astro#328: the frame size the most recent get_mem_length() promised.
     // A plain member, guarded exactly as roi_ and bits_ are: every seam test
-    // reaches this fake through LockedQHYSDK, which serialises all 26 forwards
-    // through one mutex, so both the write here and the read in
-    // get_single_frame() are already mutually exclusive. Making it atomic
+    // reaches this fake through LockedQHYSDK, which serialises 25 of the 26
+    // forwards through its one mutex_ -- cancel_exposure() alone takes its
+    // own cancel_mutex_ (#339), and this fake's cancel body touches no member
+    // at all -- so both the write here and the read in get_single_frame() are
+    // already mutually exclusive. Making it atomic
     // would buy nothing and would cost FakeQHYSDK its move constructor, which
     // the default_camera()/make_fake() factories return by value.
     uint32_t last_mem_length_ = 0;
