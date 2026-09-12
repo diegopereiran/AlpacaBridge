@@ -724,6 +724,13 @@ TEST_CASE("FakeQHYSDK - move_cfw enforces the single-digit protocol ceiling", "[
     CHECK(fake.last_cfw_target == 9);
 
     fake.close_camera("fake-qhy-0");
+
+    // Same order as QHYSDKWrapper::move_cfw(): the ceiling is checked before
+    // the handle lookup, so a CLOSED camera at position 10 answers
+    // InvalidValue, not NotConnected (review round 5 on PR #463 -- with
+    // require_open() first this reads NotConnected and nothing else notices).
+    require_alpaca_error([&] { fake.move_cfw("fake-qhy-0", 10); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { fake.move_cfw("fake-qhy-0", 3); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("LockedQHYSDK - records the slowest forward so a blocking fake is nameable", "[qhy][fake][unit]") {
@@ -764,6 +771,27 @@ TEST_CASE("LockedQHYSDK - records the slowest forward so a blocking fake is name
     sdk.close_camera("fake-qhy-0");
     fake.before_call = nullptr;
     CHECK(sdk.slowest_call_ms() >= 200);
+}
+
+TEST_CASE("LockedQHYSDK - the cancel forward is timed by its own Guard", "[qhy][fake][unit]") {
+    // cancel_exposure() is the one forward outside locked(), so it carries
+    // its own Guard (review round 4 on PR #463). Without this case, deleting
+    // that Guard left every test green while the watchdog silently stopped
+    // covering the one method production most needs to stay non-blocking.
+    auto fake = FakeQHYSDK::with_one_camera();
+    LockedQHYSDK sdk(fake);
+    sdk.open_camera("fake-qhy-0");
+    CHECK(sdk.slowest_call_ms() == 0);
+
+    fake.before_call = [](const std::string& name) {
+        if (name == "cancel_exposure") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    };
+    sdk.cancel_exposure("fake-qhy-0");
+    fake.before_call = nullptr;
+    CHECK(sdk.slowest_call_ms() >= 200);
+    sdk.close_camera("fake-qhy-0");
 }
 
 TEST_CASE("LockedQHYSDK - cancel_exposure forwards without taking the decorator's mutex", "[qhy][fake][unit]") {
