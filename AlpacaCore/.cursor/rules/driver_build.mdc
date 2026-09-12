@@ -607,18 +607,27 @@ The testing guide covers:
 
 ### QHY Camera Driver
 
-**SDK Location**: `external/qhy_sdk/` (or similar - folder name varies)
+**SDK Location**: `external/QHY/sdk_linux_arm64_26.06.04/` — a fixed, versioned path, not a folder name that varies.
 
 **Required Files** (within the SDK folder):
-- `include/qhyccd.h`
-- `lib/<platform>/libqhyccd.*`
+- `usr/local/include/qhyccd.h`
+- `usr/local/lib/libqhyccd.so`
 
-**Wrapper API**:
-- `QHYSDKWrapper::enumerate_cameras()`
-- `QHYSDKWrapper::open_camera(int id)`
-- `QHYSDKWrapper::start_exposure(...)`
+**Wrapper API**: read it from `include/alpacacore/vendor/qhy/qhy_sdk_wrapper.h`, which is the only
+copy. Two things this guide previously got wrong and that are easy to assume from the ZWO block
+above: a QHY camera is identified by a **string** id, never an integer index, and there is no single
+`start_exposure` on the wrapper — an exposure runs as `start_single_frame()`, then
+`get_single_frame()`, with `cancel_exposure()` to abort.
 
-**CMake**: Use `file(GLOB_RECURSE ...)` to find `qhyccd.h` and locate the SDK folder.
+**Test seam**: the drivers reach the SDK through the abstract `QHYSDK` interface in that same header,
+so they are testable without hardware. `QHYSDKWrapper` is the production implementation; every
+`create_qhy_*` factory has an overload taking a `QHYSDK&`, which the tests use to inject the scripted
+fake in `tests/fake_qhy_sdk.h`. Under `[stress]`, wrap the fake in the mutex-taking decorator from
+`tests/locked_qhy_sdk.h` — the fake is deliberately unhardened, so an unlocked call produces a
+ThreadSanitizer report naming the fake rather than the driver.
+
+**CMake**: no discovery. `src/vendors/qhy/CMakeLists.txt` sets the SDK root explicitly and fails at
+configure time when `qhyccd.h` is not there.
 
 ### iOptron Mount Driver
 
@@ -627,10 +636,10 @@ The testing guide covers:
 **Required Files**:
 - No vendor SDK libraries are required; the driver implements the RS-232 protocol directly.
 
-**Wrapper API**:
-- `iOptronProtocolWrapper::connect(...)`
-- `iOptronProtocolWrapper::get_position()`
-- `iOptronProtocolWrapper::slew_to_coordinates(...)`
+**Wrapper API**: read it from `include/alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h`.
+`connect()` and `get_position()` are as you would expect, but there is no method that takes
+coordinates: a goto sets the target first (`set_target_ra()`, `set_target_dec()`) and then starts the
+slew with a no-argument `slew_to_ra_dec()`, mirroring the mount's own RS-232 command order.
 
 **CMake**: No SDK discovery needed; just build the wrapper + driver sources.
 
