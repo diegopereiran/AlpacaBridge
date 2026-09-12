@@ -104,6 +104,9 @@ TEST_CASE("StressCallGuard - a non-std::exception throw is not intercepted", "[u
     StressCallGuard guard;
     CHECK_THROWS_AS(guard([] { throw 42; }), int);
     CHECK(guard.unexpected_count() == 0);
+    // total_calls_ is incremented BEFORE fn() runs, so even a throw the guard
+    // does not intercept is counted as a call.
+    CHECK(guard.total_calls() == 1);
 }
 
 TEST_CASE("StressCallGuard - report() caps the number of DISTINCT failure modes", "[unit]") {
