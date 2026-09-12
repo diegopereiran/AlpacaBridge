@@ -618,7 +618,9 @@ The testing guide covers:
 
 **Wrapper API**: read it from `include/alpacacore/vendor/qhy/qhy_sdk_wrapper.h`, which is the only
 copy. Two things this guide previously got wrong and that are easy to assume from the ZWO block
-above: a QHY camera is identified by a **string** id, never an integer index, and there is no single
+above: a QHY camera is identified by a **string** id, never an integer index (the
+`create_qhy_*_by_index()` factories take an enumeration index only as a convenience and resolve it
+to an id before the wrapper sees it), and there is no single
 `start_exposure` on the wrapper — an exposure runs as `start_single_frame()`, then
 `get_single_frame()`, with `cancel_exposure()` to abort.
 
@@ -666,7 +668,9 @@ tells you exactly where it looked.
    `src/vendors/<vendor>/CMakeLists.txt` — nothing globs for it, so a new folder name is invisible
    until that path is edited
 3. Check the architecture if the failure is not about a header at all: the build is arm64-only and
-   every vendor's CMake hard-fails on anything else. QHY checks the architecture before its
+   every SDK vendor's CMake hard-fails on anything else -- zwo, qhy, playerone, svbony and touptek
+   check `CMAKE_SYSTEM_PROCESSOR`; the ten protocol-only vendors ship no SDK and check nothing.
+   QHY checks the architecture before its
    headers, ZWO after, so which failure you see first depends on the vendor
 
 ### Linker Errors
