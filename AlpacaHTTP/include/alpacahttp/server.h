@@ -218,7 +218,11 @@ private:
     // (bad port, bind() failure, no wake pipe) leaves a joinable thread behind
     // with running_ already false, and destroying a joinable std::thread calls
     // std::terminate() (issue #402).
-    void join_server_thread(std::thread::id current_id);
+    // `only_if_stopped` is how stop()'s !running_ path asks for "reap a thread
+    // that already returned, but never adopt a live one". The decision is made
+    // under server_thread_mutex_, the same lock start_async() takes to install
+    // a thread, so it cannot be raced by a restart.
+    void join_server_thread(std::thread::id current_id, bool only_if_stopped = false);
     void reset_queues_for_start();
     void handle_shutdown_request();
     void handle_restart_request();

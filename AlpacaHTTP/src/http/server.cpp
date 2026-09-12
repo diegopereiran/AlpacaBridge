@@ -186,7 +186,14 @@ void Server::stop() {
         // instead of a clean failure the caller could report, and the caller's
         // own is_running() check did not help, because it correctly returned
         // false and the crash came later (issue #402).
-        join_server_thread(std::this_thread::get_id());
+        //
+        // only_if_stopped: reap a thread that already returned, never adopt a
+        // live one. Between this `!running_` read and the lock inside, a
+        // restart (handle_restart_request() stops then starts on a detached
+        // thread) can install a running server -- adopting it hangs this
+        // caller forever, which for the example embedder is the process never
+        // exiting.
+        join_server_thread(std::this_thread::get_id(), /*only_if_stopped=*/true);
         return;
     }
 
@@ -280,7 +287,7 @@ void Server::stop() {
     util::log_info("HTTP server stopped");
 }
 
-void Server::join_server_thread(std::thread::id current_id) {
+void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped) {
     // Take sole ownership of the thread under server_thread_mutex_, then act
     // on it with the lock released. Whoever wins the move joins; every other
     // caller finds server_thread_ empty and returns, so exactly one join()
@@ -328,6 +335,18 @@ void Server::join_server_thread(std::thread::id current_id) {
         const std::uint64_t generation = server_thread_generation_;
         server_thread_cv_.wait(
             guard, [this, generation] { return !server_thread_joining_ || server_thread_generation_ != generation; });
+        if (only_if_stopped && running_) {
+            // stop()'s !running_ path asked to reap a thread that had already
+            // returned early (a failed bind, #402). By the time it won this
+            // lock a restart may have installed a LIVE thread and set running_
+            // -- start_async() sets running_ before it takes this lock, so
+            // seeing it true here means server_thread_ is the new server's.
+            // Joining that blocks until the restarted server stops, which
+            // nothing is left to do: the embedder's stop() never returns.
+            // Reading running_ under THIS lock is what makes the answer
+            // independent of when the lock was won.
+            return;
+        }
         if (server_thread_generation_ != generation) {
             // A newer server thread exists, which means the one this call was
             // about has already been joined -- start_async() only installs a
