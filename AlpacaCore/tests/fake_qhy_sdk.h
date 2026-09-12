@@ -75,10 +75,12 @@ namespace alpacacore::test {
  *    fake's scope.
  *
  * default_camera() reports NO cooler. That is deliberate: has_cooler starts
- * the driver's telemetry thread, whose loop sleeps 1s between polls, so every
- * disconnect then blocks up to ~1s in the join. Use default_cooled_camera()
- * when the thermal paths are what's under test, and keep it out of anything
- * that connects in a loop.
+ * the driver's telemetry thread, which is a second thread calling into this
+ * fake for the life of the connection (its disconnect is fast since issue
+ * #323, when the poll's sleep became an interruptible wait, so the old
+ * "blocks up to ~1 s per disconnect" reason is gone). Use
+ * default_cooled_camera() when the thermal paths are what's under test, so
+ * the cases that don't need them keep to one thread.
  *
  * KNOWN PARITY GAPS — places this fake is deliberately WEAKER than the real
  * wrapper, so a test passing here would not have caught a regression in the
