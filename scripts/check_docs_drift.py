@@ -28,7 +28,10 @@ Checks:
      truth for a list that is already gated by name, and it is what went
      stale before. CHANGELOG.md is exempt -- its entries describe what was
      true when they were written.
-  6. Every relative path referenced in AGENTS.md's inline code spans
+  6. The QHYSDK seam's three parallel lists agree: every pure virtual on the
+     interface has a LockedQHYSDK override, every override actually takes the
+     mutex, and the forward sweep in test_qhy_fake_sdk.cpp drives all of them.
+  7. Every relative path referenced in AGENTS.md's inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
 """
@@ -286,6 +289,35 @@ def _names_in_span(which, span):
         parts.extend(re.split(r"\band\b", chunk))
     return [p.strip() for p in parts if p.strip()]
 
+QHY_INTERFACE_HEADER = "AlpacaCore/include/alpacacore/vendor/qhy/qhy_sdk_wrapper.h"
+QHY_LOCKED_HEADER = "AlpacaCore/tests/locked_qhy_sdk.h"
+QHY_SWEEP_TEST = "AlpacaCore/tests/test_qhy_fake_sdk.cpp"
+
+# The cv/exception qualifiers between the closing paren and `= 0` / `override`
+# are optional but must be TOLERATED: without them a `const` method is invisible
+# to both patterns, so a 27th pure virtual that happens to be const would be
+# omitted from every set, all three differences would come out empty, and the
+# gate would pass on exactly the drift it exists to catch. (A developer who did
+# add the sweep entry got the opposite: a STALE SWEEP ENTRY naming the wrong
+# cause.) Nothing on this seam is const today, so the hole was only reachable
+# by the next method added -- which is the whole population this gate is for.
+_QUALIFIERS = r"(?:\s*(?:const|noexcept|final|override))*"
+PURE_VIRTUAL_RE = re.compile(
+    r"\bvirtual\b[^;{}]*?(\w+)\s*\([^;{}]*\)" + _QUALIFIERS + r"\s*=\s*0\s*;", re.S)
+OVERRIDE_RE = re.compile(
+    r"(\w+)\s*\([^;{}]*\)(?:\s*(?:const|noexcept|final))*\s*override\s*\{", re.S)
+BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+
+def _strip_comments(text):
+    """Comments blanked (newlines kept). These headers carry long doc comments
+    whose prose contains parentheses and identifiers, and both patterns above
+    scan across whitespace -- without this a sentence in a comment is matched
+    as a method signature. No raw string literals exist in either header."""
+    text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    return LINE_COMMENT_RE.sub("", text)
+
 
 def _matching_brace(text, open_index):
     """Index just past the `}` closing the `{` at open_index."""
@@ -452,7 +484,111 @@ def check_blocking_get_connected_list():
     return failures
 
 
-# --- check 6: AGENTS.md path references exist -------------------------------
+# --- check 6: the QHYSDK seam's three parallel lists ------------------------
+#
+# issue #394. The forward sweep in test_qhy_fake_sdk.cpp drives every QHYSDK
+# method through LockedQHYSDK and asserts each landed on its own counterpart
+# exactly once, which is a genuine (mutation-verified) guard against a
+# TRANSPOSED forward. It is not a guard against an ABSENT one: the method list
+# is hand-written in the test and closed with `methods.size() == N`, a literal
+# compared to a literal. Add a pure virtual to QHYSDK and the compiler forces a
+# LockedQHYSDK override -- the class would otherwise be abstract -- but nothing
+# forces a test entry, so the sweep passes having exercised N of N+1 forwards.
+#
+# And the compiler only guarantees the forward EXISTS. Nothing guarantees it
+# takes the mutex, which is the only reason the decorator exists: its job is to
+# keep ThreadSanitizer findings pointing at driver code rather than at the
+# deliberately unhardened fake, and one unlocked forward makes the fake racy
+# under a storm and produces a TSan report naming the fake -- the exact
+# confusion the decorator was built to prevent, arriving silently.
+
+
+def _class_body(text, class_name):
+    """The text between `class <name> ... {` and its matching brace, or None."""
+    match = re.search(r"\bclass\s+%s\b[^{;]*\{" % re.escape(class_name), text)
+    if not match:
+        return None
+    return text[match.end():_matching_brace(text, match.end() - 1) - 1]
+
+
+def check_qhy_seam_lists():
+    failures = []
+    interface_body = _class_body(_strip_comments(read(QHY_INTERFACE_HEADER)), "QHYSDK")
+    locked_body = _class_body(_strip_comments(read(QHY_LOCKED_HEADER)), "LockedQHYSDK")
+    if interface_body is None or locked_body is None:
+        return ["Could not locate class QHYSDK and/or class LockedQHYSDK -- this check's parser is broken."]
+
+    interface_methods = set(PURE_VIRTUAL_RE.findall(interface_body))
+    if not interface_methods:
+        return ["No pure virtuals found on QHYSDK -- this check's parser is broken."]
+
+    # Cross-check the count against the literal the sweep test already asserts
+    # (CHECK(methods.size() == N)). Everything else here is set differences, so
+    # a method the regex fails to see drops out of ALL of them and the gate goes
+    # quietly green -- which is exactly what a const method did until round 2.
+    # Comparing against a number maintained elsewhere turns the next such miss
+    # into a loud failure, and pins that literal at the same time.
+    sweep_text = read(QHY_SWEEP_TEST)
+    size_match = re.search(r"\bmethods\.size\(\)\s*==\s*(\d+)", sweep_text)
+    if size_match is None:
+        failures.append(
+            "Could not find the `CHECK(methods.size() == N)` literal in %s -- this check uses it to "
+            "detect a method its regexes silently missed, so losing it would make that failure "
+            "invisible again." % QHY_SWEEP_TEST)
+    elif int(size_match.group(1)) != len(interface_methods):
+        failures.append(
+            "QHY SEAM COUNT MISMATCH: %s asserts methods.size() == %s, but %d pure virtuals were "
+            "parsed off QHYSDK. Either the sweep literal is stale, or a method's declaration has a "
+            "shape the parser in %s does not match (a const or noexcept qualifier did exactly that "
+            "once) -- in which case the set comparisons below would pass while missing it."
+            % (QHY_SWEEP_TEST, size_match.group(1), len(interface_methods), Path(__file__).name))
+
+    # Each override, with its body, so the lock can be checked too.
+    locked_methods = {}
+    for match in OVERRIDE_RE.finditer(locked_body):
+        open_index = match.end() - 1
+        locked_methods[match.group(1)] = locked_body[open_index:_matching_brace(locked_body, open_index)]
+
+    for name in sorted(interface_methods - set(locked_methods)):
+        failures.append(
+            "QHYSDK::%s() has no LockedQHYSDK override. (If this fires, the parser in %s is wrong: an "
+            "unimplemented pure virtual would make LockedQHYSDK abstract and fail the build.)"
+            % (name, Path(__file__).name))
+    for name in sorted(set(locked_methods) - interface_methods):
+        failures.append(
+            "LockedQHYSDK::%s() overrides nothing on QHYSDK -- stale forward, or the interface lost a "
+            "method." % name)
+
+    for name in sorted(set(locked_methods) & interface_methods):
+        if "locked(" not in locked_methods[name]:
+            failures.append(
+                "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through locked(). The decorator exists "
+                "only to take the mutex -- an unlocked forward makes the fake racy under a [stress] storm "
+                "and produces a ThreadSanitizer report naming the FAKE, which is the confusion the "
+                "decorator was built to prevent." % name)
+
+    # The hand-written sweep list in the test.
+    sweep = read(QHY_SWEEP_TEST)
+    list_match = re.search(r"const std::vector<std::string> methods\{(.*?)\};", sweep, re.S)
+    if not list_match:
+        failures.append(
+            "Could not find the `const std::vector<std::string> methods{...}` sweep list in %s."
+            % QHY_SWEEP_TEST)
+        return failures
+    swept = set(re.findall(r'"([^"]+)"', list_match.group(1)))
+    for name in sorted(interface_methods - swept):
+        failures.append(
+            "NOT SWEPT: QHYSDK::%s() is not in the forward sweep's method list in %s. The sweep is what "
+            "checks the forward reaches its own counterpart; a method missing from the list is verified "
+            "by inspection only." % (name, QHY_SWEEP_TEST))
+    for name in sorted(swept - interface_methods):
+        failures.append(
+            "STALE SWEEP ENTRY: %s is in the sweep list in %s but is not a QHYSDK method."
+            % (name, QHY_SWEEP_TEST))
+    return failures
+
+
+# --- check 7: AGENTS.md path references exist -------------------------------
 
 # Backtick-quoted spans that look like a repo-relative path: start with one of
 # these top-level dirs/files (spaces allowed only for a verbatim tracked path), and are not a bare CLI flag
@@ -566,6 +702,7 @@ CHECKS = [
     ("VERSION matches README badge", check_version_matches_readme),
     ("Blocking get_connected() list matches the code", check_blocking_get_connected_list),
     ("AGENTS.md path references exist", check_agents_md_paths_exist),
+    ("QHY SDK seam lists agree (interface / LockedQHYSDK / sweep)", check_qhy_seam_lists),
 ]
 
 
