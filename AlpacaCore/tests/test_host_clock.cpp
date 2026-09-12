@@ -350,7 +350,13 @@ TEST_CASE("HostClock - set_hooks replaces the probes without disturbing the stat
     CHECK(c.source() == "rtc");
 }
 
-TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util][hostclock][unit]") {
+// [stress-guard] puts this case in the sanitizers-tsan job, which runs only
+// "[stress]" and "[stress-guard]". Without the tag, the TSan cleanliness this
+// case exists to demonstrate is a local, manual result and CI only proves "no
+// crash, no deadlock". [stress] is reserved for vendor driver registrations
+// (check_stress_registration.py), and [stress-guard] is the tag that gate
+// documents for a core/harness self-test that needs TSan.
+TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util][hostclock][unit][stress-guard]") {
     // The hazard the issue is about: every host_clock_ dereference in
     // Router::route() runs on a request thread, and since #314 the server's
     // RTC probe thread is a second, non-request reader. The old seam destroyed

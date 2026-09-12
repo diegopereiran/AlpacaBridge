@@ -2866,7 +2866,11 @@ int main() {
                                                   ++*probe_calls;
                                                   return true;
                                               });
-            // Priming happened once, when the clock was constructed.
+            // Priming happened once, at install. Since open-astro#399 that is
+            // the refresh_rtc() at the end of HostClock::set_hooks(): the
+            // Router's own clock was constructed before these hooks existed
+            // and ran the REAL host_booted_from_rtc(), which this counter
+            // never sees.
             EXPECT(*probe_calls == 1);
 
             auto scope_e = std::make_shared<TelescopeClockStubDriver>(9806);

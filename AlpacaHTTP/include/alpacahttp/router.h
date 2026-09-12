@@ -76,17 +76,21 @@ public:
     // clock. NOT the synctime endpoint: handle_sync_time() calls
     // clock_settime() directly and only its mark_stepped()/mark_step_failed()
     // bookkeeping goes through this object, so a test must never POST it an
-    // in-range epoch even with the hooks installed. The current
-    // syncSystemClockFromClients setting carries over; the step latches
-    // (stepped_, step_failed_) deliberately do not, since a replacement clock
-    // starts from "nothing has happened to it yet" -- which is what a test
-    // installing hooks before serving wants.
+    // in-range epoch even with the hooks installed.
     //
-    // Replaces the clock object rather than mutating it, so it must be called
-    // before the router serves any request; no request path may be in flight.
-    // Since open-astro#314 that means before Server::start(): the RTC probe
-    // thread dereferences host_clock_ too, so the seam now has a second
-    // reader that is not a request path.
+    // open-astro#399: this replaces only the clock's PROBES, in place. The
+    // HostClock object is never destroyed, so -- unlike the version that
+    // swapped the whole object -- there is no rule about calling it before
+    // the router serves a request or before Server::start(). A request thread
+    // or the RTC probe thread mid-call cannot be left holding a freed object.
+    //
+    // Everything that is not a probe therefore carries over on its own: the
+    // syncSystemClockFromClients setting AND the step latches (stepped_,
+    // step_failed_). The latches describe what has happened to the HOST
+    // clock, which changing how the driver reads that clock does not undo, so
+    // a test that steps the clock and then re-installs hooks still sees
+    // ClockSource == "client". A test that wants a clean slate wants a new
+    // Router.
     void set_host_clock_hooks(
         alpacacore::util::HostClock::IsSynchronizedFn is_synchronized, alpacacore::util::HostClock::SetTimeFn set_time,
         alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; });
