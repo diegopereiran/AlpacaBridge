@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -80,10 +81,40 @@ public:
     }
     HostClock(
         IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; })
-        : is_synchronized_(std::move(is_synchronized)), set_time_(std::move(set_time)), has_rtc_(std::move(has_rtc)) {
+        : hooks_(std::make_shared<const Hooks>(
+              Hooks{std::move(is_synchronized), std::move(set_time), std::move(has_rtc)})) {
         // open-astro#314: prime the probe here, at construction, so that no
         // request path ever pays for it. Construction is startup, where a
         // wedged I2C bus costs a second that nobody is waiting on.
+        refresh_rtc();
+    }
+
+    /**
+     * Replace the three injected syscalls in place (open-astro#399).
+     *
+     * Test-only seam. It exists so the #289/#292 clock wiring can be driven
+     * without touching the machine's clock; nothing in production calls it.
+     *
+     * Replacing the hooks rather than the whole HostClock is what makes it
+     * safe: the object is never destroyed, so a request thread or the
+     * server's RTC probe thread that is mid-call cannot be left holding a
+     * freed object. The previous seam swapped the Router's unique_ptr, which
+     * was a use-after-free guarded only by a comment.
+     *
+     * The step latches (stepped_, step_failed_) are deliberately left alone:
+     * they describe what has happened to the host clock, which swapping the
+     * probes does not undo. enabled() likewise carries over.
+     */
+    void set_hooks(IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; }) {
+        auto next =
+            std::make_shared<const Hooks>(Hooks{std::move(is_synchronized), std::move(set_time), std::move(has_rtc)});
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            hooks_ = std::move(next);
+        }
+        // Outside the lock: the new probe may block, and re-running it here
+        // means has_rtc() answers from the new hooks immediately rather than
+        // keeping the old hooks' cached answer until the next timer tick.
         refresh_rtc();
     }
 
@@ -103,7 +134,7 @@ public:
     // again later the state honestly reads "none" and the connect-time
     // warning fires again.
     bool synchronized() const {
-        const bool s = is_synchronized_();
+        const bool s = hooks()->is_synchronized();
         if (s) {
             std::lock_guard<std::mutex> lock(mutex_);
             stepped_ = false;
@@ -155,7 +186,7 @@ public:
      * itself short-circuits, and it is rate-limited to once per 30 s while no
      * device has been found.
      */
-    void refresh_rtc() { rtc_.store(has_rtc_(), std::memory_order_relaxed); }
+    void refresh_rtc() { rtc_.store(hooks()->has_rtc(), std::memory_order_relaxed); }
 
     // Kernel truth, evaluated once per process (positively; a miss is re-probed
     // in case the RTC registers late): the /sys/class/rtc device whose hctosys
@@ -217,7 +248,12 @@ public:
             r.outcome = Outcome::SkippedOutOfRange;
             return r;
         }
-        if (is_synchronized_()) {
+        // One snapshot for the rest of the decision: the synchronized() check
+        // and the set_time() that acts on it must come from the same hooks, or
+        // a set_hooks() landing between them would step the clock on the
+        // strength of a check the new hooks never made.
+        const auto snapshot = hooks();
+        if (snapshot->is_synchronized()) {
             r.outcome = Outcome::SkippedSynchronized;
             return r;
         }
@@ -226,7 +262,7 @@ public:
             return r;
         }
         std::string error;
-        if (!set_time_(requested, error)) {
+        if (!snapshot->set_time(requested, error)) {
             r.outcome = Outcome::Failed;
             r.error = error;
             std::lock_guard<std::mutex> lock(mutex_);
@@ -295,9 +331,37 @@ public:
     }
 
 private:
-    IsSynchronizedFn is_synchronized_;
-    SetTimeFn set_time_;
-    HasRtcFn has_rtc_;
+    // open-astro#399: the three injected syscalls live in one immutable
+    // snapshot behind a shared_ptr, replaced wholesale by set_hooks().
+    //
+    // The seam used to work by having Router destroy its HostClock and build a
+    // new one. Every host_clock_-> dereference in Router::route() runs on a
+    // request thread, and since open-astro#314 the server's RTC probe thread
+    // is a second, non-request reader -- so replacing the object frees
+    // something another thread may be inside, which is a use-after-free
+    // rather than a stale read. Nothing enforced the "call it before
+    // Server::start()" rule but a comment on a public method of a shipped
+    // header.
+    //
+    // Replacing the hooks instead means the object is never destroyed and the
+    // pointer never changes. A reader copies the shared_ptr under mutex_ (a
+    // refcount bump, no allocation) and then calls THROUGH IT with the lock
+    // released, so a hook that blocks -- has_rtc() is an I2C transaction on a
+    // bus-attached RTC and can cost a second on a wedged bus -- never parks
+    // enabled() or source() behind it, and a concurrent set_hooks() cannot
+    // free the snapshot the reader is still using.
+    struct Hooks {
+        IsSynchronizedFn is_synchronized;
+        SetTimeFn set_time;
+        HasRtcFn has_rtc;
+    };
+
+    std::shared_ptr<const Hooks> hooks() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return hooks_;
+    }
+
+    std::shared_ptr<const Hooks> hooks_;  // under mutex_; the pointee is never mutated
     // The probe's answer, so has_rtc() never touches the bus (#314). Atomic
     // rather than under mutex_: source() reads it while step_from_client()
     // may hold the mutex, and that was the reason the probe was outside it.

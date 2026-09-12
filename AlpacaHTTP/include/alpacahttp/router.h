@@ -65,8 +65,8 @@ public:
     void set_config_path(std::string config_path);
     // open-astro#289: whether a client's Telescope.UTCDate write may step the
     // host clock when the kernel reports it undisciplined (no NTP/RTC).
-    void set_sync_system_clock_from_clients(bool enabled) { host_clock_->set_enabled(enabled); }
-    bool sync_system_clock_from_clients() const { return host_clock_->enabled(); }
+    void set_sync_system_clock_from_clients(bool enabled) { host_clock_.set_enabled(enabled); }
+    bool sync_system_clock_from_clients() const { return host_clock_.enabled(); }
 
     // Test-only seam (open-astro#302): replace the host clock with one whose
     // three probes are fakes (adjtimex, clock_settime and the sysfs RTC
@@ -97,7 +97,7 @@ public:
     // probe is an I2C transaction on a bus-attached RTC and can block for the
     // adapter timeout, and the connect initiator it used to sit on is timed
     // against the 1 s STANDARD target.
-    void refresh_rtc_probe() { host_clock_->refresh_rtc(); }
+    void refresh_rtc_probe() { host_clock_.refresh_rtc(); }
 
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
@@ -317,10 +317,15 @@ private:
     std::string config_path_;
 
     // Thread-safe; owns the "has a client stepped the clock" state (#289).
-    // By pointer only so set_host_clock_hooks() can swap in a fake before the
-    // router starts serving (#302); HostClock holds a mutex and so is neither
-    // copyable nor assignable.
-    std::unique_ptr<alpacacore::util::HostClock> host_clock_ = std::make_unique<alpacacore::util::HostClock>();
+    //
+    // BY VALUE since open-astro#399. It was a unique_ptr so the test seam
+    // could swap the whole object in, which meant the seam destroyed
+    // something request threads (and, since #314, the RTC probe thread) might
+    // be inside. The seam now replaces the clock's hooks in place, so nothing
+    // needs to be swapped -- and holding it by value also restores
+    // const-propagation, which a unique_ptr silently drops: a const Router
+    // method could reach a non-const HostClock through the pointer.
+    alpacacore::util::HostClock host_clock_;
 };
 
 } // namespace alpacahttp

@@ -2605,11 +2605,13 @@ int main() {
         }
 
         // The opt-out blocks the step without blocking the driver write. The
-        // flag is set BEFORE the hooks are installed: set_host_clock_hooks()
-        // replaces the HostClock and must carry syncSystemClockFromClients
-        // over to the replacement, and this order is what proves it (with the
-        // carry-over removed the fresh clock comes back enabled and
-        // set_calls becomes 1).
+        // flag is set BEFORE the hooks are installed, which is what proves
+        // syncSystemClockFromClients survives the seam. Since open-astro#399
+        // it survives because the seam replaces only the clock's HOOKS and
+        // the object holding the flag is never destroyed; before that it
+        // survived because set_host_clock_hooks() saved and restored it by
+        // hand around building a replacement clock. Either way, this order is
+        // the thing that fails if the carry-over is lost (set_calls becomes 1).
         {
             int set_calls = 0;
             alpacahttp::Router clock_router;

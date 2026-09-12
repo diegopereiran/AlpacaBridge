@@ -12,8 +12,10 @@
 
 #include <alpacacore/util/host_clock.h>
 
+#include <atomic>
 #include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -312,4 +314,88 @@ TEST_CASE("HostClock - a manual sync marks the clock client-stepped", "[util][ho
     c.mark_stepped();
     CHECK(c.source() == "client");
     CHECK(c.stepped_by_client());
+}
+
+// open-astro#399: the test seam replaces the hooks in place, so a reader that
+// is mid-call cannot be left holding a freed object.
+TEST_CASE("HostClock - set_hooks replaces the probes without disturbing the state", "[util][hostclock][unit]") {
+    alpacacore::util::HostClock c([] { return false; },
+                                  [](std::chrono::system_clock::time_point, std::string&) { return true; });
+    c.set_enabled(false);
+    c.mark_stepped();
+    CHECK(c.source() == "client");
+
+    // The hooks are what changes; the enabled flag and the step latches
+    // describe what has happened to the HOST clock, which swapping the probes
+    // does not undo. The old seam had to save and restore the flag by hand
+    // around building a replacement object; carrying over is now the default
+    // because there is no replacement.
+    c.set_hooks([] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
+    CHECK(c.enabled() == false);
+    CHECK(c.stepped_by_client());
+    CHECK(c.source() == "client");
+
+    // The new probe really is the one being called: flipping it to
+    // "synchronized" makes source() read "ntp" and clears the client latch,
+    // which the old probe never would have.
+    c.set_hooks([] { return true; }, [](std::chrono::system_clock::time_point, std::string&) { return true; });
+    CHECK(c.synchronized());
+    CHECK(c.source() == "ntp");
+
+    // has_rtc() is re-probed by set_hooks() rather than left on the previous
+    // hooks' cached answer until the next timer tick.
+    c.set_hooks([] { return false; }, [](std::chrono::system_clock::time_point, std::string&) { return true; },
+                [] { return true; });
+    CHECK(c.has_rtc());
+    CHECK(c.source() == "rtc");
+}
+
+TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util][hostclock][unit]") {
+    // The hazard the issue is about: every host_clock_ dereference in
+    // Router::route() runs on a request thread, and since #314 the server's
+    // RTC probe thread is a second, non-request reader. The old seam destroyed
+    // the whole object, so a reader mid-call was left holding a freed one --
+    // a use-after-free, not a stale read, prevented only by a comment saying
+    // to call the seam before Server::start().
+    //
+    // Under TSan/ASan this case is the one that would report it. Without a
+    // sanitizer it still pins that the swap neither crashes nor deadlocks,
+    // and that a blocking probe cannot park a concurrent set_hooks().
+    std::atomic<bool> stop{false};
+    std::atomic<int> reads{0};
+    alpacacore::util::HostClock c([] { return false; },
+                                  [](std::chrono::system_clock::time_point, std::string&) { return true; });
+
+    std::vector<std::thread> readers;
+    for (int i = 0; i < 4; ++i) {
+        readers.emplace_back([&] {
+            while (!stop.load()) {
+                // The three reads the router actually makes on a request path.
+                static_cast<void>(c.source());
+                static_cast<void>(c.enabled());
+                static_cast<void>(c.has_rtc());
+                reads.fetch_add(1);
+            }
+        });
+    }
+    // A stand-in for the server's RTC probe thread, which is not a request path.
+    std::thread prober([&] {
+        while (!stop.load()) {
+            c.refresh_rtc();
+        }
+    });
+
+    for (int i = 0; i < 200; ++i) {
+        const bool synced = (i % 2) == 0;
+        c.set_hooks([synced] { return synced; },
+                    [](std::chrono::system_clock::time_point, std::string&) { return true; },
+                    [synced] { return !synced; });
+    }
+
+    stop.store(true);
+    for (auto& t : readers) {
+        t.join();
+    }
+    prober.join();
+    CHECK(reads.load() > 0);
 }
