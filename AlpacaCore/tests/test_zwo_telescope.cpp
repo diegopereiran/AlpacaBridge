@@ -296,9 +296,16 @@ TEST_CASE("ZWO Telescope Driver - a far-off client UTCDate is logged once per co
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 250;
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+
+    // ZWO's set_utc_date() caches the instant even while disconnected (it
+    // has no connection check, unlike the other four); the warning must not
+    // fire on that path, since nothing was written to any mount.
+    const auto far = std::chrono::system_clock::now() + std::chrono::minutes(30);
+    driver->set_utc_date(far);
+    CHECK(warns.load() == 0);
+
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
-    const auto far = std::chrono::system_clock::now() + std::chrono::minutes(30);
     driver->set_utc_date(std::chrono::system_clock::now());  // agrees: no line, budget untouched
     CHECK(warns.load() == 0);
     driver->set_utc_date(far);
