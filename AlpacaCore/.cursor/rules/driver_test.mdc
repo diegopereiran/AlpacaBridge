@@ -531,15 +531,18 @@ TEST_CASE("iOptron Telescope Driver - Position Tracking", "[ioptron][telescope][
 
 Do not subclass a vendor's `*SDKWrapper` singleton. The ZWO wrapper is a plain class with
 no virtual functions at all, so an `override` on any of its methods is a compile error
-(the subclass itself would compile; there is simply nothing to override), and most of the
-other wrappers are the same shape. A mock that "overrides" `open_camera` or
+(there is nothing to override), and its constructor and destructor are private, so a
+derived class could not be instantiated even without one; most of the other wrappers are
+the same shape. A mock that "overrides" `open_camera` or
 `start_exposure` on `ZWOSDKWrapper` does not build, and worse, it suggests the seam exists
 when it does not.
 
 The pattern this repo actually uses is an **abstract interface** that the driver holds by
 reference, with the real wrapper implementing it and a scripted fake standing in for it in
-tests. QHY and ToupTek have it; ZWO and Player One do not yet (their hardware-free tests reach
-only the connect-failure path, see `tests/test_zwo_concurrency_stress.cpp` and issue #362).
+tests. QHY and ToupTek have it; ZWO, Player One and SVBONY do not yet (their hardware-free
+tests cannot reach any connected path: the unit files such as `tests/test_zwo_camera.cpp`
+never connect, and the `[stress]` registrations reach only the connect-failure path; see
+issue #362).
 Read the shape from the code rather than from a copy here, which is how the ZWO snippet this
 section used to carry went stale:
 

@@ -619,9 +619,11 @@ The testing guide covers:
 only copy. Two facts worth knowing before assuming the QHY shape below: `ZWOSDKWrapper` is a
 plain singleton (`ZWOSDKWrapper::instance()`) with **no virtual functions and no injectable
 seam**, so it cannot be subclassed or faked, and a camera is addressed by the integer id the
-SDK enumerates. Hardware-free tests reach only the connect-failure path (see
-`tests/test_zwo_concurrency_stress.cpp`); the abstract-interface seam QHY and ToupTek use is the
-pattern to follow if that gap is ever closed.
+SDK enumerates. Hardware-free tests cannot reach any connected path: `tests/test_zwo_camera.cpp`
+covers defaults, metadata, `DeviceState`, `NotConnected` codes and the state-machine contracts
+without ever connecting, and the `[stress]` registration reaches only the connect-failure path.
+The abstract-interface seam QHY and ToupTek use is the pattern to follow if that gap is ever
+closed.
 
 ### QHY Camera Driver
 
