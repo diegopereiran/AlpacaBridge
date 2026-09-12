@@ -81,7 +81,9 @@ public:
     // Guarded SOLELY by firmware_mutex_ and never consults connected_: firmware_
     // is non-empty only while connected (set at connect, cleared at disconnect,
     // both under firmware_mutex_), so there is no atomic-vs-mutex ordering to get
-    // wrong and no connected+empty / disconnected+stale window to reason about.
+    // wrong. The only windows are the sub-microsecond ones around the
+    // connected_ flips (firmware_ set before the store(true), cleared after the
+    // store(false)), visible to nothing but the web UI's firmware read.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (firmware_.empty()) {

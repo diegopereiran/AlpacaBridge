@@ -59,7 +59,8 @@ public:
         }
         slave_path_ = name;
         // Keep a slave handle open so the master never sees EIO between the
-        // probe's close and a later open (same trick as FakeGeminiFlatPanel).
+        // probe's close and a later open (the same trick PtyPair in
+        // fake_pty_write.h now does for the Gemini fakes).
         keepalive_fd_ = open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
         struct termios tty {};
         if (keepalive_fd_ >= 0 && tcgetattr(keepalive_fd_, &tty) == 0) {
