@@ -840,7 +840,9 @@ LICENSE_HEADER_PREFIXES = (
     "AlpacaHTTP/src/", "AlpacaHTTP/include/", "AlpacaHTTP/tests/",
     "AlpacaHTTP/examples/",
 )
-LICENSE_HEADER_EXTENSIONS = (".h", ".hpp", ".c", ".cc", ".cpp")
+# Every C/C++ extension git ls-files could hand back, not only the ones in use
+# today: the 100-file floor cannot notice a single unscanned file.
+LICENSE_HEADER_EXTENSIONS = (".h", ".hpp", ".hxx", ".hh", ".inl", ".ipp", ".c", ".cc", ".cpp", ".cxx")
 # The header must START within this many lines. The block itself is matched
 # against the whole file from that point, so a block that begins on line 20
 # is not cut mid-way and misreported as missing.
