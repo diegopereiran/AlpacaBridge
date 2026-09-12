@@ -233,6 +233,11 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 
 # Driver file basename -> the name the async_connectable.h comment uses for it.
 # Only the drivers that CAN be classified as blocking need an entry; the
+# The four wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek
+# StellaVita, ASIAIR, ASIAIR Plus) keep their entries although they answer
+# get_connected() lock-free since #382: the entry is what lets the gate report
+# MISSING FROM THE BLOCKING LIST if one of their wrappers ever re-locks
+# is_open(), so do not remove them on the STALE BLOCKING-LIST ENTRY advice.
 # lock-free majority is not named anywhere, by design.
 # The value is (prose name, which list it belongs to). The list matters: the
 # header names these in TWO sentences, and one name is a prefix of another
