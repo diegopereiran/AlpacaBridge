@@ -62,8 +62,14 @@ TEST_CASE("Gemini Focuser Driver - Disconnected Behavior", "[gemini][focuser][un
 
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_absolute() == true);
-    REQUIRE(driver->get_temp_comp_available() == true);
-    REQUIRE(driver->get_temp_comp() == false);
+    // open-astro#309: TempCompAvailable and TempComp are properties, so a
+    // disconnected read refuses rather than answering. These used to assert
+    // the value, which is what let the missing connection check survive.
+    // This focuser DOES support temperature compensation, so the connected
+    // answer is true -- all the more reason the disconnected read must refuse
+    // instead of reporting a capability nobody has asked the hardware about.
+    require_alpaca_error([&]() { (void)driver->get_temp_comp_available(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_supported_actions().empty());
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
@@ -237,6 +243,36 @@ TEST_CASE("Gemini Focuser Driver - connect/disconnect cycles reuse the port clea
     }
     // One handshake per connect, no more.
     CHECK(fake.connects() == 3);
+}
+
+// open-astro#309 follow-up: with the connection check answering first, nothing
+// else asserts this focuser's CONNECTED capability answers. Gemini is the one
+// of the five that really supports temperature compensation, so
+// TempCompAvailable == true is a claim worth pinning rather than losing.
+//
+// Inside the _WIN32 guard with every other FakeGeminiFocuser case: the fake is
+// pty-backed and POSIX-only, so a case using it outside the guard makes the
+// guard read as if it no longer means anything.
+TEST_CASE("Gemini Focuser Driver - connected, TempCompAvailable is true", "[gemini][focuser][unit][fake]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_temp_comp_available() == true);
+
+    // BOTH branches, because get_temp_comp() catches every std::exception and
+    // returns false: an assertion that only ever sees "off" passes whether the
+    // ":24#" round trip worked or threw, which makes it no assertion at all.
+    // The fake defaults to "10#" (off); "11#" is the reading that can only
+    // come back from a round trip that actually happened.
+    CHECK(driver->get_temp_comp() == false);
+    fake.set_temp_comp_reply(true);
+    CHECK(driver->get_temp_comp() == true);
+    fake.set_temp_comp_reply(false);
+    CHECK(driver->get_temp_comp() == false);
+
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32

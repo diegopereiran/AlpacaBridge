@@ -1541,9 +1541,9 @@ SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between
   - **GET**: `Toupcam_AAF(h, AAF_GETxxx, 0, &out)` — third arg is unused, output via pointer.
   - **RANGE-of-GET**: `Toupcam_AAF(h, AAF_RANGEMAX, AAF_GETxxx, &out)` — queries the upper bound of a GET property by passing the GET action code as the third arg. Used to discover MaxStep and Backlash range at connect time. Same pattern works for `RANGEMIN` and `RANGEDEF`.
   - **HALT/SETZERO**: control actions, third arg is the new value (0 for halt; ticks for setzero/sync).
-- **`AAF_GETSTEPSIZE` is mechanically meaningful only for specific focuser configurations** — the driver does not expose it as ASCOM `StepSize`. It throws `PropertyNotImplemented` per the focuser ASCOM contract.
+- **`AAF_GETSTEPSIZE` is mechanically meaningful only for specific focuser configurations** — the driver does not expose it as ASCOM `StepSize`. Connected, it throws `PropertyNotImplemented` per the focuser ASCOM contract; disconnected, the connection check answers first and it is `NotConnected` (#309).
 - **Temperature units**: `AAF_GETTEMP` returns tenths of Celsius (e.g. `32` → `3.2 °C`). Divide by 10.0 before returning to ASCOM. INDI applies a 0.1 °C hysteresis when updating UI; we read on demand so the hysteresis is unnecessary on the driver side.
-- **No temp-comp action**: The AAF action set has no temp-comp control. `TempCompAvailable` returns false; `set_temp_comp(true)` throws `NotImplemented` (not `DriverException`).
+- **No temp-comp action**: The AAF action set has no temp-comp control. Connected, `TempCompAvailable` returns false and `set_temp_comp(true)` throws `NotImplemented` (not `DriverException`); disconnected, all of them are `NotConnected` (#309).
 - **`Toupcam_get_FocusMotor` is deprecated** in the shipped SDK header. Do not use it for AAF focusers — use the `Toupcam_AAF` action interface instead. The non-deprecated `FocusMotor` API is for autofocus-equipped cameras (`TOUPCAM_FLAG_FOCUSMOTOR`), a different capability.
 
 #### StellaVita PowerBox (Switch)
@@ -1648,7 +1648,12 @@ datagrams before each send so replies cannot get off-by-one.
   `read_site_coordinates()` used by all seven vendor branches that take a site, and on the
   persisted path the offending coordinate is **cleared** so the driver's unset handling covers it. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
-  run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
+  run northern pointing math: the #432 sky frame (both the `a1` term and dec), the RA
+  tracking direction (#250, restored by #432) and the Dec rate / pulse-guide sign (#253).
+  **Not #261**, despite what this line said before #432 and what the `#274` CHANGELOG entry
+  still says as history: the pier-side branch and label are picked from the sky hour angle
+  and are hemisphere-independent, which is one of #432's findings. The driver comment on the
+  connect-time guard says the same. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
   client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
   the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
@@ -1665,11 +1670,29 @@ datagrams before each send so replies cannot get off-by-one.
   30 s re-sample above covers discipline gained without a step. Tests pin both branches through
   the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
   clock state (#395).
-- Pointing convention: home = counterweight down pointing at the pole, counts offset
-  `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
-  `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
-  sign (HA >= 0 -> pierEast). TODO markers in the driver flag the physical rotation
-  signs and southern-hemisphere handling as hardware-unvalidated.
+- Pointing convention (#432): home = counterweight down, tube parallel to the polar axis
+  pointing at the visible pole, counts offset `0x800000`, axis angles `a1`/`a2` in degrees
+  from home in the increasing-count direction. **`HA = s * (a1/15) + (a2 >= 0 ? +6 h : -6 h)`
+  and `dec = s * (90 - |a2|)`, with `s = +1` north and `-1` south.** The 6 h term is the
+  counterweight-down home: the dec axis lies in the meridian plane there, so a dec-only
+  rotation sweeps the HA = ±6 h circle and the meridian needs the bar horizontal
+  (`a1 = ±90`); every reachable target keeps `|a1| <= 90`, which is the
+  counterweight-never-above-horizontal rule falling out of the geometry. Its SIGN follows
+  which side of the dec axis the tube is on and does NOT flip with hemisphere; the `a1`
+  term does, because the mount faces the other pole. **That asymmetry is measured, not
+  derived, and #458 is open on it**: geometry says the 6 h term must flip too, and the
+  two mounts it was fitted to (EQM-35 Pro south, Wave 150i north) cannot separate a
+  hemisphere effect from a per-board dec-axis count sense. Pier side is hemisphere-independent
+  (`a2 >= 0` -> pierEast), since the goto picks the branch from the sky hour angle.
+  Tracking, `RightAscensionRate` and East/West pulses go through `ra_axis_sign_locked()`
+  (counts up north, down south); `MoveAxis`, goto deltas and AutoHome are mechanical and
+  never apply it. This matches `indi-eqmod`'s `EncodersToRADec()` exactly in the north;
+  in the south the two differ by 12 h and a pier label, and the hardware backs this one.
+  **Do not judge this model by the driver's own reported RA/Dec, ConformU included: the
+  driver reports what it commands.** It was established by driving an EQM-35 Pro to known
+  axis positions and reading the tube's real direction off the mount (2026-09-12); those
+  rows are in the driver comment and asserted in `test_skywatcher_pointing.cpp`. Extend
+  that file with a new hardware row for any change here.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period
@@ -1896,8 +1919,10 @@ against its checklist, 2026-09-06:
 - [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
   Audit (2026-09-09, no hardware): unlike the RA/Dec direction bugs above, the branch that
   drives `SideOfPier`/`DestinationSideOfPier` is chosen purely from the sign of hour angle
-  in `ra_dec_to_axis_degrees_locked()`, and `hemisphere_south_locked()` is consulted only for
-  `dec_mech` (the a2 magnitude), never for which branch is picked or which side it is labelled.
+  in `ra_dec_to_axis_degrees_locked()`. Since #432 that function consults
+  `hemisphere_south_locked()` twice -- `sky_sign` multiplies both `dec_mech` (the a2
+  magnitude) and the `a1` term -- but still never for which branch is picked or which
+  side it is labelled, which is the half this audit rests on.
   So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
   OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
   a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
@@ -2019,16 +2044,87 @@ Extended the regression test from the first bug to assert the RA axis actually r
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.
 
+#### KNOWN BUG (FIXED): `axes_busy_locked()` is the wrong question for a per-axis re-apply
+
+Found in review of #432 (2026-09-12), the third instance of the same idiom in this
+driver. Not hemisphere-specific in shape, only in trigger.
+
+**Symptom.** `SiteLatitude` written across the equator while a North/South pulse or a
+`MoveAxis` on the DECLINATION axis is in flight leaves the RA axis running the old
+hemisphere's direction indefinitely -- stars trail at 2x, the #250 signature, with
+nothing scheduled to correct it. Under an autoguider this is the common case, not the
+corner: roughly half of a session's corrections are declination, and PHD2 holds
+`pulse_guiding_active_` true for most of every guide cycle.
+
+**Mechanism.** A setter that must re-command an axis skips when the axis is busy, on the
+grounds that the busy operation's own restore path re-derives the value. That contract
+holds per axis, but the guard asked `axes_busy_locked()`, which is true when EITHER axis
+is busy. A declination pulse ends in `stop_axis()`'s final `else` branch -- it stops the
+DEC axis and re-applies the DEC offset, and never touches RA. The `MoveAxis` stop task is
+the same shape: its restore calls `set_tracking_locked()` only for `channel == kAxisRa`
+and `apply_dec_rate_offset_locked()` only for `kAxisDec`. So both the setter and the
+in-flight operation skipped RA, each expecting the other to do it.
+
+**Fix (done).** `axis_busy_locked(channel)` is now the primitive -- the same
+`goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[i]
+|| (pulse_guiding_active_ && pulse_axis_ == channel)` idiom the duty-cycle worker and the
+MoveAxis stop tail already use -- and `axes_busy_locked()` is defined as the OR of the
+two, so every existing caller is unchanged. `set_site_latitude()` decides each half
+separately: re-apply the RA drive unless RA is busy, re-apply the Dec offset unless Dec
+is busy, and skip entirely only when both are. A sub-floor RA rate is pre-armed into
+`ra_duty_rate_deg_s_` when RA is busy, the way `set_right_ascension_rate()`'s busy branch
+already does, because the duty worker resumes from that stored rate and no restore path
+re-derives it. Two loopback regressions (`test_skywatcher_async.cpp`) drive the
+declination-pulse and declination-`MoveAxis` variants and were confirmed to fail on the
+pre-fix setter with the RA axis still counting the old way.
+
+**Rule for the next driver.** Any "skip while busy, the restore path will re-apply"
+guard has to name the axis it is talking about, and the reviewer's question is always:
+does the operation that owns the busy axis actually re-derive THIS value? A mount-wide
+busy flag can only answer that when the operation owns every axis -- a goto, park, home
+or slew does; a pulse or a manual nudge does not.
+
+The audit found two more instances, both fixed with it, and it took three review rounds
+to find all three -- each fix's own claim of completeness was what exposed the next one.
+No hemisphere is involved in either:
+
+- `set_right_ascension_rate()`: a declination operation in flight made the whole-mount
+  predicate true and stranded the rate write with nothing scheduled to apply it, so a
+  client's `RightAscensionRate` silently did nothing until the next re-apply.
+- `set_declination_rate()`, which passes the predicate down as
+  `apply_dec_rate_offset_locked(defer_motion=)`: an East/West pulse or an RA `MoveAxis`
+  made it true while owning only the RA axis, and the pulse's `stop_axis()` restore
+  rewrites the RA step period without ever calling `apply_dec_rate_offset_locked()`, so a
+  continuous Dec offset was stranded the same way. Comet or satellite tracking while
+  autoguiding is the way in. Only the continuous branch was affected: a sub-floor rate
+  recovers on its own through the duty worker's start gate.
+
+Every "skip while busy" guard in this driver now names its axis. When adding a new one,
+grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are
+the ones asking "is the mount doing anything at all", such as the duty worker's
+`connected_ && tracking_ && !axes_busy_locked()` start gate. **And do the grep before
+writing the claim** -- this section asserted the sweep was complete twice before it was,
+and each time the assertion itself was the review finding.
+
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
-  - Pointing math is hemisphere-correct at latitude -37.2 with no changes: home
-    points at the SOUTH celestial pole, so `dec = -90 + a2`. Verified against raw
-    counts — reported HA matched axis 1 to 0.0004 deg, and alt/az recomputed
-    independently from the reported RA/Dec matched the driver to 4 decimal places.
+  - Pointing math at latitude -37.2: home points at the SOUTH celestial pole, so
+    `dec = -90 + a2`. The session "verified" this against raw counts — reported HA
+    matched axis 1 to 0.0004 deg, and alt/az recomputed from the reported RA/Dec matched
+    to 4 decimal places. **That was self-consistency only**: the driver reports the model
+    it commands, so those checks could not see that the RA-axis/hour-angle relation was
+    missing its 6 h home offset and its southern sign (#432, found from a Wave 150i sky
+    test in the north). The dec relation was right; the RA relation is now
+    `HA = -(a1/15) ± 6` here. Treat every "reported coordinates matched" line in this
+    section as a consistency check, not a sky check.
   - `MoveAxis` verified semantically in all four directions, not just for motion:
     each button was checked against the change in REPORTED RA/Dec. N: Dec +15.59
     deg, S: Dec -16.96 deg, E: RA +15.47 deg, W: RA -15.28 deg, zero cross-axis
-    coupling in every case. `move_axis()` applies NO branch or hemisphere sign
+    coupling in every case. **The two RA rows are stale as reported values**: they were
+    read under the pre-#432 model, where `d(HA)/d(a1)` did not flip below the equator.
+    The same mechanical button now moves reported RA the other way at this site. What
+    the rows still establish is the mechanical fact, which way each button turns which
+    axis; only the RA/Dec labels on them changed. `move_axis()` applies NO branch or hemisphere sign
     transform (the rate goes straight to `start_speed_motion_locked`), so this is
     also the hardware reference for which way a raw Dec-axis rate moves reported
     Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
@@ -2040,7 +2136,11 @@ with the fix reverted to the raw equality check, and passes with it restored.
     ascom-standards.org/newdocs/telescope.html#Telescope.MoveAxis, 2026-09-06).
   - **Tracking rate measured at 0.99995x sidereal over 5 minutes** (-46 ppm,
     -2.5 arcsec/hour, against a +/-31 ppm encoder-quantisation floor), Dec drift
-    exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1.
+    exactly 0 counts. Ten consecutive 30 s intervals of -3214 counts, +/-1. The
+    magnitude stands; the DIRECTION that session settled on (counts up, #250) was
+    reversed by #432: below the equator the counts must go down, which is what the
+    original code did and what indi-eqmod does. The "2.007x sidereal" that condemned
+    it was the reported RA of the old model, not the sky.
   - **Technique worth reusing:** the protocol wrapper does NOT log individual
     commands, so do not plan to read step periods out of the journal. Sample
     `":j1"`/`":j2"` through the Alpaca `commandstring` passthrough instead and
@@ -2066,7 +2166,9 @@ with the fix reverted to the raw equality check, and passes with it restored.
     drift in 30 s. Both call sites of the KNOWN BUG fix below are confirmed on the a2 > 0
     branch; the a2 < 0 branch rests on the loopback tests only -- see the PENDING BENCH
     TEST below, which reaches it WITHOUT a real meridian flip. Same session: reported RA
-    held constant to 1e-5 h over ~90 s of tracking (RA tracking-direction fix confirmed),
+    held constant to 1e-5 h over ~90 s of tracking (a self-consistency result only: the
+    "RA tracking-direction fix" it was read as confirming is the #250 removal that #432
+    reversed),
     and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
     to home, tracking off.
   - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
@@ -2190,7 +2292,7 @@ The iEAF electronic focuser (and the iAFS2/3 automatic focuser, which speaks the
 - **Timing marks that are not yours**: when ConformU runs *on the Pi* alongside the server, a cold ConformU process shows 0.1-0.25 s on `DeviceState`/`MaxStep` (a constant!) while the server log shows the request arriving 200+ ms after the previous reply was sent. That is ConformU-side .NET warm-up; re-run in the same ConformU session and it clears. Prove it with the TRACE log request timestamps before touching the driver.
 - **Enum-typed members carry a ~100 ms first-use JIT cost in ConformU on a Pi 4-class core** (HAE16 EQ session, 2026-08-25): across five runs the only FAST marks were `AlignmentMode`, `EquatorialSystem` and `SideOfPier` at 0.095-0.15 s, and two of those are hard-coded constants with no lock or serial. Every bool/double/string/int member was 5-15 ms; `DestinationSideOfPier`, the *second* use of the `PierSide` enum, was 3 ms. Each is the first response of a distinct enum type, i.e. .NET tiered JIT of the generic deserialize path per `T`. Eliminated on our side: `curl` timing of the exact PUT-then-GET sequence is 1-2 ms, `performance` governor made no difference, and a dual-stack listener (removes the refused IPv6 SYN .NET sends first) made no difference. Whether it clears on a warm re-run depends on the member type -- it did not for these enum-typed mount members (unlike the cold-process marks above), while a camera pass can come up clean simply because the first-use cost was already paid earlier in the same process. Either way a clean 4.5.0 timing record is not evidence of a real pass; only a 4.5.1 re-run settles one and the same code passed clean on the faster astro.lan rig. Do not chase it in the driver. Reported upstream as ASCOMInitiative/ConformU#31 and fixed in ConformU 4.5.1 (same HAE16 build: 0 timing marks). Use 4.5.1 or later on Pi-class hosts. The old workaround for 4.5.0 -- run the pass twice in one ConformU web-UI session and keep the warm log -- is **withdrawn on arm64**: the 4.5.0 linux-arm64 asset was published without `PublishReadyToRun` (see the Target Architecture note), so a warm log there hides a build-wide defect rather than a one-off cold start, and `/conformu` step 2g now replaces an installed 4.5.0 before any run. Replace ConformU; do not warm-log around it.
 - **Diagnosing "server slow?" from a remote browser shell**: `curl -s -o /dev/null -w "%{time_total}"` loops for the exact member sequence, then `tcpdump -i lo -w /tmp/x.pcap port 6800` (capture to file; `-A` to a browser shell is unusable) read back with `-r ... -A | grep -E "Flags \[S\]|GET /api|^HTTP/1.1 200"`. The tcpdump is what exposed the IPv6-first connects.
-- **Range**: 0..99999 steps (INDI's FocusAbsPos max; the 7-digit move field could carry more but the hardware range is 5 digits). Step size in microns is not exposed — `StepSize` throws `PropertyNotImplemented`. No temperature compensation in hardware.
+- **Range**: 0..99999 steps (INDI's FocusAbsPos max; the 7-digit move field could carry more but the hardware range is 5 digits). Step size in microns is not exposed — connected, `StepSize` throws `PropertyNotImplemented`; disconnected it is `NotConnected` (#309). No temperature compensation in hardware.
 - ConformU 4.5.0 validated 2026-08-23 on iEAF hardware (model code 2, firmware 100), Raspberry Pi arm64: 0 errors, 0 issues, all timing targets met.
 
 #### iEFW (FilterWheel)
@@ -2278,7 +2380,7 @@ Protocol: reverse-engineered USB HID vendor protocol (VID:PID `338F:A0F0`, 65-by
 - `hidPath` takes precedence over `focuserIndex` when both are present — router checks `hidPath.empty()` first.
 - **Every hidapi *library* call goes through `hid_global_mutex()`** (file-local in `astroasis_protocol_wrapper.cpp`): `hid_init`, `hid_enumerate`/`hid_free_enumeration`, `hid_open_path`, `hid_close`. hidapi guarantees only that *distinct `hid_device` handles* may be used from different threads; its init context and bus scan are process-global, and the wrapper's `Impl::mutex_` is per instance, so it cannot order `enumerate_astroasis_focusers()` on an HTTP thread (that is `create_astroasis_focuser_by_index()`, which enumerates eagerly) against another instance's `connect()`. Per-handle `hid_write`/`hid_read_timeout` deliberately stay **outside** that lock — the connect handshake blocks in `hid_read_timeout` for up to `kHandshakeTimeoutMs`, and holding a global lock across it would serialize every other focuser's I/O for no safety gain. Lock order: driver `mutex_` → `Impl::mutex_` → `hid_global_mutex()`; never take a wrapper lock while holding the global one. Astroasis is the only vendor linking hidapi — if a second one ever does, promote this mutex to a shared header, since two separate mutexes serialize nothing.
 - The onboard temperature sensor is an NTC thermistor read through a 12-bit ADC and converted via a Steinhart-Hart-style curve ported byte-for-byte from the vendor DLL's data section (see `raw_adc_to_centidegrees()` in `astroasis_protocol_wrapper.cpp`) — the formula constants have not been cross-checked against a real temperature reading, only against the DLL's own math.
-- `StepSize` and temperature compensation are not exposed by the device/protocol — both throw `PropertyNotImplemented`, don't try to synthesize a value.
+- `StepSize` and the temp-comp SETTER are not exposed by the device/protocol — both throw `PropertyNotImplemented`, don't try to synthesize a value. The two temp-comp getters answer `false` when connected. All four are `NotConnected` while disconnected (#309).
 - ConformU 4.4.0 validated on Debian 13 arm64: **0 errors, 0 issues, 0 timing issues**. Results in `AlpacaCore/conformu/Astroasis/Oasis Focuser/`.
 
 ### Gemini
