@@ -43,6 +43,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -193,13 +194,14 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         double expect_ha;
         double expect_dec;
         double expect_alt;
+        double expect_az;  // negative = not read off the mount for this row
         const char* observed;
     };
     const Row rows[] = {
-        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -6.11, 0.0, -1.3, "level, pointing east"},
-        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -10.00, 0.0, -43.6, "down about 45 deg"},
-        {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -9.01, -20.0, -18.9, "down, azimuth about 136"},
-        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, 10.13, 19.05, -20.7, "down about 20 deg"},
+        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -6.11, 0.0, -1.3, 91.0, "level, pointing east"},
+        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -10.00, 0.0, -43.6, -1.0, "down about 45 deg"},
+        {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -9.01, -20.0, -18.9, 136.0, "down, azimuth about 136"},
+        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
     };
     for (const Row& r : rows) {
         const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2);
@@ -208,6 +210,11 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         CHECK(std::abs(wrap_ha(sky.ha_hours - r.expect_ha)) < 0.02);
         CHECK(std::abs(sky.dec_degrees - r.expect_dec) < 0.1);
         CHECK(std::abs(horizon.altitude_degrees - r.expect_alt) < 0.5);
+        if (r.expect_az >= 0.0) {
+            // A second independent quantity per row where the azimuth was
+            // read off the mount as well as the altitude.
+            CHECK(std::abs(horizon.azimuth_degrees - r.expect_az) < 1.0);
+        }
     }
 
     // The first row is the one that needs no instrument, and it is what

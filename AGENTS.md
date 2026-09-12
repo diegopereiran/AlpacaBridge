@@ -1868,8 +1868,10 @@ against its checklist, 2026-09-06:
 - [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
   Audit (2026-09-09, no hardware): unlike the RA/Dec direction bugs above, the branch that
   drives `SideOfPier`/`DestinationSideOfPier` is chosen purely from the sign of hour angle
-  in `ra_dec_to_axis_degrees_locked()`, and `hemisphere_south_locked()` is consulted only for
-  `dec_mech` (the a2 magnitude), never for which branch is picked or which side it is labelled.
+  in `ra_dec_to_axis_degrees_locked()`. Since #432 that function consults
+  `hemisphere_south_locked()` twice -- `sky_sign` multiplies both `dec_mech` (the a2
+  magnitude) and the `a1` term -- but still never for which branch is picked or which
+  side it is labelled, which is the half this audit rests on.
   So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
   OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
   a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
@@ -2005,7 +2007,11 @@ with the fix reverted to the raw equality check, and passes with it restored.
   - `MoveAxis` verified semantically in all four directions, not just for motion:
     each button was checked against the change in REPORTED RA/Dec. N: Dec +15.59
     deg, S: Dec -16.96 deg, E: RA +15.47 deg, W: RA -15.28 deg, zero cross-axis
-    coupling in every case. `move_axis()` applies NO branch or hemisphere sign
+    coupling in every case. **The two RA rows are stale as reported values**: they were
+    read under the pre-#432 model, where `d(HA)/d(a1)` did not flip below the equator.
+    The same mechanical button now moves reported RA the other way at this site. What
+    the rows still establish is the mechanical fact, which way each button turns which
+    axis; only the RA/Dec labels on them changed. `move_axis()` applies NO branch or hemisphere sign
     transform (the rate goes straight to `start_speed_motion_locked`), so this is
     also the hardware reference for which way a raw Dec-axis rate moves reported
     Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
@@ -2047,7 +2053,9 @@ with the fix reverted to the raw equality check, and passes with it restored.
     drift in 30 s. Both call sites of the KNOWN BUG fix below are confirmed on the a2 > 0
     branch; the a2 < 0 branch rests on the loopback tests only -- see the PENDING BENCH
     TEST below, which reaches it WITHOUT a real meridian flip. Same session: reported RA
-    held constant to 1e-5 h over ~90 s of tracking (RA tracking-direction fix confirmed),
+    held constant to 1e-5 h over ~90 s of tracking (a self-consistency result only: the
+    "RA tracking-direction fix" it was read as confirming is the #250 removal that #432
+    reversed),
     and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
     to home, tracking off.
   - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and

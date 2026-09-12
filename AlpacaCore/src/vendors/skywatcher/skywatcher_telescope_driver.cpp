@@ -734,9 +734,47 @@ public:
         if (latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        site_latitude_ = latitude;
-        site_latitude_set_ = true;
+        // A latitude write that crosses the equator reverses the RA drive and
+        // flips the Dec offset's sign (effective_ra_rate_locked() and
+        // apply_dec_rate_offset_locked() both read hemisphere_south_locked()),
+        // so a drive applied under the old latitude is now running backwards.
+        // The client pushing its own site after connect is the ordinary way in,
+        // and nothing else re-applies until Tracking, TrackingRate,
+        // RightAscensionRate or a slew happens to: the axis holds the wrong
+        // direction at 1x and the star trails at 2x, which is the #250
+        // signature. Re-apply here. Busy axes are left alone: the slew, pulse
+        // and MoveAxis restore paths all recompute from the new latitude.
+        bool crossing = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            crossing = connected_ && tracking_ && !axes_busy_locked() && hemisphere_south_locked() != (latitude < 0.0);
+            if (!crossing) {
+                site_latitude_ = latitude;
+                site_latitude_set_ = true;
+                return;
+            }
+        }
+        reap_duty_task();
+        bool need_duty = false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            // Re-checked under the new lock: another thread may have stopped
+            // tracking or taken the axes while the mutex was released.
+            const bool still_crossing =
+                connected_ && tracking_ && !axes_busy_locked() && hemisphere_south_locked() != (latitude < 0.0);
+            const double previous = effective_ra_rate_locked();
+            site_latitude_ = latitude;
+            site_latitude_set_ = true;
+            if (still_crossing) {
+                anchor_model_locked();  // the counts are unchanged; only their reading flips
+                apply_ra_tracking_rate_locked(lock, previous);
+                apply_dec_rate_offset_locked(lock);
+                need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
+            }
+        }
+        if (need_duty) {
+            start_duty_thread();
+        }
     }
 
     double get_site_longitude() const override {

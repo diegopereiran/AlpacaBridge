@@ -921,6 +921,79 @@ TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[sky
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher - a SiteLatitude write across the equator re-applies the RA drive",
+          "[skywatcher][telescope][hemisphere]") {
+    // The drive direction comes from the latitude (effective_ra_rate_locked()),
+    // so a client pushing its own site after connect -- the ordinary way in,
+    // and the usual way a sign typo in the web-UI site config gets corrected --
+    // can leave the axis running the way the OLD hemisphere wanted. Nothing
+    // else re-applies until Tracking, TrackingRate, RightAscensionRate or a
+    // slew happens to, so the axis holds the wrong direction at 1x and the star
+    // trails at 2x: the #250 signature, from the other end.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double north_before = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double north_after = mount.axis_degrees(1);
+    INFO("north: axis1 " << north_before << " -> " << north_after << " deg");
+    REQUIRE(north_after > north_before);
+
+    driver->set_site_latitude(-35.0);
+
+    const double south_before = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double south_after = mount.axis_degrees(1);
+    INFO("after crossing the equator: axis1 " << south_before << " -> " << south_after << " deg");
+    CHECK(south_after < south_before);
+
+    // A write that stays in the same hemisphere must not disturb the drive.
+    driver->set_site_latitude(-37.2);
+    const double same_before = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double same_after = mount.axis_degrees(1);
+    INFO("same hemisphere: axis1 " << same_before << " -> " << same_after << " deg");
+    CHECK(same_after < same_before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher southern hemisphere - a positive RightAscensionRate still slows the axis",
+          "[skywatcher][telescope][eqm35][hemisphere]") {
+    // effective_ra_rate_locked() subtracts the offset and then applies the
+    // hemisphere sign, so a positive RightAscensionRate has to make the sky
+    // hour angle advance more slowly in both hemispheres. South of the equator
+    // the axis rate is negative, so "slower" is a SMALLER magnitude, not a
+    // smaller signed value. Only the plain tracking case covered this sign.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double plain_start = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double plain_travel = std::abs(mount.axis_degrees(1) - plain_start);
+
+    driver->set_right_ascension_rate(driver->get_right_ascension_rate() + 0.5);
+
+    const double offset_start = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double offset_end = mount.axis_degrees(1);
+    const double offset_travel = std::abs(offset_end - offset_start);
+
+    INFO("south: plain travel " << plain_travel << " deg, with +0.5 s/s offset " << offset_travel << " deg");
+    CHECK(offset_end < offset_start);     // still tracking the right way
+    CHECK(offset_travel < plain_travel);  // and more slowly
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 // ── Southern hemisphere Dec-rate sign (DeclinationRate / PulseGuide) ────────
 //
 // Found by static review, not on hardware: apply_dec_rate_offset_locked() and
