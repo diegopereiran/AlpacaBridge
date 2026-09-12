@@ -3195,12 +3195,18 @@ private:
     // axes read free -- see that flag for why the two had to be separated.
     void verify_post_slew_tracking_rate_locked(std::unique_lock<std::mutex>& lock) {
         if (!tracking_ || ra_duty_rate_deg_s_ != 0.0) {
+            ALPACA_LOG_INFO("SkyWatcher", std::string("Post-slew tracking rate check skipped: ") +
+                                              (!tracking_ ? "tracking is off"
+                                                          : "the RA drive is in the duty-cycled sub-floor regime"));
             return;
         }
         auto& protocol = SkyWatcherProtocolWrapper::instance();
         const double expected_cps =
             std::abs(effective_ra_rate_locked()) * axis_params_[0].counts_per_revolution / 360.0;
         if (expected_cps <= 0.0) {
+            ALPACA_LOG_INFO("SkyWatcher",
+                            "Post-slew tracking rate check skipped: the effective RA rate is zero (the offset "
+                            "cancels the drive), so the axis is meant to be stationary");
             return;
         }
         // ":j" is whole counts and both reads truncate, so a sample carries
@@ -3261,9 +3267,13 @@ private:
             // Superseded, or the client stopped tracking: not ours any more.
             if (motion_generation_ != entry_generation || !tracking_ || ra_duty_rate_deg_s_ != 0.0) {
                 // AGENTS.md tells the reader to grep for "rate check skipped"
-                // when a slew was never verified; without this the
-                // supersession exits were the one silent way out (review
-                // note on #448).
+                // when a slew was never verified (review note on #448). Every
+                // exit that does NOT complete a measurement says so -- this
+                // one, the entry guards, the zero-rate and zero-interval
+                // guards, and both exits inside the attempt-0 recovery. A
+                // check that ran and found the rate correct is deliberately
+                // silent: it is the ordinary case, once per goto, and the
+                // grep is for slews that were never verified.
                 ALPACA_LOG_INFO("SkyWatcher",
                                 std::string("Post-slew tracking rate check skipped: ") +
                                     (motion_generation_ != entry_generation
@@ -3305,11 +3315,14 @@ private:
                 delta -= static_cast<int32_t>(kCountsMask) + 1;
             }
             if (elapsed <= 0.0) {
+                ALPACA_LOG_INFO("SkyWatcher",
+                                "Post-slew tracking rate check skipped: the two position reads came back with no "
+                                "measurable interval between them");
                 return;
             }
             const double observed_cps = std::abs(static_cast<double>(delta)) / elapsed;
             if (std::abs(observed_cps - expected_cps) <= kPostSlewRateTolerance * expected_cps) {
-                return;
+                return;  // verified: the one exit that deliberately says nothing
             }
             ALPACA_LOG_WARN("SkyWatcher",
                             "Post-slew tracking restart: RA axis running at " + std::to_string(observed_cps) +
@@ -3320,11 +3333,23 @@ private:
                 // generation only now that we know the axis is still ours.
                 const uint64_t gen = ++motion_generation_;
                 if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
-                    return;  // superseded: the newer command owns the axis
+                    // A supersession exit, and it has to say so: the check has
+                    // already stopped the RA axis by this point, and AGENTS.md
+                    // tells an operator to grep for "rate check skipped" when a
+                    // slew was never verified (round-3 review).
+                    ALPACA_LOG_INFO("SkyWatcher",
+                                    "Post-slew tracking rate check skipped: a newer motion command took the RA "
+                                    "axis during the restart, which now owns it");
+                    return;
                 }
                 wait_axis_stationary_locked(lock, kAxisRa);
                 if (!tracking_) {
-                    return;  // stopped while we waited: do not restart the drive
+                    // Do not restart the drive: the client turned tracking off
+                    // while we waited for the axis to settle.
+                    ALPACA_LOG_INFO("SkyWatcher",
+                                    "Post-slew tracking rate check skipped: tracking was turned off while the axis "
+                                    "settled, so the drive was not restarted");
+                    return;
                 }
                 try {
                     apply_ra_drive_locked(lock);

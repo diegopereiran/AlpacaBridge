@@ -2443,6 +2443,65 @@ TEST_CASE("SkyWatcher async - the rate check reports a restart that did not take
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - the goto aim-ahead is measured, not the seeded constants", "[skywatcher][async]") {
+    // Round-3 review finding on #448: replacing kGotoRampSeconds (2.5 s) and
+    // kTrackingResumeSeconds (0.7 s) with measured EMAs
+    // (goto_overhead_seconds_, resume_latency_seconds_) is a behaviour change
+    // that nothing pinned -- delete both update blocks, re-seed from the
+    // constants, and the suite stayed green. That is exactly the failure mode
+    // this PR's own AGENTS.md rule warns about.
+    //
+    // The estimates are private, so the observable is what they steer: the
+    // landing residual in RA, which is pure aim-ahead error (Dec has no time
+    // term and comes out exactly 0 every slew). Run the same slew shape
+    // repeatedly and watch the spread. Measured, the estimate walks as the EMA
+    // takes in each landing and the residual walks with it: ~9.3 arcsec of
+    // spread over five slews, stable to +/-0.1 across runs. Frozen at the
+    // constants it is ~0.13 arcsec -- the residual barely moves, because
+    // nothing is adapting. A 2 arcsec floor sits a factor of four below the
+    // live value and fifteen above the frozen one.
+    //
+    // What this case does NOT claim is that the measured estimate lands the
+    // mount BETTER. On this fake it does not: frozen residuals run about
+    // -0.8 arcsec and measured ones about -3 to -13, because the fake has no
+    // equivalent of the real MC's ~3 s floor on even a 350-count goto, which
+    // is the whole reason the constants were wrong on an EQM-35. The evidence
+    // that measuring helps is the hardware ConformU run in this PR
+    // ("SlewToCoordinates 10.8 arc seconds away" -> clean), not this file.
+    // Pinned here: that the aim-ahead is driven by something that moves.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // Residual in arcsec of RA, signed, measured once the slew has fully
+    // finished (Slewing covers the restore, so the read lands after it).
+    const auto landing_residual_arcsec = [&](int i) {
+        const double lst = driver->get_sidereal_time();
+        const double target_ra = std::fmod(lst - 0.15 + 24.0, 24.0);
+        const double target_dec = 20.0 + 2.0 * i;
+        driver->slew_to_coordinates_async(target_ra, target_dec);
+        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+        CHECK(std::abs(driver->get_declination() - target_dec) < 0.01);
+        return (driver->get_right_ascension() - target_ra) * 15.0 * 3600.0;
+    };
+
+    double lowest = 1e9;
+    double highest = -1e9;
+    for (int i = 0; i < 5; ++i) {
+        const double residual = landing_residual_arcsec(i);
+        lowest = std::min(lowest, residual);
+        highest = std::max(highest, residual);
+    }
+
+    INFO("landing residual spread over five slews: " << (highest - lowest) << " arcsec");
+    CHECK((highest - lowest) > 2.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a rate write during the post-slew restore is applied", "[skywatcher][async]") {
     // Round-2 review finding on #448: holding goto_in_progress_ across the
     // restore made Slewing stay true (which is the point) but ALSO made

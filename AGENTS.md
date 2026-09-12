@@ -1902,9 +1902,14 @@ below was one of them.
   whole counts and both reads truncate, so below that every possible reading lands outside the
   tolerance and the check would condemn a healthy axis (an effective RA rate near zero, e.g.
   RightAscensionRate ~0.9 nearly cancelling sidereal, is the way in). Grep for that WARN if a
-  2x ever recurs, and for "rate check skipped" if a slew was never verified -- every way out of
-  the check logs one of the two, including the supersession exits, which review of this branch
-  found were the one silent path. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
+  2x ever recurs, and for "rate check skipped" if a slew was never verified: **every exit that
+  does not complete a measurement logs that phrase** -- the entry guards, the zero-rate and
+  zero-interval guards, both `sleep_unlocked()` supersession exits, and both exits inside the
+  attempt-0 recovery (the stop-wait losing the axis, and tracking going off while it settled).
+  Review of this branch found three of those silent, including one that fires with the RA axis
+  already stopped by the check's own stop. A check that RAN and found the rate correct logs
+  nothing -- that is the ordinary case, once per goto, and the grep is for slews that were
+  never verified, not for slews that passed. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
   event followed a 26 s full-speed slew) but was not proven.
 - **A retry loop whose supersession test compares against a generation captured before the loop
   can only ever run once.** Review of the branch above: the rate check's second sample was
@@ -1933,6 +1938,21 @@ below was one of them.
   in that window would bump `motion_generation_` under the rate check's supersession guard and
   make it skip. Same family as the per-axis `axes_busy_locked()` finding in #432: a predicate
   that bundles several questions eventually gets asked the one it answers wrongly.
+- **A measured estimate needs a test that the estimate MOVES, not that it helps.** The
+  constants-to-EMA change (`goto_overhead_seconds_`, `resume_latency_seconds_`) shipped with
+  nothing pinning it: delete both update blocks, re-seed from the constants, suite still green.
+  The estimates are private, so the observable is the thing they steer -- the RA landing
+  residual, which is pure aim-ahead error since Dec has no time term and lands exactly on
+  target every slew. Over five identical slews the residual spread is ~9.3 arcsec measured and
+  ~0.13 arcsec frozen, stable to +/-0.1 across runs; the case asserts a 2 arcsec floor.
+  **And the seam disagrees with the hardware about which is better**: on the loopback fake the
+  frozen constants land at about -0.8 arcsec and the measured EMAs at -3 to -13, because the
+  fake has no equivalent of the real MC's ~3 s floor on even a 350-count refinement goto --
+  which is precisely the fact that made the constants wrong on an EQM-35. So the test pins that
+  the aim-ahead is driven by something that moves, and says in its own comment that the
+  evidence measuring HELPS is the hardware ConformU run, not the fake. **Rule:** when a fake
+  cannot reproduce the quantity a change was made for, pin the mechanism and name the real
+  evidence in the test, rather than asserting an improvement the fake will contradict.
 - **Test seams have to model the failure, not a nearby one.** The landing-settle wait
   (`wait_axis_stationary_locked`) shipped with nothing in the suite failing without it, and the
   ramped-`:K` seam that looked like it should cover it could not: a ramped stop keeps `:f`
