@@ -3144,7 +3144,9 @@ int main() {
     }
 
     // Issue #130: a driver whose get_connected() blocks behind an in-flight
-    // connect (SynScan hand controller). The router must poll
+    // connect -- the telescopes listed in async_connectable.h. SynScan
+    // produced #130 and is deliberately NOT one of them any more: that fix
+    // made its getter a bare atomic load. The router must poll
     // get_connecting(), the non-blocking signal, so GET connected/connecting
     // answer at once mid-connect and the PUT connected wait honours its 8 s
     // deadline instead of stalling for the whole handshake.
