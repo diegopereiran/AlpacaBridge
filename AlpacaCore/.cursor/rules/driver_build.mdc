@@ -625,9 +625,12 @@ above: a QHY camera is identified by a **string** id, never an integer index, an
 **Test seam**: the drivers reach the SDK through the abstract `QHYSDK` interface in that same header,
 so they are testable without hardware. `QHYSDKWrapper` is the production implementation; every
 `create_qhy_*` factory has an overload taking a `QHYSDK&`, which the tests use to inject the scripted
-fake in `tests/fake_qhy_sdk.h`. Wrap the fake in the mutex-taking decorator from `tests/locked_qhy_sdk.h`, which is what the QHY
-tests do throughout — the fake is deliberately unhardened, so an unlocked call produces a
-ThreadSanitizer report naming the fake rather than the driver.
+fake in `tests/fake_qhy_sdk.h`. Wrap the fake in the mutex-taking decorator from `tests/locked_qhy_sdk.h`
+whenever it is injected into a driver, which is what the driver-injection tests do throughout — the fake
+is deliberately unhardened, so a concurrent unlocked call produces a ThreadSanitizer report naming the
+fake rather than the driver. The decorator is scoped to concurrent access (see the header's own comment
+on #101): the single-threaded cases in `tests/test_qhy_fake_sdk.cpp` drive a bare `FakeQHYSDK` directly
+and do not need it.
 
 **CMake**: no discovery. `src/vendors/qhy/CMakeLists.txt` sets the SDK root explicitly and fails at
 configure time when `qhyccd.h` is not there.
