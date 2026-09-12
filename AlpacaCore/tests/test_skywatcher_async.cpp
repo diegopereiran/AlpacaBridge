@@ -2615,13 +2615,13 @@ TEST_CASE("SkyWatcher async - a goto landing that reports stopped early is waite
         ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
     } sink_guard;
     std::atomic<bool> still_moving{false};
-    alpacacore::logging::set_log_sink(
-        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
-            if (level == alpacacore::logging::LogLevel::Warn &&
-                message.find("still moving 2 s after the controller reported it stopped") != std::string_view::npos) {
-                still_moving.store(true);
-            }
-        });
+    alpacacore::logging::set_log_sink([&](alpacacore::logging::LogLevel level, std::string_view,
+                                          std::string_view message) {
+        if (level == alpacacore::logging::LogLevel::Warn && message.find("still moving ") != std::string_view::npos &&
+            message.find(" s after the controller reported it stopped") != std::string_view::npos) {
+            still_moving.store(true);
+        }
+    });
 
     // Control first: an ordinary landing must NOT trip the check.
     double lst = driver->get_sidereal_time();

@@ -2845,10 +2845,15 @@ private:
                     } else if (rate != 0.0 && now >= ax[i].next_start && connected_ && tracking_ &&
                                !axes_busy_locked() && !restoring_tracking_) {
                         // restoring_tracking_ is in this gate and NOT in
-                        // axes_busy_locked() on purpose: a burst here would
-                        // bump motion_generation_ under the post-slew rate
-                        // check's supersession guard and make it skip, while
-                        // a rate SETTER in the same window must go through.
+                        // axes_busy_locked() on purpose: a burst START here
+                        // would bump motion_generation_ under the post-slew
+                        // rate check's supersession guard and make it skip,
+                        // while a rate SETTER in the same window must go
+                        // through. The burst END above is not gated: a burst
+                        // already running when the restore began still stops
+                        // with a cross-axis bump, and the rate check then
+                        // logs a skip that names a newer motion command. It
+                        // is visible in the log, not closed.
                         // ~140 ms stop-landing overrun measured on hardware;
                         // shorten the wait so the physical on-duration matches
                         // the duty fraction. The RAW floor is correct here
@@ -3311,8 +3316,9 @@ private:
                 after = protocol.inquire_position(kAxisRa);
                 elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - sampled_at).count();
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("SkyWatcher",
-                                std::string("Post-slew tracking rate check skipped: could not read position: ") + e.what());
+                ALPACA_LOG_WARN(
+                    "SkyWatcher",
+                    std::string("Post-slew tracking rate check skipped: could not read position: ") + e.what());
                 return;
             }
             int32_t delta = static_cast<int32_t>((after - before) & kCountsMask);
@@ -3629,8 +3635,11 @@ private:
                                               " landing settle check could not read the board: " + e.what());
             return;
         }
-        ALPACA_LOG_WARN("SkyWatcher", "Axis " + std::to_string(channel) +
-                                          " still moving 2 s after the controller reported it stopped");
+        ALPACA_LOG_WARN(
+            "SkyWatcher",
+            "Axis " + std::to_string(channel) + " still moving " +
+                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(kLandingSettleTimeout).count()) +
+                " s after the controller reported it stopped");
     }
 
     void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) const {
