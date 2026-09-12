@@ -340,3 +340,33 @@ TEST_CASE("QHY Camera Driver - disconnect does not wait out the telemetry sleep"
     // the wait is now woken immediately.
     CHECK(elapsed < std::chrono::milliseconds(600));
 }
+
+TEST_CASE("QHY Camera Driver - disconnect does not wait out the temperature worker's sleep", "[qhy][camera][unit]") {
+    // The other polling worker #323 changed. cooler_on_ is constructed true
+    // and the temp-control worker starts on connect whenever has_cooler and
+    // cooler_on_ both hold, so the telemetry case above already runs it
+    // (reverting only the temp worker's wait_for to sleep_for turns that
+    // case red at ~870 ms); this case says so explicitly and pins it through
+    // the public setter, so the coverage does not hinge on a constructor
+    // default a later change could flip.
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_cooler_on(true);
+    REQUIRE(driver->get_cooler_on());
+
+    // Let both workers reach their waits rather than catching one
+    // mid-iteration, so this measures the wait and not the startup.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    const auto started = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+
+    REQUIRE_FALSE(driver->get_connected());
+    CHECK(elapsed < std::chrono::milliseconds(600));
+}
