@@ -3352,12 +3352,9 @@ int main() {
         // because a null never reaches get<T>() at all. Deleting the catch in
         // config_get() must fail HERE.
         alpacahttp::Router router;
-        nlohmann::json config = {{"vendor", "skywatcher"},
-                                 {"deviceType", "telescope"},
-                                 {"deviceNumber", 50},
-                                 {"connectionType", "serial"},
-                                 {"portPath", "/dev/null"},
-                                 {"siteLatitude", "-43.5"},  // a string, not a number
+        nlohmann::json config = {{"vendor", "skywatcher"},  {"deviceType", "telescope"},
+                                 {"deviceNumber", 50},      {"connectionType", "serial"},
+                                 {"portPath", "/dev/null"}, {"siteLatitude", "-43.5"},  // a string, not a number
                                  {"siteLongitude", 172.6}};
         const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
         const auto json = nlohmann::json::parse(response.body(), nullptr, false);
