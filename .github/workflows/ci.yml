@@ -609,7 +609,7 @@ jobs:
 
   javascript:
     name: JavaScript syntax + unit tests
-    runs-on: ubuntu-24.04-arm   # syntax-only check; arch-independent
+    runs-on: ubuntu-24.04-arm   # parses and runs pure JS only; arch-independent
     timeout-minutes: 10
     steps:
       - name: Checkout
