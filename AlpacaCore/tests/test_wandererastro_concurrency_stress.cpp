@@ -65,6 +65,12 @@ constexpr const char* kAbsentSerialPort = "/dev/wanderer-alpacabridge-absent";
 // only swallows the callback as a whole -- so per-call guarding is what keeps
 // one throw from skipping every call below it for that iteration. The guard
 // also COUNTS what it swallows, so an unexpected throw now fails the case.
+// The three full-seam storms therefore widen the expected set to
+// {NotConnected, DriverException}: the link-fault latch needs ~6-10 s of
+// silence, far longer than a storm, so DriverException is not expected in
+// practice, but it is the code these calls legitimately throw once the latch
+// trips, and a set that counts it as a regression would contradict this
+// comment (review note on PR #468).
 
 void cover_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& panel = static_cast<alpacacore::CoverCalibratorDriver&>(d);
@@ -126,7 +132,8 @@ TEST_CASE("WandererAstro cover calibrator - concurrent connect/disconnect/operat
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_connected(false);
 
-    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { cover_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
@@ -170,7 +177,8 @@ TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate st
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     driver->set_connected(false);
 
-    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { filterwheel_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
@@ -202,7 +210,8 @@ TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stre
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     driver->set_connected(false);
 
-    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { box_switch_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));

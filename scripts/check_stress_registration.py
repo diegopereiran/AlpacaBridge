@@ -296,8 +296,10 @@ GUARD_ALLOWLIST = set()
 # The function form needs a return type (or `static`) before the name; the
 # lambda form is `call` bound with `=` to a `[` capture list. A CALL SITE
 # `call([&] {...})` matches neither, so only the definition is reported.
+# `[^\S\n]` rather than `\s` inside the return-type class: the definition is
+# one line, and a class that admits newlines could span into the next one.
 LOCAL_CALL_HELPER_RE = re.compile(
-    r"^\s*(?:static\s+)?\w[\w:<>,\s&*]*\bcall\s*\("
+    r"^\s*(?:static\s+)?\w[\w:<>,&*]*(?:[^\S\n][\w:<>,&*]*)*\bcall\s*\("
     r"|^\s*(?:static\s+)?(?:const\s+)?auto\s+call\s*=\s*\[",
     re.M,
 )
@@ -332,7 +334,7 @@ def check_guard_usage():
     """
     failures = []
     seen = set()
-    for path in tracked_files("AlpacaCore/tests/*_concurrency_stress.cpp"):
+    for path in tracked_files(STRESS_TEST_GLOB):
         name = os.path.basename(path)
         seen.add(name)
         text = strip_comments(read_text(path))

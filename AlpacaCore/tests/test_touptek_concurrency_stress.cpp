@@ -29,6 +29,8 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
+#include <atomic>
+
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_touptek_sdk.h"
@@ -262,7 +264,12 @@ TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress
     auto driver = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, sdk);
 
     alpacacore::test::StressCallGuard guard;
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+    // A throw from get_max_switch() leaves max_switch at 0 and skips the
+    // per-switch loop for that iteration; total_calls() still counts the two
+    // calls outside it, so coverage could erode with the case green. The
+    // per-switch tally pins that the loop ran at least once in the storm.
+    std::atomic<int> switch_calls{0};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard, &switch_calls](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
         // get_max_switch() drives the loop bound, so it is guarded with a
         // local default rather than inline: a throw here must not skip the
@@ -272,6 +279,7 @@ TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress
         for (int id = 0; id < max_switch; ++id) {
             guard([&] { static_cast<void>(sw.get_switch_value(id)); });
             guard([&] { sw.set_switch_value(id, 1.0); });
+            switch_calls.fetch_add(1, std::memory_order_relaxed);
         }
         guard([&] { static_cast<void>(sw.get_device_state()); });
     });
@@ -285,6 +293,7 @@ TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
+    CHECK(switch_calls.load() > 0);
 }
 
 TEST_CASE("ToupTek thermal switch - destruction races an in-flight connect", "[touptek][switch][stress]") {
