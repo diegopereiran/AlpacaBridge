@@ -1397,6 +1397,10 @@ public:
             refine_goto_landing(lock, ra, dec);
         } catch (...) {
             goto_in_progress_ = false;
+            // An abandoned goto never reaches the landing that consumes this
+            // stamp, and a Park/FindHome landing within the next 30 s would
+            // otherwise fold the abandoned interval into goto_overhead_seconds_.
+            last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
             throw;
         }
         // Same order as the async task: Slewing stays true until tracking is
@@ -1479,12 +1483,17 @@ public:
                 goto_in_progress_ = false;
             } catch (const std::exception& ex) {
                 goto_in_progress_ = false;
+                // See the sync path: a cancelled goto (AbortSlew throws
+                // "Slew wait cancelled") must not leave its dispatch stamp
+                // for the next landing's overhead EMA.
+                last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Async slew failed: ") + ex.what());
             } catch (...) {
                 goto_in_progress_ = false;
+                last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 stop_axes_if_cancelled_locked();
@@ -2961,9 +2970,18 @@ private:
                         resume_latency_seconds_ = std::clamp(0.5 * resume_latency_seconds_ + 0.5 * measured, 0.05, 2.0);
                     }
                 }
-                verify_post_slew_tracking_rate_locked(lock);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Failed to restore tracking after slew: ") + e.what());
+                return;
+            }
+            // Separate catch on purpose: tracking IS running by this point, so
+            // logging "Failed to restore tracking" for a failed VERIFICATION
+            // sends the reader looking for a restart that did happen.
+            try {
+                verify_post_slew_tracking_rate_locked(lock);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SkyWatcher",
+                                std::string("Tracking restarted, but the post-slew rate check failed: ") + e.what());
             }
         }
     }
@@ -3060,7 +3078,20 @@ private:
                     return;  // superseded: the newer command owns the axis
                 }
                 wait_axis_stationary_locked(lock, kAxisRa);
-                apply_ra_drive_locked(lock);
+                try {
+                    apply_ra_drive_locked(lock);
+                } catch (const std::exception& e) {
+                    // This path has already stopped the axis. Leaving
+                    // tracking_ true would report Tracking on a mount whose
+                    // RA axis is stationary, so report what is true and let
+                    // the client decide to re-enable it.
+                    tracking_ = false;
+                    ALPACA_LOG_WARN("SkyWatcher",
+                                    std::string("Post-slew tracking restart failed; RA axis left stopped and "
+                                                "Tracking now reports false: ") +
+                                        e.what());
+                    return;
+                }
             }
         }
     }
