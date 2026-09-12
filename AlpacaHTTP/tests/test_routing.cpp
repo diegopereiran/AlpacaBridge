@@ -2830,8 +2830,9 @@ int main() {
             return desc["Value"][key];
         };
 
-        // The five sub-blocks below share this stub, so each starts from a
-        // known count rather than inheriting the previous block's. Calling
+        // The sub-blocks below (six, the last carrying the five UTCDate
+        // ladder cases) share this stub, so each starts from a known count
+        // rather than inheriting the previous block's. Calling
         // this is what makes a block order-independent; a block that forgets
         // would assert against a carried-over number.
         auto fresh_counts = [&] {
