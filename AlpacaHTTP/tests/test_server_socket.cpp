@@ -1002,9 +1002,14 @@ int main() {
             }
 
             {
-                // Retrying on a free port after the failure: start_async()
-                // assigns over server_thread_, which is also std::terminate()
-                // if the dead thread was never joined.
+                // Retrying on the SAME Server after the failure. This is the
+                // shape that exercises start_async()'s own join: the second
+                // call assigns over server_thread_, and assigning over a
+                // joinable std::thread is std::terminate(). It has to be one
+                // object -- a fresh Server gets a fresh server_thread_ and
+                // proves nothing about that path (which is exactly how this
+                // test read before review: it built a second Server, so
+                // deleting the join in start_async() left the suite green).
                 alpacahttp::Config retry_config;
                 retry_config.set_http_port(6879);
                 retry_config.set_discovery_enabled(false);
@@ -1012,6 +1017,15 @@ int main() {
                 alpacahttp::Server retried(retry_config);
                 retried.start_async();
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                EXPECT(!retried.is_running());
+
+                // No stop() in between: the embedder sees is_running() false
+                // and simply tries another port on the same object. Without
+                // the join in start_async() this aborts the binary.
+                retried.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                // Still the held port, so still not running -- the point is
+                // that we got here at all.
                 EXPECT(!retried.is_running());
 
                 retry_config.set_http_port(6880);
@@ -1024,7 +1038,6 @@ int main() {
                 second.stop();
                 EXPECT(!second.is_running());
             }
-
         }
 
         holder.stop();

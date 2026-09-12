@@ -6051,9 +6051,9 @@ T config_get(const nlohmann::json& config, const char* key, const T& fallback) {
     try {
         return it->template get<T>();
     } catch (const nlohmann::json::exception&) {
-        throw alpacacore::AlpacaException(std::string("Device config field '") + key +
-                                              "' has the wrong type (got " + it->type_name() + ")",
-                                          alpacacore::AlpacaError::InvalidValue);
+        throw alpacacore::AlpacaException(
+            std::string("Device config field '") + key + "' has the wrong type (got " + it->type_name() + ")",
+            alpacacore::AlpacaError::InvalidValue);
     }
 }
 
@@ -6085,9 +6085,9 @@ std::string config_get(const nlohmann::json& config, const char* key, const char
 // out-of-range coordinate is exactly as unusable as an absent one, so the
 // driver's own unset handling -- refusing the connect, for Sky-Watcher --
 // applies to both.
-bool read_site_coordinates(const nlohmann::json& config, bool from_api, const std::string& vendor,
-                           int device_number, std::optional<double>& site_latitude,
-                           std::optional<double>& site_longitude, std::string& error_message) {
+bool read_site_coordinates(const nlohmann::json& config, bool from_api, const std::string& vendor, int device_number,
+                           std::optional<double>& site_latitude, std::optional<double>& site_longitude,
+                           std::string& error_message) {
     struct Field {
         const char* key;
         double limit;
@@ -6108,8 +6108,8 @@ bool read_site_coordinates(const nlohmann::json& config, bool from_api, const st
         // would not.
         if (!(value >= -field.limit && value <= field.limit)) {
             const std::string detail = std::string(field.key) + " " + std::to_string(value) +
-                                       " is out of range: must be between " + std::to_string(-field.limit) +
-                                       " and " + std::to_string(field.limit) + " degrees";
+                                       " is out of range: must be between " + std::to_string(-field.limit) + " and " +
+                                       std::to_string(field.limit) + " degrees";
             if (from_api) {
                 error_message = detail;
                 return false;
@@ -6122,7 +6122,6 @@ bool read_site_coordinates(const nlohmann::json& config, bool from_api, const st
     }
     return true;
 }
-
 
 }  // namespace
 
@@ -6163,7 +6162,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             response.set_body(alpaca_response);
             return response;
         }
-        
+
         std::string vendor = config_get(config, "vendor", "");
         std::string device_type_str = config_get(config, "deviceType", "");
 
@@ -6252,11 +6251,11 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             response.set_body(alpaca_response);
             return response;
         }
-        
+
         std::string device_type_str = config_get(config, "deviceType", "");
         std::string vendor = config_get(config, "vendor", "");
         int device_number = config_get(config, "deviceNumber", -1);
-        
+
         if (device_type_str.empty() || device_number < 0) {
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_tx_id,
@@ -8013,12 +8012,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         if (switch_type == "asiair-plus-rk3568") {
             auto plus_config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
-            plus_config.device_path =
-                config_get(config, "devicePath", plus_config.device_path);
-            plus_config.pwm_frequency_hz =
-                config_get(config, "pwmFrequencyHz", plus_config.pwm_frequency_hz);
-            if (config_has(config, "ports") && config["ports"].is_array() &&
-                !config["ports"].empty()) {
+            plus_config.device_path = config_get(config, "devicePath", plus_config.device_path);
+            plus_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", plus_config.pwm_frequency_hz);
+            if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPlusPortConfig> ports;
                 ports.reserve(config["ports"].size());
                 for (const auto& p : config["ports"]) {

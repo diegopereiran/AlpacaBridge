@@ -3270,12 +3270,8 @@ int main() {
         // and come back as an nlohmann type complaint instead of the specific
         // message the field has. Since #274/#353 these two fields decide
         // whether the device connects at all, so the difference matters.
-        nlohmann::json config = {{"vendor", "skywatcher"},
-                                 {"deviceType", "telescope"},
-                                 {"deviceNumber", 0},
-                                 {"connectionType", "serial"},
-                                 {"portPath", "/dev/null"},
-                                 {"siteLatitude", nullptr},
+        nlohmann::json config = {{"vendor", "skywatcher"},     {"deviceType", "telescope"}, {"deviceNumber", 0},
+                                 {"connectionType", "serial"}, {"portPath", "/dev/null"},   {"siteLatitude", nullptr},
                                  {"siteLongitude", nullptr}};
         const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
         const auto json = nlohmann::json::parse(response.body(), nullptr, false);
@@ -3298,21 +3294,17 @@ int main() {
         // every LST computation at face value.
         int next_device_number = 40;  // clear of the devices other cases register
         const auto configure = [&router, &next_device_number](const nlohmann::json& overrides) {
-            nlohmann::json config = {{"vendor", "skywatcher"},
-                                     {"deviceType", "telescope"},
-                                     {"deviceNumber", next_device_number++},
-                                     {"connectionType", "serial"},
-                                     {"portPath", "/dev/null"},
-                                     {"siteLatitude", -43.5},
-                                     {"siteLongitude", 172.6}};
+            nlohmann::json config = {
+                {"vendor", "skywatcher"},     {"deviceType", "telescope"}, {"deviceNumber", next_device_number++},
+                {"connectionType", "serial"}, {"portPath", "/dev/null"},   {"siteLatitude", -43.5},
+                {"siteLongitude", 172.6}};
             config.update(overrides);
             const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
             return nlohmann::json::parse(response.body(), nullptr, false);
         };
 
         for (const auto& bad : {nlohmann::json{{"siteLatitude", 200.0}}, nlohmann::json{{"siteLatitude", -90.5}},
-                                nlohmann::json{{"siteLongitude", 999.0}},
-                                nlohmann::json{{"siteLongitude", -180.5}}}) {
+                                nlohmann::json{{"siteLongitude", 999.0}}, nlohmann::json{{"siteLongitude", -180.5}}}) {
             const auto json = configure(bad);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
             EXPECT(json.value("ErrorMessage", "").find("out of range") != std::string::npos);
@@ -3321,8 +3313,7 @@ int main() {
         // The limits are inclusive, and the poles and the antimeridian are
         // real places.
         for (const auto& edge : {nlohmann::json{{"siteLatitude", 90.0}}, nlohmann::json{{"siteLatitude", -90.0}},
-                                 nlohmann::json{{"siteLongitude", 180.0}},
-                                 nlohmann::json{{"siteLongitude", -180.0}}}) {
+                                 nlohmann::json{{"siteLongitude", 180.0}}, nlohmann::json{{"siteLongitude", -180.0}}}) {
             // A unique device number per iteration, so this is the real
             // "accepted and registered" path rather than a later
             // "device already exists" refusal that happens not to say
