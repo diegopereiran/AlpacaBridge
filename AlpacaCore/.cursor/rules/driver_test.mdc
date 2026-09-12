@@ -582,8 +582,9 @@ fake's own contract, so a test that fails against it is a driver finding, not a 
 
 **Adding a seam to a vendor that has none**: extract the wrapper's public surface into an
 abstract interface, make the real wrapper implement it, add the `&`-taking factory overload
-beside the existing one, and write the fake against the interface. `/driver-build` asks for
-this on every new driver (issue #369); the same steps apply retroactively.
+beside the existing one, and write the fake against the interface. `/driver-build` does not
+ask for this yet; issue #369 proposes that it should, so that no new driver lands without a
+seam. The same steps apply retroactively.
 
 ---
 
