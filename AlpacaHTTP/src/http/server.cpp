@@ -167,6 +167,10 @@ void Server::start_async() {
         // start_async() itself is out of this change's scope.
         server_thread_cv_.wait(guard, [this] { return !server_thread_joining_; });
         server_thread_ = std::thread(&Server::run_server, this);
+        // New generation: any waiter still parked on the previous one must give
+        // up rather than adopt this thread.
+        ++server_thread_generation_;
+        server_thread_cv_.notify_all();
     }
 }
 
@@ -313,7 +317,23 @@ void Server::join_server_thread(std::thread::id current_id) {
     std::thread owned;
     {
         std::unique_lock<std::mutex> guard(server_thread_mutex_);
-        server_thread_cv_.wait(guard, [this] { return !server_thread_joining_; });
+        // Wait on THIS generation, not just "no join in flight". The waiter
+        // releases the mutex, so by the time it wakes the winner may already
+        // have finished its join, returned from stop() and called
+        // start_async() again -- the restart path (handle_restart_request()
+        // stops and restarts while the embedder's loop, seeing is_running()
+        // false, calls stop() too) does exactly that. Re-reading
+        // server_thread_ blind would then adopt the NEW server's thread and
+        // join it, hanging stop() forever while the restarted server runs on.
+        const std::uint64_t generation = server_thread_generation_;
+        server_thread_cv_.wait(
+            guard, [this, generation] { return !server_thread_joining_ || server_thread_generation_ != generation; });
+        if (server_thread_generation_ != generation) {
+            // A newer server thread exists, which means the one this call was
+            // about has already been joined -- start_async() only installs a
+            // new one after join_server_thread() has reaped the old. Not ours.
+            return;
+        }
         if (!server_thread_.joinable()) {
             // Either never started, or a join that has already COMPLETED
             // reaped it -- the wait above is what makes that distinction safe.

@@ -92,6 +92,12 @@ private:
     // unwinding, and ~Server() then tears the object down underneath it.
     bool server_thread_joining_{false};
     std::condition_variable server_thread_cv_;
+    // Bumped every time start_async() installs a new server thread. A waiter
+    // captures it before waiting and gives up if it moved: without that it
+    // would re-read server_thread_ after waking and could adopt the NEXT
+    // generation's thread -- the restart path does exactly that, and joining a
+    // freshly started server hangs stop() forever.
+    std::uint64_t server_thread_generation_{0};
 
     // One client connection. Owned by exactly one party at a time: the accept
     // loop (briefly, until it is parked), the reactor (while idle, waiting for

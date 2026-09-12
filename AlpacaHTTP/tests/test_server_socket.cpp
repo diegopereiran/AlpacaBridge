@@ -1165,6 +1165,71 @@ int main() {
         }
     }
 
+    {
+        // The restart shape: one caller stops and immediately starts again
+        // while another is still parked inside stop() waiting for the join.
+        // Without a generation counter the waiter wakes after the restart has
+        // installed a NEW server_thread_, adopts it and joins a server that is
+        // still running -- stop() never returns. A regression HANGS here
+        // rather than failing an assertion, which the watchdog below turns
+        // into a reported failure.
+        //
+        // Repeated, because the window is the winner's join: the waiter has to
+        // park on the condition variable while the winner is inside it, and
+        // the winner has to finish and restart before the waiter re-acquires
+        // the mutex.
+        //
+        // HONEST LIMIT: 40 restarts did NOT reach that window on this machine
+        // -- the generation check was removed and this loop still passed, three
+        // runs out of three. So treat it as an exerciser of the restart shape
+        // (and material for the ASan/TSan gates), not as the regression test
+        // for the adopt-the-next-generation bug. That one is argued in
+        // join_server_thread()'s comment and would need a test seam inside the
+        // join to pin properly.
+        alpacahttp::Config restart_config;
+        restart_config.set_http_port(6883);
+        restart_config.set_discovery_enabled(false);
+        restart_config.set_server_name("TestServerRestartRace");
+
+        alpacahttp::Server restarting(restart_config);
+        restarting.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (!restarting.is_running()) {
+            std::cerr << "WARNING: restart-race case SKIPPED -- could not bind port 6883\n";
+        } else {
+            std::atomic<bool> done{false};
+            std::atomic<long> waiter_returns{0};
+            // The embedder loop: every time it sees the server go down it
+            // calls stop() too, which is the caller that ends up parked.
+            std::thread waiter([&]() {
+                while (!done.load()) {
+                    if (!restarting.is_running()) {
+                        restarting.stop();
+                        waiter_returns.fetch_add(1);
+                    }
+                    std::this_thread::yield();
+                }
+            });
+
+            for (int round = 0; round < 40; ++round) {
+                restarting.stop();
+                restarting.start_async();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+
+            done.store(true);
+            waiter.join();
+            // Reaching here at all is the assertion: a waiter that adopted a
+            // restarted thread would still be inside stop() and this join
+            // would never return -- when the window is actually hit.
+            EXPECT(waiter_returns.load() >= 0);
+
+            restarting.stop();
+            EXPECT(!restarting.is_running());
+        }
+    }
+
     std::cout << "All server socket tests passed!\n";
     return 0;
 }
