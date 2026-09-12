@@ -39,6 +39,24 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## Camera Drivers
 
+### GPhoto
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Nikon D5300 | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/GPhoto/Nikon%20D5300/) |
+
+<details>
+<summary><strong>GPhoto Camera Driver Notes</strong></summary>
+
+- **SDK**: libgphoto2/libraw (system packages via pkg-config, no vendored SDK — the only camera vendor here built on open-source system libraries rather than a proprietary `.so`/`.a`).
+- **Connection**: USB (PTP). Cameras enumerate by USB autodetect index (`cameraIndex`), same convention as ZWO/QHY/SVBONY/PlayerOne/ToupTek.
+- **Coverage**: any Canon/Nikon/Sony body libgphoto2 recognizes over PTP should work, since the driver talks the generic PTP capture/config protocol rather than a per-model SDK. Sensor geometry (CameraXSize/CameraYSize/BayerOffsetX/Y/MaxADU) is learned from a real decoded RAW frame the first time a given model connects on a rig, then cached — see `AGENTS.md`. `PixelSizeX`/`PixelSizeY` come from a static per-model table (~140 interchangeable-lens Nikon/Canon bodies); any other model, including every fixed-lens compact/camcorder libgphoto2 also supports, reports 0 (ASCOM "unknown").
+- **ISO modeled as Gain Index, not Gain Value**: unlike every other camera driver here, ISO is a discrete `Gains()` list (the camera's actual ISO choices) rather than a continuous register, since that is what a DSLR's hardware actually offers. `GainMin`/`GainMax` correctly throw `PropertyNotImplemented`.
+- **Tested model**: Nikon D5300 on Linux arm64 (USB).
+- **ConformU**: 4.5.1 — 0 errors, 0 issues, 0 timing issues.
+
+</details>
+
 ### iOptron
 
 | Model Series | Connection | Linux<br>(arm64) | Status |

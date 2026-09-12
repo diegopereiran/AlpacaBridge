@@ -120,7 +120,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
 | Bisque | Telescope | Script/protocol | In development |
-| gphoto (DSLR/mirrorless) | Camera (Canon, Nikon, Sony via libgphoto2) | SDK wrapper (system libgphoto2/libraw, no vendored SDK) | In development — not yet ConformU-validated |
+| gphoto (DSLR/mirrorless) | Camera (Canon, Nikon, Sony via libgphoto2) | SDK wrapper (system libgphoto2/libraw, no vendored SDK) | Production |
 
 ### Management components
 
