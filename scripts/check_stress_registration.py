@@ -1085,7 +1085,7 @@ def self_test():
             "    list(APPEND TEST_SOURCES fakevendor_concurrency_stress.cpp)\n"
             "endif()\n")
 
-        def run_main_with(stress_source, core_source="", cmake_source=None):
+        def run_main_with(stress_source, core_source="", cmake_source=None, guard_allowlist=()):
             with open(stress, "w", encoding="utf-8") as fh:
                 fh.write(stress_source + "\n")
             with open(core, "w", encoding="utf-8") as fh:
@@ -1109,8 +1109,12 @@ def self_test():
             # Cleared for the same reason as ALLOWLIST: the fixture's tree
             # holds one synthetic registration file, so every real entry would
             # otherwise report as stale and drown the finding under test.
+            # `guard_allowlist` injects entries for the two stale-entry rules,
+            # which otherwise never fire in any fixture or on the real tree
+            # (review finding on PR #465).
             saved_guard_allowlist = set(GUARD_ALLOWLIST)
             GUARD_ALLOWLIST.clear()
+            GUARD_ALLOWLIST.update(guard_allowlist)
             try:
                 return main()
             finally:
@@ -1215,6 +1219,16 @@ def self_test():
                              "}\n")
         check("main() FAILS when a registration file defines a call() lambda",
               run_main_with(local_call_lambda) == 1)
+        # Both STALE GUARD ALLOWLIST ENTRY arms: a listed file that already
+        # uses the guard, and an entry naming a file the tree does not hold.
+        # Neither fires on the real tree today, so without these two cases
+        # deleting either rule left every self-test green.
+        check("main() FAILS when an allow-listed registration file uses the guard",
+              run_main_with(clean, guard_allowlist={os.path.basename(stress)}) == 1)
+        check("main() FAILS when GUARD_ALLOWLIST names a file that does not exist",
+              run_main_with(clean, guard_allowlist={"nosuch_concurrency_stress.cpp"}) == 1)
+        check("main() passes when an allow-listed file really lacks the guard",
+              run_main_with(no_guard, guard_allowlist={os.path.basename(stress)}) == 0)
         # A call SITE is not a definition: the guard's own invocation style
         # and any helper named call() from a header must not trip the rule.
         call_site = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
