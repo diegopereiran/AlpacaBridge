@@ -75,8 +75,11 @@ public:
             throw_gp_error("gp_list_new failed", result);
         }
 
+        // gp_camera_autodetect returns the number of cameras found (>= 0) on
+        // success, not GP_OK -- e.g. exactly one camera makes it return 1,
+        // which is not GP_OK. Only a negative result is a real GP_ERROR_*.
         result = gp_camera_autodetect(list, context_);
-        if (result != GP_OK) {
+        if (result < 0) {
             gp_list_free(list);
             throw_gp_error("gp_camera_autodetect failed", result);
         }

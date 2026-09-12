@@ -25,8 +25,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -89,6 +92,79 @@ std::optional<std::string> pick_raw_format_choice(const std::vector<std::string>
         }
     }
     return raw_plus_other;
+}
+
+// Sensor geometry (width/height/Bayer phase/max ADU) is not knowable from
+// libgphoto2 metadata -- it only comes from decoding a real captured RAW
+// frame with libraw (see AGENTS.md gphoto section). That is identical for
+// every camera of the same model, so once it has been learned for a given
+// model on this rig it is cached to disk (keyed by the model string, not
+// the individual device) and never needs a priming capture again -- not on
+// the next Connect, not after a reboot, and not for a second camera of the
+// same model. AlpacaCore does not do JSON (see alpaca_json.h), so this is a
+// deliberately tiny tab-separated flat file rather than pulling in a JSON
+// dependency for five integers.
+constexpr const char* kSensorCacheRelativePath = "config/gphoto_sensor_cache.tsv";
+
+struct CachedSensorGeometry {
+    int width{};
+    int height{};
+    int bayer_offset_x{};
+    int bayer_offset_y{};
+    int max_adu{};
+};
+
+std::optional<CachedSensorGeometry> load_cached_sensor_geometry(const std::string& model) {
+    std::ifstream in(kSensorCacheRelativePath);
+    if (!in) return std::nullopt;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream iss(line);
+        std::string entry_model;
+        if (!std::getline(iss, entry_model, '\t') || entry_model != model) {
+            continue;
+        }
+        CachedSensorGeometry g;
+        if (iss >> g.width >> g.height >> g.bayer_offset_x >> g.bayer_offset_y >> g.max_adu) {
+            return g;
+        }
+    }
+    return std::nullopt;
+}
+
+void store_cached_sensor_geometry(const std::string& model, const CachedSensorGeometry& g) {
+    if (model.find('\t') != std::string::npos || model.find('\n') != std::string::npos) {
+        return; // Defensive: a model string can't corrupt the flat-file format.
+    }
+    std::filesystem::path path(kSensorCacheRelativePath);
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+
+    // Rewrite the file with every other model's line preserved and this
+    // model's entry appended fresh. The file holds one line per distinct
+    // camera model this rig has ever primed -- trivially small.
+    std::vector<std::string> other_lines;
+    {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream iss(line);
+            std::string entry_model;
+            if (std::getline(iss, entry_model, '\t') && entry_model != model) {
+                other_lines.push_back(line);
+            }
+        }
+    }
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) {
+        ALPACA_LOG_WARN(kLogTag, "Unable to persist gphoto sensor geometry cache to " + path.string());
+        return;
+    }
+    for (const auto& line : other_lines) {
+        out << line << '\n';
+    }
+    out << model << '\t' << g.width << '\t' << g.height << '\t' << g.bayer_offset_x << '\t' << g.bayer_offset_y
+        << '\t' << g.max_adu << '\n';
 }
 
 } // namespace
@@ -157,7 +233,7 @@ public:
             lifecycle_lock.lock();
             stop_exposure_thread();
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
@@ -193,6 +269,32 @@ public:
             camera_info_valid_ = true;
             reset_exposure_state_locked();
             connected_.store(true);
+
+            // Sensor geometry is the same for every camera of this model
+            // (see the cache helpers above) -- a rig that has already primed
+            // this exact model, ever, skips straight to it with no capture
+            // and no added latency.
+            if (auto cached = load_cached_sensor_geometry(info.model)) {
+                set_geometry_locked(cached->width, cached->height, cached->bayer_offset_x, cached->bayer_offset_y,
+                                    cached->max_adu);
+                return;
+            }
+
+            // First time this model has ever connected on this rig: prime it
+            // now, off mutex_ (it takes a real capture+download), so ASCOM
+            // geometry properties are valid the moment Connected becomes
+            // true instead of only after the caller's own first exposure.
+            // Best-effort -- see prime_sensor_geometry_and_cache.
+            int priming_handle = opened_handle;
+            std::string priming_model = info.model;
+            lock.unlock();
+            try {
+                prime_sensor_geometry_and_cache(priming_handle, priming_model);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN(kLogTag, "Sensor geometry priming capture failed (will learn on first real "
+                                         "exposure instead): " +
+                                             std::string(e.what()));
+            }
             return;
         }
 
@@ -233,12 +335,16 @@ public:
     //
     // Unlike SDK-enumerated CMOS cameras, libgphoto2 does not report sensor
     // dimensions, pixel pitch, or Bayer phase up front -- those are only
-    // knowable once a RAW frame has actually been decoded. Every property
-    // below that depends on them throws InvalidOperation ("not yet known")
-    // until the first successful exposure; after that they report the
-    // decoded frame's real values for the rest of the session. This is the
-    // same limitation other RAW-over-gphoto2 ASCOM drivers (e.g.
-    // ASCOM.DSLR) have; see AGENTS.md for the follow-up options considered.
+    // knowable once a RAW frame has actually been decoded. set_connected
+    // resolves this at Connect time: from the on-disk per-model cache if
+    // this exact camera model has connected here before, otherwise via a
+    // one-time throwaway priming capture (see prime_sensor_geometry_and_cache
+    // and the cache helpers near the top of this file). Every property below
+    // that depends on geometry throws InvalidOperation ("not yet known") only
+    // in the rare case that both of those failed (e.g. priming capture error)
+    // -- it then falls back to the caller's own first real exposure, same as
+    // other RAW-over-gphoto2 ASCOM drivers (e.g. ASCOM.DSLR). See AGENTS.md
+    // for the history of this tradeoff.
 
     int get_bayer_offset_x() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -369,18 +475,18 @@ public:
         current_iso_index_ = gain;
     }
 
+    // ASCOM's Gain interface has three mutually-exclusive modes: "Gain
+    // Value" (GainMin/GainMax work, Gains throws), "Gain Index" (Gain/Gains
+    // work, GainMin/GainMax throw), or "Gain Not Implemented" (all throw).
+    // ISO here is a discrete Gains() list of the camera's real ISO choices,
+    // not a continuous register, so this driver is in "Gain Index" mode --
+    // unlike the other vendors here, which expose a true min/max range.
     int get_gain_max() const override {
-        ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        require_iso_supported_locked();
-        return static_cast<int>(iso_choices_.size()) - 1;
+        throw AlpacaException("Gain range not supported; use Gains", AlpacaError::PropertyNotImplemented);
     }
 
     int get_gain_min() const override {
-        ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        require_iso_supported_locked();
-        return 0;
+        throw AlpacaException("Gain range not supported; use Gains", AlpacaError::PropertyNotImplemented);
     }
 
     std::vector<std::string> get_gains() const override {
@@ -840,7 +946,9 @@ private:
 
         // Geometry (sensor size, Bayer phase, max ADU) is not knowable until
         // a frame has actually been decoded -- reset here so a reconnect
-        // never serves stale dimensions from a previous camera.
+        // never serves stale dimensions from a previous camera. set_connected
+        // repopulates it right after this, from the on-disk cache or (first
+        // time this model has ever been seen) a priming capture.
         geometry_known_ = false;
         camera_x_size_ = 0;
         camera_y_size_ = 0;
@@ -851,6 +959,44 @@ private:
         max_adu_ = 65535;
         sensor_type_ = SensorType::RGGB;
         sensor_temperature_.reset();
+    }
+
+    // Called once, without mutex_ held, right after a brand-new camera model
+    // (never before cached on this rig) finishes connecting. Takes one
+    // throwaway capture purely to learn geometry via libraw, discards the
+    // pixel data (never touches last_image_/image_ready_ -- this must not
+    // look like a real exposure to the ASCOM client), and persists the
+    // result so this cost is never paid again for this model. Best-effort:
+    // on any failure, geometry simply stays unknown until the caller's own
+    // first real exposure, exactly like before this existed.
+    void prime_sensor_geometry_and_cache(int handle, const std::string& model) {
+        auto& sdk = GPhotoSDKWrapper::instance();
+        std::string shutter_choice;
+        std::string widget_name;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!native_shutter_choices_.empty()) {
+                // Fastest native shutter speed: this capture only exists to
+                // read the frame's dimensions, not to gather light.
+                shutter_choice = native_shutter_choices_.front().first;
+                widget_name = shutter_widget_name_;
+            }
+        }
+        if (!shutter_choice.empty()) {
+            sdk.set_choice_value(handle, widget_name, shutter_choice);
+        }
+
+        GPhotoCaptureResult capture = sdk.capture_and_download(handle);
+        DecodedFrame decoded = decode_raw_frame(capture.data);
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            set_geometry_locked(decoded.width, decoded.height, decoded.bayer_offset_x, decoded.bayer_offset_y,
+                                decoded.max_adu, decoded.sensor_type);
+        }
+        store_cached_sensor_geometry(
+            model, CachedSensorGeometry{decoded.width, decoded.height, decoded.bayer_offset_x,
+                                        decoded.bayer_offset_y, decoded.max_adu});
     }
 
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
@@ -977,26 +1123,35 @@ private:
         return frame;
     }
 
+    // Requires mutex_ held. Populates the geometry properties (CameraXSize/
+    // YSize, BayerOffsetX/Y, MaxADU) shared by both a real decoded exposure
+    // and a cache-hit/priming-capture result that never touches last_image_.
+    void set_geometry_locked(int width, int height, int bayer_offset_x, int bayer_offset_y, int max_adu,
+                             SensorType sensor_type = SensorType::RGGB) {
+        bool first_frame = !geometry_known_;
+        camera_x_size_ = width;
+        camera_y_size_ = height;
+        bayer_offset_x_ = bayer_offset_x;
+        bayer_offset_y_ = bayer_offset_y;
+        max_adu_ = max_adu;
+        sensor_type_ = sensor_type;
+        geometry_known_ = true;
+
+        if (first_frame || num_x_ <= 0 || num_y_ <= 0) {
+            num_x_ = width;
+            num_y_ = height;
+            start_x_ = 0;
+            start_y_ = 0;
+        }
+    }
+
     // Requires mutex_ held; applies a freshly decoded frame, cropping to the
     // client-requested software ROI (StartX/StartY/NumX/NumY), clamped to
     // the frame bounds.
     void apply_decoded_frame_locked(const DecodedFrame& frame) {
-        bool first_frame = !geometry_known_;
-        camera_x_size_ = frame.width;
-        camera_y_size_ = frame.height;
-        bayer_offset_x_ = frame.bayer_offset_x;
-        bayer_offset_y_ = frame.bayer_offset_y;
-        max_adu_ = frame.max_adu;
-        sensor_type_ = frame.sensor_type;
+        set_geometry_locked(frame.width, frame.height, frame.bayer_offset_x, frame.bayer_offset_y, frame.max_adu,
+                            frame.sensor_type);
         sensor_temperature_ = frame.sensor_temperature;
-        geometry_known_ = true;
-
-        if (first_frame || num_x_ <= 0 || num_y_ <= 0) {
-            num_x_ = frame.width;
-            num_y_ = frame.height;
-            start_x_ = 0;
-            start_y_ = 0;
-        }
 
         int crop_w = std::clamp(num_x_, 1, frame.width - std::clamp(start_x_, 0, frame.width - 1));
         int crop_h = std::clamp(num_y_, 1, frame.height - std::clamp(start_y_, 0, frame.height - 1));

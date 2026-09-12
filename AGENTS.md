@@ -2887,22 +2887,31 @@ cleanup checklist does not apply here).
   explicit model+port `gp_abilities_list_lookup_model` / `gp_port_info_list_lookup_path` init
   (mirroring `indi-gphoto`'s default path) rather than a bare `gp_camera_init` auto-probe, so
   opening one detected camera can't race another USB-attached camera's enumeration.
-- **Sensor geometry is unknown until the first successful exposure** — this is the single
-  biggest departure from every other camera driver in this project. libgphoto2 has no
-  "sensor size" query; `CameraXSize`/`CameraYSize`/`BayerOffsetX`/`BayerOffsetY`/`MaxADU` are all
-  derived from decoding an actual captured RAW frame with libraw (`LibRaw::imgdata.sizes`,
-  `LibRaw::COLOR(row,col)` + `cdesc` for Bayer phase, `imgdata.color.maximum` for MaxADU).
-  `CameraXSize`/`CameraYSize` read `0` and `BayerOffsetX`/`BayerOffsetY` throw
-  `InvalidOperation` ("not yet known") until that first exposure completes; after that they
-  serve the decoded frame's real values for the rest of the session. **This will very likely need
-  a ConformU-driven fix** — the ASCOM Camera contract generally expects these properties readable
-  before any exposure, so hardware validation may require either a lightweight "priming" capture
-  at connect, or a per-model dimension table (D5300 sensor is 6000×4000 per public specs, but
-  that shouldn't be hardcoded into a vendor-generic driver without confirming the RAW crop
-  libgphoto2/libraw actually deliver matches it).
+- **Sensor geometry is resolved at Connect time via a per-model priming capture + on-disk
+  cache** — libgphoto2 has no "sensor size" query; `CameraXSize`/`CameraYSize`/`BayerOffsetX`/
+  `BayerOffsetY`/`MaxADU` are all derived from decoding an actual captured RAW frame with libraw
+  (`LibRaw::imgdata.sizes`, `LibRaw::COLOR(row,col)` + `cdesc` for Bayer phase,
+  `imgdata.color.maximum` for MaxADU). ConformU hardware validation against a real Nikon D5300
+  confirmed this needed a fix — the ASCOM Camera contract expects these properties readable
+  before any exposure — and also confirmed the caution below was justified: the D5300's real RAW
+  crop libraw decodes is **6016×4016**, not the 6000×4000 public spec (an 8px masked/calibration
+  border per edge that no gphoto2 widget or PTP `ObjectInfo` metadata reports — confirmed by
+  probing both directly). So `set_connected` no longer waits for the caller's first exposure:
+  on Connect it checks an on-disk cache (`config/gphoto_sensor_cache.tsv`, a tiny tab-separated
+  flat file — AlpacaCore has no JSON, see `alpaca_json.h`) keyed by camera **model** string; a hit
+  populates geometry instantly with no capture. A miss (this exact model has never connected on
+  this rig before) triggers one throwaway capture at the fastest native shutter speed off
+  `mutex_`, decodes it, populates geometry, and writes the cache entry — so the cost (one shutter
+  actuation, one ~4-6s download+decode for a 24MP frame) is paid at most once ever per model, not
+  per Connect, not per reboot, not per additional camera of the same model. Best-effort: if
+  priming fails for any reason, geometry simply falls back to the pre-fix behavior (unknown,
+  `InvalidOperation`, until the caller's own first real exposure) rather than failing Connect.
+  See `prime_sensor_geometry_and_cache`/`set_geometry_locked`/the cache helpers in
+  `gphoto_camera_driver.cpp`.
 - **`PixelSizeX`/`PixelSizeY` return `0.0`** — libgphoto2 exposes no pixel-pitch query and there
-  is no per-model table yet. Likely a ConformU finding; fix by adding a small model→pitch lookup
-  if validation requires a nonzero value.
+  is no per-model table yet (unlike sensor geometry above, pixel pitch in microns isn't
+  recoverable from decoding a RAW frame either — libraw doesn't expose it). Likely a ConformU
+  finding; fix by adding a small model→pitch lookup if validation requires a nonzero value.
 - **ISO is a discrete `Gains()` list, not a continuous register** — deliberate departure from
   every other camera driver here (ZWO/QHY/SVBONY/PlayerOne/ToupTek all throw
   `PropertyNotImplemented` for `get_gains()` and treat `Gain` as a raw numeric register). A DSLR's
