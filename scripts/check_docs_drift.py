@@ -30,7 +30,11 @@ Checks:
      true when they were written.
   6. The QHYSDK seam's three parallel lists agree: every pure virtual on the
      interface has a LockedQHYSDK override, every override actually takes the
-     mutex, and the forward sweep in test_qhy_fake_sdk.cpp drives all of them.
+     shared mutex through locked() -- except cancel_exposure(), which must
+     take its own cancel_mutex_ and must NOT go through locked() (issue #339:
+     production's cancel skips the per-handle mutex so it can interrupt a
+     download blocked on the same handle) -- and the forward sweep in
+     test_qhy_fake_sdk.cpp drives all of them.
   7. Every relative path referenced in AGENTS.md's inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
