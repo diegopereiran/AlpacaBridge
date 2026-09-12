@@ -47,6 +47,7 @@ Supported device types (base drivers in `AlpacaCore/src/drivers/`): Camera, Tele
 - **Linux arm64 only** (ARMv8 — Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). amd64/x86_64 is no longer supported, built, packaged, or validated. CMake, `debian/rules`, `build_and_run.sh`, and `install_alpaca_service.sh` all hard-fail on non-arm64 hosts.
 - When writing driver code, follow fixed-width integer practices for protocol/SDK structs (`int32_t`, `uint16_t`, etc.) and avoid `long double`. The wider portability concerns (endianness, alignment) no longer matter for our build target, but using fixed-width types still makes wire-protocol code easier to read and harder to misread.
 - ConformU validation is performed on arm64 only. Historical amd64/x64 ConformU reports have been deleted from `AlpacaCore/conformu/`.
+- **ConformU 4.5.0 has a known arm64 timing bug — use 4.5.1+ (currently a beta download, not yet a GitHub release).** On arm64, the *first* Camera-device member returning each distinct .NET response type (`CameraState`/enum, `CameraXSize`/int, `SensorType`/enum) in a fresh ConformU process is charged ~0.13-0.22 s "OUTSIDE FAST RESPONSE TIME TARGET", while AlpacaBridge answers in <1 ms (confirmed via TRACE-level dispatch timing AND a loopback packet capture during SC715C validation, 2026-09-11: the request/response round trip was 3 ms; the ~140 ms was entirely client-side, between ConformU receiving the response and issuing its next request). Root cause: the official `conformu.linux-arm64.tar.xz` 4.5.0 release was accidentally published without `PublishReadyToRun`, so .NET JIT-compiles each new generic-over-value-type instantiation (`TimeFunc<CameraState>`, `TimeFunc<int>`, `TimeFunc<SensorType>`) on first use — reproducible on ANY vendor's camera driver on this rig (confirmed identically on ZWO ASI120MM Mini), not a driver bug. Filed and fixed upstream: [ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31); the maintainer's 4.5.1 beta (rebuilt with `PublishReadyToRun`) is clean. Get it from `https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz` until a formal 4.5.1 GitHub release exists — do NOT validate a driver's timing against a 4.5.0 arm64 run; a "3 members took longer than their target response times" result showing exactly these three members (and nothing else) is this bug, not a regression to chase in driver code. The same class of bug hit Telescope devices too (`AlignmentMode`, `EquatorialSystem`, `SideOfPier` — first use of each enum type).
 
 ## Driver Implementation Rules
 
@@ -639,7 +640,7 @@ Failing this check means guiding will fail at runtime, no matter how green the A
 
 When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 
-1. **Router registration** — add vendor/device case to `Router::register_device_from_config` in `AlpacaHTTP/src/http/router.cpp`. This is the dispatch that creates driver instances from persisted JSON config.
+1. **Router registration** — add vendor/device case to `Router::register_device_from_config` in `AlpacaHTTP/src/http/router.cpp`. This is the dispatch that creates driver instances from persisted JSON config. **Read config fields through `config_has()` / `config_get()`, never `config.contains()` / `config.value()`** (#388): `contains()` is true for an explicit JSON `null` and `value()` THROWS `type_error` rather than returning the default when the stored value is not convertible, so `{"siteLatitude": null}` — trivial to produce from a client that serialises an unset value instead of omitting the key — escaped the vendor branch and came back as an nlohmann type complaint instead of the specific message the field has. The helpers treat null as absence and report a genuinely wrong type as an `AlpacaException` naming the field. **Scope**: this is done for the TOP-LEVEL config fields. The nested `ports[]` sub-objects on the iMate PowerBox / ASIAIR / StellaVita switch branches still use `p.contains(...)` / `p.value(...)`, so `{"ports":[{"pwm": null}]}` still surfaces a raw `type_error` -- the same #388 shape one level down. Use the helpers for new fields at either level; converting the existing `ports[]` readers is tracked separately.
 2. **Router includes** — add `#include <alpacacore/vendor/<vendor>/<vendor>_<device>_driver.h>` at the top of `router.cpp`, guarded by `#ifdef ALPACACORE_ENABLE_<VENDOR>`.
 3. **Config sanitization fields** — ensure vendor-specific config keys are preserved through sanitization.
 4. **Web UI vendor dropdown** — add the vendor to the device-type dropdown in the web frontend (`AlpacaHTTP/web/app.js`) so users can select it.
@@ -759,31 +760,42 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the wrong flag.
 - **The router must never call `get_connected()` while `get_connecting()` is
   true — the connect side of the rule above** (SynScan hand controller,
-  2026-09, issue #130). Five telescope drivers (Celestron, OnStep, Bisque,
-  iOptron, Sky-Watcher; SynScan was in this list until the #130 fix made its
-  getter lock-free) answer `get_connected()` under the state mutex that their
+  2026-09, issue #130). The telescope drivers named in
+  `async_connectable.h`'s blocking list -- **that comment is the list; this
+  paragraph deliberately does not repeat it, because a second copy is what
+  went stale for SynScan** -- answer `get_connected()` under the state mutex that their
   `set_connected(true)` holds for the entire handshake, so a
   `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
-  fired (25 s on a silent handset: five 5 s query timeouts). The four
+  fired (25 s on a silent handset: five 5 s query timeouts). The
   wrapper-backed switch drivers can block too — their `is_open()` waits for the
   wrapper mutex, which `open()` holds throughout and `close()` holds for its
   two locked phases (it unlocks to join the PWM workers) — but that work is
   all local, so the window is microseconds to milliseconds rather than a
   multi-second serial handshake. Do not describe it more precisely than that
   in prose: the mechanism has been restated wrongly three times, and the bound
-  is what the rule depends on. The rule applies to both; only the five make it
-  urgent. Every router
+  is what the rule depends on. The rule applies to both; only the mutex-holding
+  telescopes make it urgent. Every router
   site now reads `get_connecting()` first and short-circuits; while a task
   is in flight `Connected` reports false. A connect request that arrives
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (29 drivers do, SynScan among them since the #130 fix) —
-  the five above still take the mutex and rely on the router rule, and four
-  wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita, ZWO ASIAIR
-  and ASIAIR Plus) lock inside the wrapper's `is_open()` but release it before
-  `pending_mutex_`, so they rely on the rule without creating the ABBA hazard. Regression tests:
+  getter (every driver does except the ones `async_connectable.h` names --
+  SynScan is among those that DO have a lock-free getter, since the #130 fix) —
+  the telescopes it lists still take the mutex and rely on the router rule, and the
+  wrapper-backed switch drivers it lists lock inside the wrapper's `is_open()` but
+  release it before
+  `pending_mutex_`, so they rely on the rule without creating the ABBA hazard.
+  **`async_connectable.h`'s comment is the single source for both lists, it is
+  gated, and no count is stated anywhere** (issue #381):
+  `scripts/check_docs_drift.py` classifies every `get_connected()` override
+  under `AlpacaCore/src/vendors/` by its body and fails if a blocking one is
+  missing from `async_connectable.h`'s list, if a lock-free one is still named
+  there, or if one cannot be classified at all. Bare numbers used to be
+  restated in four places, had nothing tying them to the code, and drifted
+  repeatedly — including a fresh stale count introduced by the PR that was
+  correcting the others. State the rule, not the arithmetic. Regression tests:
   `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
   `AlpacaCore/tests/test_synscan_async_park.cpp`.
   **Known trade-off:** while a task is in flight, `Connected` reports false
@@ -793,13 +805,13 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connect that may still succeed moments later. Accepted because the
   alternative (reading `get_connected()` directly) is the phantom-link bug
   this rule fixes; there is no per-driver signal yet for which
-  `get_connected()` implementations are safe to read mid-task (the 29
-  lock-free ones) versus which aren't (the five above and the four
+  `get_connected()` implementations are safe to read mid-task (the lock-free
+  majority) versus which aren't (the telescopes above and the
   wrapper-backed switches).
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
-  can still block on a mutex-holding driver's handshake for the five above and the four
+  can still block on a mutex-holding driver's handshake for the telescopes above and the
   wrapper-backed switches (their wrapper `open()` holds the same mutex `is_open()` takes).
   Far narrower than the bug this rule fixes (needs a second request to land
   in a specific few-instruction window, not just a slow connect), and not
@@ -1254,6 +1266,36 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   the SDK via `sdk_` would instead touch the driver at the moment each call
   returns, on top of the post-call touches. Treat detached workers as unsafe
   and bound their lifetime; do not read this rule as making them safe.
+- **When a fake and the real SDK disagree, the fake must be the HARSHER of the
+  two** (`fake_qhy_sdk.h`, issues #373/#365/#390). A fake that answers a
+  plausible value where hardware answers a sentinel, or that settles instantly
+  where hardware converges, produces green tests for driver code that breaks on
+  the bench — and the plausible answer is the dangerous one precisely because
+  nothing looks wrong. Three QHY examples, two now fixed and one re-scoped and all worth
+  recognising in the next fake: `get_param()` answered `0.0` for an unsupported
+  control where `GetQHYCCDParam()` answers `QHYCCD_ERROR` (~4.29e9), so
+  "unsupported" and "reads zero" were indistinguishable; `get_mem_length()`
+  was reported as ignoring the binning it had been told about, and acting on
+  that entry literally made the fake worse, which is its own lesson: **a gap
+  entry is a claim about the real SDK, and it can be wrong.** Check the
+  units against the only caller before "fixing" one. It also exposed a
+  second, sharper rule: **a fake's paired calls must agree with each other**,
+  since `get_mem_length()` and `get_single_frame()` are used together (size a
+  buffer from one, fill it with the other) and hardware cannot deliver an
+  image larger than `GetQHYCCDMemLength()`. Fixing one of a pair alone turned
+  a parity gap into a heap-buffer-overflow inside the fake, which reads as a
+  driver bug in an ASan/TSan job. Write the units down where the state lives
+  (`roi_` is in binned pixels, because that is what the driver passes) and
+  pin the pairing with a case, not just the single call; and
+  `control_temp()` wrote its target straight into `CURTEMP`, an instant settle
+  the real `ControlQHYCCDTemp` PID can never produce, which would have let a
+  driver that merely reads back its own setpoint pass a thermal test. Keep the
+  `KNOWN PARITY GAPS` block at the top of a fake exhaustive, and prefer closing
+  a gap to documenting it. **Give a fake's shared setup ONE home**: the
+  one-camera `make_fake()` was copied verbatim into three QHY test files
+  (issue #342) and is now `FakeQHYSDK::with_one_camera()` next to the canned
+  camera it builds, so a change to what a default test fake looks like cannot
+  be made in two files out of three.
 - **Poll-until-settled loops keep the sleep cadence in the driver but put the
   DECISION in `util::ConsecutiveSettle`** (`util/poll_settle.h`, issue #105):
   stability-run + poll-budget semantics, unit-tested with scripted sequences
@@ -1276,11 +1318,11 @@ When adding a test file for a new vendor device:
 ## Continuous Integration and Pre-flight
 
 - CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
+- **Every job in every workflow carries a `timeout-minutes` bound** (issue #363). The numbers are sized from the observed healthy runtime of recent green runs with wide headroom (`sanitizers-tsan` 30 min against a healthy max of 5, `build-vendors`/`sanitizers` 25, `build-test` 20, `clang-tidy` 25 -- it does the all-vendors build `build-vendors` does plus libgpiod from source and `clang-tidy-diff` over every changed line, so it gets that job's bound rather than a smaller one -- `cppcheck` 20 -- its dominant cost is building cppcheck 2.17 from source on the runner with no cache, so it gets the same bound as the build jobs rather than a text-scan-sized one -- the text scans 10; `release` 10, `codeql` 30, `claude-review` 45). They exist because the `[stress]` suite is the one place a regression can *hang* rather than fail, and GitHub's 6-hour default turned that into six hours of runner time before any signal. **When you add a job, give it a bound**, and when a job legitimately outgrows its bound raise the number rather than trimming the work to fit -- these are a backstop against a wedge, not a performance target. Note the deliberate gap on `claude-review`: its 45 min bound is longer than `/pr-checker`'s 30 min verdict-poll budget, so a review running past 30 min times the skill out while CI still lets the job finish. That is the intended precedence (the bound exists to catch a wedged job, not to pace the reviewer); a poll timeout is a re-poll, not a broken workflow.
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
 - **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`** — `scripts/check_docs_drift.py` (the `docs-drift` CI job / pre-flight gate) now fails if they diverge, so this can't silently drift again.
 - **Web UI JavaScript is gated only by `node --check`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS with no bundler/eslint/`package.json`, so this parse-only check is its sole automated validation — there is nothing else stopping a stray brace from shipping.
-- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together; `scripts/check_docs_drift.py` fails the build if they disagree. The same script also fails if a `docs/development.md` build-options table row goes missing for a CMake `ALPACACORE_ENABLE_*` option, if `VERSION` and the README badge disagree, or if AGENTS.md references a repo path that doesn't exist.
-- **Concurrency now has automated coverage — but only where a driver is registered with the stress harness.** The `sanitizers-tsan` job (issue #101) builds all-vendors with ThreadSanitizer and runs the `[stress]` connect/disconnect/operate suite (`AlpacaCore/tests/concurrency_stress.h`): lifecycle storms from N threads, destruction racing an in-flight connect, and the racing-disconnect-never-dropped settle check. Locally: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. Registered so far: ToupTek camera / AFW / AAF focuser / thermal switch (over the fake SDK seam, wrapped in `LockedToupTekSDK`), ZWO EFW + camera + EAF focuser + CAA rotator + dew heater switch, Player One Phoenix + camera + thermal switch, SVBONY camera, Bisque, OnStep, and — over the loopback fake-mount TCP seam (`tests/fake_mount_server.h`, which drives drivers into the *connected* state so the poll/pulse/GOTO/teardown threads actually run) — the ZWO, Celestron, SynScan, and iOptron telescopes, plus the SkyWatcher telescope over its own loopback UDP simulator (`tests/fake_skywatcher_mount.h`), plus (fail-fast, no fake seam) the iOptron iEFW filter wheel, iEAF focuser, and iMate PowerBox Switch, and the Astroasis Oasis focuser (hidapi, no fake seam exists), plus the WandererAstro cover calibrator, filter wheel and box switch over the pty streamer fake (`tests/fake_serial_streamer.h`) with the request/response rotator fail-fast, plus the Gemini PDH Advanced 3 Switch and Flat Panel Pro CoverCalibrator over their pty-backed fakes (`tests/fake_gemini_pdh.h`, `tests/fake_gemini_flatpanel.h`) with the Gemini focuser fail-fast, and the WeeWX ObservingConditions driver over an unreachable URL. **When you add or substantially change a driver, add a `[stress]` TEST_CASE for it** — one factory + one operate callback (see `test_touptek_concurrency_stress.cpp` for the overall shape — but take the per-call guard from this paragraph, not from that file: every merged registration predates `StressCallGuard`, and of the 15, five — astroasis, gemini, playerone, wandererastro and weewx — define a local `call()` helper at all (four as a lambda, wandererastro as a file-scope template). Six more wrap *some* calls in inline `try`/`catch` blocks, and four — touptek included — have no per-call isolation whatsoever, so their operate callbacks stop at the first throw and exercise one call instead of all of them. Migration is tracked in issue #326). Wrap each call in the operate callback with `alpacacore::test::StressCallGuard` (`concurrency_stress.h`, issue #322) rather than a local `try/catch` — `run_lifecycle_stress` wraps the WHOLE callback in one try/catch, not each call inside it, so on a fail-fast path a single throw silently skips every call after it unless each one is guarded individually. `StressCallGuard` samples **one line per distinct failure mode with its occurrence count**, not the first N events (#377) — the old cap let one thread faulting in a tight loop fill every slot with copies of one message before another thread recorded once, which is worst in a *connected* registration where a live driver throws often and the single distinct failure that mattered is the one crowded out. It swallows the expected `NotConnected` by default and counts everything else it catches (a non-`std::exception` throw is never caught by anything here and still `std::terminate`s the binary, exactly as it would without the guard), so the case ends with `INFO(guard.report());` followed by `CHECK(guard.unexpected_count() == 0)` — **both lines, always**: only the `CHECK` turns counting into a failure, and a file that wraps every call correctly and omits it passes whatever the storm throws while *looking* like it follows the pattern (#379) — the `INFO` is what makes a failure legible, since without it the `CHECK` reports only the expansion (`3 == 0`) and names nothing it swallowed — this replaces re-deciding the guard's catch type per file, which flip-flopped across review rounds before #322. Its constructor argument **REPLACES** the default set rather than adding to it — pass `{NotConnected, PropertyNotImplemented}`, not just `{PropertyNotImplemented}`, or every racing-disconnect throw in the storm is counted as a regression and the case fails nondeterministically. **A registration that runs *connected* (over `fake_mount_server.h`, `fake_skywatcher_mount.h`, or any full-seam fake) must widen the expected set explicitly this way** — `NotConnected` alone fits a never-connected, fail-fast path, but an operate callback exercising a live driver can legitimately hit `InvalidValue`, `MethodNotImplemented`, or `InvalidWhileParked` (a slew racing a park) from ordinary calls too — remember `NotImplemented`/`PropertyNotImplemented`/`MethodNotImplemented` all share one numeric code (see the class doc), so they're not separately distinguishable inside the expected set. Drivers without a registration are still covered only by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver); do not assume green CI means thread-safe for them. **The QHY SDK seam's three parallel lists are gated** (#394): `scripts/check_docs_drift.py` compares `QHYSDK`'s pure virtuals, `LockedQHYSDK`'s overrides and the forward-sweep method list in `test_qhy_fake_sdk.cpp`, and separately fails on a forward that does not go through `locked()`. The compiler forces a forward to EXIST (an unimplemented pure virtual leaves the decorator abstract) but never that it takes the mutex, which is the only reason the decorator exists — an unlocked forward makes the fake racy under a storm and produces a TSan report naming the *fake*, the exact confusion the decorator was built to prevent. Model any future SDK decorator the same way. `scripts/check_stress_registration.py` (the `stress-registration` CI job / pre-flight gate) fails on any vendor/device-type pair that is neither registered nor explicitly allow-listed there, so the currently-unregistered drivers are tracked in one place instead of only in this paragraph. It separately rejects two tag mistakes per TEST_CASE, each scoped to where that mistake actually costs something: a `[stress-guard]`-without-`[stress]` case inside a `*_concurrency_stress.cpp` file (that tag is for harness self-tests only — a registration wearing it would still get TSan and still read as registered while dropping out of the vendor-coverage count), and a `[stress]` case anywhere else under `AlpacaCore/tests/` (a file outside that glob can compile unconditionally, in which case one such case alone satisfies the TSan job's vendor zero-coverage grep and makes it vacuous — this actually happened, see `test_async_connectable.cpp`). Note the first rule is deliberately limited to registration files: `[stress-guard]` is legitimate anywhere else, which is the whole point of the tag — a vendor case parked outside that glob wearing it would read as registered to a human without counting toward vendor coverage, but that is a naming problem rather than a tag one, and the gate does not try to catch it. Note also that the gate keys on vendor/device-type pairs, so the two ZWO ASIAIR switch drivers are masked by the dew-heater switch registration and remain covered by code review only. **SDK-callback paths especially**: the TSan suppressions mute any report with a vendor-blob frame on the stack, so a race in driver code invoked from an SDK internal thread is invisible to CI unless that callback path is exercised through a fake-SDK seam (fully instrumented, no suppression applies) — when you add an SDK callback to a driver, register a fake-seam stress path for it in the same change.
+- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together; `scripts/check_docs_drift.py` fails the build if they disagree. The same script also fails if a `docs/development.md` build-options table row goes missing for a CMake `ALPACACORE_ENABLE_*` option, if `VERSION` and the README badge disagree, if AGENTS.md references a repo path that doesn't exist, or if `async_connectable.h`'s blocking-`get_connected()` lists drift from the drivers (issue #381): it classifies every `get_connected()` override under `AlpacaCore/src/vendors/` by its body and fails on a blocking driver missing from a list, a lock-free one still named in it, or a count of either list stated anywhere the globs reach. It also fails if the QHYSDK seam's three parallel lists disagree -- every pure virtual on the interface needs a `LockedQHYSDK` override, every override must actually take the mutex, and the forward sweep in `test_qhy_fake_sdk.cpp` must drive all of them (issue #394).
 
 ## Logging, Threading, and Errors
 
@@ -1393,6 +1435,8 @@ Devices: Camera.
 
 SDK location: `AlpacaCore/external/SVBONY/lib/armv8/`, headers under `external/SVBONY/include/`.
 
+- **SC715C is a rebadged ToupTek G3M715C, NOT served by this driver.** The SVBONY SDK does not recognize the SC715C. Configure it with vendor `touptek` (device type Camera, `ALPACACORE_ENABLE_TOUPTEK`) — the ToupTek SDK enumerates it natively under its own model name `G3M715C`. Same rebadge pattern as the iOptron iCAM cameras being served by the Player One driver (see iOptron notes below) -- but with one difference that matters to the user: the router aliases vendor `ioptron` + camera onto the Player One driver, so an iCAM owner still selects `ioptron`. There is no `svbony` + camera alias (that vendor has its own driver), so the SC715C must be configured as `touptek`. Validated 2026-09-11 on Linux arm64: 0 errors, 0 issues, 0 timing issues (ConformU 4.5.1 — see the [ConformU 4.5.0 arm64 timing bug](#target-architecture) note if an earlier ConformU version shows spurious timing failures). Report saved at `AlpacaCore/conformu/SVBONY/SC715C/Linux-arm64.txt`.
+
 - **Control warm-up at connect (SV905C2 quirk)**: After `SVBOpenCamera`, `SVBSetControlValue(SVB_GAIN, ...)` returns `SVB_ERROR_GENERAL_ERROR` indefinitely on SV905C2 — regardless of value, regardless of `bAuto` flag, regardless of whether `SVBStartVideoCapture` is active, and `SVBRestoreDefaultParam` does not clear the state. The driver works around this by iterating every writable control reported by `SVBGetControlCaps` and writing each to its `default_value` during the connect path (after `SVBSetROIFormat` / `SVBSetOutputImageType`). Once any `SVBSetControlValue` call has landed, subsequent client gain writes succeed. Failures during the warm-up are tolerated and logged at DEBUG. Do not remove the warm-up loop in `set_connected` without re-running ConformU against an SV905C2 — the failure is silent until a client tries to set gain. Likely related to SDK readme entries `v1.13.1: Fixup ASCOM software to support SV905C2` and `v1.13.2: Optimize gain settings of SV905C2`.
 - **Auto control writes**: `disable_auto_if_needed` reads the current value/auto flag and only writes back if currently auto, since some SVBONY models reject manual writes while auto is active with the same `SVB_ERROR_GENERAL_ERROR`.
 - **`SVBSetControlValue` retry**: The wrapper retries up to 3 times with a 50 ms backoff specifically on `SVB_ERROR_GENERAL_ERROR` to absorb genuinely transient hardware-op faults; deterministic rejections still surface after the retries are exhausted.
@@ -1403,6 +1447,8 @@ SDK location: `AlpacaCore/external/SVBONY/lib/armv8/`, headers under `external/S
 ### ToupTek
 
 Devices: Camera, Focuser (AAF — Astro Auto Focuser), FilterWheel (AFW — Astro Filter Wheel, AFW-M 5/7-slot), Switch (two backends: cooled-camera **Thermal** — dew heater + fan; and the **StellaVita PowerBox** — GPIO).
+
+- **Rebadge note**: the camera sold as **SVBONY SC715C** is this same G3M715C hardware and enumerates via this driver's SDK under the name `G3M715C` — configure it with vendor `touptek`, not `svbony`. See the SVBONY section above.
 
 SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between the camera, focuser, filter-wheel, and thermal-switch drivers). The StellaVita Switch driver uses **no SDK** — it is a libgpiod-only driver that happens to live under the ToupTek vendor.
 
@@ -1484,7 +1530,12 @@ Target hardware: Wave 100i/150i (also applicable to AZ-GTi-class mounts).
 Protocol documentation: `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`
 (shared with the SynScan vendor directory). No external SDK required.
 
-Connection types: Serial (mount USB port, 9600 8N1) and Network (built-in Wi-Fi module,
+Connection types: Serial (the mount's own USB port or an EQDIR-class adapter, 8N1; the scan probes
+9600 then 115200 per port, because an EQ board's built-in PL2303 port answers only at 115200,
+so a silent Prolific/FTDI/CH340-class port costs at least about 3.3 s per scan: 1.5 s at 9600, the
+300 ms SynScan echo guard, 1.5 s at 115200, and up to roughly 4.4 s because the read loops only
+check their deadline between `VTIME` reads; multiplied by every such adapter on the rig; #403
+records the measurement) and Network (built-in Wi-Fi module,
 **UDP** port 11880 — one command per datagram, one reply per datagram; AP-mode address
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
@@ -1509,18 +1560,32 @@ datagrams before each send so replies cannot get off-by-one.
   and left for the connect-time guard to refuse: a device dropped at startup never enters
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
-  `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`. `0.0` is a real coordinate, so the driver tracks whether each
+  `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
+  Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
+  the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
+  config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the
+  ASCOM setters have always refused exactly that at runtime — a validation a client cannot bypass
+  but a config can is not a validation. The reads and the check live in one shared
+  `read_site_coordinates()` used by all seven vendor branches that take a site, and on the
+  persisted path the offending coordinate is **cleared** so the driver's unset handling covers it. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
-  client-set `UTCDate` offset only when the host clock was undisciplined (no NTP) at the moment
-  of the write, so a client's clock error never steers pointing on an NTP-good host;
+  client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
+  the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
+  path through `detail::host_synchronized_probe()` (one `adjtimex` read, no device I/O; #405), so
+  a client's clock error never steers pointing on an NTP-good host and stops steering it within
+  about 30 s of the host becoming disciplined by slewing (INFO log; the flag only moves
+  undisciplined to disciplined, since ignoring the offset is the safe side);
   `client_utc_now_locked()` feeds the `UTCDate` readback and always honours the client's write,
   because that property is the client's to set and ConformU reads back what it wrote (#287,
   #351). On an NTP-less host the router also steps the system clock from that write (#289). The
   offset is not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped
   underneath it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks
-  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write.
+  disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write; the
+  30 s re-sample above covers discipline gained without a step. Tests pin both branches through
+  the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
+  clock state (#395).
 - Pointing convention: home = counterweight down pointing at the pole, counts offset
   `0x800000`. Branch A (dec axis angle >= 0): `dec = 90 - a2`, `HA = a1/15`; branch B:
   `dec = 90 + a2`, `HA = a1/15 - 12`. Goto picks the branch from the target hour angle
@@ -1768,14 +1833,18 @@ against its checklist, 2026-09-06:
   board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
 - [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
   EQM-35 specifically, but the issue's ask applies equally.
-- [ ] Fake mount test double extended with a classic-board profile (9600 baud, no home
-  index, older firmware string) — deliberately NOT added with invented numbers. This
-  branch's `FakeMountProfile::eqm35_pro()` is a REAL hardware capture; fabricating a
-  plausible HEQ5/EQ6 profile without hardware to source it from would misrepresent
-  guessed values as measured ones. The issue notes HEQ5 PRO and EQ6 hardware is already
-  on hand via the `synscan` (hand-controller) driver validation (#7, #29) — reuse an
-  actual reading from that hardware over an EQDIR cable when available, rather than
-  inventing one.
+- [x] Fake mount test double extended with a classic-board profile: `FakeMountProfile::eqm35_pro()`
+  in `AlpacaCore/tests/fake_skywatcher_mount.h` is a REAL EQM-35 Pro capture (its built-in PL2303
+  port answers only at 115200), used by the `[eqm35]`-tagged cases in
+  `AlpacaCore/tests/test_skywatcher_async.cpp`: identity from the mount code, the count-frame
+  FindHome fallback, the board's own sidereal period, and the `[hemisphere]` southern-hemisphere
+  regressions that depend on its geometry and feature word (one `[eqm35]` case uses the Wave
+  profile as the control). Counts are deliberately not stated here; grep the tag.
+- [ ] A second classic-board profile (HEQ5 PRO / EQ6, 9600 baud over an EQDIR cable, older
+  firmware string) — deliberately NOT added with invented numbers: fabricating a plausible
+  profile without hardware to source it from would misrepresent guessed values as measured
+  ones. HEQ5 PRO and EQ6 hardware is on hand via the `synscan` (hand-controller) driver
+  validation (#7, #29); capture an actual reading from it over an EQDIR cable when available.
 - **Not yet done, intentionally: adding the EQM-35 Pro to `SUPPORTED-DRIVERS.md` and the
   architecture table, and renaming the "Sky-Watcher Wave" section to "Sky-Watcher Direct
   Motor Controller" per the issue's suggestion.** This PR's code and tests are ready for
@@ -2038,7 +2107,7 @@ The iEAF electronic focuser (and the iAFS2/3 automatic focuser, which speaks the
 - **Command acks**: `:FM%7u#` move-absolute (space-padded 7-wide, matching INDI), `:FQ#` abort, `:FZ#` set-current-position-as-zero, `:FR#` toggle direction (not used by the driver — ASCOM Focuser has no reverse property). Each answers with a **single `1` byte and no `#`** (INDI reads exactly one byte after them). The wrapper consumes that ack with a 300 ms timeout: left in the buffer it races the `tcflush` at the start of the next `:FI#` and, when it lands after the flush, prefixes the reply (`1+0132110299271#`) and breaks the fixed-width parse. Seen on hardware as an intermittent "Failed to parse iEAF status" on ConformU's Move. Completion is observed by polling `:FI#`.
 - **Status cache**: one `:FI#` round trip is ~10 ms on the wire; the driver serves IsMoving/Position/Temperature from a 100 ms cache (dropped by move/halt/disconnect) so `DeviceState` is one poll, not three. The original 50 ms pre-read sleep in `send_command_locked` was most of the cost — `read_response()` already waits for `#`, so it is 5 ms now.
 - **Timing marks that are not yours**: when ConformU runs *on the Pi* alongside the server, a cold ConformU process shows 0.1-0.25 s on `DeviceState`/`MaxStep` (a constant!) while the server log shows the request arriving 200+ ms after the previous reply was sent. That is ConformU-side .NET warm-up; re-run in the same ConformU session and it clears. Prove it with the TRACE log request timestamps before touching the driver.
-- **Enum-typed members carry a ~100 ms first-use JIT cost in ConformU on a Pi 4-class core** (HAE16 EQ session, 2026-08-25): across five runs the only FAST marks were `AlignmentMode`, `EquatorialSystem` and `SideOfPier` at 0.095-0.15 s, and two of those are hard-coded constants with no lock or serial. Every bool/double/string/int member was 5-15 ms; `DestinationSideOfPier`, the *second* use of the `PierSide` enum, was 3 ms. Each is the first response of a distinct enum type, i.e. .NET tiered JIT of the generic deserialize path per `T`. Eliminated on our side: `curl` timing of the exact PUT-then-GET sequence is 1-2 ms, `performance` governor made no difference, and a dual-stack listener (removes the refused IPv6 SYN .NET sends first) made no difference. It does not clear on a warm re-run (unlike the cold-process marks above) and the same code passed clean on the faster astro.lan rig. Do not chase it in the driver. Reported upstream as ASCOMInitiative/ConformU#31 and fixed in ConformU 4.5.1 (same HAE16 build: 0 timing marks). Use 4.5.1 or later on Pi-class hosts; on 4.5.0, run the pass twice in one ConformU web-UI session and keep the warm log.
+- **Enum-typed members carry a ~100 ms first-use JIT cost in ConformU on a Pi 4-class core** (HAE16 EQ session, 2026-08-25): across five runs the only FAST marks were `AlignmentMode`, `EquatorialSystem` and `SideOfPier` at 0.095-0.15 s, and two of those are hard-coded constants with no lock or serial. Every bool/double/string/int member was 5-15 ms; `DestinationSideOfPier`, the *second* use of the `PierSide` enum, was 3 ms. Each is the first response of a distinct enum type, i.e. .NET tiered JIT of the generic deserialize path per `T`. Eliminated on our side: `curl` timing of the exact PUT-then-GET sequence is 1-2 ms, `performance` governor made no difference, and a dual-stack listener (removes the refused IPv6 SYN .NET sends first) made no difference. Whether it clears on a warm re-run depends on the member type -- it did not for these enum-typed mount members (unlike the cold-process marks above), while a camera pass can come up clean simply because the first-use cost was already paid earlier in the same process. Either way a clean 4.5.0 timing record is not evidence of a real pass; only a 4.5.1 re-run settles one and the same code passed clean on the faster astro.lan rig. Do not chase it in the driver. Reported upstream as ASCOMInitiative/ConformU#31 and fixed in ConformU 4.5.1 (same HAE16 build: 0 timing marks). Use 4.5.1 or later on Pi-class hosts. The old workaround for 4.5.0 -- run the pass twice in one ConformU web-UI session and keep the warm log -- is **withdrawn on arm64**: the 4.5.0 linux-arm64 asset was published without `PublishReadyToRun` (see the Target Architecture note), so a warm log there hides a build-wide defect rather than a one-off cold start, and `/conformu` step 2g now replaces an installed 4.5.0 before any run. Replace ConformU; do not warm-log around it.
 - **Diagnosing "server slow?" from a remote browser shell**: `curl -s -o /dev/null -w "%{time_total}"` loops for the exact member sequence, then `tcpdump -i lo -w /tmp/x.pcap port 6800` (capture to file; `-A` to a browser shell is unusable) read back with `-r ... -A | grep -E "Flags \[S\]|GET /api|^HTTP/1.1 200"`. The tcpdump is what exposed the IPv6-first connects.
 - **Range**: 0..99999 steps (INDI's FocusAbsPos max; the 7-digit move field could carry more but the hardware range is 5 digits). Step size in microns is not exposed — `StepSize` throws `PropertyNotImplemented`. No temperature compensation in hardware.
 - ConformU 4.5.0 validated 2026-08-23 on iEAF hardware (model code 2, firmware 100), Raspberry Pi arm64: 0 errors, 0 issues, all timing targets met.
@@ -2180,7 +2249,7 @@ Protocol: unlike the Lite (reverse-engineered from vendor app traffic), this mod
 - **`>S#` status reply has a DIFFERENT layout from the Lite's**: `*S<2-digit id><motor><light><cover>#` (7+ chars) vs. the Lite's `*S<light><f2><f3>#` (6 chars) — see `parse_light_flag()` vs. `parse_rev2_status()` in `gemini_flatpanel_protocol_wrapper.cpp`. The 2-digit device ID must be `19` or `99` (INDI's adapter gate) or the reply is rejected as unparseable. `motor`/`light`/`cover` are each a single digit; `cover` values match INDI's `GeminiCoverStatus` enum exactly: `0`=Moving, `1`=Closed, `2`=Open, `3`=TimedOut (mapped to ASCOM `CoverState::Error`).
 - **Cover commands block the wire until physically done**: `>O#` (open) waits for the exact reply `*OOpened#`, `>C#` (close) waits for `*CClosed#`, both with a 30s timeout (`kCoverMoveTimeoutS`) — the reply IS the completion signal, there's no separate "done" query. Since ASCOM's `OpenCover`/`CloseCover` are async initiators (must return in ~1s per the STANDARD timing target, not block for the full travel), the driver runs these on a background thread (`start_cover_task()` in `GeminiFlatPanelV2Driver`) rather than calling them synchronously from the HTTP handler — same "joinable member thread, joined before starting a new one, reaped in the destructor" idiom as the Celestron/iOptron/SynScan telescope drivers' async slew tasks (see their `slew_task_thread_`/`slew_dispatch_thread_` members) — there was no existing generic reusable helper for this pattern to build on. A second open/close call while one is already in flight throws `InvalidOperation` rather than blocking or queuing.
 - **`HaltCover` has no hardware equivalent on Rev2** — per INDI's `GeminiFlatpanel::AbortCap()`, only the separate "Pro" hardware revision returns success; Rev1/Rev2/Lite all fail it. Because this model's `CoverState` is a real state (not `NotPresent` like the Lite), the "unconditional `MethodNotImplemented`" pattern used for the Lite's cover methods does NOT apply here — per the WandererCover precedent (see that section below), ConformU requires `HaltCover` to function on any cover-capable device. Fix: `HaltCover` sends no wire command; it just sets a `cover_halted_` flag that makes `CoverState`/`CoverMoving` stop reporting `Moving` (`CoverState` returns `Unknown` while halted) immediately, while the in-flight open/close command's blocking wire call keeps running in the background until the motor reaches its end stop or the 30s timeout fires on its own.
-- **`CalibratorOn`/`CalibratorOff` must run on a background thread too, not just Cover** — `GeminiFlatPanelProtocolWrapper::Impl` serializes ALL wire commands (light/brightness AND cover) behind one `mutex_`, because there is only one physical serial link and interleaving bytes from two commands would corrupt both. `open_cover()`/`close_cover()` hold that mutex for up to `kCoverMoveTimeoutS` (30s) while blocked reading the motor's completion reply. The first implementation called `protocol_.light_on()`/`set_brightness()` directly from `calibrator_on()` on the HTTP handler thread; ConformU caught this by issuing `HaltCover` (which per the note above does NOT actually stop the wire-level open/close call) on a cover that was still physically mid-travel, then immediately calling `CalibratorOn` — which blocked for 6+ seconds waiting for the cover mutex, blowing the 1.0s STANDARD target. **Fix**: `calibrator_on()`/`calibrator_off()` now dispatch to a background thread (`start_calibrator_task()`, mirroring `start_cover_task()`) so the ASCOM initiator returns immediately regardless of what protocol_'s mutex is doing, with `CalibratorChanging`/`get_calibrator_state()` reporting `NotReady` while the background command is in flight (checked via a `calibrator_changing_` atomic, same pattern as `cover_in_flight_`). This is also just the textbook-correct ASCOM `CalibratorOn` implementation per ConformU's own guidance ("return quickly... set CalibratorChanging to true...") — worth defaulting to for any calibrator that shares a wire/bus with another slow operation, not just as a fix for this specific contention. Lesson generalizes beyond Gemini: **any driver where two ASCOM-exposed operations share one underlying serial/bus mutex needs BOTH operations to be asynchronous**, not just the one that happens to be slow on its own.
+- **`CalibratorOn`/`CalibratorOff` must run on a background thread too, not just Cover** — `GeminiFlatPanelProtocolWrapper::Impl` serializes ALL wire commands (light/brightness AND cover) behind one `mutex_`, because there is only one physical serial link and interleaving bytes from two commands would corrupt both. `open_cover()`/`close_cover()` hold that mutex for up to `kCoverMoveTimeoutS` (30s) while blocked reading the motor's completion reply. The first implementation called `protocol_.light_on()`/`set_brightness()` directly from `calibrator_on()` on the HTTP handler thread; ConformU caught this by issuing `HaltCover` (which per the note above does NOT actually stop the wire-level open/close call) on a cover that was still physically mid-travel, then immediately calling `CalibratorOn` — which blocked for 6+ seconds waiting for the cover mutex, blowing the 1.0s STANDARD target. **Fix**: `calibrator_on()`/`calibrator_off()` now dispatch to a background thread (`start_calibrator_task()`, mirroring `start_cover_task()`) so the ASCOM initiator returns immediately regardless of what protocol_'s mutex is doing, with `CalibratorChanging`/`get_calibrator_state()` reporting `NotReady` while the background command is in flight (checked via `calibrator_pending_count_`, an atomic **counter** — deliberately not the single `cover_in_flight_` bool the cover path uses. Calibrator commands chain behind each other, so an earlier thread finishing and clearing a shared bool would report "not changing" while a later-queued thread is still running its own wire command; each thread increments the count for its own command and decrements it on exit, and `NotReady` holds until the LAST queued command finishes. Use a counter for any initiator that can be re-entered before the previous one drains). This is also just the textbook-correct ASCOM `CalibratorOn` implementation per ConformU's own guidance ("return quickly... set CalibratorChanging to true...") — worth defaulting to for any calibrator that shares a wire/bus with another slow operation, not just as a fix for this specific contention. Lesson generalizes beyond Gemini: **any driver where two ASCOM-exposed operations share one underlying serial/bus mutex needs BOTH operations to be asynchronous**, not just the one that happens to be slow on its own.
 - **`CoverState`/`CoverMoving` are never cached** (unlike `Brightness`/`CalibratorState`, which — same as the Lite — are driver-tracked so ConformU's immediate post-`CalibratorOn` read gets the just-set value, not a stale one). Cover state genuinely changes on its own mid-flight in a way the driver doesn't control tick-by-tick, so `get_cover_state()` queries `>S#` live whenever no cover task is in flight and isn't halted.
 - Default baud rate 9600 (8N1), same connection type options (`connectionType`: `auto`/`serial`) as the Lite; auto-detect shares `enumerate_gemini_flatpanel_ports()`/`probe_port()` with the Lite model verbatim, including the DTR/HUPCL and Espressif-vs-CH340 handling documented above — nothing v2-specific was needed there since no Rev2 unit was available to confirm whether its by-id pattern differs.
 - Web UI: `gemini-flatpanel-model` select toggles between `gemini-flatpanel-lite-fields` and `gemini-flatpanel-v2-fields` sub-blocks within the shared CoverCalibrator section; `flatPanelModel` (`"lite"`/`"v2"`) is the persisted config field. The v2 index field (`gemini-flatpanel-v2-index`) shares its `INDEX_FIELDS` `configKey` (`panelIndex`) with the Lite's, since both models compete for the same auto-detect index namespace.
@@ -2216,7 +2285,7 @@ Protocol: **no docs, no INDI/INDIGO driver, no vendor app capture** -- everythin
 - **Link health (issue #237, 2026-09-09)**: reads are cache-only by design, so the reader thread latches a link fault after 3 consecutive unanswered `>G#` polls (~6 s; a failed poll write counts too), clears `PdhState::valid`, and the driver throws `DriverException` on every value read/write (commanded values included) until a frame arrives again. Found on the VM rig: USB passthrough re-enumerated, the hub served byte-identical telemetry for 30 min while `SetSwitchValue` failed with EIO. See "Cache-backed reads must track link health" above.
 - **Hardware findings (confirmed 2026-09-08)**: `>H#` -> `*HGeminiPowerBoxPlusAdv3#` verbatim; `>V#` -> `*V309#`. The `>G#` frame uses **suffix** tags with fixed-width, space-padded numbers: `*G1111D111111U1A1T1A1M1B1M100C100C 24.06S 23.39T 42.04H  9.76D12.6V 0.11C  1.38P#` -- the split-on-tag-letters parser handles it because `strtod`/`strtol` skip leading spaces (a stricter "all digits" parse of the numeric fields would have broken). **The firmware streams `*G` frames at ~3 s only after the first `>G#`** (nothing unsolicited for the first ~5 s after open, then continuous once queried) -- so the reader-thread design was necessary: a request/response wrapper would have read a streamed frame as the `>V#` reply. Set commands produce no ack. Both dew channels came up Manual at 100 % on power-up.
 - **All writable-switch writes are serialized under `write_mutex_`** (validate + send + record as one step; readers never take it). PR #236's bot review spotted that a DEW output's mode-dependent max was read in one lock and the commanded value recorded in another, so a concurrent mode write could let a value be validated against a stale max. A concurrent mode/value writer stress case covers it.
-- 17 hardware-free Catch2 cases: 11 driver-contract/frame-parsing/handshake cases (incl. the real captured frame above) plus 6 over a pty-backed fake hub (`tests/fake_gemini_pdh.h`: replies to `>H#`/`>V#`/`>G#`, never acks set commands, optionally streams `*G` frames) covering connect + first frame, every write path incl. the mode-dependent DEW range, streamed frames routed past the handshake, the 2 s stale re-poll, the firmware gate, and concurrent DEW mode/value writers. Plus routing/config round-trip.
+- Hardware-free Catch2 coverage in `test_gemini_pdh_switch.cpp`: driver-contract, frame-parsing and handshake cases (incl. the real captured frame above) plus cases over a pty-backed fake hub (`tests/fake_gemini_pdh.h`: replies to `>H#`/`>V#`/`>G#`, never acks set commands, optionally streams `*G` frames) covering connect + first frame, every write path incl. the mode-dependent DEW range, streamed frames routed past the handshake, the 2 s stale re-poll, the firmware gate, and concurrent DEW mode/value writers. Plus routing/config round-trip.
 
 ### WandererAstro (WandererCover V4, WandererRotator Mini, SFW filter wheels, WandererBox Pro V3)
 
