@@ -3034,15 +3034,22 @@ int main() {
                 });
             // The one line the handler writes for a UTCDate step, by its
             // fixed prefix; returns (level, message) so a case can pin both.
+            // Exactly one outcome line per step: a second match returns
+            // nullopt so the has_value() checks below fail loudly instead of
+            // silently pinning whichever line came first.
             auto outcome_line = [&]() -> std::optional<CapturedLine> {
                 std::lock_guard<std::mutex> lock(captured_mutex);
+                std::optional<CapturedLine> found;
                 for (const auto& line : captured) {
                     if (line.message.find("UTCDate from ") != std::string::npos &&
                         line.message.find(": host clock ") != std::string::npos) {
-                        return line;
+                        if (found) {
+                            return std::nullopt;
+                        }
+                        found = line;
                     }
                 }
-                return std::nullopt;
+                return found;
             };
             auto clear = [&] {
                 std::lock_guard<std::mutex> lock(captured_mutex);
