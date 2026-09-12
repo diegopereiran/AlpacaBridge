@@ -652,7 +652,17 @@ jobs:
         # scripts/ci_preflight.sh. See open-astro#385.
         run: |
           set -euo pipefail
-          node --test AlpacaHTTP/tests/web/
+          # Explicit file list, not `node --test <dir>`: the directory form
+          # works on Node 20 but the runner's Node 22 resolves the path as a
+          # module and dies with MODULE_NOT_FOUND, which is how this job first
+          # failed. A glob of the test files behaves the same on both.
+          mapfile -t tests < <(git ls-files 'AlpacaHTTP/tests/web/*.test.js')
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "No web JavaScript tests — nothing to run."
+            exit 1
+          fi
+          echo "Running: ${tests[*]}"
+          node --test "${tests[@]}"
 
   cppcheck:
     name: cppcheck (changed files)

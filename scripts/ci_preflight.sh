@@ -364,7 +364,12 @@ elif ensure_tool node nodejs; then
   # renders a plausible-looking WRONG time rather than an obvious failure, so
   # they get unit tests too (open-astro#385). Kept in sync with the javascript
   # job in .github/workflows/ci.yml.
-  if [ "${js_ok}" -eq 1 ] && ! node --test AlpacaHTTP/tests/web/; then
+  # Explicit file list, not `node --test <dir>`: the directory form works on
+  # Node 20 but Node 22 resolves the path as a module and dies with
+  # MODULE_NOT_FOUND. Kept identical to the CI step for that reason.
+  mapfile -t JS_TEST_FILES < <(git ls-files 'AlpacaHTTP/tests/web/*.test.js')
+  if [ "${js_ok}" -eq 1 ] && [ "${#JS_TEST_FILES[@]}" -gt 0 ] \
+      && ! node --test "${JS_TEST_FILES[@]}"; then
     echo "Web UI JavaScript unit tests failed."
     js_ok=0
   fi

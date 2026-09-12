@@ -95,11 +95,28 @@ test('local midnight does not roll the date backwards', () => {
 test('single-digit fields are zero padded', () => {
     // Some ICU versions hand back a single digit for hours 0-9 once hourCycle
     // forces a non-default cycle, which makes the header jitter by a character
-    // on the hour.
+    // on the hour. The ICU this runs against is NOT one of them -- it already
+    // returns "03" for the same instant, so asking it directly would pass with
+    // the pad deleted. Stub the unpadded shape to exercise the pad itself.
     withTZ('UTC', () => withFormat(({ formatServerClock }) => {
-        const early = new Date(Date.UTC(2026, 0, 2, 3, 4, 5));
-        assert.ok(formatServerClock(early).startsWith('2026-01-02 03:04:05 '),
-                  formatServerClock(early));
+        const real = Intl.DateTimeFormat;
+        Intl.DateTimeFormat = function () {
+            return {
+                formatToParts: () => [
+                    { type: 'year', value: '2026' }, { type: 'month', value: '1' },
+                    { type: 'day', value: '2' }, { type: 'hour', value: '3' },
+                    { type: 'minute', value: '4' }, { type: 'second', value: '5' },
+                    { type: 'timeZoneName', value: 'UTC' },
+                ],
+            };
+        };
+        try {
+            const early = new Date(Date.UTC(2026, 0, 2, 3, 4, 5));
+            assert.ok(formatServerClock(early).startsWith('2026-01-02 03:04:05 '),
+                      formatServerClock(early));
+        } finally {
+            Intl.DateTimeFormat = real;
+        }
     }));
 });
 
@@ -119,7 +136,15 @@ test('falls back when Intl returns incomplete parts', () => {
     withTZ('UTC', () => withFormat(({ formatServerClock }) => {
         const real = Intl.DateTimeFormat;
         Intl.DateTimeFormat = function () {
-            return { formatToParts: () => [{ type: 'year', value: '2026' }] };
+            // A timeZoneName is included deliberately: without it the
+            // "no zone label" guard takes the fallback too, and this case
+            // would pass with the incomplete-parts check deleted.
+            return {
+                formatToParts: () => [
+                    { type: 'year', value: '2026' },
+                    { type: 'timeZoneName', value: 'UTC' },
+                ],
+            };
         };
         try {
             assert.strictEqual(formatServerClock(INSTANT), '2026-09-11 11:30:48 (UTC)');
