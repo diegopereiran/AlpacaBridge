@@ -477,12 +477,16 @@ public:
         auto reset_session_state_for_connect = [&](bool keep_telemetry_caches = false) {
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
-            client_disagreement_warned_ = false;  // open-astro#409: once per connection
             slew_force_until_ = std::chrono::steady_clock::time_point{};
             pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
             if (!keep_telemetry_caches) {
+                // open-astro#409: once per REAL connection. The
+                // keep_telemetry_caches=true caller is the "Connected=true
+                // while already connected" no-op, and re-arming there would
+                // log a line per poll for a client that re-sends both.
+                client_disagreement_warned_ = false;
                 cached_equatorial_.reset();
                 cached_horizontal_.reset();
                 cached_status_.reset();
@@ -1703,6 +1707,7 @@ public:
         // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
         const int offset_minutes = 0;
         TimeInfo info = from_utc_time_point(utc, offset_minutes);
+        const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
 
         if (connected_.load()) {
             ZWOMountProtocolWrapper::instance().set_time_info(info);
@@ -1717,7 +1722,7 @@ public:
         if (connected_.load()) {
             // The mount now runs on the client's clock and so does the cached
             // pointing time; on a disciplined host say so once (open-astro#409).
-            alpacacore::util::ClientUtcWarning::warn_once("ZWO", utc, client_disagreement_warned_);
+            alpacacore::util::ClientUtcWarning::warn_once("ZWO", client_minus_host, client_disagreement_warned_);
         }
     }
 

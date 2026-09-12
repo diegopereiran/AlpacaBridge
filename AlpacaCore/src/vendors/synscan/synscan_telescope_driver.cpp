@@ -918,6 +918,7 @@ private:
         info.timezone_offset_minutes = tz_info.offset_minutes;
         info.dst_enabled = tz_info.dst;
 
+        const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         SynScanProtocolWrapper::instance().set_time(info);
         timezone_offset_minutes_ = tz_info.offset_minutes;
         timezone_offset_valid_ = true;
@@ -927,7 +928,7 @@ private:
         last_utc_valid_ = true;
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
-        alpacacore::util::ClientUtcWarning::warn_once("SynScan", utc, client_disagreement_warned_);
+        alpacacore::util::ClientUtcWarning::warn_once("SynScan", client_minus_host, client_disagreement_warned_);
     }
 
 public:

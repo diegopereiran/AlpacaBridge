@@ -84,12 +84,18 @@ public:
     /// connect so a reconnect re-arms it). The flag is set only when a line
     /// is logged, so a client whose first write agrees and whose later write
     /// does not is still reported. Returns true when it logged.
-    static bool warn_once(const std::string& component, std::chrono::system_clock::time_point client_utc,
+    ///
+    /// `client_minus_host` is the client's instant minus the host's, SAMPLED
+    /// BEFORE the mount write: the write is one to three serial round trips
+    /// with a multi-second per-command timeout, so sampling afterwards
+    /// against a 2 s threshold would report a perfectly set client clock as
+    /// seconds out on a mount that was slow to ack (review note on #471).
+    static bool warn_once(const std::string& component, std::chrono::system_clock::duration client_minus_host,
                           bool& warned) {
         if (warned) {
             return false;
         }
-        const auto offset = disagreement(client_utc - std::chrono::system_clock::now(), host_synchronized());
+        const auto offset = disagreement(client_minus_host, host_synchronized());
         if (!offset) {
             return false;
         }
@@ -99,6 +105,12 @@ public:
                                        " ms; the mount's clock and pointing now follow the client (logged once "
                                        "per connection)");
         return true;
+    }
+
+    /// Convenience for a caller with nothing to write first: samples now.
+    static bool warn_once(const std::string& component, std::chrono::system_clock::time_point client_utc,
+                          bool& warned) {
+        return warn_once(component, client_utc - std::chrono::system_clock::now(), warned);
     }
 
 private:
