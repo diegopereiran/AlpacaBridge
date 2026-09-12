@@ -39,6 +39,16 @@ constexpr double kHoursToDegrees = 15.0;
 // counterweight side down). The controller's position register is initialized
 // to this offset so signed axis angles fit in the unsigned 24-bit counter.
 constexpr uint32_t kHomeCounts = 0x800000;
+// Hour angle of the dec-axis sweep at the counterweight-down home: the dec
+// axis lies in the meridian plane there, so rotating it alone moves the OTA
+// along the HA = +/-6 h circle (see the pointing-model comment in the driver).
+constexpr double kHomeHourAngleOffsetHours = 6.0;
+
+// Signed 6 h home term for a dec-axis angle: which side of the dec axis the
+// OTA sits on, NOT which hemisphere the mount is in.
+inline double home_hour_angle_offset(double dec_axis_degrees) {
+    return dec_axis_degrees >= 0.0 ? kHomeHourAngleOffsetHours : -kHomeHourAngleOffsetHours;
+}
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
@@ -270,9 +280,12 @@ public:
             // open-astro#274: the mount stores no site of its own, so an
             // unconfigured device would run on 0.0/0.0. hemisphere_south_locked()
             // is site_latitude_ < 0.0, which silently puts a southern rig on
-            // northern pointing math and undoes #250 (RA tracking direction),
-            // #253 (Dec rate and pulse-guide sign) and #261 (SideOfPier and the
-            // goto pier-side branch). Refuse rather than point wrongly.
+            // northern pointing math: the #432 sky frame (both the a1 term and
+            // dec), the RA tracking direction (#250, restored by #432) and the
+            // Dec rate / pulse-guide sign (#253). NOT #261: the pier-side
+            // branch and label are picked from the sky hour angle and are
+            // hemisphere-independent, which is one of #432's findings. Refuse
+            // rather than point wrongly.
             if (!site_coordinates_known_locked()) {
                 throw AlpacaException(
                     "Site latitude and longitude must be set before connecting: this mount stores no site of its "
@@ -520,7 +533,19 @@ public:
                                       AlpacaError::InvalidOperation);
             }
             dec_rate_arcsec_per_sec_ = rate;
-            const bool busy = axes_busy_locked();
+            // Per axis, for the same reason set_right_ascension_rate() and
+            // set_site_latitude() ask per axis: only an operation that owns
+            // the DEC axis re-applies the Dec offset when it releases it. An
+            // East/West pulse or an RA MoveAxis made the whole-mount
+            // predicate true while owning only RA, and its restore rewrites
+            // the RA step period and never calls apply_dec_rate_offset_locked(),
+            // so a continuous (at-or-above-floor) offset was stranded until
+            // the next DeclinationRate write, tracking toggle or slew --
+            // comet or satellite tracking while autoguiding is the way in
+            // (round-3 review finding). The sub-floor duty path recovered on
+            // its own through the duty worker's start gate; the continuous
+            // one did not.
+            const bool busy = axis_busy_locked(kAxisDec);
             if (!busy) {
                 anchor_model_locked();  // continuous anchor: no position jump on a rate change
             }
@@ -627,10 +652,15 @@ public:
         if (rate == ra_rate_sec_per_sidereal_sec_) {
             return;  // idempotent rewrite
         }
-        if (axes_busy_locked()) {
-            // A goto/park/home/pulse/manual motion owns the RA axis: store
-            // the rate only — the operation's restore path re-applies the
-            // effective (offset-folded) drive rate when it releases the axis.
+        if (axis_busy_locked(kAxisRa)) {
+            // An operation that owns the RA AXIS is in flight: store the rate
+            // only — its restore path re-applies the effective (offset-folded)
+            // drive rate when it releases the axis. Per axis, not the
+            // whole-mount axes_busy_locked() this used to ask: a Dec pulse or
+            // a Dec MoveAxis owns only the Dec axis and its restore never
+            // touches RA, so the rate write was stranded with nothing
+            // scheduled to apply it (round-2 review note; the same shape as
+            // the set_site_latitude() defect fixed in the commit before this).
             ra_rate_sec_per_sidereal_sec_ = rate;
             double eff = effective_ra_rate_locked();
             bool defer_duty =
@@ -665,6 +695,10 @@ public:
         refresh_position_cache_locked(false);
         // ASCOM convention derived from the dec-axis branch: the branch chosen
         // for HA >= 0 targets is pierEast (0), the mirror branch pierWest (1).
+        // The same rule in both hemispheres: the goto picks the a2 >= 0
+        // branch for a target at HA >= 0 (see ra_dec_to_axis_degrees_locked),
+        // so reading the branch back off the axis reproduces the side that
+        // get_destination_side_of_pier() computes from hour angle.
         return cached_dec_axis_deg_ >= 0.0 ? 0 : 1;
     }
 
@@ -723,9 +757,85 @@ public:
         if (latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        site_latitude_ = latitude;
-        site_latitude_set_ = true;
+        // A latitude write that crosses the equator reverses the RA drive and
+        // flips the Dec offset's sign (effective_ra_rate_locked() and
+        // apply_dec_rate_offset_locked() both read hemisphere_south_locked()),
+        // so a drive applied under the old latitude is now running backwards.
+        // The client pushing its own site after connect is the ordinary way in,
+        // and nothing else re-applies until Tracking, TrackingRate,
+        // RightAscensionRate or a slew happens to: the axis holds the wrong
+        // direction at 1x and the star trails at 2x, which is the #250
+        // signature. Re-apply here.
+        //
+        // The skip is decided PER AXIS (axis_busy_locked()), not from the
+        // whole-mount axes_busy_locked(): only an operation that owns a given
+        // axis re-derives that axis's drive when it releases it. A goto/park/
+        // home/slew owns both and restores both via set_tracking_locked() ->
+        // apply_ra_drive_locked(); a pulse or a manual MoveAxis owns only its
+        // own, and its restore touches only that one -- the pulse end's
+        // stop_axis() re-derives RA through effective_ra_rate_locked() (it
+        // used to write the rate captured at dispatch, which made even the
+        // RA skip unsafe while autoguiding: PHD2 keeps pulse_guiding_active_
+        // true for most of every guide cycle), and the MoveAxis stop task
+        // re-applies the Dec offset for a Dec nudge. So a whole-mount skip
+        // let a DEC-axis operation in flight (a North/South pulse, or
+        // MoveAxis(Dec, r) -> MoveAxis(Dec, 0)) block the RA re-apply while
+        // nothing on the Dec side ever touched RA: the RA axis kept the old
+        // hemisphere's direction indefinitely -- the same 2x-trailing
+        // signature this setter exists to prevent, reached through the other
+        // axis (round-2 review finding). The mirror case (an RA-axis
+        // operation blocking the Dec offset flip) is closed the same way.
+        bool crossing = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            crossing = connected_ && tracking_ && hemisphere_south_locked() != (latitude < 0.0) &&
+                       !(axis_busy_locked(kAxisRa) && axis_busy_locked(kAxisDec));
+            if (!crossing) {
+                site_latitude_ = latitude;
+                site_latitude_set_ = true;
+                return;
+            }
+        }
+        reap_duty_task();
+        bool need_duty = false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            // Re-checked under the new lock: another thread may have stopped
+            // tracking or taken the axes while the mutex was released.
+            const bool ra_busy = axis_busy_locked(kAxisRa);
+            const bool dec_busy = axis_busy_locked(kAxisDec);
+            const bool still_crossing =
+                connected_ && tracking_ && hemisphere_south_locked() != (latitude < 0.0) && !(ra_busy && dec_busy);
+            const double previous = effective_ra_rate_locked();
+            site_latitude_ = latitude;
+            site_latitude_set_ = true;
+            if (still_crossing) {
+                anchor_model_locked();  // the counts are unchanged; only their reading flips
+                if (!ra_busy) {
+                    apply_ra_tracking_rate_locked(lock, previous);
+                } else if (ra_duty_rate_deg_s_ != 0.0) {
+                    // Sub-floor RA drive: the axis is stopped between bursts,
+                    // so the owner's restore only has to stop it -- the duty
+                    // worker resumes from this stored rate, which no restore
+                    // path re-derives. Pre-arm it (no hardware touch) the way
+                    // set_right_ascension_rate()'s busy branch does.
+                    ra_duty_rate_deg_s_ = effective_ra_rate_locked();
+                }
+                if (!dec_busy) {
+                    apply_dec_rate_offset_locked(lock);
+                }
+            }
+            // Unconditional, exactly as set_declination_rate() computes it:
+            // reap_duty_task() above JOINED the worker, so a still_crossing
+            // that went false in the window (a goto or park taking both axes
+            // while the mutex was released) would otherwise leave a live
+            // sub-floor rate with no worker until the next rate write or
+            // tracking toggle (round-2 review note).
+            need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
+        }
+        if (need_duty) {
+            start_duty_thread();
+        }
     }
 
     double get_site_longitude() const override {
@@ -1035,7 +1145,7 @@ public:
     void pulse_guide(int direction, int duration) override {
         int axis = -1;
         bool ra_rate_adjust = false;
-        bool ra_pulse_restart = false;  // pulse rate <= 0: axis must reverse
+        bool ra_pulse_restart = false;  // pulse opposes the tracking sense
         double dec_rate_deg_per_sec = 0.0;
         double ra_pulse_rate_deg_per_sec = 0.0;
         double ra_restore_rate_deg_per_sec = kSiderealDegPerSec;
@@ -1083,13 +1193,18 @@ public:
                 // a live step-period change would not move it. Use the direct
                 // nudge path; the worker resumes bursting after the pulse.
                 ra_rate_adjust = tracking_ && ra_duty_rate_deg_s_ == 0.0;
-                double adjust = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
+                // Sky sense (East = RA increasing = slower in the tracking
+                // direction) mapped onto the hemisphere's axis sense, like
+                // effective_ra_rate_locked().
+                const double axis_sign = ra_axis_sign_locked();
+                double adjust = axis_sign * (direction == 2 ? -guide_rate_.ra : guide_rate_.ra);
                 ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
                 ra_pulse_rate_deg_per_sec = ra_restore_rate_deg_per_sec + adjust;
-                // In-place ":I" cannot change direction. A non-positive pulse
-                // rate (guide rate near 1x sidereal under Lunar/Solar drive)
-                // needs a full stop-and-reverse, and a full restart to resume.
-                ra_pulse_restart = ra_pulse_rate_deg_per_sec <= kMinInPlacePulseRateDegPerSec;
+                // In-place ":I" cannot change direction. A pulse rate that is
+                // not (comfortably) in the tracking direction -- guide rate
+                // near 1x sidereal under Lunar/Solar drive -- needs a full
+                // stop-and-reverse, and a full restart to resume.
+                ra_pulse_restart = axis_sign * ra_pulse_rate_deg_per_sec <= kMinInPlacePulseRateDegPerSec;
             }
 
             // No read freeze during the pulse: ConformU 4.5 measures the
@@ -1135,20 +1250,33 @@ public:
             // drive rate. Give the drive-rate restore the same retried care
             // as the end-of-pulse stop (#249 review).
             bool ra_live_write_sent = false;
-            auto recover_ra_drive_rate = [this, &ra_live_write_sent, ra_restore_rate_deg_per_sec]() {
+            // Same re-derivation as stop_axis() below, for the same reason:
+            // this runs after the pulse, so a SiteLatitude write during it
+            // must be honoured rather than the dispatch-time snapshot.
+            auto recover_ra_drive_rate = [this, &ra_live_write_sent]() {
                 if (!ra_live_write_sent) {
                     return;
                 }
+                // Deliberately NOT given stop_axis()'s ra_reverses branch: it
+                // writes ":I" + ":J" in place with no ":G", so a re-derived
+                // rate whose SIGN differs from the running one changes the
+                // period and leaves the axis turning the old way. Reached only
+                // when the dispatch ":J" throws after the ":I" went out, and a
+                // pure hemisphere flip preserves the magnitude, so the practical
+                // exposure is a period that is already correct. Recorded so the
+                // asymmetry with stop_axis() reads as a choice rather than an
+                // oversight (round-4 review note).
                 constexpr int kRestoreAttempts = 3;
                 std::string last_error;
                 for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
                     try {
                         std::lock_guard<std::mutex> lock(mutex_);
+                        const double restore_rate = effective_ra_rate_locked();
                         auto& proto = SkyWatcherProtocolWrapper::instance();
-                        proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
+                        proto.set_step_period(kAxisRa, tracking_step_period_for(restore_rate),
                                               /*with_readback=*/false);
                         proto.start_motion(kAxisRa);
-                        cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
+                        cmd_axis_rate_deg_s_[0] = restore_rate;
                         return;
                     } catch (const std::exception& e) {
                         last_error = e.what();
@@ -1205,13 +1333,16 @@ public:
                     // kick alone. ConformU's 5 s pulses are always verified.
                     verify_dispatch_rate = duration >= kMinPulseForRateVerifyMs;
                 } else if (restore_tracking) {
-                    // Pulse rate is non-positive (direction reversal): a live
-                    // ":I" write cannot reverse the axis — stop and restart in
-                    // the pulse direction instead.
+                    // The pulse runs against the axis's own tracking sense
+                    // (the guard is on axis_sign * rate, so this is a rate <= 0
+                    // north of the equator and >= 0 south of it): a live ":I"
+                    // write cannot reverse the axis — stop and restart in the
+                    // pulse direction instead.
                     start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate);
                 } else {
-                    // Not tracking: nudge the RA axis directly like DEC.
-                    double rate = direction == 2 ? -guide_rate_.ra : guide_rate_.ra;
+                    // Not tracking: nudge the RA axis directly like DEC, in
+                    // the hemisphere's axis sense for East/West.
+                    double rate = ra_axis_sign_locked() * (direction == 2 ? -guide_rate_.ra : guide_rate_.ra);
                     start_speed_motion_locked(lock, kAxisRa, rate);
                 }
             } catch (const std::exception& e) {
@@ -1248,9 +1379,38 @@ public:
                                            dispatch_max_window);
                 verify_elapsed = std::chrono::steady_clock::now() - verify_start;
             }
-            auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec, pulse_restart]() {
+            // What stop_axis() actually restored, for the post-stop verify
+            // below. Seeded with the dispatch-time capture so a stop that
+            // never ran (or a non-restoring pulse) behaves as before.
+            double applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
+            auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate]() {
                 auto& proto = SkyWatcherProtocolWrapper::instance();
-                if (restore_tracking && !pulse_restart) {
+                // Re-derived here, NOT the value captured at dispatch: since
+                // the drive direction became hemisphere-dependent, a
+                // SiteLatitude write that crosses the equator during the
+                // pulse changes what "restore tracking" means. The setter
+                // skips a busy RA axis precisely because this path recomputes;
+                // writing the captured pre-write rate would restore the old
+                // hemisphere's direction and leave RA running backwards until
+                // something else re-applied the drive -- the 2x-trailing
+                // failure the setter exists to prevent, reached through the
+                // one path that was still using a stale snapshot.
+                double ra_restore_rate_deg_per_sec = 0.0;
+                bool ra_reverses = false;
+                if (restore_tracking) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
+                    applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
+                    // An in-place ":I" changes the PERIOD only; direction is
+                    // latched by the ":G" that start_speed_motion_locked()
+                    // sends. So a restore whose sign no longer matches what
+                    // the axis is running has to take the stop-and-restart
+                    // branch, exactly as set_site_latitude() does for the
+                    // idle case -- otherwise the axis keeps turning the old
+                    // way at the new rate.
+                    ra_reverses = (ra_restore_rate_deg_per_sec > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0);
+                }
+                if (restore_tracking && !pulse_restart && !ra_reverses) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped. Same ":J" kick as
                     // the dispatch above, for the same reason.
@@ -1260,7 +1420,8 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                 } else if (restore_tracking) {
-                    // Reversed pulse: full stop-and-restart back to the drive rate.
+                    // Reversed pulse, or a hemisphere change mid-pulse: full
+                    // stop-and-restart back to the drive rate.
                     std::unique_lock<std::mutex> lock(mutex_);
                     start_speed_motion_locked(lock, kAxisRa, ra_restore_rate_deg_per_sec);
                 } else {
@@ -1329,7 +1490,19 @@ public:
             // pulse task ~450 ms (or more) longer, which the next command's
             // reap must join. Not worth that latency on short guide pulses.
             if (stopped && restore_tracking && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
-                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, ra_restore_rate_deg_per_sec, pulse_task_cancel_);
+                // What stop_axis() RE-DERIVED, not the dispatch-time capture.
+                // The two differ whenever effective_ra_rate_locked() moved
+                // during the pulse -- a RightAscensionRate write (deferred by
+                // the RA-axis busy skip precisely so this restore applies it)
+                // or a SiteLatitude crossing. Checking against the stale value
+                // made live_rate_change_took() classify the correctly restored
+                // axis as "did not take" and resend ":I" at the pre-write
+                // period, silently dropping the client's offset and leaving
+                // cmd_axis_rate_deg_s_[0] describing a rate the axis is not
+                // running. Narrow (East pulses, offset > ~0.25 s/s) but it is
+                // exactly the contract set_right_ascension_rate()'s skip rests
+                // on (round-4 review note).
+                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, applied_ra_restore_rate, pulse_task_cancel_);
             }
             if (!stopped) {
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
@@ -1852,6 +2025,14 @@ private:
 
     bool hemisphere_south_locked() const { return site_latitude_ < 0.0; }
 
+    // Direction the RA axis must turn for the SKY hour angle to increase
+    // (tracking, RightAscensionRate, East/West guide pulses): increasing
+    // counts north of the equator, decreasing south of it, because the mount
+    // faces the opposite pole and ha = -ha_mech there (pointing-model
+    // comment). Mechanical motion -- MoveAxis, goto deltas, AutoHome -- never
+    // applies this: a signed axis rate means the same thing everywhere.
+    double ra_axis_sign_locked() const { return hemisphere_south_locked() ? -1.0 : 1.0; }
+
     // Drops a client offset the host clock has moved out from under. The
     // offset is a snapshot delta against the host clock at the time of the
     // UTCDate write; if the host clock is stepped afterwards (Sync Time, NTP,
@@ -1934,18 +2115,79 @@ private:
 
     // ── Pointing model ──────────────────────────────────────────────────────
     // Home (counts == kHomeCounts on both axes): counterweight down, OTA at
-    // the visible celestial pole. Axis angles are signed degrees from home.
-    //   Branch A (dec axis angle >= 0): dec = 90 - a2, HA hours = a1 / 15.
-    //   Branch B (dec axis angle <  0): dec = 90 + a2, HA hours = a1 / 15 - 12.
-    // TODO: Validate physical rotation signs on Wave 100i hardware — the
-    // positive-count direction of each axis relative to the sky is a wiring
-    // convention this math assumes; flip kRaAxisSign/kDecAxisSign if slews
-    // mirror.
-    // Southern hemisphere: the dec mirror below is hardware-validated (EQM-35
-    // Pro at latitude -37.2 — reported HA matched axis 1 to 0.0004 deg and
-    // alt/az recomputed from the reported RA/Dec matched to 4 decimals). The
-    // RA-direction reversal that used to accompany it was WRONG and has been
-    // removed; see start_speed_motion_locked().
+    // the visible celestial pole. Axis angles are signed degrees from home,
+    // positive in the board's increasing-count direction.
+    //
+    // MECHANICAL frame (the geometry of a German equatorial, written here
+    // with the northern sense of the RA axis):
+    //   Branch A (dec axis angle >= 0): dec_mech = 90 - a2, ha_mech = a1/15 + 6.
+    //   Branch B (dec axis angle <  0): dec_mech = 90 + a2, ha_mech = a1/15 - 6.
+    // The code carries the two terms separately: `ha_mech_hours` below holds
+    // the a1 term alone, and home_hour_angle_offset() adds the 6 h term after
+    // the hemisphere sign, which is what the SKY frame paragraph describes.
+    // The 6 h term is the counterweight-down home: with the counterweight bar
+    // vertical the dec axis lies IN the meridian plane, so a pure dec
+    // rotation sweeps the OTA along the HA = +/-6 h great circle, and the
+    // meridian is reached only with the bar horizontal (a1 = +/-90). Both
+    // branches therefore keep a1 inside +/-90 for every reachable target,
+    // which is the counterweight-never-above-horizontal rule every GEM
+    // driver enforces. North of the equator this is exactly indi-eqmod's
+    // EncoderToHours() (`range24(result + 6.0)`) once its DE zero is
+    // re-expressed relative to its home (DEStepHome = DEStepInit + steps/4);
+    // south of it the two differ by 12 h, see the SKY frame note below.
+    //
+    // SKY frame: the mount faces the visible pole, so south of the equator
+    // the same RA-axis rotation runs the sky's hour angle the other way,
+    // while the 6 h home term does NOT flip -- it is fixed by which side of
+    // the dec axis the OTA is on, not by which pole the mount faces:
+    //   HA = s * (a1/15) + (a2 >= 0 ? +6 : -6),  dec = s * (90 - |a2|),
+    //   with s = +1 north, -1 south. Tracking therefore DEcreases a1 south of
+    //   the equator, which ra_axis_sign_locked() applies to the drive rate.
+    //
+    // KNOWN LIMIT (#458): the 6 h term not flipping with s holds for the two
+    // configurations this was measured on -- an EQM-35 Pro in the south and
+    // the Wave 150i in the north -- and those two cannot tell a hemisphere
+    // effect apart from a per-board dec-axis count sense. Rigid-body geometry
+    // says the term must flip, which makes the general form
+    // `s * eps_board * 6 * branch`. A Synta board in the north or a Wave in
+    // the south is 12 h out until that is settled with a reading per board.
+    //   The ASCOM pier side stays (a2 >= 0) -> pierEast in both hemispheres:
+    //   the branch is chosen from the sky hour angle, so the two agree by
+    //   construction (open-astro#261).
+    //
+    // History: until open-astro#432 the model read HA = a1/15 (branch A) and
+    // a1/15 - 12 (branch B). That is six hours out in the north and, away
+    // from a1 = 45 deg, wrong in the south too, so gotos landed on the wrong
+    // sky position while the driver reported the target back. It passed
+    // ConformU because the driver reports the same model it commands.
+    //
+    // MEASURED ON HARDWARE, 2026-09-12, EQM-35 Pro at latitude -37.2 (rounded)
+    // with the shipped 3.5.1 build, tube position read off the mount by hand.
+    // Each row is an axis position the driver was commanded to, and where the
+    // OTA physically ended up:
+    //
+    //   a1     a2     observed                     this model        shipped
+    //   +1.6   -90    level, pointing east         HA -6.1 h, lvl    -52.8 deg
+    //   +60.0  -90    down about 45 deg            HA -10.0 h, -44   -23.5 deg
+    //   +45.1  -70    down, azimuth about 136      HA -9.0 h, -19    -18.8 deg
+    //
+    // The first row is the decisive one and needs no instrument: with the
+    // counterweight straight down and the dec axis at 90 deg the OTA is
+    // perpendicular to both the polar axis and the counterweight bar, which
+    // both lie in one vertical plane, so the tube MUST come out level -- and
+    // level, square to the meridian, is six hours of hour angle from it. The
+    // shipped model puts that same position 53 deg below the horizon.
+    //
+    // The fourth data point is northern and comes from the Wave 150i report
+    // that opened #432: commanded a1 = +62.0, a2 = +71.0 for a target at
+    // HA +4.12 h, dec +19.05; this model puts those axes at HA +10.13 h,
+    // altitude -20.7, and the reporter photographed the tube about 20 deg
+    // below the horizon. The shipped model claims altitude +33.
+    //
+    // Note for anyone tempted to re-derive this from indi-eqmod: its
+    // EncoderToHours() is written against its own encoder zero and step
+    // direction, and transcribing it cost this fix a wrong sign that only
+    // the rig caught. The table above is the reference.
 
     std::pair<double, double> compute_ra_dec_locked() const {
         // Dead-reckon between hardware reads: while an axis runs at a
@@ -1961,18 +2203,17 @@ private:
         dt = std::clamp(dt, 0.0, rate_offsets_active_locked() && tracking_ ? 3600.0 : 5.0);
         double a1 = cached_ra_axis_deg_ + cmd_axis_rate_deg_s_[0] * dt;
         double a2 = cached_dec_axis_deg_ + cmd_axis_rate_deg_s_[1] * dt;
-        double dec = 0.0;
-        double ha_hours = 0.0;
+        double dec_mech = 0.0;
+        double ha_mech_hours = 0.0;
         if (a2 >= 0.0) {
-            dec = 90.0 - a2;
-            ha_hours = a1 / kHoursToDegrees;
+            dec_mech = 90.0 - a2;
         } else {
-            dec = 90.0 + a2;
-            ha_hours = a1 / kHoursToDegrees - 12.0;
+            dec_mech = 90.0 + a2;
         }
-        if (hemisphere_south_locked()) {
-            dec = -dec;
-        }
+        ha_mech_hours = a1 / kHoursToDegrees;
+        const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
+        const double dec = sky_sign * dec_mech;
+        const double ha_hours = wrap_hour_angle(sky_sign * ha_mech_hours + home_hour_angle_offset(a2));
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ra = wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
@@ -1982,18 +2223,19 @@ private:
                                                             double lst_advance_hours = 0.0) const {
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_) + lst_advance_hours;
         double ha = wrap_hour_angle(lst - ra);
-        double dec_mech = hemisphere_south_locked() ? -dec : dec;
-        double a1 = 0.0;
-        double a2 = 0.0;
-        if (ha >= 0.0) {
-            // pierEast branch
-            a2 = 90.0 - dec_mech;
-            a1 = ha * kHoursToDegrees;
-        } else {
-            // pierWest branch
-            a2 = -(90.0 - dec_mech);
-            a1 = (ha + 12.0) * kHoursToDegrees;
-        }
+        const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
+        const double dec_mech = sky_sign * dec;
+        // The branch is chosen from the SKY hour angle in both hemispheres:
+        // HA >= 0 (target west of the meridian) puts the OTA on the east side
+        // of the pier, which is the a2 >= 0 branch. get_side_of_pier() reads
+        // the same rule back off the axis, and get_destination_side_of_pier()
+        // states it directly, so all three agree by construction.
+        const double branch = ha >= 0.0 ? 1.0 : -1.0;
+        const double a2 = branch * (90.0 - dec_mech);
+        // HA = sky_sign * a1/15 + 6 * branch, inverted. |a1| <= 90 for every
+        // reachable target, which is the counterweight-never-above-horizontal
+        // rule falling out of the geometry rather than being enforced.
+        const double a1 = sky_sign * (ha - kHomeHourAngleOffsetHours * branch) * kHoursToDegrees;
         return {a1, a2};
     }
 
@@ -2045,14 +2287,21 @@ private:
         last_position_update_ = now;
     }
 
-    // True while a goto/park/home/pulse/manual motion owns the axes: rate
+    // True while a goto/park/home/pulse/manual motion owns THIS axis.
+    // Ownership is per axis: a goto/park/home/slew takes both, a pulse or a
+    // manual MoveAxis takes only its own -- the same idiom the duty worker
+    // and the MoveAxis stop task already use ("the global generation cannot
+    // tell a same-axis supersession from an unrelated other-axis command").
+    bool axis_busy_locked(int channel) const {
+        return goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[channel - 1] ||
+               (pulse_guiding_active_ && pulse_axis_ == channel);
+    }
+
+    // True while a goto/park/home/pulse/manual motion owns EITHER axis: rate
     // setters must not issue motion then (they would hijack the axis and
     // make get_hardware_slewing_locked read "not slewing" mid-goto); the
     // stored rates are applied by the post-slew/pulse/MoveAxis restores.
-    bool axes_busy_locked() const {
-        return goto_in_progress_ || parking_ || homing_ || slewing_cached_ || pulse_guiding_active_ ||
-               manual_axis_slewing_[0] || manual_axis_slewing_[1];
-    }
+    bool axes_busy_locked() const { return axis_busy_locked(kAxisRa) || axis_busy_locked(kAxisDec); }
 
     bool rate_offsets_active_locked() const {
         return ra_rate_sec_per_sidereal_sec_ != 0.0 || dec_rate_arcsec_per_sec_ != 0.0;
@@ -2347,26 +2596,14 @@ private:
         }
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
         // Motion mode: '1' = speed slow, '3' = speed fast.
-        // NO hemisphere flip. The RA axis count frame relates to hour angle the
-        // same way in both hemispheres (HA hours = a1 / 15), so tracking must
-        // drive counts in the SAME sense everywhere -- what changes with
-        // hemisphere is the pointing math (dec is mirrored), not the direction
-        // the sky moves in the count frame.
-        //
-        // This previously negated the RA rate below the equator, carrying a
-        // "TODO: Validate southern hemisphere RA direction on hardware" marker.
-        // Hardware validation (EQM-35 Pro, latitude -37.2, 2026-09-06) showed the
-        // flip was wrong: tracking drove axis 1 counts DOWN at 107 counts/s when
-        // holding a star requires them to go UP (HA must increase with LST), so
-        // reported RA advanced at 2.007x sidereal instead of standing still --
-        // the sky's motion was doubled rather than cancelled. The rate magnitude
-        // was correct throughout (measured 0.99995x sidereal), which is why a
-        // rate-only check missed it; only comparing RA against LST exposes it.
-        //
-        // The flip was also self-inconsistent: dispatch_goto_locked() derives its
-        // direction from the signed count delta and never applied it, so gotos
-        // and tracking disagreed about which way the RA axis should turn below
-        // the equator.
+        // No hemisphere handling HERE: this is the mechanical layer, and a
+        // signed axis rate means the same thing everywhere (MoveAxis and
+        // AutoHome depend on that). The hemisphere's RA sense for tracking,
+        // RightAscensionRate and East/West pulses is applied by the callers
+        // through ra_axis_sign_locked() -- see effective_ra_rate_locked() and
+        // the pointing-model comment. (#250 had removed a flip from this
+        // function on the strength of the old model's reported RA; #432 put
+        // the southern reversal back where the sky frame is built.)
         const double rate = signed_rate_deg_per_sec;
         protocol.set_motion_mode(channel, fast ? '3' : '1', direction_char(rate));
         protocol.set_step_period(channel, step_period_for_locked(channel, rate, fast));
@@ -2386,10 +2623,14 @@ private:
         }
     }
 
-    // RA drive rate with the RightAscensionRate offset folded in. Positive
-    // offset = RA increasing = axis SLOWER (RA = LST - HA) -> subtract.
+    // RA drive rate with the RightAscensionRate offset folded in, as a SIGNED
+    // AXIS rate. Positive offset = RA increasing = the axis advancing SLOWER
+    // in the tracking direction (RA = LST - HA) -> subtract, then apply the
+    // hemisphere's axis sense so the sky hour angle increases (south of the
+    // equator tracking runs the counts DOWN).
     double effective_ra_rate_locked() const {
-        return base_tracking_rate_locked() - ra_rate_sec_per_sidereal_sec_ * kRaRateSecondsToDegPerSec;
+        return ra_axis_sign_locked() *
+               (base_tracking_rate_locked() - ra_rate_sec_per_sidereal_sec_ * kRaRateSecondsToDegPerSec);
     }
 
     // Slowest achievable slow-mode rate (":I" clamps at 0xFFFFFF): ~0.26
@@ -2685,8 +2926,9 @@ private:
         // not resend its ":I"+":J" into the stopped axis and restart it.
         reap_rate_verify_task();
         if (tracking) {
-            // Track: RA axis in the direction of increasing hour angle
-            // (positive axis angle by this driver's convention) at the
+            // Track: RA axis in the direction of increasing SKY hour angle
+            // (increasing counts north of the equator, decreasing south of
+            // it -- effective_ra_rate_locked() carries the sign) at the
             // selected drive rate plus any RightAscensionRate offset.
             apply_ra_drive_locked(lock);
             apply_dec_rate_offset_locked(lock);
