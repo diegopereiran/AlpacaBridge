@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-09-11
+## Updated 2026-09-12
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -158,6 +158,7 @@ This document lists all hardware vendors and device types that are verified to w
 | ASI2600MM Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/) |
 | ASI290MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI290MM%20Mini/) |
 | ASI462MM | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI462MM/) |
+| ASI533MC Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI533MC%20Pro/) |
 | ASI585MC Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI585MC%20Pro/) |
 | ASI662MC | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI662MC/) |
 
@@ -167,8 +168,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO ASI Camera SDK Version 1.40 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
-- **Tested model**: ASI585MC Pro (cooled, IMX585) on Linux arm64.
-- **ConformU**: 4.5.0 — ASI585MC Pro: 0 errors, 0 issues, 0 timing issues.
+- **Tested models**: ASI585MC Pro (cooled, IMX585) and ASI533MC Pro (cooled colour, IMX533, 3008x3008 RGGB) on Linux arm64.
+- **ConformU**: 4.5.0 — ASI585MC Pro: 0 errors, 0 issues, 0 timing issues. 4.5.1 — ASI533MC Pro, 2026-09-12: 0 errors, 0 issues, 0 timing issues. (Note: ConformU 4.5.0 on arm64 has a known timing-report bug unrelated to any driver — see General Notes above.)
 
 </details>
 
@@ -684,6 +685,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | Wave 100i | USB, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/SkyWatcher/Wave%20100i/) |
+| EQM-35 Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SkyWatcher/EQM-35%20Pro/) |
 
 <details>
 <summary><strong>Sky-Watcher Wave Driver Notes</strong></summary>
@@ -693,6 +695,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Site required**: The motor controller stores no site or time. Set Site Latitude/Longitude in the device config (or via the Alpaca setters) — with the site unset the driver refuses to connect (`InvalidOperation`), so nothing can run on a guessed 0/0 site. Two things to know about that refusal: the setters satisfy it for the session only — they write driver state, not `registered_devices.json`, so a device fixed that way refuses again after a restart, and only the device config is a durable fix. And the client does not see `InvalidOperation`: the router reports a failed connect as `NotConnected`. Since #358 it carries the reason, so the `ErrorMessage` is the driver's own sentence naming the two fields rather than a bare "Connection failed"; the error number is unchanged.
 - **Pointing math**: All in the driver — axis counts to RA/Dec via CPR read at connect, LST computed host-side, GEM-style pier-side branches, sidereal tracking via computed step periods. Sync uses the controller's native set-position command. Pulse guiding adjusts the RA step period in place while tracking (the axis never stops); Dec pulses are software-timed speed-mode nudges. Park and MoveAxis(0) are asynchronous initiators.
 - **Tested model**: Wave 100i, motor board firmware 3.58 (mount code 0x44; the board reports `=033A44`, which is firmware major/minor plus the mount identity byte, not a three-part version), on Linux arm64 (USB).
+- **Tested model (EQ class)**: EQM-35 Pro, motor board firmware 3.39 (mount code 0x32), over the mount's built-in USB port (soldered Prolific PL2303, 115200 baud), on Linux arm64 (Debian 13 dev VM, chrony-disciplined clock). ConformU 4.5.0 (2026-09-12): 0 errors, 0 issues, 0 timing violations on the full suite including the physically measured pulse-guide, rate-offset, sync and slew checks. Site coordinates in the report are rounded to whole degrees. Goto landing and the post-slew tracking restart are verified against the controller (stopped AND stationary; restart rate-checked, except where the sample window cannot resolve the expected rate, which is logged) and the goto aim-ahead uses per-session measured goto overhead and restart latency, seeded from the Wave constants.
 - **AutoHome**: FindHome runs the SynScan-style AutoHome procedure using the mount's home index sensors, re-anchoring the position counters to the physical home mark regardless of the power-on position. Requires the home-index feature bit (Wave 100i reports it on both axes).
 - **Tracking**: Sidereal, Lunar, and Solar drive rates, plus RA/Dec tracking rate offsets (comet/satellite tracking) at the Sidereal drive rate. Declination rates below the motor controller's ~0.26 arcsec/s slow-mode floor are produced by duty-cycling. The linked ConformU reports predate the rate-offset feature; a re-run including ConformU's measured-rate offset tests is the merge gate for that feature and the reports will be refreshed with it.
 - **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. The RA/Dec tracking-rate offsets were validated afterwards on the Wave 100i over USB (ConformU 4.5.0, 2026-08-25): 0 errors, 0 issues, all 32 measured offset-rate checks within tolerance; that run's only marks were two 0.10x s FAST readings on constant `Can*` getters caused by the dev-VM network path (ConformU now runs on the SBC over localhost, see `/conformu`), so the linked logs remain the earlier full-suite reports. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
