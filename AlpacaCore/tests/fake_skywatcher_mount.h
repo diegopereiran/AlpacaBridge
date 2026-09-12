@@ -155,6 +155,14 @@ public:
 
     /// Number of ":K"/":L" stop commands received for an axis (regression:
     /// a superseded goto dispatch must still stop BOTH axes).
+    /// Gotos started on an axis (":J" with a goto motion mode latched).
+    /// stop_count/start_count cannot stand in: every dispatch stops both axes
+    /// first and a tracking restart is a ":J" too.
+    int goto_count(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).goto_count;
+    }
+
     int stop_count(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
         return ax(axis).stop_count;
@@ -230,6 +238,25 @@ public:
         ax(axis).wrong_restart_factor = factor;
     }
 
+    /// Report the next @p n goto landings as STOPPED while the axis is still
+    /// @p deg short of its goto target, then creep that remainder in over
+    /// @p coast_ms. Models the real landing the #432 session measured: ":f"
+    /// clears its running bit when the controller ends its braking ramp, but
+    /// the last counts keep arriving, so a position read taken the instant
+    /// the slew "completes" is short of where the axis actually settles.
+    ///
+    /// This is the seam wait_axis_stationary_locked() exists for, and the one
+    /// stop_ramp_ms_ cannot provide: a ramped ":K" keeps ":f" RUNNING for the
+    /// whole ramp, so the driver's ordinary stop-wait already covers it and
+    /// the stationary check has no window left to close.
+    void land_short_by(int axis, int n, double deg, int coast_ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Axis& a = ax(axis);
+        a.short_landings = n;
+        a.short_counts = static_cast<int64_t>(std::llround(deg * a.cpr / 360.0));
+        a.coast_ms = coast_ms;
+    }
+
     /// Refuse the next @p n ":J" on an axis with "!2" (Motor not stopped):
     /// the start/re-latch throws in the wrapper. Models a transport-level
     /// failure of the ":J" kick that follows a live ":I" (#249 review).
@@ -275,6 +302,13 @@ private:
         uint32_t indexer = 0;
         int start_count = 0;
         int stop_count = 0;
+        int goto_count = 0;
+        int short_landings = 0;    // goto landings to report stopped early (test knob)
+        int64_t short_counts = 0;  // how far short of the target to report it (test knob)
+        int coast_ms = 0;          // how long the remainder takes to arrive (test knob)
+        bool coasting = false;     // counts still creeping with ":f" reading stopped
+        int64_t coast_target = 0;
+        double coast_cps = 0.0;
         int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
         int wrong_restart_latches = 0;    // ":J" restarts to latch at the wrong rate (test knob)
 
@@ -293,7 +327,25 @@ private:
                 stopping = false;
                 in_goto = false;
             }
-            if (!running || dt <= 0.0) {
+            if (dt <= 0.0) {
+                return;
+            }
+            if (!running) {
+                // A landing reported stopped early: the last counts are still
+                // arriving even though ":f" says the axis is idle.
+                if (coasting) {
+                    int64_t before_coast = counts;
+                    double dir_sign = coast_target >= counts ? 1.0 : -1.0;
+                    double step = coast_cps * dt;
+                    double remaining = std::abs(static_cast<double>(coast_target - counts));
+                    if (step >= remaining) {
+                        counts = coast_target;
+                        coasting = false;
+                    } else {
+                        counts += static_cast<int64_t>(std::llround(dir_sign * step));
+                    }
+                    latch_indexer(before_coast);
+                }
                 return;
             }
             int64_t before = counts;
@@ -302,22 +354,37 @@ private:
                 double step = kGotoDegPerSec * cpr / 360.0 * dt;
                 double remaining = std::abs(static_cast<double>(goto_target - counts));
                 if (step >= remaining) {
-                    counts = goto_target;
                     running = false;
                     in_goto = false;
+                    if (short_landings > 0 && short_counts > 0 && coast_ms > 0) {
+                        --short_landings;
+                        // Stop short and creep the remainder in while ":f"
+                        // already reads stopped.
+                        counts = goto_target - static_cast<int64_t>(std::llround(dir_sign * short_counts));
+                        coasting = true;
+                        coast_target = goto_target;
+                        coast_cps = static_cast<double>(short_counts) / (static_cast<double>(coast_ms) / 1000.0);
+                    } else {
+                        counts = goto_target;
+                    }
                 } else {
                     counts += static_cast<int64_t>(std::llround(dir_sign * step));
                 }
             } else {
                 counts += static_cast<int64_t>(std::llround(rate_counts * dt));
             }
-            // Latch the home index on a crossing while armed.
-            if (indexer == 0 || indexer == 0xFFFFFF) {
-                bool was_below = before < home_index_counts;
-                bool is_below = counts < home_index_counts;
-                if (was_below != is_below) {
-                    indexer = static_cast<uint32_t>(home_index_counts & 0xFFFFFF);
-                }
+            latch_indexer(before);
+        }
+
+        // Latch the home index on a crossing while armed.
+        void latch_indexer(int64_t before) {
+            if (indexer != 0 && indexer != 0xFFFFFF) {
+                return;
+            }
+            bool was_below = before < home_index_counts;
+            bool is_below = counts < home_index_counts;
+            if (was_below != is_below) {
+                indexer = static_cast<uint32_t>(home_index_counts & 0xFFFFFF);
             }
         }
 
@@ -436,9 +503,11 @@ private:
                 }
                 ++a.start_count;
                 was_running_on_start = a.running;
+                a.coasting = false;  // a fresh command supersedes any coast
                 a.running = true;
                 a.stopping = false;
                 if (a.in_goto) {
+                    ++a.goto_count;
                     a.goto_target &= 0xFFFFFF;
                 } else if (a.ignore_start_relatches > 0) {
                     --a.ignore_start_relatches;  // acked, preset still not applied
@@ -456,6 +525,7 @@ private:
                 return "=";
             case 'K':  // ramped stop: keeps running for stop_ramp_ms_ first
                 ++a.stop_count;
+                a.coasting = false;  // an explicit stop ends the landing coast
                 if (a.running && stop_ramp_ms_ > 0) {
                     a.stopping = true;
                     a.stop_at = now() + std::chrono::milliseconds(stop_ramp_ms_);
@@ -466,6 +536,7 @@ private:
                 return "=";
             case 'L':  // instant stop
                 ++a.stop_count;
+                a.coasting = false;  // an explicit stop ends the landing coast
                 a.running = false;
                 a.stopping = false;
                 a.in_goto = false;

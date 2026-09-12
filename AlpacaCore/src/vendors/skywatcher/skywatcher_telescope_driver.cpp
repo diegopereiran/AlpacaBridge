@@ -1408,11 +1408,15 @@ public:
         }
         // Same order as the async task: Slewing stays true until tracking is
         // running again. restore_tracking_after_slew_locked() now releases
-        // mutex_ for the post-slew rate check (450 ms, and up to ~3 s more if
-        // the stop/restart retry fires), so clearing the flag first let a
-        // client polling Slewing see the slew finish and fire PulseGuide or
+        // mutex_ for the post-slew rate check, so clearing the flag first let
+        // a client polling Slewing see the slew finish and fire PulseGuide or
         // MoveAxis into exactly the restart window this check exists to
-        // protect.
+        // protect. Budget for a synchronous SlewToCoordinates: two sample
+        // windows of kRateVerifySettle + kPostSlewRateWindow (~450 ms each),
+        // and between them a recovery of kAxisStopTimeout (5 s worst case) +
+        // kLandingSettleTimeout (2 s) -- about 7.5 s past the landing if
+        // every bound is hit, against ~450 ms when the first sample agrees,
+        // which is the ordinary case.
         try {
             restore_tracking_after_slew_locked(lock);
         } catch (...) {
@@ -1899,6 +1903,14 @@ private:
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         position_cache_valid_ = false;
+        // Both are MEASURED off the mount that was connected, so they must not
+        // survive into the next one: a driver instance reconnected to
+        // different hardware would otherwise aim a goto ahead by the previous
+        // mount's numbers (review note on #448).
+        resume_latency_seconds_ = kTrackingResumeSeconds;
+        goto_overhead_seconds_ = kGotoRampSeconds;
+        last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
+        last_landing_time_ = std::chrono::steady_clock::time_point{};
     }
 
     // True once both coordinates have a provenance: either the device config
@@ -3040,17 +3052,41 @@ private:
         // after the window (as ++motion_generation_ did) cannot detect a
         // command that landed inside the window, which is the only thing it
         // needed to detect.
-        const uint64_t entry_generation = motion_generation_;
+        //
+        // NOT const, and re-seeded after the attempt-0 recovery below: that
+        // recovery is itself a motion command (its own ++motion_generation_,
+        // and start_speed_motion_locked() bumps it again), so leaving the
+        // entry value in place made attempt 1's first sleep_unlocked() read
+        // its OWN restart as somebody else's supersession and return. The
+        // second sample was unreachable, "restart did not correct it" could
+        // never be emitted, and a restart that also latched wrong ran at the
+        // wrong rate for the rest of the session in silence -- the #432
+        // symptom, from inside the check meant to catch it (round-1 review).
+        uint64_t entry_generation = motion_generation_;
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
             lock.unlock();
             std::this_thread::sleep_for(d);
             lock.lock();
             check_connected();
             if (slew_task_cancel_.load()) {
+                ALPACA_LOG_INFO("SkyWatcher", "Post-slew tracking rate check skipped: slew cancelled");
                 return false;
             }
             // Superseded, or the client stopped tracking: not ours any more.
-            return motion_generation_ == entry_generation && tracking_ && ra_duty_rate_deg_s_ == 0.0;
+            if (motion_generation_ != entry_generation || !tracking_ || ra_duty_rate_deg_s_ != 0.0) {
+                // AGENTS.md tells the reader to grep for "rate check skipped"
+                // when a slew was never verified; without this the
+                // supersession exits were the one silent way out (review
+                // note on #448).
+                ALPACA_LOG_INFO("SkyWatcher",
+                                std::string("Post-slew tracking rate check skipped: ") +
+                                    (motion_generation_ != entry_generation
+                                         ? "a newer motion command took the RA axis"
+                                         : (!tracking_ ? "tracking was turned off"
+                                                       : "the RA drive moved to the duty-cycled regime")));
+                return false;
+            }
+            return true;
         };
         for (int attempt = 0; attempt < 2; ++attempt) {
             uint32_t before = 0;
@@ -3106,6 +3142,9 @@ private:
                 }
                 try {
                     apply_ra_drive_locked(lock);
+                    // Our own restart is the baseline for attempt 1's
+                    // supersession test, not the value captured on entry.
+                    entry_generation = motion_generation_;
                 } catch (const std::exception& e) {
                     // This path has already stopped the axis. Leaving
                     // tracking_ true would report Tracking on a mount whose

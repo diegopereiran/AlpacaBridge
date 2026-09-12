@@ -1894,8 +1894,36 @@ below was one of them.
   whole counts and both reads truncate, so below that every possible reading lands outside the
   tolerance and the check would condemn a healthy axis (an effective RA rate near zero, e.g.
   RightAscensionRate ~0.9 nearly cancelling sidereal, is the way in). Grep for that WARN if a
-  2x ever recurs, and for "rate check skipped" if a slew was never verified. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
+  2x ever recurs, and for "rate check skipped" if a slew was never verified -- every way out of
+  the check logs one of the two, including the supersession exits, which review of this branch
+  found were the one silent path. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
   event followed a 26 s full-speed slew) but was not proven.
+- **A retry loop whose supersession test compares against a generation captured before the loop
+  can only ever run once.** Review of the branch above: the rate check's second sample was
+  unreachable, because the attempt-0 recovery is itself a motion command (its own
+  `++motion_generation_`, and `start_speed_motion_locked()` bumps it again), so attempt 1's first
+  re-lock read the check's OWN restart as another command's supersession and returned. The
+  "restart did not correct it" WARN could never be emitted, and a restart that also latched wrong
+  ran at the wrong rate in silence -- the exact failure the check exists to surface. Fixed by
+  re-seeding the entry generation from the recovery's own restart. **Rule:** whenever a loop both
+  issues a motion command and guards itself with "has the generation moved", the guard's baseline
+  has to be re-established after each of the loop's own commands, or every iteration after the
+  first is dead code. The tell is a `const` generation captured outside the loop. Pinned by a
+  case arming two bad latches instead of one (`restart_tracking_at_wrong_rate(1, 2)`) and
+  asserting the second-attempt WARN.
+- **Test seams have to model the failure, not a nearby one.** The landing-settle wait
+  (`wait_axis_stationary_locked`) shipped with nothing in the suite failing without it, and the
+  ramped-`:K` seam that looked like it should cover it could not: a ramped stop keeps `:f`
+  RUNNING for the whole ramp, which the ordinary stop-wait already handles, so the stationary
+  check had no window left to close. The real window is the one the hardware showed -- `:f`
+  clearing while the last counts still arrive -- and it needed its own seam (`land_short_by()`:
+  report the landing stopped N counts short, then creep the remainder in). Goto counts could not
+  be the signal either (`refine_goto_landing()` burns all three iterations on this fake whether or
+  not a landing coasts), nor wall-clock timing (the 3 s `slew_force_until_` window and the
+  tracking restore both sit between the landing and `Slewing` clearing). What works: coast for
+  longer than `kLandingSettleTimeout` and assert the check's own give-up WARN, a string nothing
+  else emits. **Rule:** before claiming a change is covered, delete it and run the suite; if it
+  stays green, the seam models the wrong failure.
 - **Goto aim-ahead constants are rig-specific: measure them.** `kGotoRampSeconds` (2.5 s) and
   `kTrackingResumeSeconds` (0.7 s) were tuned on the Wave 100i. On the EQM-35 the landing-to-`:J1`
   restart takes ~0.2 s and even a 350-count refinement goto ~3.1 s (the MC's minimum goto time),
