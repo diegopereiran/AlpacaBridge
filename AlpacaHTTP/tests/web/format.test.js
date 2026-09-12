@@ -12,7 +12,10 @@
 
 // Unit tests for the web UI's pure formatting helpers (open-astro#385).
 //
-// Run: node --test AlpacaHTTP/tests/web/
+// Run: node --test AlpacaHTTP/tests/web/*.test.js
+// (the file form, not the directory: `node --test <dir>` resolves the path
+// as a module on Node 22 and dies with MODULE_NOT_FOUND. Both gates pass an
+// explicit git ls-files list for the same reason.)
 // `node --test` ships with the Node versions CI already installs; there is no
 // dependency to add and no package.json.
 //
