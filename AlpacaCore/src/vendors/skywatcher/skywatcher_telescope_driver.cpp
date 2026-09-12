@@ -72,6 +72,19 @@ constexpr auto kStaleCacheLimit = std::chrono::seconds(10);
 constexpr auto kOffsetModelHold = std::chrono::minutes(30);  // offset sessions serve the model this long
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
 constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
+// A goto the controller reports stopped can still be finishing its approach:
+// EQM-35 Pro (MC fw 3.39), 2026-09-12, the third landing refinement read 11
+// counts short of its target while ":f" already said stopped, and the
+// tracking restart sent into that window left the RA axis running at ~2x
+// sidereal for the rest of the session (ConformU "PulseGuide +9.0 North:
+// East-West movement outside tolerance", RA change -5.68 s). Every clean
+// landing in the same log read exactly on target. A slew is therefore
+// complete only when the axis is stopped AND its count is unchanged across
+// kLandingSettle; the post-slew tracking restart is then rate-checked.
+constexpr auto kLandingSettle = std::chrono::milliseconds(60);
+constexpr auto kLandingSettleTimeout = std::chrono::seconds(2);
+constexpr auto kPostSlewRateWindow = std::chrono::milliseconds(300);
+constexpr double kPostSlewRateTolerance = 0.25;
 // Below this rate an in-place ":I" pulse adjustment is unreliable (and a
 // non-positive rate needs a direction change ":I" cannot deliver).
 constexpr double kMinInPlacePulseRateDegPerSec = 0.05 * kSiderealDegPerSec;
@@ -1447,8 +1460,11 @@ public:
                 // releasing the mutex between polls so GETs stay responsive.
                 wait_for_slew_complete(lock);
                 refine_goto_landing(lock, ra, dec);
-                goto_in_progress_ = false;
+                // Slewing stays true until tracking is running again: a client
+                // that fires motion into the restart window (ConformU's pulse
+                // test polls Slewing at 500 ms) otherwise races the board.
                 restore_tracking_after_slew_locked(lock);
+                goto_in_progress_ = false;
             } catch (const std::exception& ex) {
                 goto_in_progress_ = false;
                 slewing_cached_ = false;
@@ -2826,9 +2842,24 @@ private:
 
     // LST advances 24 sidereal hours per sidereal day of SI seconds.
     static constexpr double kLstHoursPerSecond = 24.0 / 86164.0905;
+    // Fixed goto overhead beyond distance/max-rate (ramp up + down, the
+    // pre-dispatch stop-wait, landing detection). INITIAL estimate only: an
+    // EQM-35 Pro takes ~3.1 s for even a 350-count refinement goto and
+    // ~3.7 s of overhead on a 15 deg one, so goto_overhead_seconds_ is
+    // measured on every goto (see wait_for_slew_complete). With this fixed
+    // at 2.5 s each refinement landed ~0.6 s late and the loop never
+    // converged (ConformU SlewToCoordinates "10.8 arc seconds away").
     static constexpr double kGotoRampSeconds = 2.5;
-    // After the goto lands, the RA axis sits stopped while tracking restarts
-    // (~0.7 s); aim that far ahead so the drift-back lands ON target.
+    // After the goto lands, the RA axis sits stopped while tracking restarts;
+    // aim that far ahead so the drift-back lands ON target. 0.7 s is the
+    // Wave 100i over Wi-Fi and only the INITIAL estimate: the restart on an
+    // EQM-35 Pro over USB takes ~0.2 s, and with 0.7 s assumed in BOTH the
+    // aim and the landing deadband check a 20 deg goto whose duration
+    // estimate ran 1.2 s long read as 6 arcsec off (inside the deadband,
+    // no refinement) and then resumed tracking 1.03 s ahead of the sky --
+    // ConformU SyncToCoordinates "15.4 arc seconds away from RA target"
+    // (2026-09-12). resume_latency_seconds_ is measured landing-to-":J" on
+    // every slew and replaces this constant after the first one.
     static constexpr double kTrackingResumeSeconds = 0.7;
     // Landing deadband per axis (~8 arcsec; ConformU checks RA to 10 arcsec).
     static constexpr double kLandingDeadbandDeg = 8.0 / 3600.0;
@@ -2841,7 +2872,9 @@ private:
         refresh_position_cache_locked(true);
         auto [p1, p2] = ra_dec_to_axis_degrees_locked(ra, dec);
         double dist = std::max(std::abs(p1 - cached_ra_axis_deg_), std::abs(p2 - cached_dec_axis_deg_));
-        double est_seconds = dist / kMaxMoveAxisRateDegPerSec + kGotoRampSeconds + kTrackingResumeSeconds;
+        last_goto_dispatch_time_ = std::chrono::steady_clock::now();
+        last_goto_dist_deg_ = dist;
+        double est_seconds = dist / kMaxMoveAxisRateDegPerSec + goto_overhead_seconds_ + resume_latency_seconds_;
         auto [t1, t2] = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond);
         dispatch_goto_locked(lock, t1, t2);
     }
@@ -2858,7 +2891,7 @@ private:
             refresh_position_cache_locked(true);
             // Judge the landing against the target ADVANCED by the resume
             // window -- the mount deliberately lands ahead (see above).
-            auto [n1, n2] = ra_dec_to_axis_degrees_locked(ra, dec, kTrackingResumeSeconds * kLstHoursPerSecond);
+            auto [n1, n2] = ra_dec_to_axis_degrees_locked(ra, dec, resume_latency_seconds_ * kLstHoursPerSecond);
             if (std::abs(n1 - cached_ra_axis_deg_) <= kLandingDeadbandDeg &&
                 std::abs(n2 - cached_dec_axis_deg_) <= kLandingDeadbandDeg) {
                 break;
@@ -2907,8 +2940,82 @@ private:
             restore_tracking_after_slew_ = false;
             try {
                 set_tracking_locked(lock, true);
+                // Landing -> ":J" latency of THIS restart, folded into the
+                // aim-ahead/deadband estimate (see kTrackingResumeSeconds).
+                if (last_landing_time_ != std::chrono::steady_clock::time_point{}) {
+                    const double measured =
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - last_landing_time_).count();
+                    if (measured > 0.0 && measured < 5.0) {
+                        resume_latency_seconds_ = std::clamp(0.5 * resume_latency_seconds_ + 0.5 * measured, 0.05, 2.0);
+                    }
+                }
+                verify_post_slew_tracking_rate_locked(lock);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Failed to restore tracking after slew: ") + e.what());
+            }
+        }
+    }
+
+    // The RA axis restarted from a goto landing has been seen running at ~2x
+    // the commanded period (see kLandingSettle). Sample the count rate over
+    // kPostSlewRateWindow and, if it is not the commanded drive rate, stop the
+    // axis, wait for it to settle and restart once. Continuous drive only: a
+    // duty-cycled sub-floor rate has no steady rate to sample. Runs inside the
+    // slew task with goto_in_progress_ still set, so Slewing stays true.
+    void verify_post_slew_tracking_rate_locked(std::unique_lock<std::mutex>& lock) {
+        if (!tracking_ || ra_duty_rate_deg_s_ != 0.0) {
+            return;
+        }
+        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        const double expected_cps =
+            std::abs(effective_ra_rate_locked()) * axis_params_[0].counts_per_revolution / 360.0;
+        if (expected_cps <= 0.0) {
+            return;
+        }
+        auto sleep_unlocked = [&](std::chrono::milliseconds d) {
+            lock.unlock();
+            std::this_thread::sleep_for(d);
+            lock.lock();
+            check_connected();
+            return !slew_task_cancel_.load();
+        };
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            uint32_t before = 0;
+            uint32_t after = 0;
+            try {
+                if (!sleep_unlocked(kRateVerifySettle)) {
+                    return;
+                }
+                before = protocol.inquire_position(kAxisRa);
+                if (!sleep_unlocked(kPostSlewRateWindow)) {
+                    return;
+                }
+                after = protocol.inquire_position(kAxisRa);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SkyWatcher",
+                                std::string("Post-slew tracking rate check could not read position: ") + e.what());
+                return;
+            }
+            int32_t delta = static_cast<int32_t>((after - before) & kCountsMask);
+            if (delta > static_cast<int32_t>(kCountsMask >> 1)) {
+                delta -= static_cast<int32_t>(kCountsMask) + 1;
+            }
+            const double observed_cps =
+                std::abs(static_cast<double>(delta)) / std::chrono::duration<double>(kPostSlewRateWindow).count();
+            if (std::abs(observed_cps - expected_cps) <= kPostSlewRateTolerance * expected_cps) {
+                return;
+            }
+            ALPACA_LOG_WARN("SkyWatcher",
+                            "Post-slew tracking restart: RA axis running at " + std::to_string(observed_cps) +
+                                " counts/s, expected " + std::to_string(expected_cps) +
+                                (attempt == 0 ? "; stopping and restarting tracking" : "; restart did not correct it"));
+            if (attempt == 0) {
+                const uint64_t gen = ++motion_generation_;
+                if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
+                    return;  // superseded: the newer command owns the axis
+                }
+                wait_axis_stationary_locked(lock, kAxisRa);
+                apply_ra_drive_locked(lock);
             }
         }
     }
@@ -3137,6 +3244,38 @@ private:
 
     // Poll for slew completion, RELEASING the mutex around every sleep so a
     // sync slew/park doesn't block all GETs (project reference pattern).
+    // The controller's stopped flag is not the end of a goto (see
+    // kLandingSettle): poll until it reads stopped AND two position reads
+    // kLandingSettle apart agree. Releases mutex_ around every sleep.
+    void wait_axis_stationary_locked(std::unique_lock<std::mutex>& lock, int channel) const {
+        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        const auto deadline = std::chrono::steady_clock::now() + kLandingSettleTimeout;
+        try {
+            uint32_t last = protocol.inquire_position(channel);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (slew_task_cancel_.load()) {
+                    return;
+                }
+                lock.unlock();
+                std::this_thread::sleep_for(kLandingSettle);
+                lock.lock();
+                check_connected();
+                const AxisStatus status = protocol.inquire_status(channel);
+                const uint32_t now = protocol.inquire_position(channel);
+                if (!status.running && now == last) {
+                    return;
+                }
+                last = now;
+            }
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("SkyWatcher", "Axis " + std::to_string(channel) +
+                                              " landing settle check could not read the board: " + e.what());
+            return;
+        }
+        ALPACA_LOG_WARN("SkyWatcher", "Axis " + std::to_string(channel) +
+                                          " still moving 2 s after the controller reported it stopped");
+    }
+
     void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) const {
         const auto timeout = std::chrono::seconds(180);
         auto start = std::chrono::steady_clock::now();
@@ -3170,6 +3309,17 @@ private:
                 throw AlpacaException("Slew timed out");
             }
             sleep_unlocked(std::chrono::milliseconds(250));
+        }
+        wait_axis_stationary_locked(lock, kAxisRa);
+        wait_axis_stationary_locked(lock, kAxisDec);
+        last_landing_time_ = std::chrono::steady_clock::now();
+        if (last_goto_dispatch_time_ != std::chrono::steady_clock::time_point{}) {
+            const double took = std::chrono::duration<double>(last_landing_time_ - last_goto_dispatch_time_).count();
+            const double overhead = took - last_goto_dist_deg_ / kMaxMoveAxisRateDegPerSec;
+            if (overhead > 0.0 && overhead < 30.0) {
+                goto_overhead_seconds_ = std::clamp(0.5 * goto_overhead_seconds_ + 0.5 * overhead, 0.5, 10.0);
+            }
+            last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
         }
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -3389,6 +3539,15 @@ private:
     // expired during a slow refine iteration, ConformU proceeded, and the
     // next refinement goto fought its pulse-guide test for the motors).
     mutable bool goto_in_progress_ = false;
+    // Measured goto-landing -> tracking-restart latency (EMA), see
+    // kTrackingResumeSeconds; stamped by wait_for_slew_complete().
+    mutable double resume_latency_seconds_ = kTrackingResumeSeconds;
+    // Measured goto overhead (EMA), see kGotoRampSeconds; the dispatch stamp
+    // is set by dispatch_predicted_goto_locked() and consumed at landing.
+    mutable double goto_overhead_seconds_ = kGotoRampSeconds;
+    mutable std::chrono::steady_clock::time_point last_goto_dispatch_time_{};
+    mutable double last_goto_dist_deg_ = 0.0;
+    mutable std::chrono::steady_clock::time_point last_landing_time_{};
     bool has_home_indexer_ = false;
     int tracking_rate_ = 0;                      // ASCOM DriveRate (0/1/2)
     double ra_rate_sec_per_sidereal_sec_ = 0.0;  // RightAscensionRate

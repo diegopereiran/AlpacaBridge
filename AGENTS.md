@@ -1794,6 +1794,53 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   for classic mounts that have neither (the #230 audience). Docs line for
   `SUPPORTED-DRIVERS.md` lands with the post-ConformU direct-driver docs PR.
 
+#### Goto landing, tracking restart and the dev-VM clock (EQM-35 Pro) — 2026-09-12
+
+Full ConformU on the EQM-35 Pro over USB, in a Lima Debian 13 arm64 VM on an Apple Silicon Mac
+with the mount's USB-serial bridge passed through by VirtualHere. Five full runs; each finding
+below was one of them.
+
+- **The controller's stopped flag is not the end of a goto.** After a 6 h slew and three landing
+  refinements, the last refinement's landing read 11 counts short of its `:S` target while `:f`
+  already said stopped; every clean landing in the same log read exactly on target. The tracking
+  restart (`:K1 :G111 :I1 :J1`, sidereal period written and read back correctly) sent 7 ms later
+  left the RA axis running at ~2x sidereal for the rest of the session (raw `:j1`: 1251 counts in
+  the 6 s of a Dec-only pulse, 9716 counts in the 47 s to FindHome). ConformU saw it as
+  `PulseGuide +9.0 North` "East-West movement outside tolerance, RA change -5.68 s". Not
+  reproducible on demand (five targeted attempts incl. the identical slew shape). Driver now: a
+  slew is complete only when the axis reads stopped AND two `:j` reads 60 ms apart agree
+  (`wait_axis_stationary_locked`, also between refinement gotos); `Slewing` stays true until
+  tracking is restarted; the restart is rate-checked over 300 ms and redone once with a WARN
+  ("Post-slew tracking restart: RA axis running at N counts/s") if off by >25%. Grep for that
+  WARN if a 2x ever recurs. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
+  event followed a 26 s full-speed slew) but was not proven.
+- **Goto aim-ahead constants are rig-specific: measure them.** `kGotoRampSeconds` (2.5 s) and
+  `kTrackingResumeSeconds` (0.7 s) were tuned on the Wave 100i. On the EQM-35 the landing-to-`:J1`
+  restart takes ~0.2 s and even a 350-count refinement goto ~3.1 s (the MC's minimum goto time),
+  so 2.5 + 0.7 happened to equal 3.1 + 0.2 for refinements (which is why they landed to 0.6 arcsec)
+  while a 20 deg goto whose estimate ran 1.2 s long read as 6 arcsec off at the deadband check and
+  resumed tracking 1.03 s ahead of the sky (`SyncToCoordinates` "15.4 arc seconds away", exactly
+  1.03 s of RA). Fixing only the restart latency made every refinement land 0.6 s late
+  (`SlewToCoordinates` "10.8 arc seconds away"). Both are now EMAs measured per goto
+  (`goto_overhead_seconds_`, `resume_latency_seconds_`), seeded from the constants so the first
+  goto of a session is unchanged on every mount; the refinement loop remains the safety net.
+- **Run chrony on the machine running ConformU. A stepped clock is an RA error.** RA = LST - HA
+  with LST from the host clock. Lima's host agent steps the guest clock by ~100 ms whenever the
+  drift passes its threshold (every 2-3 min at the ~500 ppm a vz guest drifts; no knob in Lima
+  2.2.0), and `systemd-timesyncd` does not correct frequency. Every 10 s rate-offset measurement
+  or Dec pulse that spans a step fails by exactly 0.1 s of RA: `RightAscensionRate Write`
+  -0.0136 vs -0.0033 s/s (twice, at different hour angles), `PulseGuide +3.0 South` 0.10 s
+  east-west; the raw RA counts were exactly sidereal both times and the step timestamps in
+  `~/.lima/<vm>/ha.stderr.log` ("guest clock adjusted") sat inside each measurement window.
+  `apt install chrony` (fast poll: `minpoll 3 maxpoll 5`, one `chronyc makestep`) holds the drift
+  at ~65 ms with no steps; the passing run had none. `/conformu` Step 2f2 now requires chrony.
+- **ConformU's `-9.0 / +9.0 / -3.0 / +3.0` test labels are hour angles.** The extended
+  rate-offset and pulse-guide tests slew to HA -9, +9, -3 and +3 h and repeat each measurement
+  there; a failure at one label and not another is position/timing-dependent, not a sign flip.
+- **VirtualHere for the USB pass-through** (Lima vz has none): the free server refuses `USE`
+  from a client started with `-n` ("running as a service"); run `vhclientarm64` without `-n`.
+  The client needs `vhci-hcd`, which Debian's `cloud` kernel lacks -- install `linux-image-arm64`.
+
 #### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
 
 open-astro/AlpacaBridge#230, filed by the maintainer, asks for exactly the work in this
