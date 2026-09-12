@@ -2271,8 +2271,8 @@ private:
         const double ha_mech_hours = a1 / kHoursToDegrees;
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec = sky_sign * dec_mech;
-        const double ha_hours = wrap_hour_angle(sky_sign * ha_mech_hours +
-                                                kHomeHourAngleOffsetHours * branch_from_axis_locked(a2));
+        const double ha_hours =
+            wrap_hour_angle(sky_sign * ha_mech_hours + kHomeHourAngleOffsetHours * branch_from_axis_locked(a2));
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ra = wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
@@ -2324,9 +2324,7 @@ private:
     // command-path angle keeps its sign bit at the pole (-0.0 on the
     // negative branch), so std::signbit is the right reader here, and only
     // here.
-    void remember_command_branch_locked(double commanded_a2) {
-        pointing_branch_ = std::signbit(commanded_a2) ? -1 : 1;
-    }
+    void remember_command_branch_locked(double commanded_a2) { pointing_branch_ = std::signbit(commanded_a2) ? -1 : 1; }
 
     std::pair<double, double> compute_alt_az_locked() const {
         auto [ra, dec] = compute_ra_dec_locked();
