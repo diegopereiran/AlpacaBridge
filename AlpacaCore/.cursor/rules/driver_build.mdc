@@ -164,10 +164,14 @@ public:
 
 **Location**: `include/alpacacore/vendor/<vendor>/<vendor>_sdk_wrapper.h`
 
-Create a clean C++ interface that wraps the messy SDK:
+Create a clean C++ interface that wraps the messy SDK. The snippet below is the SHAPE
+of such a wrapper, not a copy of any real header: it borrows ZWO's names for
+illustration, but its signatures are invented and the real
+`include/alpacacore/vendor/zwo/zwo_sdk_wrapper.h` differs on most of them (that
+header is the only place the ZWO API is stated; read it, never this block):
 
 ```cpp
-// include/alpacacore/vendor/zwo/zwo_sdk_wrapper.h
+// include/alpacacore/vendor/<vendor>/<vendor>_sdk_wrapper.h  (illustrative shape only)
 #pragma once
 
 #include <vector>
@@ -616,7 +620,8 @@ The testing guide covers:
 - `lib/<platform>/<arch>/libASICamera2.*` (or `ASICamera2.lib` on Windows)
 
 **Wrapper API**: read it from `include/alpacacore/vendor/zwo/zwo_sdk_wrapper.h`, which is the
-only copy. Two facts worth knowing before assuming the QHY shape below: `ZWOSDKWrapper` is a
+only place it is stated (the Layer 2 snippet above is an illustrative shape with invented
+signatures, not this header). Two facts worth knowing before assuming the QHY shape below: `ZWOSDKWrapper` is a
 plain singleton (`ZWOSDKWrapper::instance()`) with **no virtual functions and no injectable
 seam**, so it cannot be subclassed or faked, and a camera is addressed by the integer id the
 SDK enumerates. Hardware-free tests cannot reach any connected path: `tests/test_zwo_camera.cpp`
