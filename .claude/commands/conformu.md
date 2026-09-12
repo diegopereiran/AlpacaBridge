@@ -139,13 +139,13 @@ Save the directory. Today's log file is named per the daily convention (check th
 for m in sitelatitude sitelongitude; do curl -sS "http://<host>:6800/api/v1/<type>/<n>/$m?ClientID=1&ClientTransactionID=1" | jq .Value; done
 ```
 
-**Clock.** Telescope RA is `LST - HA` with LST from the SBC's system clock, so an unsettled clock distorts RA-rate measurements. The SBC image runs `systemd-timesyncd` (no chrony):
+**Clock.** Telescope RA is `LST - HA` with LST from the system clock of the machine running AlpacaBridge, so a clock that is STEPPED during a measurement shifts RA by the step: a 100 ms step inside a 10 s rate-offset window or a Dec pulse reads as exactly 0.1 s of RA error (`RightAscensionRate` -0.0136 vs -0.0033 s/s; "East-West movement" 0.10 s on a Dec pulse -- EQM-35 Pro in a Lima dev VM, 2026-09-12, three failed runs). `systemd-timesyncd` slews but does not correct frequency; a Lima VM's host agent steps the guest clock ~100 ms every few minutes with no way to turn it off; an SBC's oscillator drifts. **Require chrony on the machine running ConformU/AlpacaBridge** -- it corrects the clock's frequency error continuously so the offset never reaches a step threshold. If it is missing, say what you want to install and why, and get the user's OK before changing the machine's time sync -- swapping timesyncd for chrony on someone's rig is not a step to take unannounced. With that OK: `apt install chrony` (it replaces timesyncd); on a VM add `minpoll 3 maxpoll 5` to the `pool` line and run `chronyc makestep` once. If the user would rather not, say so in the report and treat every rate/pulse RA failure as unproven until the clock is ruled out. Then:
 
 ```bash
-ssh astro@<host> 'timedatectl | grep synchronized; echo astro | sudo -S timedatectl timesync-status | grep -E "Offset|Poll"'
+ssh astro@<host> 'chronyc tracking | grep -E "System time|Frequency|Update interval"'
 ```
 
-Require `synchronized: yes` and an offset in the low-millisecond range. Skip for non-telescope devices.
+Require a `System time` offset in the low-millisecond range and a non-zero `Update interval`. On a Lima VM also confirm the host agent is not stepping: `grep "guest clock adjusted" ~/.lima/<vm>/ha.stderr.log | tail -3` must show nothing within the last few minutes, and re-check it after the run -- a step inside the run window invalidates the affected measurements even if ConformU passed. Skip for non-telescope devices.
 
 **The ConformU host's clock too.** Since #301 the Sky-Watcher direct driver ignores a client-supplied `UTCDate` for pointing whenever the SBC's kernel reports its clock NTP-disciplined, so ConformU can no longer make the driver agree with a wrong clock of its own by writing `UTCDate`. If a run flags `SiderealTime`, check the clock on the machine running ConformU before suspecting the driver (issue #412): a ConformU host more than a few minutes off produces exactly that finding against a correct driver.
 
