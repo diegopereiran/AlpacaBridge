@@ -530,10 +530,11 @@ TEST_CASE("iOptron Telescope Driver - Position Tracking", "[ioptron][telescope][
 ### Pattern: an abstract SDK seam plus a scripted fake
 
 Do not subclass a vendor's `*SDKWrapper` singleton. The ZWO wrapper is a plain class with
-no virtual functions and a private `Impl`, so an `override` on any of its methods is a
-compile error, and most of the other wrappers are the same shape. A mock that "overrides"
-`open_camera` or `start_exposure` on `ZWOSDKWrapper` does not build, and worse, it suggests
-the seam exists when it does not.
+no virtual functions at all, so an `override` on any of its methods is a compile error
+(the subclass itself would compile; there is simply nothing to override), and most of the
+other wrappers are the same shape. A mock that "overrides" `open_camera` or
+`start_exposure` on `ZWOSDKWrapper` does not build, and worse, it suggests the seam exists
+when it does not.
 
 The pattern this repo actually uses is an **abstract interface** that the driver holds by
 reference, with the real wrapper implementing it and a scripted fake standing in for it in
@@ -554,7 +555,9 @@ section used to carry went stale:
 
 ### Using the fake in a test
 
-This is the real connect-path test from `tests/test_qhy_camera.cpp`, not a sketch:
+This is abridged from the real connect-path test in `tests/test_qhy_camera.cpp` (the fake
+helper is inlined and the sequencing checks and disconnect half are dropped); everything
+shown is what the real case does, not a sketch:
 
 ```cpp
 #include "fake_qhy_sdk.h"
