@@ -301,6 +301,20 @@ GUARD_ALLOWLIST = {
 }
 
 
+# A hand-rolled call() wrapper in either form the registrations used:
+#   static void call(const std::function<void()>& fn) {...}   (file scope)
+#   template <typename F> void call(F&& fn) {...}             (file scope)
+#   auto call = [](auto&& fn) {...};                           (lambda)
+# The function form needs a return type (or `static`) before the name; the
+# lambda form is `call` bound with `=` to a `[` capture list. A CALL SITE
+# `call([&] {...})` matches neither, so only the definition is reported.
+LOCAL_CALL_HELPER_RE = re.compile(
+    r"^\s*(?:static\s+)?\w[\w:<>,\s&*]*\bcall\s*\("
+    r"|^\s*(?:static\s+)?(?:const\s+)?auto\s+call\s*=\s*\[",
+    re.M,
+)
+
+
 def check_guard_usage():
     """StressCallGuard is used, and its result is actually asserted (issue #379).
 
@@ -320,14 +334,20 @@ def check_guard_usage():
 
     A local `call(...)` helper that wraps the same try/catch by hand is
     rejected outright: it is the shape the guard replaced, and it reintroduces
-    the counting-without-failing problem one file at a time.
+    the counting-without-failing problem one file at a time. Both forms the
+    merged registrations used are caught: the file-scope function/template
+    (`static void call(...)`, `template <...> void call(...)`) and the lambda
+    (`auto call = [](auto&& fn) {...}`), which was four of the five.
+
+    Reads the comment-stripped text, like rules 1-3: a closing CHECK that has
+    been commented out must not satisfy the presence rules.
     """
     failures = []
     seen = set()
     for path in tracked_files("AlpacaCore/tests/*_concurrency_stress.cpp"):
         name = os.path.basename(path)
         seen.add(name)
-        text = read_text(path)
+        text = strip_comments(read_text(path))
         allowed = name in GUARD_ALLOWLIST
         uses_guard = "StressCallGuard" in text
 
@@ -367,7 +387,7 @@ def check_guard_usage():
                 "a hundred clean calls, so a storm that silently stopped exercising the driver still "
                 "passes (issue #334)." % path
             )
-        if re.search(r"^\s*(?:static\s+)?\w[\w:<>,\s&*]*\bcall\s*\(", text, re.M):
+        if LOCAL_CALL_HELPER_RE.search(text):
             failures.append(
                 "LOCAL call() HELPER: %s defines its own call() wrapper. That is the hand-rolled "
                 "try/catch StressCallGuard replaced, and it reintroduces counting-without-failing one "
@@ -1170,6 +1190,31 @@ def self_test():
                       "static void call(const std::function<void()>& fn) { try { fn(); } catch (...) {} }")
         check("main() FAILS when a registration file defines its own call() helper",
               run_main_with(local_call) == 1)
+        # The lambda form, which four of the five merged helpers used; the
+        # first regex needed `call(` directly and never matched `call = [`.
+        local_call_lambda = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
+                             "  auto call = [](auto&& fn) { try { fn(); } catch (...) {} };\n"
+                             + GUARDED_BODY +
+                             "}\n")
+        check("main() FAILS when a registration file defines a call() lambda",
+              run_main_with(local_call_lambda) == 1)
+        # A call SITE is not a definition: the guard's own invocation style
+        # and any helper named call() from a header must not trip the rule.
+        call_site = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
+                     "  guard([&] { call(1); });\n"
+                     + GUARDED_BODY +
+                     "}\n")
+        check("main() passes when call() is only invoked, not defined",
+              run_main_with(call_site) == 0)
+        # Rule 5 reads comment-stripped text, like rules 1-3: a closing CHECK
+        # that has been commented out must not count as present.
+        commented_out = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
+                         "  alpacacore::test::StressCallGuard guard;\n"
+                         "  INFO(guard.report());\n"
+                         "  CHECK(guard.unexpected_count() == 0);\n"
+                         "  // CHECK(guard.total_calls() > 0);\n}")
+        check("main() FAILS when the total_calls() CHECK is commented out",
+              run_main_with(commented_out) == 1)
 
         # The CMake gating rule's own wiring into main() (issue #396).
         ungated_cmake = ("set(TEST_SOURCES test_core.cpp\n"
