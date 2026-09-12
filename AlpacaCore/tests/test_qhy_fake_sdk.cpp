@@ -359,6 +359,14 @@ TEST_CASE("LockedQHYSDK - every method forwards to its own counterpart", "[qhy][
     sdk.get_sdk_version();
     sdk.close_camera(id);
 
+    // open-astro#339, the other half: the sweep above is the one place every
+    // forward goes through the decorator, so it is where the no-blocking rule
+    // is checked for ALL of them. A 2 s sleep added to any fake method (guide,
+    // control_temp, get_single_frame, set_readout_mode, ...) fails here by
+    // name instead of hanging the first [stress] run that reaches it.
+    INFO("slowest forward: " << sdk.slowest_call_ms() << " ms");
+    CHECK(sdk.slowest_call_ms() < 100);
+
     const std::vector<std::string> methods{
         "enumerate_cameras",
         "get_camera_model",
