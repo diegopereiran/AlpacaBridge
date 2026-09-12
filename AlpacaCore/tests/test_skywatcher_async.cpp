@@ -994,6 +994,50 @@ TEST_CASE("SkyWatcher southern hemisphere - a positive RightAscensionRate still 
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW hemisphere's direction",
+          "[skywatcher][telescope][hemisphere]") {
+    // Review finding: set_site_latitude() skips a busy RA axis on the grounds
+    // that the restore paths recompute -- but the pulse path captured
+    // ra_restore_rate_deg_per_sec at DISPATCH and wrote it back verbatim at
+    // pulse end. Autoguiding keeps pulse_guiding_active_ true for most of
+    // every guide cycle (PHD2: duration + 1 s), so a site correction made
+    // mid-session lands here rather than in the setter's re-apply, and the
+    // pulse restored the pre-write direction. RA then ran backwards until
+    // something else re-applied the drive.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_drift = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return mount.physical_degrees(1) - p0;
+    };
+    const double north_drift = ra_drift();
+    REQUIRE(std::abs(north_drift) > 0.0);
+
+    // An East/West pulse keeps the RA axis busy; the site is corrected while
+    // it is in flight, so the setter takes its busy-axis skip.
+    driver->pulse_guide(2, 1200);  // East, 1.2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->set_site_latitude(-39.7392);
+
+    // Once the pulse has restored tracking, the axis must be running the way
+    // the NEW hemisphere wants. With the dispatch-time capture it keeps the
+    // old direction and this comparison fails.
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 6000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const double south_drift = ra_drift();
+    REQUIRE(std::abs(south_drift) > 0.0);
+    CHECK((north_drift > 0.0) != (south_drift > 0.0));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 // ── Southern hemisphere Dec-rate sign (DeclinationRate / PulseGuide) ────────
 //
 // Found by static review, not on hardware: apply_dec_rate_offset_locked() and

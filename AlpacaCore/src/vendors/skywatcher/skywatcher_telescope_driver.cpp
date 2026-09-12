@@ -742,8 +742,15 @@ public:
         // and nothing else re-applies until Tracking, TrackingRate,
         // RightAscensionRate or a slew happens to: the axis holds the wrong
         // direction at 1x and the star trails at 2x, which is the #250
-        // signature. Re-apply here. Busy axes are left alone: the slew, pulse
-        // and MoveAxis restore paths all recompute from the new latitude.
+        // signature. Re-apply here. Busy axes are left alone because their
+        // restore paths recompute from the new latitude: the slew restore via
+        // set_tracking_locked() -> apply_ra_drive_locked(), the MoveAxis stop
+        // likewise, and the pulse end through effective_ra_rate_locked()
+        // re-derived in stop_axis()/recover_ra_drive_rate(). The pulse path
+        // used to write the rate it captured at dispatch, which made this skip
+        // unsafe while autoguiding -- PHD2 keeps pulse_guiding_active_ true for
+        // most of every guide cycle, so a site correction mid-session landed
+        // there rather than here.
         bool crossing = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1189,7 +1196,10 @@ public:
             // drive rate. Give the drive-rate restore the same retried care
             // as the end-of-pulse stop (#249 review).
             bool ra_live_write_sent = false;
-            auto recover_ra_drive_rate = [this, &ra_live_write_sent, ra_restore_rate_deg_per_sec]() {
+            // Same re-derivation as stop_axis() below, for the same reason:
+            // this runs after the pulse, so a SiteLatitude write during it
+            // must be honoured rather than the dispatch-time snapshot.
+            auto recover_ra_drive_rate = [this, &ra_live_write_sent]() {
                 if (!ra_live_write_sent) {
                     return;
                 }
@@ -1198,11 +1208,12 @@ public:
                 for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
                     try {
                         std::lock_guard<std::mutex> lock(mutex_);
+                        const double restore_rate = effective_ra_rate_locked();
                         auto& proto = SkyWatcherProtocolWrapper::instance();
-                        proto.set_step_period(kAxisRa, tracking_step_period_for(ra_restore_rate_deg_per_sec),
+                        proto.set_step_period(kAxisRa, tracking_step_period_for(restore_rate),
                                               /*with_readback=*/false);
                         proto.start_motion(kAxisRa);
-                        cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
+                        cmd_axis_rate_deg_s_[0] = restore_rate;
                         return;
                     } catch (const std::exception& e) {
                         last_error = e.what();
@@ -1305,9 +1316,33 @@ public:
                                            dispatch_max_window);
                 verify_elapsed = std::chrono::steady_clock::now() - verify_start;
             }
-            auto stop_axis = [this, axis, restore_tracking, ra_restore_rate_deg_per_sec, pulse_restart]() {
+            auto stop_axis = [this, axis, restore_tracking, pulse_restart]() {
                 auto& proto = SkyWatcherProtocolWrapper::instance();
-                if (restore_tracking && !pulse_restart) {
+                // Re-derived here, NOT the value captured at dispatch: since
+                // the drive direction became hemisphere-dependent, a
+                // SiteLatitude write that crosses the equator during the
+                // pulse changes what "restore tracking" means. The setter
+                // skips a busy RA axis precisely because this path recomputes;
+                // writing the captured pre-write rate would restore the old
+                // hemisphere's direction and leave RA running backwards until
+                // something else re-applied the drive -- the 2x-trailing
+                // failure the setter exists to prevent, reached through the
+                // one path that was still using a stale snapshot.
+                double ra_restore_rate_deg_per_sec = 0.0;
+                bool ra_reverses = false;
+                if (restore_tracking) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
+                    // An in-place ":I" changes the PERIOD only; direction is
+                    // latched by the ":G" that start_speed_motion_locked()
+                    // sends. So a restore whose sign no longer matches what
+                    // the axis is running has to take the stop-and-restart
+                    // branch, exactly as set_site_latitude() does for the
+                    // idle case -- otherwise the axis keeps turning the old
+                    // way at the new rate.
+                    ra_reverses = (ra_restore_rate_deg_per_sec > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0);
+                }
+                if (restore_tracking && !pulse_restart && !ra_reverses) {
                     // RA pulse over a live tracking axis: restore the drive
                     // step period; the axis never stopped. Same ":J" kick as
                     // the dispatch above, for the same reason.
@@ -1317,7 +1352,8 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
                 } else if (restore_tracking) {
-                    // Reversed pulse: full stop-and-restart back to the drive rate.
+                    // Reversed pulse, or a hemisphere change mid-pulse: full
+                    // stop-and-restart back to the drive rate.
                     std::unique_lock<std::mutex> lock(mutex_);
                     start_speed_motion_locked(lock, kAxisRa, ra_restore_rate_deg_per_sec);
                 } else {
