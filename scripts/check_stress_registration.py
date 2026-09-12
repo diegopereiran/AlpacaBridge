@@ -343,7 +343,7 @@ def check_guard_usage():
     the counting-without-failing problem one file at a time. Both forms the
     merged registrations used are caught: the file-scope function/template
     (`static void call(...)`, `template <...> void call(...)`) and the lambda
-    (`auto call = [](auto&& fn) {...}`), which was four of the five.
+    (`auto call = [](auto&& fn) {...}`), which was three of the five (the other two were templates).
 
     Reads the comment-stripped text, like rules 1-3: a closing CHECK that has
     been commented out must not satisfy the presence rules.
@@ -1222,7 +1222,7 @@ def self_test():
                       "static void call(const std::function<void()>& fn) { try { fn(); } catch (...) {} }")
         check("main() FAILS when a registration file defines its own call() helper",
               run_main_with(local_call) == 1)
-        # The lambda form, which four of the five merged helpers used; the
+        # The lambda form, which three of the five merged helpers used; the
         # first regex needed `call(` directly and never matched `call = [`.
         local_call_lambda = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                              "  auto call = [](auto&& fn) { try { fn(); } catch (...) {} };\n"
