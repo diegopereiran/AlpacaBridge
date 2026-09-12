@@ -3014,9 +3014,19 @@ int main() {
             };
             std::vector<CapturedLine> captured;
             std::mutex captured_mutex;
-            const auto previous_level = alpacacore::logging::get_log_level();
+            // Restored by a guard rather than straight-line statements, so the
+            // restore does not depend on where the block exits (review note on
+            // PR #475; EXPECT aborts today, but a non-aborting assert would
+            // otherwise leak the lowered level into every later block).
+            struct LoggingRestore {
+                alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+                alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+                ~LoggingRestore() {
+                    alpacacore::logging::set_log_sink(sink);
+                    alpacacore::logging::set_log_level(level);
+                }
+            } logging_restore;
             alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
-            auto previous_sink = alpacacore::logging::get_log_sink();
             alpacacore::logging::set_log_sink(
                 [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
                     std::lock_guard<std::mutex> lock(captured_mutex);
@@ -3139,9 +3149,6 @@ int main() {
                 EXPECT(line && line->level == alpacacore::logging::LogLevel::Debug);
                 EXPECT(line && line->message.find("syncSystemClockFromClients is off") != std::string::npos);
             }
-
-            alpacacore::logging::set_log_sink(previous_sink);
-            alpacacore::logging::set_log_level(previous_level);
         }
 
         // A hardware RTC the kernel booted from is reported as the source
@@ -3322,15 +3329,18 @@ int main() {
                     std::lock_guard<std::mutex> lock(captured_mutex);
                     bool refused_text = false;
                     bool sync_time_recommended = false;
+                    bool sync_script_recommended = false;
                     for (const auto& line : captured) {
                         if (line.message.find("hardware RTC's time") == std::string::npos) {
                             continue;
                         }
                         refused_text |= line.message.find("setting the clock was refused") != std::string::npos;
                         sync_time_recommended |= line.message.find("Use the web UI's Sync Time") != std::string::npos;
+                        sync_script_recommended |= line.message.find("scripts/sync-clock.sh") != std::string::npos;
                     }
                     EXPECT(refused_text);
                     EXPECT(!sync_time_recommended);
+                    EXPECT(sync_script_recommended);  // the replacement advice, not just the absence of the old
                 }
                 registry.unregister_device(alpacacore::DeviceType::Telescope, 9807);
             }
