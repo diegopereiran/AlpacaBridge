@@ -3370,6 +3370,7 @@ int main() {
 
         // The limits are inclusive, and the poles and the antimeridian are
         // real places.
+        const int first_accepted = next_device_number;
         for (const auto& edge : {nlohmann::json{{"siteLatitude", 90.0}}, nlohmann::json{{"siteLatitude", -90.0}},
                                  nlohmann::json{{"siteLongitude", 180.0}}, nlohmann::json{{"siteLongitude", -180.0}}}) {
             // A unique device number per iteration, so this is the real
@@ -3378,6 +3379,17 @@ int main() {
             // "out of range".
             const auto json = configure(edge);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        }
+
+        // Unregister what the accepted half just registered. These four go
+        // through the real configure path, so they are also PERSISTED to
+        // config/registered_devices.json -- and a second run of this binary
+        // against the same working directory would then get "Device already
+        // registered" from configure() and fail the EXPECT above on a device
+        // that is fine. CI never saw it because it starts from a clean
+        // checkout; running the suite twice locally did.
+        for (int device = first_accepted; device < next_device_number; ++device) {
+            remove_device(router, "skywatcher", "telescope", device);
         }
     }
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
