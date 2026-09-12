@@ -65,7 +65,8 @@ if(TARGET alpacacore_synscan)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
-        test_skywatcher_async.cpp test_skywatcher_serial.cpp)
+        test_skywatcher_async.cpp test_skywatcher_serial.cpp
+        test_skywatcher_pointing.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
 endif()
