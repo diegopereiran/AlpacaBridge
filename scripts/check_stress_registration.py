@@ -3,8 +3,8 @@
 
 Five rule families, not one:
 
-1. Every vendor (driver, device type) pair needs a `[stress]` TEST_CASE or an
-   ALLOWLIST entry.
+1. Every vendor (driver, device type) pair needs a `[stress]` TEST_CASE (the
+   ALLOWLIST covers only the drivers that predate this gate; issue #369).
 2. A `[stress-guard]`-without-`[stress]` case inside a `*_concurrency_stress.cpp`
    file is rejected: that tag is for harness self-tests, and a registration
    wearing it would read as registered while dropping out of the vendor count.
@@ -70,10 +70,11 @@ DeviceType::CoverCalibrator, so a filename-based guess would be wrong.
 New driver, no stress test yet? Either add the `[stress]` TEST_CASE in a
 `*_concurrency_stress.cpp` file gated behind the vendor's `if(TARGET ...)`
 block (see `test_touptek_concurrency_stress.cpp` for the shape: one factory +
-one operate callback), or add the (vendor, device type) pair to ALLOWLIST below
-with a comment. The allow-list is meant to shrink, not grow -- an entry left
-in place after coverage is added will itself fail the check (see below), so
-there is nothing to remember to clean up by hand.
+one operate callback). ALLOWLIST below is only for the drivers that predate
+this gate: it is meant to shrink, not grow, and a new driver has no business
+on it (/driver-build Step 7b says how to build the seam and the registration).
+An entry left in place after coverage is added will itself fail the check
+(see below), so there is nothing to remember to clean up by hand.
 """
 
 import os
@@ -734,9 +735,11 @@ def main():
         allowed = (vendor, dtype) in ALLOWLIST
         if not covered and not allowed:
             failures.append(
-                "MISSING: %s/%s has no [stress] TEST_CASE and is not in "
-                "ALLOWLIST (%s): %s"
-                % (vendor, dtype, __file__, ", ".join(paths))
+                "MISSING: %s/%s has no [stress] TEST_CASE: %s. Register it in "
+                "AlpacaCore/tests/test_%s_concurrency_stress.cpp (/driver-build Step 7b: build "
+                "the seam, then the registration). ALLOWLIST in %s is for drivers that predate "
+                "this gate and must not grow."
+                % (vendor, dtype, ", ".join(paths), vendor, __file__)
             )
         if covered and allowed:
             failures.append(

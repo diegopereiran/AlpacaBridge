@@ -677,10 +677,27 @@ These three test cases catch the bugs that cause ConformU failures. They run wit
      - Camera without shutter: `HasShutter` returns false, operations should behave accordingly
      - Focuser without temp comp: `set_temp_comp(true)` must throw with correct code
 
+### Step 7b — The test seam and the `[stress]` registration (MANDATORY, same weight as the 8 cases)
+
+The unit cases above run without hardware because they never connect. Concurrency is the #1 driver-review bug class (use-after-close, a dropped racing disconnect, destructor versus connection thread), ConformU is single-threaded, and the only thing that exercises those paths automatically is the `[stress]` lifecycle storm under ThreadSanitizer (`sanitizers-tsan` in CI, `RUN_TSAN=1 ./scripts/ci_preflight.sh` locally). A storm needs a hardware-free **connect**, and a connect needs a seam. Build both now, not later: every driver that landed without them went onto a list that nine later PRs had to work back down.
+
+**1. The seam.** Pick the shape by what the driver talks to:
+
+- **Vendor SDK** (camera, filter wheel, anything linking a vendor `.so`): the abstract-interface pattern. An abstract `<Vendor>SDK` interface, the production wrapper implementing it, a `<Vendor>SDK&`-taking overload on every `create_<vendor>_*` factory beside the existing one, a scripted fake in `tests/fake_<vendor>_sdk.h`, and a mutex-taking decorator in `tests/locked_<vendor>_sdk.h` that wraps the fake wherever it is injected, so a TSan report points at driver code rather than at the fake. Worked examples: QHY (`QHYSDK`, `tests/fake_qhy_sdk.h`, `tests/locked_qhy_sdk.h`) and ToupTek (the same three files under the `touptek` names). Read them; do not write a mock that subclasses the singleton wrapper, it has no virtual functions and will not build.
+- **Serial or network protocol** (mounts, focusers, hubs): a fake device on the other end of the real transport. A pseudo-terminal fake for serial (`tests/fake_gemini_focuser.h`, `tests/fake_skywatcher_serial_board.h`; `PtyPair` in `tests/fake_pty_write.h` owns the pty), a loopback server for TCP/UDP (`tests/fake_mount_server.h`, `tests/fake_skywatcher_mount.h`). The driver connects through its real protocol wrapper, so the wrapper's own threads and timeouts are what get stormed.
+
+A driver whose seam cannot be built yet (no fake is possible without the hardware in hand) still registers: with every connect failing fast at enumeration the storm exercises the `AsyncConnectable` machinery, the failure-path cleanup and the getters racing the lifecycle, which is where this driver family's findings have lived. Say so in the file's header comment, the way `test_zwo_concurrency_stress.cpp` does.
+
+**2. The registration.** Create `AlpacaCore/tests/test_<vendor>_concurrency_stress.cpp` (that suffix is what `scripts/check_stress_registration.py` looks for), built on `tests/concurrency_stress.h`: a factory returning the driver, an `operate` callback exercising its operational surface with **every call wrapped in `StressCallGuard`** (a local try/catch lets the first throw skip every call after it), then the scenarios: `run_lifecycle_stress`, `run_destruction_during_connect_stress`, and the racing-disconnect cases. Each `TEST_CASE` carries `[<vendor>][<device>][stress]`; the file ends each case with `INFO(guard.report()); CHECK(guard.unexpected_count() == 0); CHECK(guard.total_calls() > 0);`. Copy the closest existing registration (`ls AlpacaCore/tests/test_*_concurrency_stress.cpp`) and read `concurrency_stress.h`'s header comment first; both the file naming and the guard idiom are gated, so the check will tell you exactly what is missing.
+
+**3. Do not add an `ALLOWLIST` entry.** `scripts/check_stress_registration.py` fails a driver with no `[stress]` case and its message names the `ALLOWLIST` as an alternative. That list exists only for the drivers that predate the gate (seeded at 20 pairs in 2026-09, two left) and is expected to shrink, never grow. A new driver built from this command has no reason to be on it; if you find yourself adding one, the seam in part 1 is the work you skipped.
+
+**4. Gate it in CMake.** The stress file goes in the same `if(TARGET alpacacore_<vendor>)` block as the unit file (below); an unconditional listing is itself a gate failure, because the file would compile with the vendor absent and register nothing.
+
 ### CMake integration (also mandatory)
 
 Update `AlpacaCore/tests/CMakeLists.txt`:
-- Add `test_<vendor>_<device>.cpp` to the conditional `TEST_SOURCES` list, guarded by `if(TARGET alpacacore_<vendor>)`.
+- Add `test_<vendor>_<device>.cpp` **and** `test_<vendor>_concurrency_stress.cpp` to the conditional `TEST_SOURCES` list, guarded by `if(TARGET alpacacore_<vendor>)`.
 - Add `target_link_libraries(alpacacore_tests PRIVATE alpacacore_<vendor>)` in the matching conditional block.
 
 Follow the existing pattern in the file — read it first:
@@ -711,6 +728,14 @@ cd AlpacaCore && cmake -B build -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build
 ```
 
 All tests must pass — not just the new driver's tests.
+
+Then run the registration gate locally, exactly as CI and the pre-flight do, so a missing or misplaced `[stress]` case is caught here rather than in review:
+
+```bash
+python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py
+```
+
+It must print `Stress-test registration OK` and the new (vendor, device type) pair must not be on the `ALLOWLIST` (Step 7b). Run the storm itself under ThreadSanitizer before opening the PR: `RUN_TSAN=1 ./scripts/ci_preflight.sh`, or the full pre-flight, which includes it.
 
 ## Step 9 — Vendor-specific notes
 
