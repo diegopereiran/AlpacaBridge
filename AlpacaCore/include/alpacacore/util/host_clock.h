@@ -78,8 +78,9 @@ public:
     // host_booted_from_rtc() re-probes a missing RTC at most this often; a
     // refresh_rtc() that lands sooner returns the cached answer. The server's
     // probe timer (Config::rtc_probe_interval_seconds) must run SLOWER than
-    // this, or every other pass is swallowed and the effective period doubles
-    // with nothing failing; Config derives its default from this constant so
+    // this, or passes are swallowed and each one costs the process an extra
+    // interval with nothing failing (exactly every other pass, i.e. a doubled
+    // period, when the two are equal); Config derives its default from this constant so
     // the two cannot drift apart (open-astro#406).
     static constexpr std::chrono::seconds kRtcProbeRateLimit{30};
 

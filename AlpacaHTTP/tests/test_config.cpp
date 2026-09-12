@@ -73,7 +73,6 @@ int main() {
         // relation is what matters (#406): a default at or below the limiter
         // has every other pass swallowed with nothing failing, so it is
         // asserted against the limiter itself, not against a literal.
-        EXPECT(fresh.rtc_probe_interval_seconds() == 31);
         EXPECT(fresh.rtc_probe_interval_seconds() > alpacacore::util::HostClock::kRtcProbeRateLimit.count());
         EXPECT(fresh.rtc_probe_interval_seconds() == alpacacore::util::HostClock::kRtcProbeRateLimit.count() + 1);
         fresh.set_rtc_probe_interval_seconds(0);
