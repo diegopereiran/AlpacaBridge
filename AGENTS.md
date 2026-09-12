@@ -1888,6 +1888,122 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   for classic mounts that have neither (the #230 audience). Docs line for
   `SUPPORTED-DRIVERS.md` lands with the post-ConformU direct-driver docs PR.
 
+#### Goto landing, tracking restart and the dev-VM clock (EQM-35 Pro) — 2026-09-12
+
+Full ConformU on the EQM-35 Pro over USB, in a Lima Debian 13 arm64 VM on an Apple Silicon Mac
+with the mount's USB-serial bridge passed through by VirtualHere. Five full runs; each finding
+below was one of them.
+
+- **The controller's stopped flag is not the end of a goto.** After a 6 h slew and three landing
+  refinements, the last refinement's landing read 11 counts short of its `:S` target while `:f`
+  already said stopped; every clean landing in the same log read exactly on target. The tracking
+  restart (`:K1 :G111 :I1 :J1`, sidereal period written and read back correctly) sent 7 ms later
+  left the RA axis running at ~2x sidereal for the rest of the session (raw `:j1`: 1251 counts in
+  the 6 s of a Dec-only pulse, 9716 counts in the 47 s to FindHome). ConformU saw it as
+  `PulseGuide +9.0 North` "East-West movement outside tolerance, RA change -5.68 s". Not
+  reproducible on demand (five targeted attempts incl. the identical slew shape). Driver now: a
+  slew is complete only when the axis reads stopped AND two `:j` reads 60 ms apart agree
+  (`wait_axis_stationary_locked`, also between refinement gotos); `Slewing` stays true until
+  tracking is restarted; the restart is rate-checked over 300 ms and redone once with a WARN
+  ("Post-slew tracking restart: RA axis running at N counts/s") if off by >25%. The check is
+  skipped, with an INFO naming the count, when the window cannot accumulate 4 counts: ":j" is
+  whole counts and both reads truncate, so below that every possible reading lands outside the
+  tolerance and the check would condemn a healthy axis (an effective RA rate near zero, e.g.
+  RightAscensionRate ~0.9 nearly cancelling sidereal, is the way in). Grep for that WARN if a
+  2x ever recurs, and for "rate check skipped" if a slew was never verified: **every exit that
+  does not complete a measurement logs that phrase** -- the entry guards, the zero-rate and
+  zero-interval guards, both `sleep_unlocked()` supersession exits, the three exits inside the
+  attempt-0 recovery (the stop-wait losing the axis, tracking going off while it settled, and the
+  restart itself throwing), and the two catch blocks (a position read throwing mid-window, and
+  the caller's catch around the whole check, which fires when `check_connected()` throws out of
+  the sample sleep). Review of this branch found three of those silent, including one that fires
+  with the RA axis already stopped by the check's own stop, and a second review found the three
+  exception paths silent too. A check that RAN and found the rate correct logs
+  nothing -- that is the ordinary case, once per goto, and the grep is for slews that were
+  never verified, not for slews that passed. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
+  event followed a 26 s full-speed slew) but was not proven.
+- **A retry loop whose supersession test compares against a generation captured before the loop
+  can only ever run once.** Review of the branch above: the rate check's second sample was
+  unreachable, because the attempt-0 recovery is itself a motion command (its own
+  `++motion_generation_`, and `start_speed_motion_locked()` bumps it again), so attempt 1's first
+  re-lock read the check's OWN restart as another command's supersession and returned. The
+  "restart did not correct it" WARN could never be emitted, and a restart that also latched wrong
+  ran at the wrong rate in silence -- the exact failure the check exists to surface. Fixed by
+  re-seeding the entry generation from the recovery's own restart. **Rule:** whenever a loop both
+  issues a motion command and guards itself with "has the generation moved", the guard's baseline
+  has to be re-established after each of the loop's own commands, or every iteration after the
+  first is dead code. The tell is a `const` generation captured outside the loop. Pinned by a
+  case arming two bad latches instead of one (`restart_tracking_at_wrong_rate(1, 2)`) and
+  asserting the second-attempt WARN.
+- **One flag cannot answer two questions, and "Slewing" is not "the axes are busy".** Holding
+  `goto_in_progress_` across the post-slew restore was the right fix for the Slewing half (a
+  client must not fire motion into the restart window) and a regression for the other: that
+  same flag feeds `axes_busy_locked()`, which the rate setters read as "a goto owns the axes,
+  its restore will re-apply this when it releases them". The restore had already run. A
+  `RightAscensionRate` write landing in the window returned 200, read back the new value, and
+  was never driven. Fixed with a second flag, `restoring_tracking_`, that
+  `get_slewing_locked()` consults and `axes_busy_locked()` does not. **Rule:** before widening
+  the span of a state flag, list every predicate that reads it and check each one still wants
+  the wider span. Here `get_slewing_locked()` did, `axes_busy_locked()` did not, and the
+  duty-cycle worker's start gate did -- so it names the new flag explicitly, because a burst
+  in that window would bump `motion_generation_` under the rate check's supersession guard and
+  make it skip. Same family as the per-axis `axes_busy_locked()` finding in #432: a predicate
+  that bundles several questions eventually gets asked the one it answers wrongly.
+- **A measured estimate needs a test that the estimate MOVES, not that it helps.** The
+  constants-to-EMA change (`goto_overhead_seconds_`, `resume_latency_seconds_`) shipped with
+  nothing pinning it: delete both update blocks, re-seed from the constants, suite still green.
+  The estimates are private, so the observable is the thing they steer -- the RA landing
+  residual, which is pure aim-ahead error since Dec has no time term and lands exactly on
+  target every slew. Over five identical slews the residual spread is ~9.3 arcsec measured and
+  ~0.13 arcsec frozen, stable to +/-0.1 across runs; the case asserts a 2 arcsec floor.
+  **And the seam disagrees with the hardware about which is better**: on the loopback fake the
+  frozen constants land at about -0.8 arcsec and the measured EMAs at -3 to -13, because the
+  fake has no equivalent of the real MC's ~3 s floor on even a 350-count refinement goto --
+  which is precisely the fact that made the constants wrong on an EQM-35. So the test pins that
+  the aim-ahead is driven by something that moves, and says in its own comment that the
+  evidence measuring HELPS is the hardware ConformU run, not the fake. **Rule:** when a fake
+  cannot reproduce the quantity a change was made for, pin the mechanism and name the real
+  evidence in the test, rather than asserting an improvement the fake will contradict.
+- **Test seams have to model the failure, not a nearby one.** The landing-settle wait
+  (`wait_axis_stationary_locked`) shipped with nothing in the suite failing without it, and the
+  ramped-`:K` seam that looked like it should cover it could not: a ramped stop keeps `:f`
+  RUNNING for the whole ramp, which the ordinary stop-wait already handles, so the stationary
+  check had no window left to close. The real window is the one the hardware showed -- `:f`
+  clearing while the last counts still arrive -- and it needed its own seam (`land_short_by()`:
+  report the landing stopped N counts short, then creep the remainder in). Goto counts could not
+  be the signal either (`refine_goto_landing()` burns all three iterations on this fake whether or
+  not a landing coasts), nor wall-clock timing (the 3 s `slew_force_until_` window and the
+  tracking restore both sit between the landing and `Slewing` clearing). What works: coast for
+  longer than `kLandingSettleTimeout` and assert the check's own give-up WARN, a string nothing
+  else emits. **Rule:** before claiming a change is covered, delete it and run the suite; if it
+  stays green, the seam models the wrong failure.
+- **Goto aim-ahead constants are rig-specific: measure them.** `kGotoRampSeconds` (2.5 s) and
+  `kTrackingResumeSeconds` (0.7 s) were tuned on the Wave 100i. On the EQM-35 the landing-to-`:J1`
+  restart takes ~0.2 s and even a 350-count refinement goto ~3.1 s (the MC's minimum goto time),
+  so 2.5 + 0.7 happened to equal 3.1 + 0.2 for refinements (which is why they landed to 0.6 arcsec)
+  while a 20 deg goto whose estimate ran 1.2 s long read as 6 arcsec off at the deadband check and
+  resumed tracking 1.03 s ahead of the sky (`SyncToCoordinates` "15.4 arc seconds away", exactly
+  1.03 s of RA). Fixing only the restart latency made every refinement land 0.6 s late
+  (`SlewToCoordinates` "10.8 arc seconds away"). Both are now EMAs measured per goto
+  (`goto_overhead_seconds_`, `resume_latency_seconds_`), seeded from the constants so the first
+  goto of a session is unchanged on every mount; the refinement loop remains the safety net.
+- **Run chrony on the machine running ConformU. A stepped clock is an RA error.** RA = LST - HA
+  with LST from the host clock. Lima's host agent steps the guest clock by ~100 ms whenever the
+  drift passes its threshold (every 2-3 min at the ~500 ppm a vz guest drifts; no knob in Lima
+  2.2.0), and `systemd-timesyncd` does not correct frequency. Every 10 s rate-offset measurement
+  or Dec pulse that spans a step fails by exactly 0.1 s of RA: `RightAscensionRate Write`
+  -0.0136 vs -0.0033 s/s (twice, at different hour angles), `PulseGuide +3.0 South` 0.10 s
+  east-west; the raw RA counts were exactly sidereal both times and the step timestamps in
+  `~/.lima/<vm>/ha.stderr.log` ("guest clock adjusted") sat inside each measurement window.
+  `apt install chrony` (fast poll: `minpoll 3 maxpoll 5`, one `chronyc makestep`) holds the drift
+  at ~65 ms with no steps; the passing run had none. `/conformu` Step 2f2 now requires chrony.
+- **ConformU's `-9.0 / +9.0 / -3.0 / +3.0` test labels are hour angles.** The extended
+  rate-offset and pulse-guide tests slew to HA -9, +9, -3 and +3 h and repeat each measurement
+  there; a failure at one label and not another is position/timing-dependent, not a sign flip.
+- **VirtualHere for the USB pass-through** (Lima vz has none): the free server refuses `USE`
+  from a client started with `-n` ("running as a service"); run `vhclientarm64` without `-n`.
+  The client needs `vhci-hcd`, which Debian's `cloud` kernel lacks -- install `linux-image-arm64`.
+
 #### Alignment with upstream issue #230 (EQMOD-style direct motor-controller support)
 
 open-astro/AlpacaBridge#230, filed by the maintainer, asks for exactly the work in this
