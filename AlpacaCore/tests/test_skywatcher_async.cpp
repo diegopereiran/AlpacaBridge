@@ -1038,6 +1038,98 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies the RA drive",
+          "[skywatcher][telescope][hemisphere]") {
+    // Round-2 review finding, the other half of the sibling above: the busy
+    // skip was decided from axes_busy_locked(), which is true for ANY pulse,
+    // but only an RA pulse's restore re-derives the RA drive. A North/South
+    // pulse takes the stop_axis() else-branch -- it stops the DEC axis and
+    // re-applies the Dec offset, and never touches RA. So the setter skipped,
+    // the pulse skipped, and RA kept counting the old hemisphere's way
+    // indefinitely: the 2x-trailing #250 signature again. Autoguiding makes
+    // this the COMMON case -- roughly half of PHD2's corrections are Dec.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_drift = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return mount.physical_degrees(1) - p0;
+    };
+    const double north_drift = ra_drift();
+    REQUIRE(std::abs(north_drift) > 0.0);
+
+    // A North pulse keeps the DEC axis busy; the RA axis is untouched and
+    // still tracking, so the setter must re-apply it rather than skip.
+    driver->pulse_guide(0, 1200);  // North, 1.2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->set_site_latitude(-39.7392);
+
+    // RA reverses immediately -- it is not the pulse's axis, so there is
+    // nothing to wait for. Checked again after the pulse ends to prove the
+    // Dec restore does not undo it.
+    const double mid_drift = ra_drift();
+    REQUIRE(std::abs(mid_drift) > 0.0);
+    INFO("north RA drift " << north_drift << " deg, during the Dec pulse " << mid_drift << " deg");
+    CHECK((north_drift > 0.0) != (mid_drift > 0.0));
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 6000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const double south_drift = ra_drift();
+    REQUIRE(std::abs(south_drift) > 0.0);
+    INFO("after the Dec pulse: RA drift " << south_drift << " deg");
+    CHECK((north_drift > 0.0) != (south_drift > 0.0));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-applies the RA drive",
+          "[skywatcher][telescope][hemisphere]") {
+    // The MoveAxis half of the same finding: manual_axis_slewing_[1] made
+    // axes_busy_locked() true, and the Dec stop task's restore only calls
+    // apply_dec_rate_offset_locked() for channel == kAxisDec. RA was left on
+    // the old hemisphere's direction with nothing scheduled to re-derive it.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_drift = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return mount.physical_degrees(1) - p0;
+    };
+    const double north_drift = ra_drift();
+    REQUIRE(std::abs(north_drift) > 0.0);
+
+    driver->move_axis(1, 0.5);  // Dec axis nudge, degrees/sec
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    driver->set_site_latitude(-39.7392);
+
+    const double mid_drift = ra_drift();
+    REQUIRE(std::abs(mid_drift) > 0.0);
+    INFO("north RA drift " << north_drift << " deg, during the Dec MoveAxis " << mid_drift << " deg");
+    CHECK((north_drift > 0.0) != (mid_drift > 0.0));
+
+    driver->move_axis(1, 0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const double south_drift = ra_drift();
+    REQUIRE(std::abs(south_drift) > 0.0);
+    INFO("after the Dec MoveAxis stop: RA drift " << south_drift << " deg");
+    CHECK((north_drift > 0.0) != (south_drift > 0.0));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 // ── Southern hemisphere Dec-rate sign (DeclinationRate / PulseGuide) ────────
 //
 // Found by static review, not on hardware: apply_dec_rate_offset_locked() and

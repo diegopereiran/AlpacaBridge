@@ -745,19 +745,31 @@ public:
         // and nothing else re-applies until Tracking, TrackingRate,
         // RightAscensionRate or a slew happens to: the axis holds the wrong
         // direction at 1x and the star trails at 2x, which is the #250
-        // signature. Re-apply here. Busy axes are left alone because their
-        // restore paths recompute from the new latitude: the slew restore via
-        // set_tracking_locked() -> apply_ra_drive_locked(), the MoveAxis stop
-        // likewise, and the pulse end through effective_ra_rate_locked()
-        // re-derived in stop_axis()/recover_ra_drive_rate(). The pulse path
-        // used to write the rate it captured at dispatch, which made this skip
-        // unsafe while autoguiding -- PHD2 keeps pulse_guiding_active_ true for
-        // most of every guide cycle, so a site correction mid-session landed
-        // there rather than here.
+        // signature. Re-apply here.
+        //
+        // The skip is decided PER AXIS (axis_busy_locked()), not from the
+        // whole-mount axes_busy_locked(): only an operation that owns a given
+        // axis re-derives that axis's drive when it releases it. A goto/park/
+        // home/slew owns both and restores both via set_tracking_locked() ->
+        // apply_ra_drive_locked(); a pulse or a manual MoveAxis owns only its
+        // own, and its restore touches only that one -- the pulse end's
+        // stop_axis() re-derives RA through effective_ra_rate_locked() (it
+        // used to write the rate captured at dispatch, which made even the
+        // RA skip unsafe while autoguiding: PHD2 keeps pulse_guiding_active_
+        // true for most of every guide cycle), and the MoveAxis stop task
+        // re-applies the Dec offset for a Dec nudge. So a whole-mount skip
+        // let a DEC-axis operation in flight (a North/South pulse, or
+        // MoveAxis(Dec, r) -> MoveAxis(Dec, 0)) block the RA re-apply while
+        // nothing on the Dec side ever touched RA: the RA axis kept the old
+        // hemisphere's direction indefinitely -- the same 2x-trailing
+        // signature this setter exists to prevent, reached through the other
+        // axis (round-2 review finding). The mirror case (an RA-axis
+        // operation blocking the Dec offset flip) is closed the same way.
         bool crossing = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            crossing = connected_ && tracking_ && !axes_busy_locked() && hemisphere_south_locked() != (latitude < 0.0);
+            crossing = connected_ && tracking_ && hemisphere_south_locked() != (latitude < 0.0) &&
+                       !(axis_busy_locked(kAxisRa) && axis_busy_locked(kAxisDec));
             if (!crossing) {
                 site_latitude_ = latitude;
                 site_latitude_set_ = true;
@@ -770,15 +782,28 @@ public:
             std::unique_lock<std::mutex> lock(mutex_);
             // Re-checked under the new lock: another thread may have stopped
             // tracking or taken the axes while the mutex was released.
+            const bool ra_busy = axis_busy_locked(kAxisRa);
+            const bool dec_busy = axis_busy_locked(kAxisDec);
             const bool still_crossing =
-                connected_ && tracking_ && !axes_busy_locked() && hemisphere_south_locked() != (latitude < 0.0);
+                connected_ && tracking_ && hemisphere_south_locked() != (latitude < 0.0) && !(ra_busy && dec_busy);
             const double previous = effective_ra_rate_locked();
             site_latitude_ = latitude;
             site_latitude_set_ = true;
             if (still_crossing) {
                 anchor_model_locked();  // the counts are unchanged; only their reading flips
-                apply_ra_tracking_rate_locked(lock, previous);
-                apply_dec_rate_offset_locked(lock);
+                if (!ra_busy) {
+                    apply_ra_tracking_rate_locked(lock, previous);
+                } else if (ra_duty_rate_deg_s_ != 0.0) {
+                    // Sub-floor RA drive: the axis is stopped between bursts,
+                    // so the owner's restore only has to stop it -- the duty
+                    // worker resumes from this stored rate, which no restore
+                    // path re-derives. Pre-arm it (no hardware touch) the way
+                    // set_right_ascension_rate()'s busy branch does.
+                    ra_duty_rate_deg_s_ = effective_ra_rate_locked();
+                }
+                if (!dec_busy) {
+                    apply_dec_rate_offset_locked(lock);
+                }
                 need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
             }
         }
@@ -2210,14 +2235,21 @@ private:
         last_position_update_ = now;
     }
 
-    // True while a goto/park/home/pulse/manual motion owns the axes: rate
+    // True while a goto/park/home/pulse/manual motion owns THIS axis.
+    // Ownership is per axis: a goto/park/home/slew takes both, a pulse or a
+    // manual MoveAxis takes only its own -- the same idiom the duty worker
+    // and the MoveAxis stop task already use ("the global generation cannot
+    // tell a same-axis supersession from an unrelated other-axis command").
+    bool axis_busy_locked(int channel) const {
+        return goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[channel - 1] ||
+               (pulse_guiding_active_ && pulse_axis_ == channel);
+    }
+
+    // True while a goto/park/home/pulse/manual motion owns EITHER axis: rate
     // setters must not issue motion then (they would hijack the axis and
     // make get_hardware_slewing_locked read "not slewing" mid-goto); the
     // stored rates are applied by the post-slew/pulse/MoveAxis restores.
-    bool axes_busy_locked() const {
-        return goto_in_progress_ || parking_ || homing_ || slewing_cached_ || pulse_guiding_active_ ||
-               manual_axis_slewing_[0] || manual_axis_slewing_[1];
-    }
+    bool axes_busy_locked() const { return axis_busy_locked(kAxisRa) || axis_busy_locked(kAxisDec); }
 
     bool rate_offsets_active_locked() const {
         return ra_rate_sec_per_sidereal_sec_ != 0.0 || dec_rate_arcsec_per_sec_ != 0.0;

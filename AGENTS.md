@@ -2039,6 +2039,49 @@ Extended the regression test from the first bug to assert the RA axis actually r
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.
 
+#### KNOWN BUG (FIXED): `axes_busy_locked()` is the wrong question for a per-axis re-apply
+
+Found in review of #432 (2026-09-12), the third instance of the same idiom in this
+driver. Not hemisphere-specific in shape, only in trigger.
+
+**Symptom.** `SiteLatitude` written across the equator while a North/South pulse or a
+`MoveAxis` on the DECLINATION axis is in flight leaves the RA axis running the old
+hemisphere's direction indefinitely -- stars trail at 2x, the #250 signature, with
+nothing scheduled to correct it. Under an autoguider this is the common case, not the
+corner: roughly half of a session's corrections are declination, and PHD2 holds
+`pulse_guiding_active_` true for most of every guide cycle.
+
+**Mechanism.** A setter that must re-command an axis skips when the axis is busy, on the
+grounds that the busy operation's own restore path re-derives the value. That contract
+holds per axis, but the guard asked `axes_busy_locked()`, which is true when EITHER axis
+is busy. A declination pulse ends in `stop_axis()`'s final `else` branch -- it stops the
+DEC axis and re-applies the DEC offset, and never touches RA. The `MoveAxis` stop task is
+the same shape: its restore calls `set_tracking_locked()` only for `channel == kAxisRa`
+and `apply_dec_rate_offset_locked()` only for `kAxisDec`. So both the setter and the
+in-flight operation skipped RA, each expecting the other to do it.
+
+**Fix (done).** `axis_busy_locked(channel)` is now the primitive -- the same
+`goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[i]
+|| (pulse_guiding_active_ && pulse_axis_ == channel)` idiom the duty-cycle worker and the
+MoveAxis stop tail already use -- and `axes_busy_locked()` is defined as the OR of the
+two, so every existing caller is unchanged. `set_site_latitude()` decides each half
+separately: re-apply the RA drive unless RA is busy, re-apply the Dec offset unless Dec
+is busy, and skip entirely only when both are. A sub-floor RA rate is pre-armed into
+`ra_duty_rate_deg_s_` when RA is busy, the way `set_right_ascension_rate()`'s busy branch
+already does, because the duty worker resumes from that stored rate and no restore path
+re-derives it. Two loopback regressions (`test_skywatcher_async.cpp`) drive the
+declination-pulse and declination-`MoveAxis` variants and were confirmed to fail on the
+pre-fix setter with the RA axis still counting the old way.
+
+**Rule for the next driver.** Any "skip while busy, the restore path will re-apply"
+guard has to name the axis it is talking about, and the reviewer's question is always:
+does the operation that owns the busy axis actually re-derive THIS value? A mount-wide
+busy flag can only answer that when the operation owns every axis -- a goto, park, home
+or slew does; a pulse or a manual nudge does not. The same audit applies to
+`set_right_ascension_rate()`, whose busy branch carries the identical assumption for a
+plain rate change (no hemisphere involved, so a declination operation in flight can still
+strand an RA rate write until the next re-apply); it predates #432 and is unfixed.
+
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
   - Pointing math at latitude -37.2: home points at the SOUTH celestial pole, so
