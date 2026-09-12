@@ -382,6 +382,11 @@ def check_blocking_get_connected_list():
         r"\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
         r"(?:named\s+|more\s+)?(?:telescopes?|wrapper-backed\s+switch(?:es)?)\b",
         re.IGNORECASE)
+    # Anchored on the noun deliberately. A rule that also caught a bare "the
+    # five" (noun implied) was tried and dropped: "the two locked phases", "the
+    # two ZWO drivers" and similar ordinary prose light it up, so it fails on
+    # correct text. A count with the noun left implied has to be caught by
+    # review -- which is how the one at AGENTS.md:777 was.
     # Globbed, not a hand-written file list: the first version of this loop
     # named four files and missed synscan_telescope_driver.cpp, which carried
     # the counts -- a gate against drift that itself drifts is worth very
