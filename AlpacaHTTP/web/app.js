@@ -1555,8 +1555,8 @@ function updateHeaderProfileName(profileName) {
     }
 }
 
-// Shows a badge next to the version number when this build isn'''t coming from
-// main -- e.g. a PR branch checked out for local testing -- so it can'''t be
+// Shows a badge next to the version number when this build isn't coming from
+// main -- e.g. a PR branch checked out for local testing -- so it can't be
 // mistaken for an official release. kVersion (VERSION file) stays the same
 // on every branch; GitBranch/GitCommit come from the actual checkout.
 let _buildBadgeChecked = false;
@@ -1576,15 +1576,20 @@ async function updateHeaderBuildBadge() {
         const dirty = !!(info.GitDirty !== undefined ? info.GitDirty : info.gitDirty);
         const isRelease = !!(info.GitIsRelease !== undefined ? info.GitIsRelease : info.gitIsRelease);
         const remoteUrl = info.GitRemoteUrl || info.gitRemoteUrl || '';
-        // isRelease (HEAD sits exactly on a vX.Y.Z tag) is the real release
-        // check -- packaging checks out the tag as a detached HEAD, so
-        // branch alone would read as "HEAD", not "main", on a real release.
-        if (isRelease || !branch || branch === 'unknown' || branch === 'HEAD') {
+        // isRelease (HEAD sits exactly on a vX.Y.Z tag) is the ONLY release
+        // check. `git rev-parse --abbrev-ref HEAD` prints the literal "HEAD"
+        // for every detached checkout, not just a release one: a bare
+        // `git checkout <sha>`, a `git checkout FETCH_HEAD` of a PR head and
+        // any actions/checkout build all land there. Testing for it here as
+        // well hid the badge on exactly the unofficial builds it exists to
+        // flag, so a detached non-release build is labelled, not hidden.
+        if (isRelease || !branch || branch === 'unknown') {
             badge.hidden = true;
             return;
         }
-        badge.textContent = branch + (commit && commit !== 'unknown' ? '@' + commit : '') + (dirty ? '*' : '');
-        badge.title = 'Running from a non-release checkout: branch ' + branch +
+        const branchLabel = branch === 'HEAD' ? 'detached' : branch;
+        badge.textContent = branchLabel + (commit && commit !== 'unknown' ? '@' + commit : '') + (dirty ? '*' : '');
+        badge.title = 'Running from a non-release checkout: branch ' + branchLabel +
             (commit && commit !== 'unknown' ? ', commit ' + commit : '') +
             (dirty ? ' (uncommitted changes present)' : '') +
             (remoteUrl ? ' -- click to open this commit on GitHub' : '');
