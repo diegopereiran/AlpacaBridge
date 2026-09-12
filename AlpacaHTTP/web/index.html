@@ -472,6 +472,13 @@
                         <input type="number" id="skywatcher-site-elevation" name="skywatcherSiteElevation" min="-300" max="10000" step="1" placeholder="1609">
                         <small>Optional.</small>
                     </div>
+                    <div class="form-group">
+                        <label for="skywatcher-learn-site-from-client">
+                            <input type="checkbox" id="skywatcher-learn-site-from-client" name="skywatcherLearnSiteFromClient" checked>
+                            Learn site from clients
+                        </label>
+                        <small>Keep a site latitude, longitude or elevation written by a client (an app with GPS, a planetarium program) as this device's saved site, so it survives a restart. Untick to protect a surveyed position.</small>
+                    </div>
                 </div>
 
                 <!-- OnStep Telescope Configuration -->
@@ -675,6 +682,13 @@
                                 <input type="checkbox" id="zwo-mount-sync-time-on-connect" name="zwoMountSyncTimeOnConnect" checked>
                                 Sync mount time on connect
                             </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="zwo-mount-learn-site-from-client">
+                                <input type="checkbox" id="zwo-mount-learn-site-from-client" name="zwoMountLearnSiteFromClient" checked>
+                                Learn site from clients
+                            </label>
+                            <small>Keep a site latitude, longitude or elevation written by a client as this device's saved site, so it survives a restart. Untick to protect a surveyed position.</small>
                         </div>
 
                     </div>
@@ -1682,6 +1696,6 @@
     </div>
 
     <script src="/web/format.js?v=2"></script>
-    <script src="/web/app.js?v=34"></script>
+    <script src="/web/app.js?v=35"></script>
 </body>
 </html>

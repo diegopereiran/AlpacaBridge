@@ -337,6 +337,16 @@ private:
     void add_clock_fields(nlohmann::json& desc) const;
     void warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const;
 
+    // open-astro#444: a client-set site coordinate (SiteLatitude, SiteLongitude
+    // or SiteElevation PUT) is written through to the device's persisted
+    // entry in config/registered_devices.json, so a location that only ever
+    // arrives from a client (a phone's GPS through an app, a gpsd feed) is
+    // still there after a restart. Called only after the driver has accepted
+    // the value. `key` is the persisted camelCase field name. A persisted
+    // entry whose `learnSiteFromClient` is false is left alone; an unchanged
+    // value is not re-saved; a device with no persisted entry is a no-op.
+    void persist_client_site(const alpacacore::AlpacaDriver& device, const char* key, double value);
+
     // True while `device` is still the DeviceRegistry's driver for its
     // type/number. Straggler requests that fetched the shared_ptr before a
     // removedevice must not re-insert registry/op-mutex entries for it —

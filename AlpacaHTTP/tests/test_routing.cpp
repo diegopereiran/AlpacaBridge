@@ -2099,6 +2099,107 @@ int main() {
         remove_device(router, "skywatcher", "telescope", 9619);
     }
     {
+        // issue #444: a site a client writes through the ASCOM setters is
+        // persisted to the device's entry, so a location that only ever came
+        // from a client (a phone's GPS through an app, gpsd) survives a
+        // restart. Registered with null island, then each of the three
+        // coordinates PUT through /api/v1, then read back through
+        // configureddevices (the persisted entry's Config) and from the file.
+        const auto site_config = [&](int number) {
+            const auto listed = nlohmann::json::parse(
+                route_request(router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+            EXPECT(!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array());
+            for (const auto& entry : listed["Value"]) {
+                if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == number) {
+                    return entry.value("Config", nlohmann::json());
+                }
+            }
+            return nlohmann::json();
+        };
+        const auto put_ok = [&](const std::string& path, const std::string& body) {
+            const auto resp = route_request(router, "PUT", path, body);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        };
+        const auto persisted_file_entry = [&](int number) {
+            std::ifstream in(std::filesystem::path("config") / "registered_devices.json");
+            const auto file = nlohmann::json::parse(in, nullptr, false);
+            EXPECT(!file.is_discarded() && file.is_array());
+            for (const auto& entry : file) {
+                if (entry.value("deviceNumber", -1) == number) {
+                    return entry;
+                }
+            }
+            return nlohmann::json();
+        };
+
+        nlohmann::json learner = {{"vendor", "skywatcher"},     {"deviceType", "telescope"},  {"deviceNumber", 9640},
+                                  {"connectionType", "serial"}, {"portPath", "/dev/ttyUSB9"}, {"baudRate", 9600},
+                                  {"siteLatitude", 0.0},        {"siteLongitude", 0.0}};
+        {
+            const auto ok = route_request(router, "POST", "/management/v1/configuredevice", learner.dump());
+            const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
+            EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
+        }
+        const std::string base = "/api/v1/telescope/9640";
+        // #274 allows the setters before Connected, which is what makes a
+        // client-supplied site usable at all on this vendor.
+        put_ok(base + "/sitelatitude", "SiteLatitude=-33.87&ClientID=1&ClientTransactionID=1");
+        put_ok(base + "/sitelongitude", "SiteLongitude=151.21&ClientID=1&ClientTransactionID=2");
+        put_ok(base + "/siteelevation", "SiteElevation=58&ClientID=1&ClientTransactionID=3");
+        {
+            const auto cfg = site_config(9640);
+            EXPECT(cfg.is_object() && std::fabs(cfg.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(cfg.value("siteLongitude", 0.0) - 151.21) < 1e-9);
+            EXPECT(std::fabs(cfg.value("siteElevation", 0.0) - 58.0) < 1e-9);
+            // The other fields of the entry are untouched by the write-through.
+            EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB9");
+            EXPECT(cfg.value("baudRate", -1) == 9600);
+            // And it reached the file, not just the in-memory list: that is
+            // what a restart reads.
+            const auto on_disk = persisted_file_entry(9640);
+            EXPECT(on_disk.is_object() && std::fabs(on_disk.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(on_disk.value("siteLongitude", 0.0) - 151.21) < 1e-9);
+            EXPECT(std::fabs(on_disk.value("siteElevation", 0.0) - 58.0) < 1e-9);
+        }
+        // A value the driver refuses is not persisted either: the hook runs
+        // after the setter, so the throw never reaches it.
+        {
+            const auto resp = route_request(router, "PUT", base + "/sitelatitude", "SiteLatitude=95&ClientID=1");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(std::fabs(site_config(9640).value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+        }
+        remove_device(router, "skywatcher", "telescope", 9640);
+
+        // The opt-out: learnSiteFromClient=false keeps a surveyed position
+        // against a client's GPS. The flag itself round-trips through
+        // sanitize_device_config, the setter still succeeds (the driver takes
+        // the value for this session), and the persisted entry is unchanged.
+        nlohmann::json surveyed = learner;
+        surveyed["deviceNumber"] = 9641;
+        surveyed["siteLatitude"] = 39.7392;
+        surveyed["siteLongitude"] = -104.9903;
+        surveyed["learnSiteFromClient"] = false;
+        {
+            const auto ok = route_request(router, "POST", "/management/v1/configuredevice", surveyed.dump());
+            const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
+            EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
+        }
+        put_ok("/api/v1/telescope/9641/sitelatitude", "SiteLatitude=-33.87&ClientID=1");
+        put_ok("/api/v1/telescope/9641/siteelevation", "SiteElevation=58&ClientID=1");
+        {
+            const auto cfg = site_config(9641);
+            EXPECT(cfg.is_object() && cfg.value("learnSiteFromClient", true) == false);
+            EXPECT(std::fabs(cfg.value("siteLatitude", 0.0) - 39.7392) < 1e-9);
+            EXPECT(!cfg.contains("siteElevation"));
+            const auto resp = route_request(router, "GET", "/api/v1/telescope/9641/sitelatitude?ClientID=1");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && std::fabs(json.value("Value", 0.0) - (-33.87)) < 1e-9);
+        }
+        remove_device(router, "skywatcher", "telescope", 9641);
+    }
+    {
         // issue #274, the other half: a config already on disk cannot be
         // corrected by its caller. Dropping it at startup would keep it out of
         // the device registry, and configureddevices -- the web UI's only

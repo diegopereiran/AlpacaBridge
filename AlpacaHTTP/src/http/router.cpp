@@ -3524,6 +3524,7 @@ Response Router::dispatch_telescope_method(
             else if (request.method() == HttpMethod::PUT) {
                 double value = parse_double("SiteElevation");
                 telescope->set_site_elevation(value);
+                persist_client_site(*telescope, "siteElevation", value);  // open-astro#444
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -3539,6 +3540,7 @@ Response Router::dispatch_telescope_method(
             else if (request.method() == HttpMethod::PUT) {
                 double value = parse_double("SiteLatitude");
                 telescope->set_site_latitude(value);
+                persist_client_site(*telescope, "siteLatitude", value);  // open-astro#444
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -3554,6 +3556,7 @@ Response Router::dispatch_telescope_method(
             else if (request.method() == HttpMethod::PUT) {
                 double value = parse_double("SiteLongitude");
                 telescope->set_site_longitude(value);
+                persist_client_site(*telescope, "siteLongitude", value);  // open-astro#444
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -9371,9 +9374,66 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     copy_if_present("siteLatitude");
     copy_if_present("siteLongitude");
     copy_if_present("siteElevation");
+    copy_if_present("learnSiteFromClient");  // open-astro#444
     copy_if_present("syncTimeOnConnect");
 
     return sanitized;
+}
+
+void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const char* key, double value) {
+    if (device.get_device_type() != alpacacore::DeviceType::Telescope) {
+        return;
+    }
+    const int device_number = device.get_device_number();
+    bool changed = false;
+    bool declined = false;
+    std::string vendor;
+    {
+        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+        for (auto& entry : persisted_devices_) {
+            // deviceType is stored as the caller posted it; the web UI and
+            // the tests both send lowercase, the registry answers
+            // "Telescope", so compare case-insensitively as the lookup on the
+            // configureddevices side does.
+            if (to_lower_copy(entry.value("deviceType", "")) != "telescope" ||
+                entry.value("deviceNumber", -1) != device_number) {
+                continue;
+            }
+            vendor = entry.value("vendor", "");
+            // The opt-out: an operator with a surveyed pier position does not
+            // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
+            // on, because the value the mount is using RIGHT NOW is the one
+            // the client set, and a restart should start from the same site
+            // the last session ended on rather than an older one.
+            if (!entry.value("learnSiteFromClient", true)) {
+                declined = true;
+                break;
+            }
+            // Unchanged: no file write on a client that re-sends its site on
+            // every connect (most do).
+            if (entry.contains(key) && entry[key].is_number() && entry[key].get<double>() == value) {
+                break;
+            }
+            entry[key] = value;
+            changed = true;
+            break;
+        }
+    }
+    if (declined) {
+        util::log_debug("Telescope " + std::to_string(device_number) + ": client " + key +
+                        " not persisted (learnSiteFromClient is false)");
+        return;
+    }
+    if (!changed) {
+        return;  // no persisted entry (a device registered for this process only), or same value
+    }
+    // File I/O on a PUT setter, not on a getter or DeviceState: AGENTS.md's
+    // cheap-read rule does not apply, and this runs once per changed value.
+    save_persisted_devices();
+    std::ostringstream msg;
+    msg << "Telescope " << device_number << " (" << vendor << "): persisted client " << key << " = "
+        << std::setprecision(7) << value << " to config/registered_devices.json";
+    util::log_info(msg.str());
 }
 
 void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
