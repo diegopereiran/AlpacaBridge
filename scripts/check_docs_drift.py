@@ -30,7 +30,11 @@ Checks:
      true when they were written.
   6. The QHYSDK seam's three parallel lists agree: every pure virtual on the
      interface has a LockedQHYSDK override, every override actually takes the
-     mutex, and the forward sweep in test_qhy_fake_sdk.cpp drives all of them.
+     shared mutex through locked() -- except cancel_exposure(), which must
+     take its own cancel_mutex_ and must NOT go through locked() (issue #339:
+     production's cancel skips the per-handle mutex so it can interrupt a
+     download blocked on the same handle) -- and the forward sweep in
+     test_qhy_fake_sdk.cpp drives all of them.
   7. Every relative path referenced in AGENTS.md's inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
@@ -572,8 +576,34 @@ def check_qhy_seam_lists():
             "LockedQHYSDK::%s() overrides nothing on QHYSDK -- stale forward, or the interface lost a "
             "method." % name)
 
+    # cancel_exposure is the one documented exception (open-astro#339): the real
+    # QHYSDKWrapper::cancel_exposure() deliberately skips the per-handle call
+    # mutex so it can interrupt a GetQHYCCDSingleFrame already blocked on the
+    # same handle, and routing it through the shared mutex here inverted that
+    # invariant. It still takes A mutex -- its own -- so it is not an unlocked
+    # forward and the fake stays non-racy; it just does not queue behind the
+    # call it exists to interrupt.
+    CANCEL_EXEMPT = "cancel_exposure"
     for name in sorted(set(locked_methods) & interface_methods):
-        if "locked(" not in locked_methods[name]:
+        body = locked_methods[name]
+        if name == CANCEL_EXEMPT:
+            # Mechanical, not a substring: the body must take the lock_guard on
+            # cancel_mutex_ AND must not go through locked(). A body that does
+            # both (shared mutex plus a mention of cancel_mutex_) is the
+            # inverted shape #339 fixed, and a substring test passed it.
+            # `lock_guard<std::mutex>` or CTAD `lock_guard` both count; any
+            # mention of the shared `mutex_` (locked() or a hand-rolled guard)
+            # is the inverted shape, so it is rejected by name, not by idiom.
+            takes_own = re.search(r"lock_guard\s*(?:<\s*std::mutex\s*>)?\s*\w+\s*\(\s*cancel_mutex_\s*\)", body)
+            touches_shared = "locked(" in body or re.search(r"(?<![\w])mutex_\b", body)
+            if not takes_own or touches_shared:
+                failures.append(
+                    "LockedQHYSDK::cancel_exposure() must take cancel_mutex_ -- its own lock, separate "
+                    "from the shared one, per open-astro#339. Through the shared mutex it queues behind "
+                    "the in-flight call it exists to interrupt; with no mutex at all it becomes the one "
+                    "racy forward in the decorator.")
+            continue
+        if "locked(" not in body:
             failures.append(
                 "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through locked(). The decorator exists "
                 "only to take the mutex -- an unlocked forward makes the fake racy under a [stress] storm "
