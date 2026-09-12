@@ -55,8 +55,9 @@ external/                       # Vendor SDK folders or vendored SDK assets (pol
 ├─ ZWO/
 │   └─ ASI_Camera_SDK/          # ZWO SDK subset (vendored)
 │       └─ SDK files...
-├─ qhy_sdk/                     # Another vendor SDK
-│   └─ SDK files...
+├─ QHY/
+│   └─ sdk_linux_arm64_26.06.04/  # QHY SDK, unpacked as shipped (usr/local/...)
+│       └─ SDK files...
 
 include/alpacacore/
 ├─ <device>_driver.h            # Pure virtual interface
@@ -107,7 +108,7 @@ external/
    └─ README.md
 ```
 
-**Important**: Use the SDK structure exactly as provided by the vendor. The folder name will vary (e.g., `ASI_Camera_SDK/`, `qhy_sdk/`). Your CMake configuration will locate files within whatever folder name the vendor uses.
+**Important**: Use the SDK structure exactly as provided by the vendor, and do not rename or flatten it — folder layouts differ per vendor (`ZWO/ASI_Camera_SDK/`, `QHY/sdk_linux_arm64_26.06.04/usr/local/`). Nothing searches for it: each vendor's `src/vendors/<vendor>/CMakeLists.txt` sets its SDK root as a literal path and fails at configure time when the header is not there. Adding a vendor, or bumping an SDK to a new versioned folder, means editing that path.
 
 **Vendoring option**: If the vendor license allows, you may commit the **minimal required SDK files**
 (headers + platform libraries) into `external/` to remove manual SDK downloads. Document exactly
@@ -649,13 +650,18 @@ slew with a no-argument `slew_to_ra_dec()`, mirroring the mount's own RS-232 com
 
 ### SDK Not Found
 
-**Error**: `FATAL_ERROR: ZWO SDK not found`
+**Error**: `ZWO SDK header not found at <path>/ASICamera2.h`, or the equivalent for another
+vendor (`QHY SDK header not found at <path>/qhyccd.h`).
 
-**Solution**: 
-1. Verify SDK folder is in `external/` (extracted directly, not in a subdirectory)
-2. Check that the SDK folder contains the expected header file (e.g., `ASICamera2.h`)
-3. Verify the CMake `file(GLOB_RECURSE ...)` pattern matches your SDK's folder structure
-4. The SDK folder name doesn't matter - CMake searches for the header file
+**Solution**: the path in the message is the literal one that vendor's CMake sets, so the message
+tells you exactly where it looked.
+1. Unpack the SDK at that path, keeping the vendor's own internal layout (QHY's ships its headers
+   under `usr/local/include/`, ZWO's directly under `include/`)
+2. If the vendor shipped a newer versioned folder, update the SDK root in
+   `src/vendors/<vendor>/CMakeLists.txt` — nothing globs for it, so a new folder name is invisible
+   until that path is edited
+3. Check the architecture first if the failure came earlier than the header check: the build is
+   arm64-only and each vendor's CMake fails outright on anything else
 
 ### Linker Errors
 
