@@ -6058,8 +6058,11 @@ T config_get(const nlohmann::json& config, const char* key, const T& fallback) {
 }
 
 // String-literal defaults deduce `const char*`, which nlohmann cannot `get<>`.
+// A null fallback becomes an empty string rather than std::string(nullptr),
+// which is undefined behaviour -- cppcheck's whole-program pass flags the
+// unguarded construction, and "" is what every caller means by "no default".
 std::string config_get(const nlohmann::json& config, const char* key, const char* fallback) {
-    return config_get<std::string>(config, key, std::string(fallback));
+    return config_get<std::string>(config, key, fallback != nullptr ? std::string(fallback) : std::string());
 }
 
 // Reads siteLatitude/siteLongitude out of a device config and range-checks
@@ -6114,8 +6117,14 @@ bool read_site_coordinates(const nlohmann::json& config, bool from_api, const st
                 error_message = detail;
                 return false;
             }
-            util::log_warning("Persisted " + vendor + " device " + std::to_string(device_number) + ": " + detail +
-                              ". The coordinate is ignored; set a valid one in the web UI.");
+            std::string warning = "Persisted ";
+            warning += vendor;
+            warning += " device ";
+            warning += std::to_string(device_number);
+            warning += ": ";
+            warning += detail;
+            warning += ". The coordinate is ignored; set a valid one in the web UI.";
+            util::log_warning(warning);
             continue;
         }
         *field.out = value;
