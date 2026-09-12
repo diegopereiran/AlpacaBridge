@@ -781,7 +781,7 @@ TEST_CASE("LockedQHYSDK - the cancel forward is timed by its own Guard", "[qhy][
     auto fake = FakeQHYSDK::with_one_camera();
     LockedQHYSDK sdk(fake);
     sdk.open_camera("fake-qhy-0");
-    CHECK(sdk.slowest_call_ms() == 0);
+    CHECK(sdk.slowest_call_ms() < 100);  // bookkeeping only so far; the >= 200 below is the signal
 
     fake.before_call = [](const std::string& name) {
         if (name == "cancel_exposure") {

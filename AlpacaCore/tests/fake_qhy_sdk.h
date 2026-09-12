@@ -68,7 +68,7 @@ namespace alpacacore::test {
  *    has moved on — i.e. a use-after-free of the fake itself. The ONE
  *    sanctioned exception is `before_call`, null in every ordinary test: a
  *    case that sets it to block a named method owns the consequences and
- *    must release the block before its driver is destroyed (the two #339
+ *    must release the block before its driver is destroyed (the three #339
  *    cases). LockedQHYSDK::slowest_call_ms() is the mechanical check that no
  *    method has quietly gained a block; the 26-forward sweep asserts it.
  * 2. THE FAKE MUST OUTLIVE EVERY DRIVER BUILT ON IT, including those
@@ -143,7 +143,7 @@ public:
     /// Test-only hook, run at the top of every forward (open-astro#339).
     /// Null in every ordinary case. See hit(). Read by hit() with NO
     /// synchronisation, like every other knob here: assign and clear it only
-    /// while no other thread is inside the fake (the two #339 cases do so
+    /// while no other thread is inside the fake (the three #339 cases do so
     /// single-threaded, and clear it after joining), never mid-[stress].
     std::function<void(const std::string&)> before_call;
     bool sdk_resource_available = true;
