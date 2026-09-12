@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-09-11
+## Updated 2026-09-12
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -158,6 +158,7 @@ This document lists all hardware vendors and device types that are verified to w
 | ASI2600MM Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/) |
 | ASI290MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI290MM%20Mini/) |
 | ASI462MM | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI462MM/) |
+| ASI533MC Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI533MC%20Pro/) |
 | ASI585MC Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI585MC%20Pro/) |
 | ASI662MC | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI662MC/) |
 
@@ -167,8 +168,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO ASI Camera SDK Version 1.40 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
-- **Tested model**: ASI585MC Pro (cooled, IMX585) on Linux arm64.
-- **ConformU**: 4.5.0 — ASI585MC Pro: 0 errors, 0 issues, 0 timing issues.
+- **Tested models**: ASI585MC Pro (cooled, IMX585) and ASI533MC Pro (cooled colour, IMX533, 3008x3008 RGGB) on Linux arm64.
+- **ConformU**: 4.5.0 — ASI585MC Pro: 0 errors, 0 issues, 0 timing issues. 4.5.1 — ASI533MC Pro: 0 errors, 0 issues, 0 timing issues.
 
 </details>
 
