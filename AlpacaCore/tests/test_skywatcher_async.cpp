@@ -1926,65 +1926,108 @@ TEST_CASE("SkyWatcher async - syncing by coordinates sets both target flags (#30
 
 TEST_CASE("SkyWatcher async - a goto whose tracking restarts at the wrong rate is stopped and restarted",
           "[skywatcher][async]") {
-    // The #432 failure this check exists for: the goto lands, tracking is
-    // re-applied, but the board latches the previous (slew) step period, so
-    // the mount creeps at the wrong rate with Tracking reporting true. The
-    // sampled :j1 check is the only thing that can see it -- ":i" agrees with
-    // the driver, so nothing in the command path notices.
+    // The #432 failure: the goto lands, tracking is re-applied, the board
+    // acknowledges it and ":i" reads back exactly what was written -- and the
+    // axis still runs at the wrong rate. Only the sampled ":j1" check can see
+    // that, which is why it exists.
+    //
+    // The signal asserted here is the check's OWN WARN. Stop counts cannot
+    // isolate it: dispatch_goto_locked() stops the RA axis before every goto
+    // and refine_goto_landing() re-gotos up to three more times, so
+    // stop_count(1) has already moved several times before the check runs.
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
-    const int stops_before = mount.stop_count(1);
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    std::atomic<bool> condemned{false};
+    std::atomic<bool> gave_up{false};
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level != alpacacore::logging::LogLevel::Warn) {
+                return;
+            }
+            if (message.find("Post-slew tracking restart") != std::string_view::npos) {
+                condemned.store(true);
+            }
+            if (message.find("restart did not correct it") != std::string_view::npos) {
+                gave_up.store(true);
+            }
+        });
 
-    // Swallow the restore's step-period write so the axis re-latches the
-    // slew rate on the following ":J" -- the axis runs, ":i" disagrees, and
-    // only the sampled position check can see it.
-    mount.drop_tracking_restore_rate_write(1, 1);
+    // The restart's ":J" latches at 2x the commanded rate.
+    mount.restart_tracking_at_wrong_rate(1, 1);
 
     const double lst = driver->get_sidereal_time();
     driver->slew_to_coordinates_async(std::fmod(lst - 0.15 + 24.0, 24.0), 20.0);
-
-    // The recovery is a genuine stop/restart of the RA axis, not another
-    // in-place ":I": that is what distinguishes this check from the
-    // RightAscensionRate re-kick above, which never stops the axis.
-    REQUIRE(wait_until([&] { return mount.stop_count(1) > stops_before; }, 15000));
-    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));
-    // Slewing is still true here by design -- the restore owns the slew until
-    // the rate check finishes -- so wait it out rather than sampling it.
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+
+    // The check saw it and recovered on the first attempt: the WARN fired,
+    // the "did not correct it" second-attempt WARN did not, and the axis is
+    // left running.
+    CHECK(condemned.load());
+    CHECK_FALSE(gave_up.load());
+    REQUIRE(mount.axis_running(1));
 
     driver->set_tracking(false);
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - the rate check's restart waits for the axis to stop ramping", "[skywatcher][async]") {
-    // wait_axis_stationary_locked(): ":K" is acknowledged long before a real
-    // axis has decelerated. Restarting tracking into a still-moving axis is
-    // what produced the wrong latched period in the first place, so the
-    // restart must not be issued until the axis is actually stationary.
+TEST_CASE("SkyWatcher async - the rate check recovers on a mount that decelerates slowly", "[skywatcher][async]") {
+    // The same recovery as the case above, on a mount whose ":K" leaves the
+    // axis ramping for 800 ms, so the stop/restart spans a real deceleration
+    // rather than an instant stop.
+    //
+    // What this does NOT pin: wait_axis_stationary_locked() itself. In this
+    // fake, stop_axis_and_wait_locked() already waits for ":f" to report
+    // stopped and the fake stops advancing counts at that same moment, so
+    // there is no window for the stationary check to close and the case
+    // passes with it deleted (verified). Covering it needs a fake that
+    // answers ":f" stopped while its counts still advance -- the #432
+    // landing -- armed on the RESTORE's ":K" only, since the goto's own
+    // pre-dispatch stop uses the same command. That seam does not exist yet;
+    // it is the gap to close, not something this case claims.
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
-    mount.set_stop_ramp_ms(800);  // ":K" acked, axis keeps running for 800 ms
+    mount.set_stop_ramp_ms(800);
     auto driver = connected_driver(mount);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
-    const int stops_before = mount.stop_count(1);
-    mount.drop_tracking_restore_rate_write(1, 1);
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    std::atomic<bool> condemned{false};
+    std::atomic<bool> gave_up{false};
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level != alpacacore::logging::LogLevel::Warn) {
+                return;
+            }
+            if (message.find("Post-slew tracking restart") != std::string_view::npos) {
+                condemned.store(true);
+            }
+            if (message.find("restart did not correct it") != std::string_view::npos) {
+                gave_up.store(true);
+            }
+        });
+
+    mount.restart_tracking_at_wrong_rate(1, 1);
 
     const double lst = driver->get_sidereal_time();
     driver->slew_to_coordinates_async(std::fmod(lst - 0.15 + 24.0, 24.0), 22.0);
-
-    REQUIRE(wait_until([&] { return mount.stop_count(1) > stops_before; }, 15000));
-    // Between the stop and the restart the axis must have been observed
-    // stationary. Sampling it here would race the ramp, so assert the end
-    // state instead: the axis is running again and the driver is not still
-    // reporting a slew, which can only happen after the wait returned.
-    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 10000));
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+
+    // Recovered despite the ramp.
+    CHECK(condemned.load());
+    CHECK_FALSE(gave_up.load());
+    REQUIRE(mount.axis_running(1));
 
     driver->set_tracking(false);
     driver->set_connected(false);
@@ -2003,10 +2046,10 @@ TEST_CASE("SkyWatcher async - the synchronous slew reports Slewing until trackin
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
-    // Force the slow path: the restore's rate write is swallowed, so the
-    // check must run its sample window and then stop/restart the axis. All of
-    // that has to happen while Slewing is still true.
-    mount.drop_tracking_restore_rate_write(1, 1);
+    // Force the slow path: the restart latches at the wrong rate, so the
+    // check must run its sample window and then stop and restart the axis.
+    // All of that has to happen while Slewing is still true.
+    mount.restart_tracking_at_wrong_rate(1, 1);
 
     // The slew runs on its own thread so this one can watch Slewing while the
     // synchronous call is still inside restore_tracking_after_slew_locked().

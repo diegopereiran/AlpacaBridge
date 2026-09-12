@@ -214,17 +214,20 @@ public:
         ax(axis).ignore_start_relatches = n;
     }
 
-    /// Acknowledge but silently DROP the next @p n ":I" writes that arrive on
-    /// an axis that is STOPPED and not mid-goto -- i.e. the step period the
-    /// driver writes when it restarts tracking after a slew. The axis then
-    /// re-latches its PREVIOUS T1 on the following ":J" and runs at the slew
-    /// rate instead of the tracking rate, with ":i" disagreeing: the #432
-    /// shape, where the mount creeps at the wrong rate while Tracking reports
-    /// true. Distinct from drop_step_period_writes(), which also swallows the
-    /// goto's own writes and so cannot isolate the restore.
-    void drop_tracking_restore_rate_write(int axis, int n) {
+    /// Latch the next @p n ":J" starts that arrive on a STOPPED, non-goto axis
+    /// -- the tracking restart after a slew landing -- at @p factor times the
+    /// commanded rate. Models the #432 symptom directly: the board accepts the
+    /// restart, ":i" reads back exactly what the driver wrote, and the axis
+    /// nonetheless runs at the wrong rate, so only a sampled position check
+    /// can see it.
+    ///
+    /// A dropped ":I" cannot produce this: dispatch_goto_locked() writes only
+    /// ":G"/":S"/":J", never ":I", so the axis still holds the tracking period
+    /// from before the slew and the restart's ":J" re-latches it CORRECTLY.
+    void restart_tracking_at_wrong_rate(int axis, int n, double factor = 2.0) {
         std::lock_guard<std::mutex> lock(mutex_);
-        ax(axis).drop_idle_step_period_writes = n;
+        ax(axis).wrong_restart_latches = n;
+        ax(axis).wrong_restart_factor = factor;
     }
 
     /// Refuse the next @p n ":J" on an axis with "!2" (Motor not stopped):
@@ -272,11 +275,13 @@ private:
         uint32_t indexer = 0;
         int start_count = 0;
         int stop_count = 0;
-        int drop_step_period_writes = 0;       // ":I" writes to ack-but-ignore (test knob)
-        int drop_idle_step_period_writes = 0;  // ":I" on a stopped, non-goto axis to ack-but-ignore (test knob)
-        int stall_live_rate_writes = 0;   // ":I" writes on a running axis to store but not apply (test knob)
-        int ignore_start_relatches = 0;   // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
-        int reject_starts = 0;            // ":J" to refuse with "!2" (test knob)
+        int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
+        int wrong_restart_latches = 0;    // ":J" restarts to latch at the wrong rate (test knob)
+
+        double wrong_restart_factor = 2.0;  // how wrong (test knob)
+        int stall_live_rate_writes = 0;     // ":I" writes on a running axis to store but not apply (test knob)
+        int ignore_start_relatches = 0;     // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
+        int reject_starts = 0;              // ":J" to refuse with "!2" (test knob)
         int64_t home_index_counts = kHome;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
 
@@ -359,6 +364,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
         a.advance(now());
+        bool was_running_on_start = false;  // ":J" only; declared here to not cross case labels
         switch (cmd) {
             case 'e':
                 return "=" + profile_.version_reply;
@@ -410,10 +416,6 @@ private:
                     --a.drop_step_period_writes;
                     return "=";  // acked, not stored -- ":i" will disagree
                 }
-                if (!a.running && !a.in_goto && a.drop_idle_step_period_writes > 0) {
-                    --a.drop_idle_step_period_writes;
-                    return "=";  // the post-slew tracking restore, swallowed
-                }
                 a.t1 = parse_u24(data);
                 if (a.running && a.stall_live_rate_writes > 0) {
                     --a.stall_live_rate_writes;
@@ -433,7 +435,9 @@ private:
                     return "!2";  // refused: nothing applied
                 }
                 ++a.start_count;
+                was_running_on_start = a.running;
                 a.running = true;
+                a.stopping = false;
                 if (a.in_goto) {
                     a.goto_target &= 0xFFFFFF;
                 } else if (a.ignore_start_relatches > 0) {
@@ -443,6 +447,10 @@ private:
                     // this is what makes a ":J" kick after a stalled live
                     // ":I" actually take effect.
                     double cps = a.t1 > 0 ? static_cast<double>(kTimerFreq) / a.t1 : 0.0;
+                    if (!was_running_on_start && a.wrong_restart_latches > 0) {
+                        --a.wrong_restart_latches;
+                        cps *= a.wrong_restart_factor;  // latched wrong: #432
+                    }
                     a.rate_counts = a.dir == '1' ? -cps : cps;
                 }
                 return "=";

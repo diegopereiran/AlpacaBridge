@@ -3006,12 +3006,30 @@ private:
                                               std::to_string(kMinResolvableDeltaCounts) + " needed to resolve it");
             return;
         }
+        // Everything above is a snapshot taken under the lock, and the sleeps
+        // below drop it for kRateVerifySettle + kPostSlewRateWindow. Whatever
+        // claims the RA axis in that window -- Tracking off, MoveAxis, a
+        // RightAscensionRate write -- owns it afterwards, so re-validate on
+        // every re-lock rather than acting on the stale snapshot. Without
+        // this, a client writing Tracking = false during the settle sleep got
+        // delta == 0 measured against the old expected_cps, a bogus "running
+        // at 0 counts/s" WARN, and then apply_ra_drive_locked() driving the
+        // axis at sidereal while the Tracking property reported False.
+        // The generation is captured HERE, before the first unlock: taking it
+        // after the window (as ++motion_generation_ did) cannot detect a
+        // command that landed inside the window, which is the only thing it
+        // needed to detect.
+        const uint64_t entry_generation = motion_generation_;
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
             lock.unlock();
             std::this_thread::sleep_for(d);
             lock.lock();
             check_connected();
-            return !slew_task_cancel_.load();
+            if (slew_task_cancel_.load()) {
+                return false;
+            }
+            // Superseded, or the client stopped tracking: not ours any more.
+            return motion_generation_ == entry_generation && tracking_ && ra_duty_rate_deg_s_ == 0.0;
         };
         for (int attempt = 0; attempt < 2; ++attempt) {
             uint32_t before = 0;
@@ -3055,11 +3073,16 @@ private:
                                 " counts/s, expected " + std::to_string(expected_cps) +
                                 (attempt == 0 ? "; stopping and restarting tracking" : "; restart did not correct it"));
             if (attempt == 0) {
+                // Re-checked immediately above by sleep_unlocked(); bump the
+                // generation only now that we know the axis is still ours.
                 const uint64_t gen = ++motion_generation_;
                 if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
                     return;  // superseded: the newer command owns the axis
                 }
                 wait_axis_stationary_locked(lock, kAxisRa);
+                if (!tracking_) {
+                    return;  // stopped while we waited: do not restart the drive
+                }
                 apply_ra_drive_locked(lock);
             }
         }
