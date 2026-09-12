@@ -1539,25 +1539,26 @@ datagrams before each send so replies cannot get off-by-one.
   30 s re-sample above covers discipline gained without a step. Tests pin both branches through
   the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
   clock state (#395).
-- Pointing convention (#432): home = counterweight down pointing at the visible pole,
-  counts offset `0x800000`, axis angles `a1`/`a2` in degrees from home in the
-  increasing-count direction. **Mechanical frame** — branch A (`a2 >= 0`):
-  `dec_mech = 90 - a2`, `ha_mech = a1/15 + 6`; branch B (`a2 < 0`): `dec_mech = 90 + a2`,
-  `ha_mech = a1/15 - 6`. The 6 h is the counterweight-down home: the dec axis lies in the
-  meridian plane there, so a dec-only rotation sweeps the HA = ±6 h circle and the meridian
-  needs the bar horizontal (`a1 = ±90`); every reachable target keeps `|a1| <= 90`
-  (counterweight never above horizontal). **Sky frame**: north of the equator sky = mechanical;
-  south of it `dec = -dec_mech`, `HA = -ha_mech`, and branch A is pier**West** (the ASCOM label
-  follows the sky hour angle, `HA >= 0 -> pierEast`, in both hemispheres; the branch that
-  realises it mirrors). Tracking, `RightAscensionRate` and East/West pulses go through
-  `ra_axis_sign_locked()` (counts up north, down south — indi-eqmod's
-  `RAInverted = (Hemisphere == SOUTH)`); `MoveAxis`, goto deltas and AutoHome are mechanical
-  and never apply it. This is indi-eqmod's `EncodersToRADec()` with its DE zero re-expressed
-  relative to its home (`DEStepHome = DEStepInit + steps/4`). **Do not judge this model by
-  the driver's own reported RA/Dec, ConformU included: the driver reports what it commands.**
-  `test_skywatcher_pointing.cpp` carries an independent vector oracle (GEM geometry, EQMOD
-  sign conventions) and asserts gotos land on the sky in both hemispheres; extend that file
-  for any change here.
+- Pointing convention (#432): home = counterweight down, tube parallel to the polar axis
+  pointing at the visible pole, counts offset `0x800000`, axis angles `a1`/`a2` in degrees
+  from home in the increasing-count direction. **`HA = s * (a1/15) + (a2 >= 0 ? +6 h : -6 h)`
+  and `dec = s * (90 - |a2|)`, with `s = +1` north and `-1` south.** The 6 h term is the
+  counterweight-down home: the dec axis lies in the meridian plane there, so a dec-only
+  rotation sweeps the HA = ±6 h circle and the meridian needs the bar horizontal
+  (`a1 = ±90`); every reachable target keeps `|a1| <= 90`, which is the
+  counterweight-never-above-horizontal rule falling out of the geometry. Its SIGN follows
+  which side of the dec axis the tube is on and does NOT flip with hemisphere; the `a1`
+  term does, because the mount faces the other pole. Pier side is hemisphere-independent
+  (`a2 >= 0` -> pierEast), since the goto picks the branch from the sky hour angle.
+  Tracking, `RightAscensionRate` and East/West pulses go through `ra_axis_sign_locked()`
+  (counts up north, down south); `MoveAxis`, goto deltas and AutoHome are mechanical and
+  never apply it. This matches `indi-eqmod`'s `EncodersToRADec()` exactly in the north;
+  in the south the two differ by 12 h and a pier label, and the hardware backs this one.
+  **Do not judge this model by the driver's own reported RA/Dec, ConformU included: the
+  driver reports what it commands.** It was established by driving an EQM-35 Pro to known
+  axis positions and reading the tube's real direction off the mount (2026-09-12); those
+  rows are in the driver comment and asserted in `test_skywatcher_pointing.cpp`. Extend
+  that file with a new hardware row for any change here.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period

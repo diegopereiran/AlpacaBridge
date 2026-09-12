@@ -43,6 +43,12 @@ constexpr uint32_t kHomeCounts = 0x800000;
 // axis lies in the meridian plane there, so rotating it alone moves the OTA
 // along the HA = +/-6 h circle (see the pointing-model comment in the driver).
 constexpr double kHomeHourAngleOffsetHours = 6.0;
+
+// Signed 6 h home term for a dec-axis angle: which side of the dec axis the
+// OTA sits on, NOT which hemisphere the mount is in.
+inline double home_hour_angle_offset(double dec_axis_degrees) {
+    return dec_axis_degrees >= 0.0 ? kHomeHourAngleOffsetHours : -kHomeHourAngleOffsetHours;
+}
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
@@ -666,12 +672,11 @@ public:
         refresh_position_cache_locked(false);
         // ASCOM convention derived from the dec-axis branch: the branch chosen
         // for HA >= 0 targets is pierEast (0), the mirror branch pierWest (1).
-        // North of the equator that is branch A (a2 >= 0); south of it the
-        // mount faces the other pole and the same branch is pierWest -- see
-        // the pointing-model comment. Must agree with the branch choice in
-        // ra_dec_to_axis_degrees_locked() and with
-        // get_destination_side_of_pier().
-        return (cached_dec_axis_deg_ >= 0.0) != hemisphere_south_locked() ? 0 : 1;
+        // The same rule in both hemispheres: the goto picks the a2 >= 0
+        // branch for a target at HA >= 0 (see ra_dec_to_axis_degrees_locked),
+        // so reading the branch back off the axis reproduces the side that
+        // get_destination_side_of_pier() computes from hour angle.
+        return cached_dec_axis_deg_ >= 0.0 ? 0 : 1;
     }
 
     void set_side_of_pier(int side) override {
@@ -1971,25 +1976,50 @@ private:
     // (`range24(result + 6.0)`) once its DE zero is re-expressed relative to
     // its home (DEStepHome = DEStepInit + steps/4).
     //
-    // SKY frame: north of the equator the mechanical frame IS the sky frame.
-    // South of it the mount faces the SOUTH pole, so the same axis rotation
-    // moves the OTA the opposite way in both HA and dec:
-    //   dec = -dec_mech, HA = -ha_mech, and the branch that is pierEast in
-    //   the north is pierWest in the south (the ASCOM label tracks the sky,
-    //   the branch tracks the hardware). Tracking must then DEcrease a1
-    //   (indi-eqmod: `RAInverted = (Hemisphere == SOUTH)`), which
-    //   ra_axis_sign_locked() applies to the RA drive rate.
+    // SKY frame: the mount faces the visible pole, so south of the equator
+    // the same RA-axis rotation runs the sky's hour angle the other way,
+    // while the 6 h home term does NOT flip -- it is fixed by which side of
+    // the dec axis the OTA is on, not by which pole the mount faces:
+    //   HA = s * (a1/15) + (a2 >= 0 ? +6 : -6),  dec = s * (90 - |a2|),
+    //   with s = +1 north, -1 south. Tracking therefore DEcreases a1 south of
+    //   the equator, which ra_axis_sign_locked() applies to the drive rate.
+    //   The ASCOM pier side stays (a2 >= 0) -> pierEast in both hemispheres:
+    //   the branch is chosen from the sky hour angle, so the two agree by
+    //   construction (open-astro#261).
     //
     // History: until open-astro#432 the model read HA = a1/15 (branch A) and
-    // a1/15 - 12 (branch B), i.e. the 6 h home offset was missing, so every
-    // goto landed 90 deg away on the RA axis and gotos with HA > 6 h put the
-    // counterweight above horizontal. It passed ConformU because the driver
-    // reports the same model it commands; a Wave 150i owner's sky test
-    // (Arcturus, HA +4.1 h: commanded a1 = +62 deg, tube ended ~20 deg BELOW
-    // the horizon, exactly where this geometry puts a1 = +62 with the
-    // corrected model) exposed it. The southern RA reversal removed in #250
-    // had been correct all along; the "2x sidereal" it was judged by was the
-    // reported RA of the wrong model, not the sky.
+    // a1/15 - 12 (branch B). That is six hours out in the north and, away
+    // from a1 = 45 deg, wrong in the south too, so gotos landed on the wrong
+    // sky position while the driver reported the target back. It passed
+    // ConformU because the driver reports the same model it commands.
+    //
+    // MEASURED ON HARDWARE, 2026-09-12, EQM-35 Pro at latitude -37.2 (rounded)
+    // with the shipped 3.5.1 build, tube position read off the mount by hand.
+    // Each row is an axis position the driver was commanded to, and where the
+    // OTA physically ended up:
+    //
+    //   a1     a2     observed                     this model        shipped
+    //   +1.6   -90    level, pointing east         HA -6.1 h, lvl    -52.8 deg
+    //   +60.0  -90    down about 45 deg            HA -10.0 h, -44   -23.5 deg
+    //   +45.1  -70    down, azimuth about 136      HA -9.0 h, -19    -18.8 deg
+    //
+    // The first row is the decisive one and needs no instrument: with the
+    // counterweight straight down and the dec axis at 90 deg the OTA is
+    // perpendicular to both the polar axis and the counterweight bar, which
+    // both lie in one vertical plane, so the tube MUST come out level -- and
+    // level, square to the meridian, is six hours of hour angle from it. The
+    // shipped model puts that same position 53 deg below the horizon.
+    //
+    // The fourth data point is northern and comes from the Wave 150i report
+    // that opened #432: commanded a1 = +62.0, a2 = +71.0 for a target at
+    // HA +4.12 h, dec +19.05; this model puts those axes at HA +10.13 h,
+    // altitude -20.7, and the reporter photographed the tube about 20 deg
+    // below the horizon. The shipped model claims altitude +33.
+    //
+    // Note for anyone tempted to re-derive this from indi-eqmod: its
+    // EncoderToHours() is written against its own encoder zero and step
+    // direction, and transcribing it cost this fix a wrong sign that only
+    // the rig caught. The table above is the reference.
 
     std::pair<double, double> compute_ra_dec_locked() const {
         // Dead-reckon between hardware reads: while an axis runs at a
@@ -2009,14 +2039,13 @@ private:
         double ha_mech_hours = 0.0;
         if (a2 >= 0.0) {
             dec_mech = 90.0 - a2;
-            ha_mech_hours = a1 / kHoursToDegrees + kHomeHourAngleOffsetHours;
         } else {
             dec_mech = 90.0 + a2;
-            ha_mech_hours = a1 / kHoursToDegrees - kHomeHourAngleOffsetHours;
         }
+        ha_mech_hours = a1 / kHoursToDegrees;
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec = sky_sign * dec_mech;
-        const double ha_hours = wrap_hour_angle(sky_sign * ha_mech_hours);
+        const double ha_hours = wrap_hour_angle(sky_sign * ha_mech_hours + home_hour_angle_offset(a2));
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ra = wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
@@ -2026,25 +2055,19 @@ private:
                                                             double lst_advance_hours = 0.0) const {
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_) + lst_advance_hours;
         double ha = wrap_hour_angle(lst - ra);
-        const bool south = hemisphere_south_locked();
-        const double sky_sign = south ? -1.0 : 1.0;
+        const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec_mech = sky_sign * dec;
-        const double ha_mech = sky_sign * ha;
-        // The ASCOM side is chosen from the SKY hour angle (HA >= 0 ->
-        // pierEast, matching get_destination_side_of_pier()); which
-        // mechanical branch realises that side flips with the hemisphere.
-        // Testing the sky HA rather than ha_mech keeps HA == 0 on the same
-        // side as the destination getter in the south too (-0.0 >= 0.0).
-        const bool branch_a = (ha >= 0.0) != south;
-        double a1 = 0.0;
-        double a2 = 0.0;
-        if (branch_a) {
-            a2 = 90.0 - dec_mech;
-            a1 = (ha_mech - kHomeHourAngleOffsetHours) * kHoursToDegrees;
-        } else {
-            a2 = -(90.0 - dec_mech);
-            a1 = (ha_mech + kHomeHourAngleOffsetHours) * kHoursToDegrees;
-        }
+        // The branch is chosen from the SKY hour angle in both hemispheres:
+        // HA >= 0 (target west of the meridian) puts the OTA on the east side
+        // of the pier, which is the a2 >= 0 branch. get_side_of_pier() reads
+        // the same rule back off the axis, and get_destination_side_of_pier()
+        // states it directly, so all three agree by construction.
+        const double branch = ha >= 0.0 ? 1.0 : -1.0;
+        const double a2 = branch * (90.0 - dec_mech);
+        // HA = sky_sign * a1/15 + 6 * branch, inverted. |a1| <= 90 for every
+        // reachable target, which is the counterweight-never-above-horizontal
+        // rule falling out of the geometry rather than being enforced.
+        const double a1 = sky_sign * (ha - kHomeHourAngleOffsetHours * branch) * kHoursToDegrees;
         return {a1, a2};
     }
 
