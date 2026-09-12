@@ -7,6 +7,10 @@ harness-readiness evaluation that prompted this script). Every check below
 is read-only and file-local -- no network, no build.
 
 Run from the repo root:  python3 scripts/check_docs_drift.py
+Self-test (no repo state): python3 scripts/check_docs_drift.py --self-test
+  -- drives check 8's pairing and job-scoping helpers over literal fixtures,
+  one per mutation the check exists to catch, so an extractor that stops
+  matching fails here instead of degrading the gate to its floor (#455).
 
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
@@ -877,10 +881,13 @@ def _pair_tsan_runs(label, events, failures):
 
 
 def check_tsan_filtered_runs_sync():
-    failures = []
-    ci_full = read(".github/workflows/ci.yml")
-    preflight_full = read("scripts/ci_preflight.sh")
+    return _tsan_findings(read(".github/workflows/ci.yml"), read("scripts/ci_preflight.sh"))
 
+
+def _tsan_findings(ci_full, preflight_full):
+    """Check 8 over the two files' text. Pure, so --self-test can drive it
+    over literal fixtures without touching the repo."""
+    failures = []
     ci = _ci_job_block(ci_full, "sanitizers-tsan")
     preflight = _scoped_block(
         preflight_full,
@@ -985,5 +992,138 @@ def main():
     return 0
 
 
+# --- self-test ---------------------------------------------------------------
+
+# Literal fixtures in the shape of today's two files (the [ -x ... ] probe and
+# the unrelated jobs after the TSan and cppcheck jobs are deliberate: they are
+# what the scoping rules must ignore).
+_SELF_TEST_CI = """\
+jobs:
+  build:
+    steps:
+      - run: echo build
+  sanitizers-tsan:
+    steps:
+      - name: Run
+        run: |
+          test -x build-tsan/tests/alpacacore_tests  # probe, not a run
+          build-tsan/tests/alpacacore_tests "[stress]" 2>&1 | tee stress-run.log
+          grep -qE 'test cases: *[1-9]' stress-run.log
+          build-tsan/tests/alpacacore_tests "[stress-guard]" 2>&1 | tee stress-guard-run.log
+          grep -qE 'test cases: *[1-9]' stress-guard-run.log
+  format:
+    steps:
+      - run: grep -qE 'unrelated' other.log
+  cppcheck:
+    steps:
+      - run: cppcheck --suppress=missingInclude --suppress=unusedFunction src
+  zizmor:
+    steps:
+      - run: echo --suppress=notCppcheck
+"""
+
+_SELF_TEST_PREFLIGHT = """\
+# --- gate 3: sanitizers ------------------------------------------------------
+TSAN_BUILD_DIR="AlpacaCore/build-tsan"
+section "ThreadSanitizer (concurrency stress, all vendors)"
+if [ -x "${TSAN_BUILD_DIR}/tests/alpacacore_tests" ]; then
+  "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-run.log"
+  if grep -qE 'test cases: *[1-9]' "${TSAN_BUILD_DIR}/stress-run.log"; then echo ok; fi
+  "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress-guard]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-guard-run.log"
+  if grep -qE 'test cases: *[1-9]' "${TSAN_BUILD_DIR}/stress-guard-run.log"; then echo ok; fi
+fi
+# --- gate 4: something else --------------------------------------------------
+grep -qE 'unrelated' "${TSAN_BUILD_DIR}/other.log"
+"""
+
+
+def self_test():
+    """Regression guard for check 8's helpers and the job-scoping rule.
+
+    Every fixture is a literal string, so this needs no repo state. The
+    mutations are the ones the #455 review tabulated; each must produce the
+    finding named for it, and the unmutated pair must produce none (which is
+    also what catches a run matcher that silently stops matching: the floor
+    fires and the baseline is no longer clean).
+    """
+    checks = []
+
+    def check(name, condition):
+        checks.append((name, condition))
+
+    def sub(text, old, new, count=1):
+        assert text.count(old) == count, (old, text.count(old))
+        return text.replace(old, new)
+
+    ci, pf = _SELF_TEST_CI, _SELF_TEST_PREFLIGHT
+    baseline = _tsan_findings(ci, pf)
+    check("baseline fixtures produce no finding: %r" % baseline, baseline == [])
+    check("the [ -x ] / test -x probes are not counted as runs",
+          len([e for e in _tsan_events(_ci_job_block(ci, "sanitizers-tsan")) if e[0] == "run"]) == 2)
+
+    # 1. a retagged run whose tee target was not retagged.
+    m = sub(ci, '"[stress-guard]" 2>&1 | tee stress-guard-run.log', '"[stress-guard]" 2>&1 | tee stress-run.log')
+    f = _tsan_findings(m, pf)
+    check("guard run keeping the old tee target is paired by log, not count",
+          any("run [stress-guard] writes stress-run.log but the grep that follows it reads stress-guard-run.log" in x for x in f))
+
+    # 2. one pattern loosened in ci.yml only.
+    m = sub(ci, "grep -qE 'test cases: *[1-9]' stress-run.log", "grep -qE 'test cases' stress-run.log")
+    check("a loosened pattern in one file is a pattern finding",
+          any("grep pattern differs" in x for x in _tsan_findings(m, pf)))
+
+    # 3. the two runs swapped in ci_preflight.sh only (greps left in place).
+    m = pf.replace('"[stress]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-run.log"', "@A@")
+    m = m.replace('"[stress-guard]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-guard-run.log"',
+                  '"[stress]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-run.log"')
+    m = m.replace("@A@", '"[stress-guard]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-guard-run.log"')
+    f = _tsan_findings(ci, m)
+    check("swapped runs report both pairs as reading the wrong log",
+          len([x for x in f if "the guard must read the log of the run it guards" in x]) == 2)
+
+    # 4. a grep deleted in ci.yml.
+    m = sub(ci, "          grep -qE 'test cases: *[1-9]' stress-guard-run.log\n", "")
+    check("a deleted grep leaves its run unguarded",
+          any("run [stress-guard] is not followed by a zero-test grep" in x for x in _tsan_findings(m, pf)))
+
+    # 5. the build directory renamed in ci.yml for one run only.
+    m = sub(ci, 'build-tsan/tests/alpacacore_tests "[stress-guard]"', 'build-tsan2/tests/alpacacore_tests "[stress-guard]"')
+    check("a build-dir rename in ci.yml is a build-directory finding",
+          any("build directory differs" in x and "build-tsan2" in x for x in _tsan_findings(m, pf)))
+
+    # 6. TSAN_BUILD_DIR renamed in ci_preflight.sh only.
+    m = sub(pf, 'TSAN_BUILD_DIR="AlpacaCore/build-tsan"', 'TSAN_BUILD_DIR="AlpacaCore/tsan-build"')
+    check("a TSAN_BUILD_DIR rename is a build-directory finding",
+          any("build directory differs" in x and "tsan-build" in x for x in _tsan_findings(ci, m)))
+
+    # 7. a run that does not tee at all.
+    m = sub(ci, '"[stress]" 2>&1 | tee stress-run.log', '"[stress]"')
+    check("a run without tee is reported, not skipped",
+          any("does not `| tee` a log" in x for x in _tsan_findings(m, pf)))
+
+    # 8. scope: the unrelated grep after the TSan job and the unrelated
+    #    --suppress= after the cppcheck job are outside both blocks; an
+    #    inserted job between them must not widen either.
+    inserted = sub(ci, "  format:\n", "  extra-after-tsan:\n    steps:\n      - run: grep -qE 'x' x.log\n  format:\n")
+    check("an inserted job after sanitizers-tsan does not widen check 8's scope",
+          _tsan_findings(inserted, pf) == [])
+    block = _ci_job_block(inserted, "cppcheck")
+    check("check 3's cppcheck block ends at the next job whatever its name",
+          block is not None and "unusedFunction" in block and "notCppcheck" not in block)
+    check("an unknown job name yields None, not a widened block",
+          _ci_job_block(ci, "no-such-job") is None)
+
+    failed = [name for name, ok in checks if not ok]
+    for name, ok in checks:
+        print("[%s] %s" % ("PASS" if ok else "FAIL", name))
+    if failed:
+        print("\n%d/%d self-test(s) failed." % (len(failed), len(checks)))
+        return 1
+    print("\nAll %d self-test(s) passed." % len(checks))
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     sys.exit(main())
