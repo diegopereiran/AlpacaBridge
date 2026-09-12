@@ -267,6 +267,20 @@ def _blocking_list_spans(header):
     return spans, failures
 
 
+def _names_in_span(which, span):
+    """The driver names a blocking-list sentence actually lists."""
+    if which == "telescopes":
+        body = span.split("create that hazard are the", 1)[1]
+        body = body.rsplit("telescopes.", 1)[0]
+    else:
+        body = span.split("(", 1)[1].rsplit(")", 1)[0]
+    # "A, B, C and D" -> [A, B, C, D]
+    parts = []
+    for chunk in body.split(","):
+        parts.extend(re.split(r"\band\b", chunk))
+    return [p.strip() for p in parts if p.strip()]
+
+
 def _matching_brace(text, open_index):
     """Index just past the `}` closing the `{` at open_index."""
     depth = 0
@@ -338,6 +352,44 @@ def check_blocking_get_connected_list():
     def named(entry):
         prose, which = entry
         return prose in spans[which]
+
+    # Parse the names OUT of each list, so a name that should not be there is
+    # caught even when no driver file maps to it. Probing only for the names in
+    # DRIVER_PROSE_NAMES could never see that: the dict holds only the drivers
+    # that ARE blocking, so a lock-free driver named in the header (SynScan
+    # after #130 -- the drift this whole check exists for) matched nothing and
+    # passed.
+    expected = {which: set() for which in BLOCKING_LIST_SPANS}
+    for basename, kind in kinds.items():
+        entry = DRIVER_PROSE_NAMES.get(basename)
+        if entry is not None and kind != "lock-free":
+            expected[entry[1]].add(entry[0])
+    for which, span in spans.items():
+        for listed in _names_in_span(which, span):
+            if listed not in expected[which]:
+                failures.append(
+                    "STALE BLOCKING-LIST ENTRY: async_connectable.h's %s list names '%s', but no "
+                    "driver with that name has a blocking get_connected(). Either it was made "
+                    "lock-free and the name must come out, or the name does not match "
+                    "DRIVER_PROSE_NAMES." % (which, listed))
+
+    # The counts this PR removed must not creep back. A number in front of
+    # "telescopes"/"wrapper-backed switch(es)" is exactly the thing nothing
+    # checks and that went stale repeatedly -- the lists themselves are gated
+    # above, so a count adds nothing but a second source of truth.
+    count_re = re.compile(
+        r"\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+        r"(?:named\s+|more\s+)?(?:telescopes?|wrapper-backed\s+switch(?:es)?)\b",
+        re.IGNORECASE)
+    for path in ("AGENTS.md",
+                 "AlpacaCore/include/alpacacore/async_connectable.h",
+                 "AlpacaHTTP/src/http/router.cpp",
+                 "AlpacaHTTP/tests/test_routing.cpp"):
+        for match in count_re.finditer(read(path)):
+            failures.append(
+                "COUNTED BLOCKING DRIVERS: %s says %r. These lists are gated by name; a count is a "
+                "second source of truth that nothing checks and that has gone stale before "
+                "(issue #381). Refer to the named list instead." % (path, match.group(0)))
 
     for basename, kind in sorted(kinds.items()):
         if kind == "lock-free":

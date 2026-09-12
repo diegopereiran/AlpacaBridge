@@ -2222,7 +2222,7 @@ Response Router::dispatch_device_method(
                 // driver's get_connected() may take the state mutex that its
                 // connect sequence holds for the whole handshake (SynScan was
                 // the original: 25 s on a silent handset, issue #130, whose
-                // fix made that getter lock-free; five telescopes still have
+                // fix made that getter lock-free; the telescopes named there still have
                 // the shape -- see async_connectable.h). Reading it
                 // mid-transition stalled this poll for the entire connect,
                 // the very client timeout the PUT wait below exists to
@@ -2319,7 +2319,7 @@ Response Router::dispatch_device_method(
                 // driver's get_connected() may block on the state mutex its
                 // connect sequence holds for the whole handshake (the SynScan
                 // hand controller was the original, issue #130; its getter is
-                // lock-free now, five telescopes still block), and calling it
+                // lock-free now, the telescopes named there still block), and calling it
                 // while a task is in
                 // flight stalled this handler for the entire connect, so the
                 // 8 s deadline below never fired. A connect requested while a

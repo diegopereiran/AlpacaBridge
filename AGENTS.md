@@ -760,13 +760,14 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the wrong flag.
 - **The router must never call `get_connected()` while `get_connecting()` is
   true — the connect side of the rule above** (SynScan hand controller,
-  2026-09, issue #130). Five telescope drivers (Celestron, OnStep, Bisque,
+  2026-09, issue #130). The telescope drivers named in
+  `async_connectable.h` (Celestron, OnStep, Bisque,
   iOptron, Sky-Watcher; SynScan was in this list until the #130 fix made its
   getter lock-free) answer `get_connected()` under the state mutex that their
   `set_connected(true)` holds for the entire handshake, so a
   `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's 8 s deadline never
-  fired (25 s on a silent handset: five 5 s query timeouts). The four
+  fired (25 s on a silent handset: five 5 s query timeouts). The
   wrapper-backed switch drivers can block too — their `is_open()` waits for the
   wrapper mutex, which `open()` holds throughout and `close()` holds for its
   two locked phases (it unlocks to join the PWM workers) — but that work is
@@ -780,9 +781,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (every driver does except the nine named here, SynScan among them
+  getter (every driver does except the ones named here, SynScan among them
   since the #130 fix) —
-  the five above still take the mutex and rely on the router rule, and four
+  the telescopes above still take the mutex and rely on the router rule, and the
   wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita, ZWO ASIAIR
   and ASIAIR Plus) lock inside the wrapper's `is_open()` but release it before
   `pending_mutex_`, so they rely on the rule without creating the ABBA hazard.
@@ -804,12 +805,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   alternative (reading `get_connected()` directly) is the phantom-link bug
   this rule fixes; there is no per-driver signal yet for which
   `get_connected()` implementations are safe to read mid-task (the lock-free
-  majority) versus which aren't (the five above and the four
+  majority) versus which aren't (the telescopes above and the
   wrapper-backed switches).
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
-  can still block on a mutex-holding driver's handshake for the five above and the four
+  can still block on a mutex-holding driver's handshake for the telescopes above and the
   wrapper-backed switches (their wrapper `open()` holds the same mutex `is_open()` takes).
   Far narrower than the bug this rule fixes (needs a second request to land
   in a specific few-instruction window, not just a slow connect), and not
