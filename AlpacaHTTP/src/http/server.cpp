@@ -152,7 +152,13 @@ void Server::start_async() {
     shutdown_requested_ = false;
     reset_queues_for_start();
     running_ = true;
-    server_thread_ = std::thread(&Server::run_server, this);
+    {
+        // Same guard as join_server_thread(): the assignment is the other half
+        // of server_thread_'s ownership, and assigning over a joinable thread
+        // is std::terminate() too.
+        std::lock_guard<std::mutex> guard(server_thread_mutex_);
+        server_thread_ = std::thread(&Server::run_server, this);
+    }
 }
 
 void Server::stop() {
@@ -262,17 +268,34 @@ void Server::stop() {
 }
 
 void Server::join_server_thread(std::thread::id current_id) {
-    if (!server_thread_.joinable()) {
-        return;
+    // Take sole ownership of the thread under server_thread_mutex_, then act
+    // on it with the lock released. Whoever wins the move joins; every other
+    // caller finds server_thread_ empty and returns, so exactly one join()
+    // ever runs on it. stop() is re-entrant from another thread (the shutdown
+    // endpoint's detached thread runs the shutdown callback, which can make
+    // the embedder's loop call stop() as well), and concurrent join() on one
+    // std::thread is UB -- in practice the second pthread_join throws
+    // std::system_error that nothing catches, i.e. std::terminate().
+    //
+    // The join happens OUTSIDE the lock deliberately: it blocks until the
+    // accept loop unwinds, and holding a lock that any other stop() caller
+    // needs for that long is how this turns into a deadlock instead.
+    std::thread owned;
+    {
+        std::lock_guard<std::mutex> guard(server_thread_mutex_);
+        if (!server_thread_.joinable()) {
+            return;
+        }
+        owned = std::move(server_thread_);
     }
-    if (server_thread_.get_id() == current_id) {
+    if (owned.get_id() == current_id) {
         // Unreachable from stop() (run_server() never calls stop()); kept as
         // an orphan rather than a detach for the same reason as above.
         std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
-        orphaned_threads_.push_back(std::move(server_thread_));
+        orphaned_threads_.push_back(std::move(owned));
         return;
     }
-    server_thread_.join();
+    owned.join();
 }
 
 // Destructor only, after every thread has been joined. The pipe is never
@@ -290,9 +313,9 @@ void Server::close_wake_pipe() {
 }
 
 void Server::wait() {
-    if (server_thread_.joinable()) {
-        server_thread_.join();
-    }
+    // Routed through the same ownership handshake as join_server_thread(), so
+    // a concurrent stop() and wait() cannot both join the one thread.
+    join_server_thread(std::this_thread::get_id());
 }
 
 namespace {

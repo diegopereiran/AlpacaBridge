@@ -74,6 +74,17 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<util::SocketHandle> server_fd_{util::kInvalidSocket};
     std::thread server_thread_;
+    // Guards ownership of server_thread_ only (not the lifecycle phases).
+    // stop() is re-entrant from another thread -- the shutdown endpoint's
+    // detached thread runs the shutdown callback, which can make the embedder's
+    // own loop call stop() too -- so without this both callers could reach
+    // join_server_thread() and join() the same std::thread. Concurrent join()
+    // is UB, and in practice the second pthread_join throws std::system_error
+    // that nothing catches, i.e. std::terminate(): the very failure #402 set
+    // out to remove, moved onto the normal shutdown path. The lock is NEVER
+    // held across the join itself -- the thread is moved out first -- so a
+    // worker that calls stop() cannot deadlock against it.
+    std::mutex server_thread_mutex_;
 
     // One client connection. Owned by exactly one party at a time: the accept
     // loop (briefly, until it is parked), the reactor (while idle, waiting for

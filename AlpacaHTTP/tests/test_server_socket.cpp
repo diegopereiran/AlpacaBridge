@@ -1044,6 +1044,54 @@ int main() {
         EXPECT(!holder.is_running());
     }
 
+    {
+        // Two threads calling stop() on the SAME running Server, which is the
+        // shipped shutdown path, not a contrived one: PUT
+        // /management/v1/shutdown spawns a detached thread that runs the
+        // shutdown callback, and the example server's callback clears the flag
+        // its own main loop polls -- so that loop calls stop() too, while the
+        // detached thread is inside stop(). Both reach join_server_thread().
+        //
+        // Concurrent join() on one std::thread is UB; in practice the second
+        // pthread_join throws std::system_error, which nothing catches, so the
+        // process terminates. Like the port-conflict case above, a regression
+        // here ABORTS this binary rather than failing an assertion.
+        alpacahttp::Config concurrent_config;
+        concurrent_config.set_http_port(6881);
+        concurrent_config.set_discovery_enabled(false);
+        concurrent_config.set_server_name("TestServerConcurrentStop");
+        alpacahttp::Server concurrent(concurrent_config);
+        concurrent.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (concurrent.is_running()) {
+            // Released together so both land in stop() at once, which is what
+            // makes them race for the join rather than queueing behind it.
+            std::atomic<bool> go{false};
+            std::atomic<int> finished{0};
+            std::vector<std::thread> stoppers;
+            for (int i = 0; i < 2; ++i) {
+                stoppers.emplace_back([&]() {
+                    while (!go.load()) {
+                        std::this_thread::yield();
+                    }
+                    concurrent.stop();
+                    finished.fetch_add(1);
+                });
+            }
+            go.store(true);
+            for (auto& t : stoppers) {
+                t.join();
+            }
+            EXPECT(finished.load() == 2);
+            EXPECT(!concurrent.is_running());
+            // A third stop() after the fact is still a no-op, not a second
+            // join of an already-reaped thread.
+            concurrent.stop();
+            EXPECT(!concurrent.is_running());
+        }
+    }
+
     std::cout << "All server socket tests passed!\n";
     return 0;
 }
