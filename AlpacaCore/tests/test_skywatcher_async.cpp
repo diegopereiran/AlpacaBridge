@@ -871,14 +871,15 @@ TEST_CASE("SkyWatcher southern hemisphere - tracking turns RA the right way",
     // model that read the RA axis angle as the hour angle in both
     // hemispheres; #432 showed the model was wrong (the counterweight-down
     // home puts the dec-axis sweep on the HA = +/-6 h circle, and south of
-    // the equator the mount faces the other pole, so HA = -(a1/15 +/- 6)).
+    // the equator the mount faces the other pole, so HA = -(a1/15) +/- 6).
     // With the corrected model, holding a star below the equator needs the
     // counts to go DOWN -- indi-eqmod's `RAInverted = (Hemisphere == SOUTH)`.
     //
     // The RATE was correct the whole time (0.99995x sidereal on hardware);
-    // only the direction is at stake, so this asserts the sign. The physical
-    // (oracle-checked) version of this assertion is in
-    // test_skywatcher_pointing.cpp.
+    // only the direction is at stake, so this asserts the sign. The
+    // hardware-anchored version of this assertion is in
+    // test_skywatcher_pointing.cpp, which checks the same tracking sense
+    // against the measured rows rather than against the driver's report.
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
     REQUIRE(mount.ok());
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
@@ -915,6 +916,353 @@ TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[sky
 
     INFO("axis1 moved from " << before << " to " << after << " deg");
     CHECK(after > before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a SiteLatitude write across the equator re-applies the RA drive",
+          "[skywatcher][telescope][hemisphere]") {
+    // The drive direction comes from the latitude (effective_ra_rate_locked()),
+    // so a client pushing its own site after connect -- the ordinary way in,
+    // and the usual way a sign typo in the web-UI site config gets corrected --
+    // can leave the axis running the way the OLD hemisphere wanted. Nothing
+    // else re-applies until Tracking, TrackingRate, RightAscensionRate or a
+    // slew happens to, so the axis holds the wrong direction at 1x and the star
+    // trails at 2x: the #250 signature, from the other end.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double north_before = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double north_after = mount.axis_degrees(1);
+    INFO("north: axis1 " << north_before << " -> " << north_after << " deg");
+    REQUIRE(north_after > north_before);
+
+    driver->set_site_latitude(-35.0);
+
+    const double south_before = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double south_after = mount.axis_degrees(1);
+    INFO("after crossing the equator: axis1 " << south_before << " -> " << south_after << " deg");
+    CHECK(south_after < south_before);
+
+    // A write that stays in the same hemisphere must not disturb the drive.
+    driver->set_site_latitude(-37.2);
+    const double same_before = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double same_after = mount.axis_degrees(1);
+    INFO("same hemisphere: axis1 " << same_before << " -> " << same_after << " deg");
+    CHECK(same_after < same_before);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher southern hemisphere - a positive RightAscensionRate still slows the axis",
+          "[skywatcher][telescope][eqm35][hemisphere]") {
+    // effective_ra_rate_locked() subtracts the offset and then applies the
+    // hemisphere sign, so a positive RightAscensionRate has to make the sky
+    // hour angle advance more slowly in both hemispheres. South of the equator
+    // the axis rate is negative, so "slower" is a SMALLER magnitude, not a
+    // smaller signed value. Only the plain tracking case covered this sign.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double plain_start = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double plain_travel = std::abs(mount.axis_degrees(1) - plain_start);
+
+    driver->set_right_ascension_rate(driver->get_right_ascension_rate() + 0.5);
+
+    const double offset_start = mount.axis_degrees(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    const double offset_end = mount.axis_degrees(1);
+    const double offset_travel = std::abs(offset_end - offset_start);
+
+    INFO("south: plain travel " << plain_travel << " deg, with +0.5 s/s offset " << offset_travel << " deg");
+    CHECK(offset_end < offset_start);     // still tracking the right way
+    CHECK(offset_travel < plain_travel);  // and more slowly
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW hemisphere's direction",
+          "[skywatcher][telescope][hemisphere]") {
+    // Review finding: set_site_latitude() skips a busy RA axis on the grounds
+    // that the restore paths recompute -- but the pulse path captured
+    // ra_restore_rate_deg_per_sec at DISPATCH and wrote it back verbatim at
+    // pulse end. Autoguiding keeps pulse_guiding_active_ true for most of
+    // every guide cycle (PHD2: duration + 1 s), so a site correction made
+    // mid-session lands here rather than in the setter's re-apply, and the
+    // pulse restored the pre-write direction. RA then ran backwards until
+    // something else re-applied the drive.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_drift = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return mount.physical_degrees(1) - p0;
+    };
+    const double north_drift = ra_drift();
+    REQUIRE(std::abs(north_drift) > 0.0);
+
+    // An East/West pulse keeps the RA axis busy; the site is corrected while
+    // it is in flight, so the setter takes its busy-axis skip.
+    driver->pulse_guide(2, 1200);  // East, 1.2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->set_site_latitude(-39.7392);
+
+    // Once the pulse has restored tracking, the axis must be running the way
+    // the NEW hemisphere wants. With the dispatch-time capture it keeps the
+    // old direction and this comparison fails.
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 6000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const double south_drift = ra_drift();
+    REQUIRE(std::abs(south_drift) > 0.0);
+    CHECK((north_drift > 0.0) != (south_drift > 0.0));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies the RA drive",
+          "[skywatcher][telescope][hemisphere]") {
+    // Round-2 review finding, the other half of the sibling above: the busy
+    // skip was decided from axes_busy_locked(), which is true for ANY pulse,
+    // but only an RA pulse's restore re-derives the RA drive. A North/South
+    // pulse takes the stop_axis() else-branch -- it stops the DEC axis and
+    // re-applies the Dec offset, and never touches RA. So the setter skipped,
+    // the pulse skipped, and RA kept counting the old hemisphere's way
+    // indefinitely: the 2x-trailing #250 signature again. Autoguiding makes
+    // this the COMMON case -- roughly half of PHD2's corrections are Dec.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_drift = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return mount.physical_degrees(1) - p0;
+    };
+    const double north_drift = ra_drift();
+    REQUIRE(std::abs(north_drift) > 0.0);
+
+    // A North pulse keeps the DEC axis busy; the RA axis is untouched and
+    // still tracking, so the setter must re-apply it rather than skip.
+    driver->pulse_guide(0, 1200);  // North, 1.2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->set_site_latitude(-39.7392);
+
+    // RA reverses immediately -- it is not the pulse's axis, so there is
+    // nothing to wait for. Checked again after the pulse ends to prove the
+    // Dec restore does not undo it.
+    const double mid_drift = ra_drift();
+    REQUIRE(std::abs(mid_drift) > 0.0);
+    INFO("north RA drift " << north_drift << " deg, during the Dec pulse " << mid_drift << " deg");
+    CHECK((north_drift > 0.0) != (mid_drift > 0.0));
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 6000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const double south_drift = ra_drift();
+    REQUIRE(std::abs(south_drift) > 0.0);
+    INFO("after the Dec pulse: RA drift " << south_drift << " deg");
+    CHECK((north_drift > 0.0) != (south_drift > 0.0));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a RightAscensionRate write during a long East pulse survives the post-stop verify",
+          "[skywatcher][telescope][hemisphere]") {
+    // Round-4 review note: stop_axis() re-derives the restore rate under the
+    // lock -- that is what makes set_right_ascension_rate()'s RA-axis skip
+    // safe, since the setter defers to "the busy operation's restore path".
+    // But the post-stop verify that follows was still handed the DISPATCH-time
+    // capture. With the two disagreeing, live_rate_change_took() measures the
+    // correctly restored axis, finds it nearer the pulse rate than the stale
+    // expectation, calls it "did not take" and resends ":I" at the pre-write
+    // period. The client's offset is silently dropped and
+    // cmd_axis_rate_deg_s_[0] stops describing what the axis is running.
+    //
+    // Needs a pulse at or past kMinPulseForRateVerifyMs (1500 ms) for that
+    // verify to run at all, and an offset big enough to move the
+    // classification: East, 2 s, +0.3 s/s (the threshold works out near
+    // 0.25 s/s, and only on East).
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // past the ramp
+
+    const auto ra_travel = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        return std::abs(mount.physical_degrees(1) - p0);
+    };
+    const double plain_travel = ra_travel();
+    REQUIRE(plain_travel > 0.0);
+
+    driver->pulse_guide(2, 2000);  // East, 2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    REQUIRE(driver->get_is_pulse_guiding());
+    driver->set_right_ascension_rate(0.3);  // deferred: the RA axis is the pulse's
+    REQUIRE(driver->get_right_ascension_rate() == 0.3);
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));  // past the verify window
+
+    // The restore applied sidereal * (1 - 0.3). Resent at the stale rate the
+    // axis runs at plain sidereal and travels the full distance.
+    const double offset_travel = ra_travel();
+    INFO("plain travel " << plain_travel << " deg, with +0.3 s/s written mid-pulse " << offset_travel << " deg");
+    CHECK(offset_travel < 0.85 * plain_travel);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a DeclinationRate write during an RA pulse is applied, not stranded",
+          "[skywatcher][telescope][hemisphere]") {
+    // Round-3 review finding, and the third instance of the same guard: the
+    // whole-mount predicate reaches apply_dec_rate_offset_locked() as
+    // defer_motion, so an East/West pulse -- which owns only the RA axis --
+    // made it true and the continuous branch returned without starting any
+    // Dec motion. The pulse's stop_axis() restore only rewrites the RA step
+    // period and never calls apply_dec_rate_offset_locked(), so the offset
+    // was stranded until the next DeclinationRate write, tracking toggle or
+    // slew. Comet or satellite tracking while autoguiding is the way in.
+    //
+    // Only the CONTINUOUS branch: a sub-floor rate is recovered by the duty
+    // worker's own start gate once the axes are free, so 10 arcsec/s (well
+    // above the ~0.26 arcsec/s floor) is the rate that shows it.
+    //
+    // No hemisphere is involved, so this is northern like the RA sibling.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    REQUIRE_FALSE(mount.axis_running(2));
+
+    // An East pulse owns the RA axis only, and is long enough that the Dec
+    // motion below cannot be the pulse's own restore path.
+    driver->pulse_guide(2, 3000);  // East, 3 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    REQUIRE(driver->get_is_pulse_guiding());
+
+    driver->set_declination_rate(10.0);  // arcsec/s, continuous (above the floor)
+    REQUIRE(driver->get_declination_rate() == 10.0);
+
+    // The Dec axis must start while the RA pulse is still in flight.
+    CHECK(wait_until([&] { return mount.axis_running(2); }, 1500));
+    CHECK(driver->get_is_pulse_guiding());
+
+    driver->set_declination_rate(0.0);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a RightAscensionRate write during a DEC pulse is applied, not stranded",
+          "[skywatcher][telescope][hemisphere]") {
+    // Round-2 review note: set_right_ascension_rate() asked the whole-mount
+    // axes_busy_locked() for the same "the owner's restore will re-apply it"
+    // skip that set_site_latitude() had to learn is a per-axis question. A
+    // North/South pulse makes that predicate true while owning only the DEC
+    // axis, and its restore path never touches RA, so the new rate sat in the
+    // field with nothing scheduled to drive it -- the client's
+    // RightAscensionRate silently did nothing until the next re-apply.
+    //
+    // Not hemisphere-specific (no sign is involved), which is why it needs its
+    // own case rather than riding on the latitude ones above.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_travel = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return std::abs(mount.physical_degrees(1) - p0);
+    };
+    const double plain_travel = ra_travel();
+    REQUIRE(plain_travel > 0.0);
+
+    // A North pulse owns the Dec axis only; RA is still tracking.
+    driver->pulse_guide(0, 1200);  // North, 1.2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    driver->set_right_ascension_rate(driver->get_right_ascension_rate() + 0.5);
+
+    // +0.5 s/s slows the drive: the axis must already be travelling less far
+    // per unit time, without waiting for the Dec pulse to end.
+    const double offset_travel = ra_travel();
+    INFO("plain travel " << plain_travel << " deg, with +0.5 s/s during a Dec pulse " << offset_travel << " deg");
+    CHECK(offset_travel < plain_travel);
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 6000));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-applies the RA drive",
+          "[skywatcher][telescope][hemisphere]") {
+    // The MoveAxis half of the same finding: manual_axis_slewing_[1] made
+    // axes_busy_locked() true, and the Dec stop task's restore only calls
+    // apply_dec_rate_offset_locked() for channel == kAxisDec. RA was left on
+    // the old hemisphere's direction with nothing scheduled to re-derive it.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_drift = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return mount.physical_degrees(1) - p0;
+    };
+    const double north_drift = ra_drift();
+    REQUIRE(std::abs(north_drift) > 0.0);
+
+    driver->move_axis(1, 0.5);  // Dec axis nudge, degrees/sec
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    driver->set_site_latitude(-39.7392);
+
+    const double mid_drift = ra_drift();
+    REQUIRE(std::abs(mid_drift) > 0.0);
+    INFO("north RA drift " << north_drift << " deg, during the Dec MoveAxis " << mid_drift << " deg");
+    CHECK((north_drift > 0.0) != (mid_drift > 0.0));
+
+    driver->move_axis(1, 0.0);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 5000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const double south_drift = ra_drift();
+    REQUIRE(std::abs(south_drift) > 0.0);
+    INFO("after the Dec MoveAxis stop: RA drift " << south_drift << " deg");
+    CHECK((north_drift > 0.0) != (south_drift > 0.0));
 
     driver->set_tracking(false);
     driver->set_connected(false);
@@ -1013,17 +1361,12 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
 // These tests assert the ASCOM contract only: the reported side flips with
 // hour angle and agrees with DestinationSideOfPier (the same shape OnStep's
 // ConformU-validated fix above requires: "WE", not constant). Which
-// MECHANICAL branch realises each side is the #261 question, and it is
-// settled by the physical oracle in test_skywatcher_pointing.cpp (#432):
-// the pierEast branch is a2 >= 0 in BOTH hemispheres. get_side_of_pier()
-// applies that test unconditionally, ra_dec_to_axis_degrees_locked() picks
-// the branch from the sky hour angle in both hemispheres, and
-// test_skywatcher_pointing.cpp asserts a2 > 0 alongside pierEast at latitude
-// -35. So neither the label nor the axis branch mirrors with hemisphere --
-// which is exactly #432's answer to #261, and why the cases below read the
-// same in both. (An earlier draft of this comment said the branch mirrors;
-// it never did, and a reader of the #261 cases would have been sent looking
-// for code that does not exist -- round-2 review finding on #448.)
+// MECHANICAL branch realises each side is the #261 question, and #432
+// settled it: the goto picks the branch from the SKY hour angle, so
+// HA >= 0 takes the a2 >= 0 branch and get_side_of_pier() reads pierEast
+// (0) back off it. That rule is the same in both hemispheres -- the branch
+// does NOT mirror south of the equator -- which is why the labels below are
+// identical to the northern case.
 
 TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and agrees with destination",
           "[skywatcher][telescope][eqm35][hemisphere]") {
@@ -1047,10 +1390,14 @@ TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
     CHECK(driver->get_side_of_pier() == 0);
 
-    // A branch crossing forces the RA axis (a1) to jump by close to 180 deg
-    // -- that IS a real meridian flip, not a test artifact: at
-    // kMaxMoveAxisRateDegPerSec (~3.3 deg/s) it is a ~55 s goto plus ramp
-    // (measured 57 s in the loopback), not the ~15 s one-branch slew above.
+    // A branch crossing swings the RA axis (a1) from +60 to -60 deg and the
+    // Dec axis from +50 to -50 -- that IS a real meridian flip, not a test
+    // artifact: at kMaxMoveAxisRateDegPerSec (~3.3 deg/s) the 120 deg RA leg
+    // is a ~36 s goto plus ramp (measured 57 s end to end in the loopback),
+    // not the ~15 s one-branch slew above. (This comment used to say "close
+    // to 180 deg"; it was 120 under the old model too, so the figure was
+    // always wrong -- corrected here because #432 rewrites the section
+    // header just above.)
     driver->slew_to_coordinates_async(east_ra, dec);
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 90000));
     // The branch must actually flip on the second goto, not just relabel the
@@ -1084,7 +1431,7 @@ TEST_CASE("SkyWatcher northern hemisphere - SideOfPier flips with hour angle and
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
     CHECK(driver->get_side_of_pier() == 0);
 
-    driver->slew_to_coordinates_async(east_ra, dec);  // ~180 deg RA jump, see sibling test
+    driver->slew_to_coordinates_async(east_ra, dec);  // 120 deg RA jump, see sibling test
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 90000));
     CHECK(driver->get_side_of_pier() == 1);
 

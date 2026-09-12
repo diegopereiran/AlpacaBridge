@@ -19,12 +19,20 @@
 // agrees with itself and a wrong pointing model is invisible. That is how a
 // six-hour error shipped and passed conformance on three different boards.
 //
-// The reference below is NOT derived from the driver. It is the relation
-// measured on hardware on 2026-09-12: an EQM-35 Pro at latitude -37.2 was
-// driven to known axis positions with the shipped (wrong) 3.5.1 build, and
-// the tube's real direction was read off the mount by hand. Those rows are
-// asserted literally in the first test case. A fourth, northern row comes
-// from the Wave 150i report that opened the issue.
+// WHAT IS AND IS NOT AN EXTERNAL ANCHOR HERE. The four hardware rows in the
+// first test case are: an EQM-35 Pro at latitude -37.2 was driven to known
+// axis positions on 2026-09-12 with the shipped (wrong) 3.5.1 build and the
+// tube's real direction was read off the mount by hand (three rows), and a
+// fourth, northern row comes from the Wave 150i report that opened the
+// issue. Those four, and the alt/az cross-check against what was observed,
+// are the only checks in this file that the driver cannot satisfy by
+// agreeing with itself.
+//
+// `sky_from_axes()` below is a transcription of the driver's own formula, so
+// the goto cases downstream of it pin the goto path against the model rather
+// than against the sky. They are still worth having -- they catch a goto that
+// stops commanding what the model says -- but they are not independent
+// evidence for the model. #458 tracks the vector oracle that would be.
 //
 // If you change the pointing model, this file is what has to justify it, and
 // a new hardware row is what has to extend it. Do not "verify" a change here
@@ -35,6 +43,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -185,13 +194,14 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         double expect_ha;
         double expect_dec;
         double expect_alt;
+        double expect_az;  // negative = not read off the mount for this row
         const char* observed;
     };
     const Row rows[] = {
-        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -6.11, 0.0, -1.3, "level, pointing east"},
-        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -10.00, 0.0, -43.6, "down about 45 deg"},
-        {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -9.01, -20.0, -18.9, "down, azimuth about 136"},
-        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, 10.13, 19.05, -20.7, "down about 20 deg"},
+        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -6.11, 0.0, -1.3, 91.0, "level, pointing east"},
+        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -10.00, 0.0, -43.6, -1.0, "down about 45 deg"},
+        {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -9.01, -20.0, -18.9, 136.0, "down, azimuth about 136"},
+        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
     };
     for (const Row& r : rows) {
         const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2);
@@ -200,6 +210,11 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         CHECK(std::abs(wrap_ha(sky.ha_hours - r.expect_ha)) < 0.02);
         CHECK(std::abs(sky.dec_degrees - r.expect_dec) < 0.1);
         CHECK(std::abs(horizon.altitude_degrees - r.expect_alt) < 0.5);
+        if (r.expect_az >= 0.0) {
+            // A second independent quantity per row where the azimuth was
+            // read off the mount as well as the altitude.
+            CHECK(std::abs(horizon.azimuth_degrees - r.expect_az) < 1.0);
+        }
     }
 
     // The first row is the one that needs no instrument, and it is what
@@ -355,6 +370,75 @@ TEST_CASE("SkyWatcher pointing - tracking holds the physical hour angle in both 
         driver->set_tracking(false);
         driver->set_connected(false);
     }
+}
+
+TEST_CASE("SkyWatcher pointing - an East guide pulse with Tracking off runs the southern way",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // Round-2 review finding: pulse_guide()'s not-tracking RA branch is the
+    // SECOND call site of ra_axis_sign_locked() and had no case of its own.
+    // Every other pulse test connects at latitude +39.7392, where the sign is
+    // +1 and the factor is a no-op, and the southern East-pulse case below
+    // enables tracking, so it takes the ra_rate_adjust branch instead. Delete
+    // `ra_axis_sign_locked() *` from that line and the whole suite stayed
+    // green while an autoguider pulsing a parked-rate mount below the equator
+    // pushed the star the wrong way.
+    //
+    // Sky sense, south: guide East = RA increasing. dec = -(90 - |a2|) and
+    // HA = -(a1/15) + 6 on this branch, so RA = LST - HA rises when a1 rises:
+    // the axis must run in the INCREASING-count direction, the opposite of
+    // the same pulse in the north.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0, 150.0, 80.0);
+    driver->set_connected(true);
+    mount.jump_axis_degrees(2, 45.0);
+    REQUIRE_FALSE(driver->get_tracking());
+
+    const double a1_before = mount.physical_degrees(1);
+    driver->pulse_guide(2, 1500);  // East, 1.5 s, no tracking to fold it into
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    const double moved = mount.physical_degrees(1) - a1_before;
+
+    INFO("south, Tracking off, East pulse: axis 1 moved " << moved << " deg");
+    CHECK(moved > 0.0);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a southern East guide pulse stays on the in-place rate change",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // Round-2 review finding, the other unguarded sign: the in-place-versus-
+    // stop-and-restart guard is `axis_sign * ra_pulse_rate <= kMinInPlace...`.
+    // Drop the axis_sign factor and every southern pulse rate is negative, so
+    // the guard is always true and EVERY guide correction takes the full
+    // stop-and-restart path -- the mount stops and re-accelerates the RA axis
+    // on every cycle of a guiding session. Magnitude and direction both still
+    // come out right on that path, which is why the direction case below
+    // passes either way; only the stop count can see it.
+    //
+    // This is the southern twin of the northern assertion in
+    // test_skywatcher_async.cpp ("a kick, never a stop/restart").
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0, 150.0, 80.0);
+    driver->set_connected(true);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));  // past the ramp
+    const int stops_before = mount.stop_count(1);
+
+    driver->pulse_guide(2, 1200);  // East, at the 0.5x default guide rate
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+
+    INFO("south, tracking, East pulse: RA stops " << stops_before << " -> " << mount.stop_count(1));
+    CHECK(mount.stop_count(1) == stops_before);
+    CHECK(mount.axis_running(1));
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher pointing - an East guide pulse slows the axis in the tracking sense, south",

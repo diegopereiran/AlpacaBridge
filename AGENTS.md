@@ -1648,7 +1648,12 @@ datagrams before each send so replies cannot get off-by-one.
   `read_site_coordinates()` used by all seven vendor branches that take a site, and on the
   persisted path the offending coordinate is **cleared** so the driver's unset handling covers it. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
-  run northern pointing math and undo #250, #253 and #261. Time comes from two functions: `utc_now_locked()`
+  run northern pointing math: the #432 sky frame (both the `a1` term and dec), the RA
+  tracking direction (#250, restored by #432) and the Dec rate / pulse-guide sign (#253).
+  **Not #261**, despite what this line said before #432 and what the `#274` CHANGELOG entry
+  still says as history: the pier-side branch and label are picked from the sky hour angle
+  and are hemisphere-independent, which is one of #432's findings. The driver comment on the
+  connect-time guard says the same. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
   client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
   the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
@@ -1674,7 +1679,10 @@ datagrams before each send so replies cannot get off-by-one.
   (`a1 = ±90`); every reachable target keeps `|a1| <= 90`, which is the
   counterweight-never-above-horizontal rule falling out of the geometry. Its SIGN follows
   which side of the dec axis the tube is on and does NOT flip with hemisphere; the `a1`
-  term does, because the mount faces the other pole. Pier side is hemisphere-independent
+  term does, because the mount faces the other pole. **That asymmetry is measured, not
+  derived, and #458 is open on it**: geometry says the 6 h term must flip too, and the
+  two mounts it was fitted to (EQM-35 Pro south, Wave 150i north) cannot separate a
+  hemisphere effect from a per-board dec-axis count sense. Pier side is hemisphere-independent
   (`a2 >= 0` -> pierEast), since the goto picks the branch from the sky hour angle.
   Tracking, `RightAscensionRate` and East/West pulses go through `ra_axis_sign_locked()`
   (counts up north, down south); `MoveAxis`, goto deltas and AutoHome are mechanical and
@@ -2004,8 +2012,10 @@ against its checklist, 2026-09-06:
 - [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
   Audit (2026-09-09, no hardware): unlike the RA/Dec direction bugs above, the branch that
   drives `SideOfPier`/`DestinationSideOfPier` is chosen purely from the sign of hour angle
-  in `ra_dec_to_axis_degrees_locked()`, and `hemisphere_south_locked()` is consulted only for
-  `dec_mech` (the a2 magnitude), never for which branch is picked or which side it is labelled.
+  in `ra_dec_to_axis_degrees_locked()`. Since #432 that function consults
+  `hemisphere_south_locked()` twice -- `sky_sign` multiplies both `dec_mech` (the a2
+  magnitude) and the `a1` term -- but still never for which branch is picked or which
+  side it is labelled, which is the half this audit rests on.
   So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
   OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
   a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
@@ -2127,6 +2137,68 @@ Extended the regression test from the first bug to assert the RA axis actually r
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.
 
+#### KNOWN BUG (FIXED): `axes_busy_locked()` is the wrong question for a per-axis re-apply
+
+Found in review of #432 (2026-09-12), the third instance of the same idiom in this
+driver. Not hemisphere-specific in shape, only in trigger.
+
+**Symptom.** `SiteLatitude` written across the equator while a North/South pulse or a
+`MoveAxis` on the DECLINATION axis is in flight leaves the RA axis running the old
+hemisphere's direction indefinitely -- stars trail at 2x, the #250 signature, with
+nothing scheduled to correct it. Under an autoguider this is the common case, not the
+corner: roughly half of a session's corrections are declination, and PHD2 holds
+`pulse_guiding_active_` true for most of every guide cycle.
+
+**Mechanism.** A setter that must re-command an axis skips when the axis is busy, on the
+grounds that the busy operation's own restore path re-derives the value. That contract
+holds per axis, but the guard asked `axes_busy_locked()`, which is true when EITHER axis
+is busy. A declination pulse ends in `stop_axis()`'s final `else` branch -- it stops the
+DEC axis and re-applies the DEC offset, and never touches RA. The `MoveAxis` stop task is
+the same shape: its restore calls `set_tracking_locked()` only for `channel == kAxisRa`
+and `apply_dec_rate_offset_locked()` only for `kAxisDec`. So both the setter and the
+in-flight operation skipped RA, each expecting the other to do it.
+
+**Fix (done).** `axis_busy_locked(channel)` is now the primitive -- the same
+`goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[i]
+|| (pulse_guiding_active_ && pulse_axis_ == channel)` idiom the duty-cycle worker and the
+MoveAxis stop tail already use -- and `axes_busy_locked()` is defined as the OR of the
+two, so every existing caller is unchanged. `set_site_latitude()` decides each half
+separately: re-apply the RA drive unless RA is busy, re-apply the Dec offset unless Dec
+is busy, and skip entirely only when both are. A sub-floor RA rate is pre-armed into
+`ra_duty_rate_deg_s_` when RA is busy, the way `set_right_ascension_rate()`'s busy branch
+already does, because the duty worker resumes from that stored rate and no restore path
+re-derives it. Two loopback regressions (`test_skywatcher_async.cpp`) drive the
+declination-pulse and declination-`MoveAxis` variants and were confirmed to fail on the
+pre-fix setter with the RA axis still counting the old way.
+
+**Rule for the next driver.** Any "skip while busy, the restore path will re-apply"
+guard has to name the axis it is talking about, and the reviewer's question is always:
+does the operation that owns the busy axis actually re-derive THIS value? A mount-wide
+busy flag can only answer that when the operation owns every axis -- a goto, park, home
+or slew does; a pulse or a manual nudge does not.
+
+The audit found two more instances, both fixed with it, and it took three review rounds
+to find all three -- each fix's own claim of completeness was what exposed the next one.
+No hemisphere is involved in either:
+
+- `set_right_ascension_rate()`: a declination operation in flight made the whole-mount
+  predicate true and stranded the rate write with nothing scheduled to apply it, so a
+  client's `RightAscensionRate` silently did nothing until the next re-apply.
+- `set_declination_rate()`, which passes the predicate down as
+  `apply_dec_rate_offset_locked(defer_motion=)`: an East/West pulse or an RA `MoveAxis`
+  made it true while owning only the RA axis, and the pulse's `stop_axis()` restore
+  rewrites the RA step period without ever calling `apply_dec_rate_offset_locked()`, so a
+  continuous Dec offset was stranded the same way. Comet or satellite tracking while
+  autoguiding is the way in. Only the continuous branch was affected: a sub-floor rate
+  recovers on its own through the duty worker's start gate.
+
+Every "skip while busy" guard in this driver now names its axis. When adding a new one,
+grep for `axes_busy_locked()` and justify each remaining caller: the legitimate uses are
+the ones asking "is the mount doing anything at all", such as the duty worker's
+`connected_ && tracking_ && !axes_busy_locked()` start gate. **And do the grep before
+writing the claim** -- this section asserted the sweep was complete twice before it was,
+and each time the assertion itself was the review finding.
+
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
   - Pointing math at latitude -37.2: home points at the SOUTH celestial pole, so
@@ -2136,12 +2208,16 @@ with the fix reverted to the raw equality check, and passes with it restored.
     it commands, so those checks could not see that the RA-axis/hour-angle relation was
     missing its 6 h home offset and its southern sign (#432, found from a Wave 150i sky
     test in the north). The dec relation was right; the RA relation is now
-    `HA = -(a1/15 ± 6)` here. Treat every "reported coordinates matched" line in this
+    `HA = -(a1/15) ± 6` here. Treat every "reported coordinates matched" line in this
     section as a consistency check, not a sky check.
   - `MoveAxis` verified semantically in all four directions, not just for motion:
     each button was checked against the change in REPORTED RA/Dec. N: Dec +15.59
     deg, S: Dec -16.96 deg, E: RA +15.47 deg, W: RA -15.28 deg, zero cross-axis
-    coupling in every case. `move_axis()` applies NO branch or hemisphere sign
+    coupling in every case. **The two RA rows are stale as reported values**: they were
+    read under the pre-#432 model, where `d(HA)/d(a1)` did not flip below the equator.
+    The same mechanical button now moves reported RA the other way at this site. What
+    the rows still establish is the mechanical fact, which way each button turns which
+    axis; only the RA/Dec labels on them changed. `move_axis()` applies NO branch or hemisphere sign
     transform (the rate goes straight to `start_speed_motion_locked`), so this is
     also the hardware reference for which way a raw Dec-axis rate moves reported
     Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
@@ -2183,7 +2259,9 @@ with the fix reverted to the raw equality check, and passes with it restored.
     drift in 30 s. Both call sites of the KNOWN BUG fix below are confirmed on the a2 > 0
     branch; the a2 < 0 branch rests on the loopback tests only -- see the PENDING BENCH
     TEST below, which reaches it WITHOUT a real meridian flip. Same session: reported RA
-    held constant to 1e-5 h over ~90 s of tracking (RA tracking-direction fix confirmed),
+    held constant to 1e-5 h over ~90 s of tracking (a self-consistency result only: the
+    "RA tracking-direction fix" it was read as confirming is the #250 removal that #432
+    reversed),
     and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
     to home, tracking off.
   - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
