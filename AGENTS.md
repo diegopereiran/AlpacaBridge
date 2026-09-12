@@ -205,6 +205,27 @@ vendor-agnostic; do them in the driver from the start.
 > inherits it (issue #100); a new driver that copy-pastes its own
 > `connection_thread_` machinery is a review-blocking regression.
 
+> A driver that refuses a connect should say why in the exception it throws:
+> since #358 `AsyncConnectable` keeps that text and the router reports it to
+> the client instead of a bare "Connection failed", so the message is read by
+> an operator in NINA, not only in the log. Write it for someone standing at
+> the mount — name the setting to change, not the internal state that was
+> wrong — and **never interpolate a credential or token into it**, because it
+> is now a client-facing string on an unauthenticated LAN surface, not a log
+> line. It also reaches the web UI as `LastConnectError` on
+> `/management/v1/configureddevices`, which is the only place the Platform 7
+> `PUT /connect` path can surface a reason at all.
+>
+> Every driver that mixes in `AsyncConnectable` must carry
+> `ALPACA_EXPOSE_CONNECT_ERROR()` in a public section: it forwards the new
+> `AlpacaDriver::get_last_connect_error()` virtual to the mixin's stored
+> string. The router cannot reach the mixin by `dynamic_cast`, because the
+> base is inherited `protected` everywhere and a cross-cast only traverses
+> **public** base paths — such a cast compiles, always returns `nullptr`, and
+> silently drops every reason. A driver that omits the macro compiles and
+> tests green while reporting nothing, so `scripts/check_connect_error_hook.py`
+> gates it in CI and in `ci_preflight.sh`.
+
 Two of our worst deadlocks are documented later, not in the checklist above — read
 [`disconnect_locked()`](#reconnect-must-not-self-deadlock-disconnect_locked) and the
 narrow-`firmware_mutex_` rule (under "Device firmware / SDK version") before touching
@@ -1684,8 +1705,10 @@ datagrams before each send so replies cannot get off-by-one.
   keeps Slewing true via the manual flag, and a background task clears it and restores
   tracking once the axis reports stopped. This applies to every telescope driver.
 - ConformU needs a real site. Since #274 a Sky-Watcher device with no site refuses
-  `Connected` outright, so the run fails at connect; the client reports "Connection
-  failed" and the driver's message naming the two fields is in the server log (#358).
+  `Connected` outright, so the run fails at connect. Since #358 the client is told why:
+  the router reports the driver's own sentence naming the two fields as the
+  `ErrorMessage` (the error number is still `NotConnected`), rather than a bare
+  "Connection failed" with the reason left in the server log.
   Set the observing site in the web UI before validating. Before #274 the site collapsed
   to 0,0 instead and the CheckMethods slew tests aborted with "highest elevation
   available is below the horizon".
