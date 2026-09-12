@@ -22,7 +22,12 @@ Checks:
      restated: the router rule ("never call get_connected() while
      get_connecting() is true") depends on knowing which drivers have that
      shape, and the list has drifted repeatedly in both directions
-     (issues #315, #355, #381, #407).
+     (issues #315, #355, #381, #407). The same check also fails on a COUNT
+     of either list ("the five telescopes", "four wrapper-backed switches")
+     stated anywhere the globs below reach: a number is a second source of
+     truth for a list that is already gated by name, and it is what went
+     stale before. CHANGELOG.md is exempt -- its entries describe what was
+     true when they were written.
   6. Every relative path referenced in AGENTS.md's inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
