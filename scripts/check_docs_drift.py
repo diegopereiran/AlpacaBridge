@@ -130,7 +130,7 @@ _CI_JOB_RE = re.compile(r"^  [A-Za-z0-9_-]+:[ \t]*$", re.MULTILINE)
 
 
 def _ci_job_block(ci_text, job_name):
-    """The text of one top-level job in ci.yml, from its `  <job>:` line to the
+    r"""The text of one top-level job in ci.yml, from its `  <job>:` line to the
     next job's line (or EOF).
 
     Checks 3 and 8 used to end their scope at a NAMED neighbour (`\n  zizmor:`,
@@ -144,7 +144,9 @@ def _ci_job_block(ci_text, job_name):
     if start == -1:
         return None
     start += 1
-    m = _CI_JOB_RE.search(ci_text, start + len(job_name) + 3)
+    # Search from the end of the job's own line, not from an arithmetic
+    # offset that hard-codes the indent and the colon.
+    m = _CI_JOB_RE.search(ci_text, ci_text.index("\n", start))
     return ci_text[start:m.start()] if m else ci_text[start:]
 
 
