@@ -3286,8 +3286,28 @@ int main() {
             return router.route(request, 1);
         };
 
-        for (const char* path : {"/management/v1/synctime", "/management/v1/wifi/connect"}) {
-            const auto response = rejected(path, "{}");
+        // The utcdate setter is the third caller (added by #401, because a
+        // UTCDate write can step the host clock), and it is the one whose
+        // ClientTransactionID comes from dispatch_telescope_method far above
+        // rather than from a line or two up -- so it is the easiest of the
+        // three to leave on the hardcoded 0. It needs a registered telescope
+        // to reach the setter at all.
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto cross_origin_scope = std::make_shared<TelescopeClockStubDriver>(9804);
+        EXPECT(registry.register_device(cross_origin_scope));
+
+        // The management endpoints read ClientTransactionID from the query
+        // string; a device PUT reads it from the BODY (handle_device()), so
+        // the utcdate case has to send it there or it would assert against a
+        // 0 the fix never touches -- a test that fails for the wrong reason.
+        struct Case {
+            const char* path;
+            const char* body;
+        };
+        for (const Case& c : {Case{"/management/v1/synctime", "{}"}, Case{"/management/v1/wifi/connect", "{}"},
+                              Case{"/api/v1/telescope/9804/utcdate", R"({"ClientTransactionID": 4242})"}}) {
+            const char* path = c.path;
+            const auto response = rejected(path, c.body);
             EXPECT(response.status_code() == 403);
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded());
@@ -3314,6 +3334,8 @@ int main() {
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ClientTransactionID", 99U) == 0U);
         }
+
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9804);
     }
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER

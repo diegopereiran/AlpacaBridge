@@ -985,6 +985,12 @@ int main() {
         holder.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
+        if (!holder.is_running()) {
+            // Say so. The whole #402 block hangs off this, and a silent skip
+            // turns the flagship regression case into a green no-op on a
+            // runner where 6879 happens to be taken.
+            std::cerr << "WARNING: port-conflict cases SKIPPED -- could not bind port 6879\n";
+        }
         if (holder.is_running()) {
             {
                 alpacahttp::Config conflict_config;
@@ -1066,6 +1072,9 @@ int main() {
         concurrent.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
+        if (!concurrent.is_running()) {
+            std::cerr << "WARNING: concurrent-stop case SKIPPED -- could not bind port 6881\n";
+        }
         if (concurrent.is_running()) {
             // Released together so both land in stop() at once, which is what
             // makes them race for the join rather than queueing behind it.
@@ -1125,6 +1134,8 @@ int main() {
             server->start_async();
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
             if (!server->is_running()) {
+                std::cerr << "WARNING: stop-then-destroy loop SKIPPED at round " << round
+                          << " -- could not bind port 6882\n";
                 break;
             }
 

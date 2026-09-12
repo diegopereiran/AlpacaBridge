@@ -157,9 +157,14 @@ void Server::start_async() {
         // of server_thread_'s ownership, and assigning over a joinable thread
         // is std::terminate() too.
         std::unique_lock<std::mutex> guard(server_thread_mutex_);
-        // join_server_thread() above already waited, but re-check: another
-        // caller could have started a join in the gap. Assigning over a
-        // joinable thread is std::terminate() too.
+        // Wait out any join that started in the gap since join_server_thread()
+        // returned, so this assignment cannot land on a thread another caller
+        // is mid-join on. NOTE this does not make concurrent start_async()
+        // calls safe: two threads that both pass the `if (running_)` check
+        // above will both arrive here and the second assigns over a joinable
+        // thread, which is std::terminate(). No caller does that today --
+        // handle_restart_request() is CAS-guarded -- and serialising
+        // start_async() itself is out of this change's scope.
         server_thread_cv_.wait(guard, [this] { return !server_thread_joining_; });
         server_thread_ = std::thread(&Server::run_server, this);
     }
@@ -330,8 +335,14 @@ void Server::join_server_thread(std::thread::id current_id) {
     {
         std::lock_guard<std::mutex> guard(server_thread_mutex_);
         server_thread_joining_ = false;
+        // notify_all() INSIDE the lock, deliberately. A waiter only needs the
+        // mutex to re-check the predicate, so notifying after the unlock would
+        // let it return from stop() -- and the embedder run ~Server() -- while
+        // this thread is still about to touch server_thread_cv_. This is the
+        // last `this` access after the protocol's own "the thread is gone, you
+        // may destroy me now" signal, so it is the one that has to be inside.
+        server_thread_cv_.notify_all();
     }
-    server_thread_cv_.notify_all();
 }
 
 // Destructor only, after every thread has been joined. The pipe is never
