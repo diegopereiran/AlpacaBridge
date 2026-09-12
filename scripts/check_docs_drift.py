@@ -215,17 +215,56 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 # Driver file basename -> the name the async_connectable.h comment uses for it.
 # Only the drivers that CAN be classified as blocking need an entry; the
 # lock-free majority is not named anywhere, by design.
+# The value is (prose name, which list it belongs to). The list matters: the
+# header names these in TWO sentences, and one name is a prefix of another
+# across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
+# (switch). A plain `name in header` test therefore answered wrongly in both
+# directions: dropping iOptron from the telescope list still "found" it via the
+# switch entry (the exact drift this check exists to catch, passing green), and
+# a correctly-removed iOptron reported a STALE entry that could not be resolved
+# without editing an unrelated sentence. Each name is now looked for only in
+# its own list.
 DRIVER_PROSE_NAMES = {
-    "bisque_telescope_driver.cpp": "Bisque",
-    "celestron_telescope_driver.cpp": "Celestron",
-    "ioptron_telescope_driver.cpp": "iOptron",
-    "onstep_telescope_driver.cpp": "OnStep",
-    "skywatcher_telescope_driver.cpp": "Sky-Watcher",
-    "ioptron_switch_driver.cpp": "iOptron iMate PowerBox",
-    "touptek_switch_driver.cpp": "ToupTek StellaVita",
-    "zwo_asiair_switch_driver.cpp": "ZWO ASIAIR",
-    "zwo_asiair_plus_switch_driver.cpp": "ASIAIR Plus",
+    "bisque_telescope_driver.cpp": ("Bisque", "telescopes"),
+    "celestron_telescope_driver.cpp": ("Celestron", "telescopes"),
+    "ioptron_telescope_driver.cpp": ("iOptron", "telescopes"),
+    "onstep_telescope_driver.cpp": ("OnStep", "telescopes"),
+    "skywatcher_telescope_driver.cpp": ("Sky-Watcher", "telescopes"),
+    "ioptron_switch_driver.cpp": ("iOptron iMate PowerBox", "switches"),
+    "touptek_switch_driver.cpp": ("ToupTek StellaVita", "switches"),
+    "zwo_asiair_switch_driver.cpp": ("ZWO ASIAIR", "switches"),
+    "zwo_asiair_plus_switch_driver.cpp": ("ASIAIR Plus", "switches"),
 }
+
+# Where each list lives in async_connectable.h, as (start marker, end marker).
+# Both must be found or the check fails loudly: a header rewrite that moves
+# them must not silently turn this gate into a no-op.
+BLOCKING_LIST_SPANS = {
+    "telescopes": ("create that hazard are the", "telescopes."),
+    "switches": ("The wrapper-backed switch drivers (", ")"),
+}
+
+
+def _blocking_list_spans(header):
+    """{list name: text} for each blocking list, or ({}, [failure])."""
+    # Strip `//` comment markers and collapse the wrapping so a name split
+    # across two comment lines still matches.
+    flat = " ".join(line.strip().lstrip("/").strip() for line in header.splitlines())
+    flat = re.sub(r"\s+", " ", flat)
+    spans = {}
+    failures = []
+    for name, (start, end) in BLOCKING_LIST_SPANS.items():
+        i = flat.find(start)
+        j = flat.find(end, i + len(start)) if i >= 0 else -1
+        if i < 0 or j < 0:
+            failures.append(
+                "BLOCKING-LIST SPAN NOT FOUND: could not locate the '%s' list in "
+                "async_connectable.h (looked for %r ... %r). The list was moved or reworded -- "
+                "update BLOCKING_LIST_SPANS in %s, or this check silently stops checking."
+                % (name, start, end, Path(__file__).name))
+            continue
+        spans[name] = flat[i:j + len(end)]
+    return spans, failures
 
 
 def _matching_brace(text, open_index):
@@ -291,30 +330,39 @@ def check_blocking_get_connected_list():
         return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
 
     header = read("AlpacaCore/include/alpacacore/async_connectable.h")
+    spans, span_failures = _blocking_list_spans(header)
+    failures.extend(span_failures)
+    if span_failures:
+        return failures
+
+    def named(entry):
+        prose, which = entry
+        return prose in spans[which]
+
     for basename, kind in sorted(kinds.items()):
         if kind == "lock-free":
             # The lock-free majority is deliberately unnamed. What matters is
             # that it is not named as blocking: a driver made lock-free (as
             # SynScan was by #130) must come OUT of the list.
-            prose = DRIVER_PROSE_NAMES.get(basename)
-            if prose and prose in header:
+            entry = DRIVER_PROSE_NAMES.get(basename)
+            if entry and named(entry):
                 failures.append(
                     "STALE BLOCKING-LIST ENTRY: %s's get_connected() is lock-free, but "
                     "async_connectable.h still names '%s' among the drivers that block. Remove it there "
-                    "and from DRIVER_PROSE_NAMES." % (basename, prose))
+                    "and from DRIVER_PROSE_NAMES." % (basename, entry[0]))
             continue
-        prose = DRIVER_PROSE_NAMES.get(basename)
-        if prose is None:
+        entry = DRIVER_PROSE_NAMES.get(basename)
+        if entry is None:
             failures.append(
                 "UNNAMED BLOCKING DRIVER: %s's get_connected() is %s, so it blocks behind its connect "
                 "sequence, but no prose name is registered for it. Add it to DRIVER_PROSE_NAMES in %s "
                 "and to the list in async_connectable.h -- the router rule and the pending_mutex_ "
                 "ordering both depend on that list being complete." % (basename, kind, Path(__file__).name))
             continue
-        if prose not in header:
+        if not named(entry):
             failures.append(
-                "MISSING FROM THE BLOCKING LIST: %s's get_connected() is %s, but async_connectable.h "
-                "does not name '%s'." % (basename, kind, prose))
+                "MISSING FROM THE BLOCKING LIST: %s's get_connected() is %s, but async_connectable.h's "
+                "%s list does not name '%s'." % (basename, kind, entry[1], entry[0]))
     return failures
 
 
