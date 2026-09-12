@@ -168,8 +168,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO ASI Camera SDK Version 1.40 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
-- **Tested models**: ASI585MC Pro (cooled, IMX585), ASI533MC Pro (cooled colour, IMX533, 3008x3008 RGGB) and ASI120MM Mini (uncooled mono guide camera, 1280x960) on Linux arm64.
-- **ConformU**: 4.5.0 — ASI585MC Pro: 0 errors, 0 issues, 0 timing issues. 4.5.1 — ASI533MC Pro, 2026-09-12: 0 errors, 0 issues, 0 timing issues. 4.5.1 — ASI120MM Mini, 2026-09-13 (re-validation; the previous report was ConformU 4.2.1 against Camera interface version 3, so it did not exercise `DeviceState`): 0 errors, 0 issues, 0 timing issues. (Note: ConformU 4.5.0 on arm64 has a known timing-report bug unrelated to any driver — see General Notes above.)
+- **Tested models**: ASI585MC Pro (cooled, IMX585) and ASI533MC Pro (cooled colour, IMX533, 3008x3008 RGGB) on Linux arm64.
+- **ConformU**: 4.5.0 — ASI585MC Pro: 0 errors, 0 issues, 0 timing issues. 4.5.1 — ASI533MC Pro, 2026-09-12: 0 errors, 0 issues, 0 timing issues. (Note: ConformU 4.5.0 on arm64 has a known timing-report bug unrelated to any driver — see General Notes above.)
 
 </details>
 
