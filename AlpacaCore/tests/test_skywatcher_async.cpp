@@ -1088,6 +1088,58 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher - a RightAscensionRate write during a long East pulse survives the post-stop verify",
+          "[skywatcher][telescope][hemisphere]") {
+    // Round-4 review note: stop_axis() re-derives the restore rate under the
+    // lock -- that is what makes set_right_ascension_rate()'s RA-axis skip
+    // safe, since the setter defers to "the busy operation's restore path".
+    // But the post-stop verify that follows was still handed the DISPATCH-time
+    // capture. With the two disagreeing, live_rate_change_took() measures the
+    // correctly restored axis, finds it nearer the pulse rate than the stale
+    // expectation, calls it "did not take" and resends ":I" at the pre-write
+    // period. The client's offset is silently dropped and
+    // cmd_axis_rate_deg_s_[0] stops describing what the axis is running.
+    //
+    // Needs a pulse at or past kMinPulseForRateVerifyMs (1500 ms) for that
+    // verify to run at all, and an offset big enough to move the
+    // classification: East, 2 s, +0.3 s/s (the threshold works out near
+    // 0.25 s/s, and only on East).
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // past the ramp
+
+    const auto ra_travel = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        return std::abs(mount.physical_degrees(1) - p0);
+    };
+    const double plain_travel = ra_travel();
+    REQUIRE(plain_travel > 0.0);
+
+    driver->pulse_guide(2, 2000);  // East, 2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    REQUIRE(driver->get_is_pulse_guiding());
+    driver->set_right_ascension_rate(0.3);  // deferred: the RA axis is the pulse's
+    REQUIRE(driver->get_right_ascension_rate() == 0.3);
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));  // past the verify window
+
+    // The restore applied sidereal * (1 - 0.3). Resent at the stale rate the
+    // axis runs at plain sidereal and travels the full distance.
+    const double offset_travel = ra_travel();
+    INFO("plain travel " << plain_travel << " deg, with +0.3 s/s written mid-pulse " << offset_travel << " deg");
+    CHECK(offset_travel < 0.85 * plain_travel);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher - a DeclinationRate write during an RA pulse is applied, not stranded",
           "[skywatcher][telescope][hemisphere]") {
     // Round-3 review finding, and the third instance of the same guard: the
@@ -1379,7 +1431,7 @@ TEST_CASE("SkyWatcher northern hemisphere - SideOfPier flips with hour angle and
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
     CHECK(driver->get_side_of_pier() == 0);
 
-    driver->slew_to_coordinates_async(east_ra, dec);  // ~180 deg RA jump, see sibling test
+    driver->slew_to_coordinates_async(east_ra, dec);  // 120 deg RA jump, see sibling test
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 90000));
     CHECK(driver->get_side_of_pier() == 1);
 

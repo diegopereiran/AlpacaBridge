@@ -1257,6 +1257,15 @@ public:
                 if (!ra_live_write_sent) {
                     return;
                 }
+                // Deliberately NOT given stop_axis()'s ra_reverses branch: it
+                // writes ":I" + ":J" in place with no ":G", so a re-derived
+                // rate whose SIGN differs from the running one changes the
+                // period and leaves the axis turning the old way. Reached only
+                // when the dispatch ":J" throws after the ":I" went out, and a
+                // pure hemisphere flip preserves the magnitude, so the practical
+                // exposure is a period that is already correct. Recorded so the
+                // asymmetry with stop_axis() reads as a choice rather than an
+                // oversight (round-4 review note).
                 constexpr int kRestoreAttempts = 3;
                 std::string last_error;
                 for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
@@ -1370,7 +1379,11 @@ public:
                                            dispatch_max_window);
                 verify_elapsed = std::chrono::steady_clock::now() - verify_start;
             }
-            auto stop_axis = [this, axis, restore_tracking, pulse_restart]() {
+            // What stop_axis() actually restored, for the post-stop verify
+            // below. Seeded with the dispatch-time capture so a stop that
+            // never ran (or a non-restoring pulse) behaves as before.
+            double applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
+            auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate]() {
                 auto& proto = SkyWatcherProtocolWrapper::instance();
                 // Re-derived here, NOT the value captured at dispatch: since
                 // the drive direction became hemisphere-dependent, a
@@ -1387,6 +1400,7 @@ public:
                 if (restore_tracking) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     ra_restore_rate_deg_per_sec = effective_ra_rate_locked();
+                    applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
                     // An in-place ":I" changes the PERIOD only; direction is
                     // latched by the ":G" that start_speed_motion_locked()
                     // sends. So a restore whose sign no longer matches what
@@ -1476,7 +1490,19 @@ public:
             // pulse task ~450 ms (or more) longer, which the next command's
             // reap must join. Not worth that latency on short guide pulses.
             if (stopped && restore_tracking && !pulse_restart && duration >= kMinPulseForRateVerifyMs) {
-                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, ra_restore_rate_deg_per_sec, pulse_task_cancel_);
+                // What stop_axis() RE-DERIVED, not the dispatch-time capture.
+                // The two differ whenever effective_ra_rate_locked() moved
+                // during the pulse -- a RightAscensionRate write (deferred by
+                // the RA-axis busy skip precisely so this restore applies it)
+                // or a SiteLatitude crossing. Checking against the stale value
+                // made live_rate_change_took() classify the correctly restored
+                // axis as "did not take" and resend ":I" at the pre-write
+                // period, silently dropping the client's offset and leaving
+                // cmd_axis_rate_deg_s_[0] describing a rate the axis is not
+                // running. Narrow (East pulses, offset > ~0.25 s/s) but it is
+                // exactly the contract set_right_ascension_rate()'s skip rests
+                // on (round-4 review note).
+                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, applied_ra_restore_rate, pulse_task_cancel_);
             }
             if (!stopped) {
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
