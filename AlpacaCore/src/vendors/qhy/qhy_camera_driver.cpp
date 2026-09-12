@@ -2277,6 +2277,8 @@ private:
         // Same double-start guard as start_temp_control_thread.
         std::lock_guard<std::mutex> start_lock(thread_start_mutex_);
         std::string id;
+        std::shared_ptr<WorkerStopSignal> stop_flag;
+        std::shared_ptr<std::atomic<bool>> running_flag;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (telemetry_thread_.joinable()) {
@@ -2285,17 +2287,24 @@ private:
             // Fresh signal per generation, not a reset of the old one: a
             // previous generation's timed-out-and-detached zombie keeps its
             // own copy, and resetting in place would un-stop it (same
-            // reasoning as the temp worker's stop_flag).
-            telemetry_thread_stop_ = std::make_shared<WorkerStopSignal>();
-            telemetry_thread_running_ = std::make_shared<std::atomic<bool>>(false);
+            // reasoning as the temp worker's stop_flag). Both flags are
+            // captured into locals under the same lock that publishes them,
+            // exactly as start_temp_control_thread() does, so the lambda
+            // never re-reads a member that another writer could reassign,
+            // and the running flag is constructed true so a disconnect
+            // interleaving here never observes a published-but-false flag.
+            stop_flag = std::make_shared<WorkerStopSignal>();
+            running_flag = std::make_shared<std::atomic<bool>>(true);
+            telemetry_thread_stop_ = stop_flag;
+            telemetry_thread_running_ = running_flag;
             id = camera_id_.value_or("");
         }
         if (id.empty()) {
+            // No worker will run for this generation, so do not leave a
+            // published flag claiming one is in flight.
+            running_flag->store(false);
             return;
         }
-        auto stop_flag = telemetry_thread_stop_;
-        auto running_flag = telemetry_thread_running_;
-        running_flag->store(true);
         std::thread t([this, id, stop_flag, running_flag, sdk_ptr = &sdk_]() {
             // Clears on every exit path, so the bounded join below can tell a
             // finished worker from one that needs detaching.
