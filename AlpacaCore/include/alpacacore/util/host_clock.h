@@ -113,8 +113,12 @@ public:
             hooks_ = std::move(next);
         }
         // Outside the lock: the new probe may block, and re-running it here
-        // means has_rtc() answers from the new hooks immediately rather than
-        // keeping the old hooks' cached answer until the next timer tick.
+        // means has_rtc() answers from the new hooks rather than keeping the
+        // old hooks' cached answer until the next timer tick. Two set_hooks()
+        // calls racing each other, or one racing the server's probe thread,
+        // can leave rtc_ holding the losing snapshot's answer until the next
+        // refresh_rtc(); a test-only seam does not need the generation
+        // counter that would close that window.
         refresh_rtc();
     }
 

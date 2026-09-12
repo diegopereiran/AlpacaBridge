@@ -369,13 +369,18 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
     // and that a blocking probe cannot park a concurrent set_hooks().
     std::atomic<bool> stop{false};
     std::atomic<int> reads{0};
+    // A hang here (set_hooks() starved on the mutex, a reader wedged) would
+    // otherwise run to the CI job timeout; the deadline turns it into a red
+    // CHECK instead.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    const auto expired = [&] { return std::chrono::steady_clock::now() >= deadline; };
     alpacacore::util::HostClock c([] { return false; },
                                   [](std::chrono::system_clock::time_point, std::string&) { return true; });
 
     std::vector<std::thread> readers;
     for (int i = 0; i < 4; ++i) {
         readers.emplace_back([&] {
-            while (!stop.load()) {
+            while (!stop.load() && !expired()) {
                 // The three reads the router actually makes on a request path.
                 static_cast<void>(c.source());
                 static_cast<void>(c.enabled());
@@ -386,12 +391,12 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
     }
     // A stand-in for the server's RTC probe thread, which is not a request path.
     std::thread prober([&] {
-        while (!stop.load()) {
+        while (!stop.load() && !expired()) {
             c.refresh_rtc();
         }
     });
 
-    for (int i = 0; i < 200; ++i) {
+    for (int i = 0; i < 200 && !expired(); ++i) {
         const bool synced = (i % 2) == 0;
         c.set_hooks([synced] { return synced; },
                     [](std::chrono::system_clock::time_point, std::string&) { return true; },
@@ -403,5 +408,6 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
         t.join();
     }
     prober.join();
+    CHECK_FALSE(expired());
     CHECK(reads.load() > 0);
 }
