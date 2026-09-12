@@ -22,7 +22,8 @@ Five rule families, not one:
 5. A registration file must use `StressCallGuard` the way AGENTS.md documents
    it (issues #379, #334), or be named in `GUARD_ALLOWLIST` with a reason:
    the guard present, `CHECK(...unexpected_count())`, `INFO(...report())`,
-   `CHECK(...total_calls())`, and no local `call()` helper in either of the
+   `CHECK(...total_calls() > 0)` (the comparison is part of the rule: `>= 0`
+   is the same vacuity), and no local `call()` helper in either of the
    two forms this repo has used (a file-scope function/template, or an
    `auto call = [...]` lambda). A stale allow-list entry is itself a failure.
    See check_guard_usage().
@@ -310,8 +311,11 @@ GUARD_ALLOWLIST = {
 # `call([&] {...})` matches neither, so only the definition is reported.
 # `[^\S\n]` rather than `\s` inside the return-type class: the definition is
 # one line, and a class that admits newlines could span into the next one.
+# A keyword before `call(` is a USE (`return call(fn);`, `else call(fn);`,
+# `throw call(...)`), not a return type, so those lines are excluded.
 LOCAL_CALL_HELPER_RE = re.compile(
-    r"^\s*(?:static\s+)?\w[\w:<>,&*]*(?:[^\S\n][\w:<>,&*]*)*\bcall\s*\("
+    r"^\s*(?:static\s+)?(?!(?:return|else|throw|co_return|co_yield|case|goto|new|delete|await)\b)"
+    r"\w[\w:<>,&*]*(?:[^\S\n][\w:<>,&*]*)*\bcall\s*\("
     r"|^\s*(?:static\s+)?(?:const\s+)?auto\s+call\s*=\s*\[",
     re.M,
 )
@@ -1237,6 +1241,13 @@ def self_test():
                      "}\n")
         check("main() passes when call() is only invoked, not defined",
               run_main_with(call_site) == 0)
+        keyword_site = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
+                        "  auto f = [&] { return call(1); };\n"
+                        "  if (f()) {} else call(2);\n"
+                        + GUARDED_BODY +
+                        "}\n")
+        check("main() passes when call() follows a keyword (a use, not a definition)",
+              run_main_with(keyword_site) == 0)
         # Rule 5 reads comment-stripped text, like rules 1-3: a closing CHECK
         # that has been commented out must not count as present.
         commented_out = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
