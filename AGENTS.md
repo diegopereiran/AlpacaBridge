@@ -1843,8 +1843,12 @@ below was one of them.
   slew is complete only when the axis reads stopped AND two `:j` reads 60 ms apart agree
   (`wait_axis_stationary_locked`, also between refinement gotos); `Slewing` stays true until
   tracking is restarted; the restart is rate-checked over 300 ms and redone once with a WARN
-  ("Post-slew tracking restart: RA axis running at N counts/s") if off by >25%. Grep for that
-  WARN if a 2x ever recurs. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
+  ("Post-slew tracking restart: RA axis running at N counts/s") if off by >25%. The check is
+  skipped, with an INFO naming the count, when the window cannot accumulate 4 counts: ":j" is
+  whole counts and both reads truncate, so below that every possible reading lands outside the
+  tolerance and the check would condemn a healthy axis (an effective RA rate near zero, e.g.
+  RightAscensionRate ~0.9 nearly cancelling sidereal, is the way in). Grep for that WARN if a
+  2x ever recurs, and for "rate check skipped" if a slew was never verified. Power was a suspect (mount fed from an SVBONY SV241's 12 V rail; the
   event followed a 26 s full-speed slew) but was not proven.
 - **Goto aim-ahead constants are rig-specific: measure them.** `kGotoRampSeconds` (2.5 s) and
   `kTrackingResumeSeconds` (0.7 s) were tuned on the Wave 100i. On the EQM-35 the landing-to-`:J1`
