@@ -2041,8 +2041,8 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 namespace {
 // Defined further down with the management guards; also used by the one
 // device setter with a host-level side effect (open-astro#401).
-std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t server_tx_id,
-                                                    const char* what);
+std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
+                                                    std::uint32_t server_tx_id, const char* what);
 
 void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
     const auto cutoff = std::chrono::steady_clock::now() - kClientConnectionStaleAfter;
@@ -3239,7 +3239,7 @@ Response Router::dispatch_telescope_method(
             // and latch ClockSource, the same host-level effect the synctime
             // endpoint guards. A browser page on another origin must not be
             // able to fire it; native Alpaca clients send no Origin and pass.
-            if (auto rejected = reject_cross_origin_request(request, server_tx_id, "UTCDate")) {
+            if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "UTCDate")) {
                 return *rejected;
             }
             if (request.method() == HttpMethod::GET) {
