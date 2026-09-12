@@ -751,7 +751,7 @@ tells you exactly where it looked.
 
 | Component | Location |
 |-----------|----------|
-| SDK Files | `external/<Vendor>/<sdk folder>/` (differs per vendor, fixed per vendor: the literal path in that vendor's `CMakeLists.txt`) |
+| SDK Files | the literal root in that vendor's `CMakeLists.txt`: `external/<Vendor>/<sdk folder>/` for ZWO, QHY, ToupTek and Player One, but `external/SVBONY/` itself (with `include/` and `lib/` directly under it) for SVBONY |
 | Wrapper Header | `include/alpacacore/vendor/<vendor>/<vendor>_sdk_wrapper.h` |
 | Wrapper Implementation | `src/vendors/<vendor>/<vendor>_sdk_wrapper.cpp` |
 | Driver Implementation | `src/vendors/<vendor>/<vendor>_<device>_driver.cpp` |
