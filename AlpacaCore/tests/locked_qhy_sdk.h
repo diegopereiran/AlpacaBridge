@@ -29,7 +29,8 @@ namespace alpacacore::test {
 
 /**
  * Thread-safe decorator over any QHYSDK — every call forwards to the inner
- * implementation under one mutex.
+ * implementation under one mutex, except cancel_exposure(), which has its
+ * own (see below).
  *
  * Exists for the concurrency stress harness (issue #101): FakeQHYSDK is
  * deliberately NOT thread-hardened (single-connect-path tests don't need it),
@@ -45,19 +46,21 @@ namespace alpacacore::test {
  * holding one mutex across a blocking call would serialize the storm into a
  * queue. See rule 1 in FakeQHYSDK's class comment.
  *
- * One production rule this decorator deliberately does NOT preserve:
+ * One production rule this decorator DOES preserve, since open-astro#339:
  * QHYSDKWrapper::cancel_exposure() skips the per-handle call_mutex on purpose
  * (AGENTS.md, "Every SDK call is serialized against its physical handle"),
  * because its whole job is to interrupt a GetQHYCCDSingleFrame blocked on
  * another thread — serializing it the same way as every other call would
  * deadlock it behind the very call it needs to cancel. Here, cancel_exposure()
- * goes through the SAME mutex as everything else. That is safe only as long
- * as the rule above holds (no fake method blocks) — the moment a fake gains a
- * deliberate delay (to test a real timeout path, say), this decorator turns
- * that production safety valve into a deadlock instead of a no-op. Nothing
- * mechanical stops that: the no-blocking rule is convention, and making it
- * enforceable is issue #339 — this decorator is the reason that issue matters
- * rather than being tidiness.
+ * takes cancel_mutex_ instead of mutex_: cancels are serialised against each
+ * other but NOT against the other forwards, so a cancel can overtake an
+ * in-flight call (e.g. a fake method blocked in before_call to model a
+ * timeout) exactly as production lets it. That is sound only because the
+ * fake's cancel_exposure body touches no state shared with the call it
+ * overtakes; a fake whose cancel starts mutating shared state must go back
+ * under mutex_ and give up the overtaking property. slowest_call_ms() is the
+ * mechanical check that no OTHER fake method has quietly gained a blocking
+ * call.
  */
 class LockedQHYSDK : public vendor::qhy::QHYSDK {
 public:
