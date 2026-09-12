@@ -1015,9 +1015,15 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
 // ConformU-validated fix above requires: "WE", not constant). Which
 // MECHANICAL branch realises each side is the #261 question, and it is
 // settled by the physical oracle in test_skywatcher_pointing.cpp (#432):
-// the pierEast branch is a2 >= 0 north of the equator and a2 < 0 south of
-// it, because the mount faces the opposite pole there. The labels below are
-// therefore the same in both hemispheres while the axis branch mirrors.
+// the pierEast branch is a2 >= 0 in BOTH hemispheres. get_side_of_pier()
+// applies that test unconditionally, ra_dec_to_axis_degrees_locked() picks
+// the branch from the sky hour angle in both hemispheres, and
+// test_skywatcher_pointing.cpp asserts a2 > 0 alongside pierEast at latitude
+// -35. So neither the label nor the axis branch mirrors with hemisphere --
+// which is exactly #432's answer to #261, and why the cases below read the
+// same in both. (An earlier draft of this comment said the branch mirrors;
+// it never did, and a reader of the #261 cases would have been sent looking
+// for code that does not exist -- round-2 review finding on #448.)
 
 TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and agrees with destination",
           "[skywatcher][telescope][eqm35][hemisphere]") {
@@ -2085,6 +2091,85 @@ TEST_CASE("SkyWatcher async - the rate check reports a restart that did not take
     // loop exits after attempt 0 and gave_up can never become true.
     CHECK(condemned.load() >= 2);
     CHECK(gave_up.load());
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a rate write during the post-slew restore is applied", "[skywatcher][async]") {
+    // Round-2 review finding on #448: holding goto_in_progress_ across the
+    // restore made Slewing stay true (which is the point) but ALSO made
+    // axes_busy_locked() true, and the rate setters read that as "a goto owns
+    // the axes, its restore will re-apply this when it releases them". By
+    // then the restore had already run, and nothing re-applies after
+    // goto_in_progress_ clears: the write returned 200, RightAscensionRate
+    // read back the new value, and the axis kept the old rate for good.
+    // Before this PR the flag was already false during the restore, so the
+    // same write applied -- a regression introduced by the Slewing fix.
+    // restoring_tracking_ now carries the Slewing half on its own.
+    //
+    // Landing the write INSIDE the window has to be deterministic, and simply
+    // writing once Slewing is true is not: most of a slew is the refinement
+    // loop, where the axes really are busy and the restore that follows does
+    // re-apply the rate, so the write takes effect either way (measured).
+    // The one anchor that is inside the window and nowhere else is the rate
+    // check's own recovery: arm ONE wrong latch, so the restore's ":J" comes
+    // up at 2x, attempt 0 condemns it ("Post-slew tracking restart"), and the
+    // recovery stops and restarts the axis -- correctly this time, the knob
+    // being spent. The write goes in the moment that restart's ":J" lands,
+    // which is the top of attempt 1's ~450 ms sample, with mutex_ released
+    // and the restore long since finished.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    const auto ra_travel = [&] {
+        const double p0 = mount.physical_degrees(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return std::abs(mount.physical_degrees(1) - p0);
+    };
+    const double plain_travel = ra_travel();
+    REQUIRE(plain_travel > 0.0);
+
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    std::atomic<bool> condemned{false};
+    std::atomic<int> starts_at_warn{0};
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("Post-slew tracking restart") != std::string_view::npos && !condemned.load()) {
+                // The fake's own mutex, not the driver's: safe to take here.
+                starts_at_warn.store(mount.start_count(1));
+                condemned.store(true);
+            }
+        });
+
+    mount.restart_tracking_at_wrong_rate(1, 1);
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 0.15 + 24.0, 24.0), 30.0);
+
+    // Attempt 0 condemned the restore, then its recovery's restart went out.
+    REQUIRE(wait_until([&] { return condemned.load(); }, 60000));
+    REQUIRE(wait_until([&] { return mount.start_count(1) > starts_at_warn.load(); }, 20000));
+    REQUIRE(driver->get_slewing());  // the Slewing half of the contract still holds
+
+    driver->set_right_ascension_rate(driver->get_right_ascension_rate() + 0.5);
+    REQUIRE(driver->get_right_ascension_rate() == 0.5);
+
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    // +0.5 s/s slows the drive. Stranded, the axis keeps the rate the restore
+    // left it at and travels exactly as far as it did before the slew.
+    const double offset_travel = ra_travel();
+    INFO("plain travel " << plain_travel << " deg, after a +0.5 s/s write in the restore window " << offset_travel
+                         << " deg");
+    CHECK(offset_travel < plain_travel);
 
     driver->set_tracking(false);
     driver->set_connected(false);

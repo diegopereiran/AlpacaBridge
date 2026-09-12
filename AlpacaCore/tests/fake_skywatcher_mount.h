@@ -155,14 +155,6 @@ public:
 
     /// Number of ":K"/":L" stop commands received for an axis (regression:
     /// a superseded goto dispatch must still stop BOTH axes).
-    /// Gotos started on an axis (":J" with a goto motion mode latched).
-    /// stop_count/start_count cannot stand in: every dispatch stops both axes
-    /// first and a tracking restart is a ":J" too.
-    int goto_count(int axis) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return ax(axis).goto_count;
-    }
-
     int stop_count(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
         return ax(axis).stop_count;
@@ -302,7 +294,6 @@ private:
         uint32_t indexer = 0;
         int start_count = 0;
         int stop_count = 0;
-        int goto_count = 0;
         int short_landings = 0;    // goto landings to report stopped early (test knob)
         int64_t short_counts = 0;  // how far short of the target to report it (test knob)
         int coast_ms = 0;          // how long the remainder takes to arrive (test knob)
@@ -507,7 +498,6 @@ private:
                 a.running = true;
                 a.stopping = false;
                 if (a.in_goto) {
-                    ++a.goto_count;
                     a.goto_target &= 0xFFFFFF;
                 } else if (a.ignore_start_relatches > 0) {
                     --a.ignore_start_relatches;  // acked, preset still not applied

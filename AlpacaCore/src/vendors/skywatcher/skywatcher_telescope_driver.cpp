@@ -1417,13 +1417,15 @@ public:
         // kLandingSettleTimeout (2 s) -- about 7.5 s past the landing if
         // every bound is hit, against ~450 ms when the first sample agrees,
         // which is the ordinary case.
+        goto_in_progress_ = false;
+        restoring_tracking_ = true;
         try {
             restore_tracking_after_slew_locked(lock);
         } catch (...) {
-            goto_in_progress_ = false;
+            restoring_tracking_ = false;
             throw;
         }
-        goto_in_progress_ = false;
+        restoring_tracking_ = false;
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -1486,10 +1488,13 @@ public:
                 // Slewing stays true until tracking is running again: a client
                 // that fires motion into the restart window (ConformU's pulse
                 // test polls Slewing at 500 ms) otherwise races the board.
-                restore_tracking_after_slew_locked(lock);
                 goto_in_progress_ = false;
+                restoring_tracking_ = true;
+                restore_tracking_after_slew_locked(lock);
+                restoring_tracking_ = false;
             } catch (const std::exception& ex) {
                 goto_in_progress_ = false;
+                restoring_tracking_ = false;
                 // See the sync path: a cancelled goto (AbortSlew throws
                 // "Slew wait cancelled") must not leave its dispatch stamp
                 // for the next landing's overhead EMA.
@@ -1500,6 +1505,7 @@ public:
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Async slew failed: ") + ex.what());
             } catch (...) {
                 goto_in_progress_ = false;
+                restoring_tracking_ = false;
                 last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -1812,6 +1818,7 @@ public:
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         goto_in_progress_ = false;
+        restoring_tracking_ = false;
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
@@ -1894,6 +1901,7 @@ private:
         parking_ = false;
         homing_ = false;
         goto_in_progress_ = false;
+        restoring_tracking_ = false;
         tracking_rate_ = 0;
         ra_rate_sec_per_sidereal_sec_ = 0.0;
         dec_rate_arcsec_per_sec_ = 0.0;
@@ -2663,7 +2671,12 @@ private:
                             ax[i].bursting = false;
                         }
                     } else if (rate != 0.0 && now >= ax[i].next_start && connected_ && tracking_ &&
-                               !axes_busy_locked()) {
+                               !axes_busy_locked() && !restoring_tracking_) {
+                        // restoring_tracking_ is in this gate and NOT in
+                        // axes_busy_locked() on purpose: a burst here would
+                        // bump motion_generation_ under the post-slew rate
+                        // check's supersession guard and make it skip, while
+                        // a rate SETTER in the same window must go through.
                         // ~140 ms stop-landing overrun measured on hardware;
                         // shorten the wait so the physical on-duration matches
                         // the duty fraction. The RAW floor is correct here
@@ -3006,7 +3019,8 @@ private:
     // kPostSlewRateWindow and, if it is not the commanded drive rate, stop the
     // axis, wait for it to settle and restart once. Continuous drive only: a
     // duty-cycled sub-floor rate has no steady rate to sample. Runs inside the
-    // slew task with goto_in_progress_ still set, so Slewing stays true.
+    // slew task with restoring_tracking_ set, so Slewing stays true while the
+    // axes read free -- see that flag for why the two had to be separated.
     void verify_post_slew_tracking_rate_locked(std::unique_lock<std::mutex>& lock) {
         if (!tracking_ || ra_duty_rate_deg_s_ != 0.0) {
             return;
@@ -3166,7 +3180,7 @@ private:
         // locked step -- ConformU polls Slewing for park completion, and a
         // fast (localhost) poller caught the gap between the slew ending and
         // parked_ being set, declaring the park failed.
-        if (parking_ || homing_ || goto_in_progress_) {
+        if (parking_ || homing_ || goto_in_progress_ || restoring_tracking_) {
             return true;
         }
         return get_hardware_slewing_locked();
@@ -3680,6 +3694,19 @@ private:
     // expired during a slow refine iteration, ConformU proceeded, and the
     // next refinement goto fought its pulse-guide test for the motors).
     mutable bool goto_in_progress_ = false;
+    // Slewing must stay true across the post-slew tracking restore and its
+    // rate check, which release mutex_ for ~450 ms (up to ~7.5 s if every
+    // bound is hit), or a client polling Slewing sees the slew finish and
+    // fires motion into exactly the restart window the check exists to
+    // protect. But the axes are NOT owned in that window: the restore has
+    // already re-applied the drive, so a rate write landing there must be
+    // applied on the spot -- deferring it to "the busy operation's restore
+    // path" defers it to something that has already run, and the rate is
+    // stored and silently never driven. goto_in_progress_ answers both
+    // questions at once and cannot express that, hence a second flag, which
+    // get_slewing_locked() consults and axes_busy_locked() deliberately does
+    // not (round-2 review).
+    mutable bool restoring_tracking_ = false;
     // Measured goto-landing -> tracking-restart latency (EMA), see
     // kTrackingResumeSeconds; stamped by wait_for_slew_complete().
     mutable double resume_latency_seconds_ = kTrackingResumeSeconds;

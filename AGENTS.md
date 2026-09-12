@@ -1911,6 +1911,20 @@ below was one of them.
   first is dead code. The tell is a `const` generation captured outside the loop. Pinned by a
   case arming two bad latches instead of one (`restart_tracking_at_wrong_rate(1, 2)`) and
   asserting the second-attempt WARN.
+- **One flag cannot answer two questions, and "Slewing" is not "the axes are busy".** Holding
+  `goto_in_progress_` across the post-slew restore was the right fix for the Slewing half (a
+  client must not fire motion into the restart window) and a regression for the other: that
+  same flag feeds `axes_busy_locked()`, which the rate setters read as "a goto owns the axes,
+  its restore will re-apply this when it releases them". The restore had already run. A
+  `RightAscensionRate` write landing in the window returned 200, read back the new value, and
+  was never driven. Fixed with a second flag, `restoring_tracking_`, that
+  `get_slewing_locked()` consults and `axes_busy_locked()` does not. **Rule:** before widening
+  the span of a state flag, list every predicate that reads it and check each one still wants
+  the wider span. Here `get_slewing_locked()` did, `axes_busy_locked()` did not, and the
+  duty-cycle worker's start gate did -- so it names the new flag explicitly, because a burst
+  in that window would bump `motion_generation_` under the rate check's supersession guard and
+  make it skip. Same family as the per-axis `axes_busy_locked()` finding in #432: a predicate
+  that bundles several questions eventually gets asked the one it answers wrongly.
 - **Test seams have to model the failure, not a nearby one.** The landing-settle wait
   (`wait_axis_stationary_locked`) shipped with nothing in the suite failing without it, and the
   ramped-`:K` seam that looked like it should cover it could not: a ramped stop keeps `:f`
