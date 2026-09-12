@@ -75,8 +75,9 @@ public:
     // five mounts with their own clock (OnStep, Celestron, SynScan, iOptron,
     // ZWO AM) log it through ClientUtcWarning when they resolve the same
     // event the OTHER way, pointing by the client because the write set the
-    // mount's clock (open-astro#409). One event, one threshold, rather than
-    // seven literals that can drift apart.
+    // mount's clock (open-astro#409). One event, one threshold, shared by
+    // seven users through three sites (router, Sky-Watcher, ClientUtcWarning)
+    // rather than literals that can drift apart.
     static constexpr std::chrono::milliseconds kClientDisagreementWarn{2000};
 
     HostClock()
