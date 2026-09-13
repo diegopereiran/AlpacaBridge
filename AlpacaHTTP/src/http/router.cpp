@@ -9611,8 +9611,10 @@ bool Router::save_persisted_devices() const {
         // passes on the same file end as one dump's head plus the other's
         // tail, which the next start cannot parse and so loads NO devices.
         // Writing a sibling temp file and renaming it over the real one
-        // makes each save atomic for a reader (and for a power cut mid-write,
-        // the observatory case): the file is always a complete dump.
+        // makes each save atomic for a concurrent reader: the file is always
+        // a complete dump. (Atomic against readers, not against power loss:
+        // without fsync on the temp file and its directory, a crash right
+        // after the rename can still leave a zero-length file on ext4.)
         //
         // The file lock is taken BEFORE the snapshot (lock order: file, then
         // list, the same everywhere). Snapshotting first let worker A copy
