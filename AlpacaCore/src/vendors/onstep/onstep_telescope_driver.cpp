@@ -1048,9 +1048,11 @@ private:
         // simple dataflow model doesn't see that the call mutates
         // cached_status_, so it (wrongly) assumes both sides always match.
         if (was_slewing && !cached_status_.is_slewing) {
-            // Slew just completed: caches are stale and, per the telescope
-            // lessons in .github/instructions/onstep.instructions.md, some LX200-family mounts stop tracking
-            // during a GOTO — best-effort restore it. TODO: confirm against
+            // Slew just completed: caches are stale and, per the SynScan
+            // tracking-restoration lesson in
+            // .github/instructions/synscan.instructions.md, some LX200-family
+            // mounts stop tracking during a GOTO — best-effort restore it.
+            // TODO: confirm against
             // real OnStep firmware whether this restoration is needed.
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
