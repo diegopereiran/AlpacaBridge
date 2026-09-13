@@ -31,19 +31,9 @@ std::string trim(const std::string& s) {
     return s.substr(first, last - first + 1);
 }
 
-// The part of a zoneinfo path after its last "zoneinfo/" component, or ""
-// when there is none: "/usr/share/zoneinfo/America/Denver" -> "America/Denver",
-// "../usr/share/zoneinfo/Etc/UTC" -> "Etc/UTC" (Debian ships the relative
-// form), "/etc/localtime" -> "". The "posix/" and "right/" subtrees hold the
-// same zones under names a browser's Intl rejects, so that leading segment
-// is dropped: ".../zoneinfo/right/Europe/Berlin" -> "Europe/Berlin".
-std::string zone_from_zoneinfo_path(const std::string& path) {
-    static const std::string kMarker = "zoneinfo/";
-    const auto pos = path.rfind(kMarker);
-    if (pos == std::string::npos) {
-        return "";
-    }
-    std::string zone = path.substr(pos + kMarker.size());
+// "posix/Europe/Berlin" -> "Europe/Berlin": the posix/ and right/ subtrees
+// hold the same zones under names a browser's Intl rejects.
+std::string strip_zoneinfo_subtree(std::string zone) {
     for (const char* prefix : {"posix/", "right/"}) {
         const std::string p = prefix;
         if (zone.compare(0, p.size(), p) == 0) {
@@ -52,6 +42,20 @@ std::string zone_from_zoneinfo_path(const std::string& path) {
         }
     }
     return zone;
+}
+
+// The part of a zoneinfo path after its last "zoneinfo/" component, or ""
+// when there is none: "/usr/share/zoneinfo/America/Denver" -> "America/Denver",
+// "../usr/share/zoneinfo/Etc/UTC" -> "Etc/UTC" (Debian ships the relative
+// form), "/etc/localtime" -> "", with the subtree prefix dropped:
+// ".../zoneinfo/right/Europe/Berlin" -> "Europe/Berlin".
+std::string zone_from_zoneinfo_path(const std::string& path) {
+    static const std::string kMarker = "zoneinfo/";
+    const auto pos = path.rfind(kMarker);
+    if (pos == std::string::npos) {
+        return "";
+    }
+    return strip_zoneinfo_subtree(path.substr(pos + kMarker.size()));
 }
 
 }  // namespace
@@ -91,9 +95,13 @@ std::string host_time_zone(const char* tz_env, const std::string& etc_dir) {
         if (!tz.empty() && tz.front() == ':') {
             tz.erase(0, 1);
         }
-        // TZ may also carry an absolute zoneinfo path (":/usr/share/zoneinfo/X").
+        // TZ may also carry an absolute zoneinfo path (":/usr/share/zoneinfo/X"),
+        // or a path relative to the zoneinfo directory ("posix/America/Denver",
+        // legal for glibc); the same prefix rule applies to both.
         if (!tz.empty() && tz.front() == '/') {
             tz = zone_from_zoneinfo_path(tz);
+        } else {
+            tz = strip_zoneinfo_subtree(tz);
         }
         if (looks_like_iana_zone(tz)) {
             return tz;

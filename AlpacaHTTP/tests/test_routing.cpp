@@ -505,6 +505,9 @@ int main() {
         EXPECT(host_time_zone("Pacific/Auckland", etc_dir) == "Pacific/Auckland");
         EXPECT(host_time_zone(":Pacific/Auckland", etc_dir) == "Pacific/Auckland");
         EXPECT(host_time_zone(":/usr/share/zoneinfo/Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+        // A zoneinfo-relative TZ in the posix/ or right/ subtree, absolute or not.
+        EXPECT(host_time_zone("posix/Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+        EXPECT(host_time_zone(":/usr/share/zoneinfo/right/Pacific/Auckland", etc_dir) == "Pacific/Auckland");
 
         // /etc/timezone, trimmed.
         { std::ofstream(etc_dir + "/timezone") << "America/Denver\n"; }
