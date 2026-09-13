@@ -19,15 +19,13 @@
 #ifndef _WIN32
 
 #include <alpacacore/util/synscan_handset_probe.h>
-#include <fcntl.h>
-#include <termios.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <functional>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -42,30 +40,11 @@ class FakeSerialHandset {
 public:
     using Responder = std::function<std::string(const std::string& chunk)>;
 
-    explicit FakeSerialHandset(Responder responder) : responder_(std::move(responder)) {
-        master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
-        // Issue #424: the master goes non-blocking here, so a reply to a probe
-        // that has stopped draining can never park this thread inside write()
-        // and hang the join. Folded into the same throw as the other setup
-        // failures: a silent fallback to a blocking master would look exactly
-        // like the hang this exists to remove.
-        if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0 ||
-            !alpacacore::test::make_pty_nonblocking(master_fd_)) {
-            throw std::runtime_error("FakeSerialHandset: cannot open pty");
-        }
-        const char* name = ptsname(master_fd_);
-        if (name == nullptr) {
-            throw std::runtime_error("FakeSerialHandset: ptsname failed");
-        }
-        slave_path_ = name;
-        // Keep a slave handle open so the master never sees EIO between the
-        // probe's close and a later open (same trick as FakeGeminiFlatPanel).
-        keepalive_fd_ = open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
-        struct termios tty {};
-        if (keepalive_fd_ >= 0 && tcgetattr(keepalive_fd_, &tty) == 0) {
-            cfmakeraw(&tty);
-            tcsetattr(keepalive_fd_, TCSANOW, &tty);
-        }
+    explicit FakeSerialHandset(Responder responder) : pty_("FakeSerialHandset"), responder_(std::move(responder)) {
+        // The pty pair is owned by pty_ (fake_pty_write.h), constructed
+        // before this body runs; a setup failure throws from there with
+        // nothing left open (issue #387). Its keep-alive slave keeps the
+        // master clear of EIO between the probe's close and a later open.
         reader_ = std::thread([this] { run(); });
     }
 
@@ -74,18 +53,12 @@ public:
         if (reader_.joinable()) {
             reader_.join();
         }
-        if (keepalive_fd_ >= 0) {
-            close(keepalive_fd_);
-        }
-        if (master_fd_ >= 0) {
-            close(master_fd_);
-        }
     }
 
     FakeSerialHandset(const FakeSerialHandset&) = delete;
     FakeSerialHandset& operator=(const FakeSerialHandset&) = delete;
 
-    const std::string& slave_path() const { return slave_path_; }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     std::string received() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -97,13 +70,13 @@ private:
         while (!stop_.load()) {
             fd_set fds;
             FD_ZERO(&fds);
-            FD_SET(master_fd_, &fds);
+            FD_SET(pty_.master_fd(), &fds);
             timeval tv{0, 50000};  // 50 ms poll so stop_ is honoured promptly
-            if (select(master_fd_ + 1, &fds, nullptr, nullptr, &tv) <= 0) {
+            if (select(pty_.master_fd() + 1, &fds, nullptr, nullptr, &tv) <= 0) {
                 continue;
             }
             char buf[64];
-            const ssize_t n = read(master_fd_, buf, sizeof(buf));
+            const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
             if (n <= 0) {
                 continue;
             }
@@ -119,15 +92,15 @@ private:
                 // reply, which the silent / non-echo cases exercise on
                 // purpose -- whereas a blocking write to a pty the probe has
                 // stopped draining parks this thread and hangs the join.
-                alpacacore::test::pty_write_bounded(master_fd_, reply, stop_);
+                alpacacore::test::pty_write_bounded(pty_.master_fd(), reply, stop_);
             }
         }
     }
 
+    // First member: constructed before the reader, destroyed after it has
+    // been joined.
+    alpacacore::test::PtyPair pty_;
     Responder responder_;
-    int master_fd_ = -1;
-    int keepalive_fd_ = -1;
-    std::string slave_path_;
     std::thread reader_;
     std::atomic<bool> stop_{false};
     mutable std::mutex mutex_;
