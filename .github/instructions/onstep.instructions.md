@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/onstep/**,AlpacaCore/include/alpacacore/vendor/onstep/**,AlpacaCore/tests/*onstep*,AlpacaCore/conformu/**/OnStep*"
+applyTo: "AlpacaCore/src/vendors/onstep/**,AlpacaCore/include/alpacacore/vendor/onstep/**,AlpacaCore/tests/*onstep*,AlpacaCore/conformu/OnStep/**"
 ---
 
 ### OnStep
@@ -37,7 +37,7 @@ it is never reachable through `router.cpp` or the web UI.
   duration, not polled from the mount. Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread.
 - **SideOfPier must be computed from hour angle, not read from `:GU#`'s `E`/`W` flag** — the same
-  lesson iOptron already learned from its `:GEP#` raw pier value (see the iOptron notes above):
+  lesson iOptron already learned from its `:GEP#` raw pier value (see the [iOptron notes](ioptron.instructions.md)):
   a mount's raw physical-pier-side report does not match the ASCOM convention once tracking past
   the meridian. `:GU#` does encode pier side directly (confirmed on real hardware, firmware
   "On-Step" v10.23a, characters `E`/`W`), and an earlier version of this driver preferred that

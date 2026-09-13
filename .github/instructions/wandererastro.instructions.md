@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/wandererastro/**,AlpacaCore/include/alpacacore/vendor/wandererastro/**,AlpacaCore/tests/*wandererastro*,AlpacaCore/conformu/**/WandererAstro*"
+applyTo: "AlpacaCore/src/vendors/wandererastro/**,AlpacaCore/include/alpacacore/vendor/wandererastro/**,AlpacaCore/tests/*wandererastro*,AlpacaCore/conformu/WandererAstro/**"
 ---
 
 ### WandererAstro (WandererCover V4, WandererRotator Mini, SFW filter wheels, WandererBox Pro V3)

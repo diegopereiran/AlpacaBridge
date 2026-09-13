@@ -1,12 +1,12 @@
 ---
-applyTo: "AlpacaCore/src/vendors/touptek/**,AlpacaCore/include/alpacacore/vendor/touptek/**,AlpacaCore/tests/*touptek*,AlpacaCore/conformu/**/ToupTek*"
+applyTo: "AlpacaCore/src/vendors/touptek/**,AlpacaCore/include/alpacacore/vendor/touptek/**,AlpacaCore/tests/*touptek*,AlpacaCore/conformu/ToupTek/**"
 ---
 
 ### ToupTek
 
 Devices: Camera, Focuser (AAF — Astro Auto Focuser), FilterWheel (AFW — Astro Filter Wheel, AFW-M 5/7-slot), Switch (two backends: cooled-camera **Thermal** — dew heater + fan; and the **StellaVita PowerBox** — GPIO).
 
-- **Rebadge note**: the camera sold as **SVBONY SC715C** is this same G3M715C hardware and enumerates via this driver's SDK under the name `G3M715C` — configure it with vendor `touptek`, not `svbony`. See the SVBONY section above.
+- **Rebadge note**: the camera sold as **SVBONY SC715C** is this same G3M715C hardware and enumerates via this driver's SDK under the name `G3M715C` — configure it with vendor `touptek`, not `svbony`. See [SVBONY](svbony.instructions.md).
 
 SDK location: `AlpacaCore/external/ToupTek/toupcamsdk.20260128/` (shared between the camera, focuser, filter-wheel, and thermal-switch drivers). The StellaVita Switch driver uses **no SDK** — it is a libgpiod-only driver that happens to live under the ToupTek vendor.
 

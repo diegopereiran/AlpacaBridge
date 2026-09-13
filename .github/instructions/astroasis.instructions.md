@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/astroasis/**,AlpacaCore/include/alpacacore/vendor/astroasis/**,AlpacaCore/tests/*astroasis*,AlpacaCore/conformu/**/Astroasis*"
+applyTo: "AlpacaCore/src/vendors/astroasis/**,AlpacaCore/include/alpacacore/vendor/astroasis/**,AlpacaCore/tests/*astroasis*,AlpacaCore/conformu/Astroasis/**"
 ---
 
 ### Astroasis

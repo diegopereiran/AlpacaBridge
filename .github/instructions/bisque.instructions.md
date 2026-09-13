@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/bisque/**,AlpacaCore/include/alpacacore/vendor/bisque/**,AlpacaCore/tests/*bisque*,AlpacaCore/conformu/**/Bisque*"
+applyTo: "AlpacaCore/src/vendors/bisque/**,AlpacaCore/include/alpacacore/vendor/bisque/**,AlpacaCore/tests/*bisque*"
 ---
 
 ### Bisque (Paramount / TheSkyX)

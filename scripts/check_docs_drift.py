@@ -549,6 +549,7 @@ def check_blocking_get_connected_list():
     counted_paths = sorted(
         str(p.relative_to(ROOT))
         for pattern in ("AGENTS.md", "README.md", "docs/**/*.md",
+                        ".github/instructions/**/*.instructions.md",
                         "AlpacaCore/include/**/*.h", "AlpacaCore/src/**/*.h",
                         "AlpacaCore/src/**/*.cpp", "AlpacaCore/tests/**/*.h",
                         "AlpacaCore/tests/**/*.cpp",
@@ -1225,7 +1226,11 @@ def check_license_headers():
     return failures
 
 
+from check_instruction_structure import check as check_instruction_structure
+
+
 CHECKS = [
+    ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
     ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
     ("cppcheck --suppress sync (ci.yml vs ci_preflight.sh)", check_cppcheck_suppress_sync),
@@ -1382,6 +1387,9 @@ def self_test():
     check("memory references are found in source comments",
           MEMORY_COMMENT_PATH_RE.findall("// See docs/decisions/0001-example.md") ==
           ["docs/decisions/0001-example.md"])
+
+    from check_instruction_structure import self_test as instruction_self_test
+    instruction_self_test()
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:

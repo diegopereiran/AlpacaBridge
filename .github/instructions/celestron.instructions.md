@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/celestron/**,AlpacaCore/include/alpacacore/vendor/celestron/**,AlpacaCore/tests/*celestron*,AlpacaCore/conformu/**/Celestron*"
+applyTo: "AlpacaCore/src/vendors/celestron/**,AlpacaCore/include/alpacacore/vendor/celestron/**,AlpacaCore/tests/*celestron*,AlpacaCore/conformu/Celestron/**"
 ---
 
 ### Celestron (NexStar)

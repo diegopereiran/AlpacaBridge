@@ -912,7 +912,7 @@ After the driver is implemented, tested, and validated, update the applicable `.
 
 ### What to add
 
-1. **New vendor section** — If this is a new vendor, create `.github/instructions/<vendor>.instructions.md` with `applyTo` globs for its implementation and tests, following the existing vendor files:
+1. **New vendor section** — If this is a new vendor, create `.github/instructions/<vendor>.instructions.md` with `applyTo` globs for its implementation and tests, following the existing vendor files. Add a matching `.claude/rules/<vendor>.md` adapter and an entry in `docs/agent-instructions.md`; run `python3 scripts/check_docs_drift.py` to check discovery:
    - Devices supported
    - SDK locations or protocol documentation paths
    - Connection types

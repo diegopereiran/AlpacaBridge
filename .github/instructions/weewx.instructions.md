@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/weewx/**,AlpacaCore/include/alpacacore/vendor/weewx/**,AlpacaCore/tests/*weewx*,AlpacaCore/conformu/**/WeeWX*"
+applyTo: "AlpacaCore/src/vendors/weewx/**,AlpacaCore/include/alpacacore/vendor/weewx/**,AlpacaCore/tests/*weewx*,AlpacaCore/conformu/WeeWX/**"
 ---
 
 ### WeeWX

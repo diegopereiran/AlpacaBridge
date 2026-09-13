@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaHTTP/src/util/wifi_manager.cpp,AlpacaHTTP/include/alpacahttp/wifi_manager.h,AlpacaHTTP/tests/test_wifi_manager.cpp,AlpacaHTTP/web/**"
+applyTo: "AlpacaHTTP/**,docs/wifi-*.md"
 ---
 
 ### WiFi manager (AlpacaHTTP, 3.4.0)

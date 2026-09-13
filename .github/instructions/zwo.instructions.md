@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/zwo/**,AlpacaCore/include/alpacacore/vendor/zwo/**,AlpacaCore/tests/*zwo*,AlpacaCore/conformu/**/ZWO*"
+applyTo: "AlpacaCore/src/vendors/zwo/**,AlpacaCore/include/alpacacore/vendor/zwo/**,AlpacaCore/tests/*zwo*,AlpacaCore/conformu/ZWO/**"
 ---
 
 ### ZWO
@@ -16,7 +16,7 @@ SDK locations: `AlpacaCore/external/ZWO/ASI_Camera_SDK/`, `EAF/`, `EFW/`, `CAA/`
 
 #### ZWO ASIair Pro Switch (12V power ports via on-board GPIO)
 
-End-user setup instructions live in [AlpacaCore/PowerPorts.md](AlpacaCore/PowerPorts.md); this section captures the implementation-side context.
+End-user setup instructions live in [AlpacaCore/PowerPorts.md](../../AlpacaCore/PowerPorts.md); this section captures the implementation-side context.
 
 - **Hardware reality**: ASIair Pro is a Raspberry Pi 4 (BCM2711) with a custom HAT exposing four 12V DC outputs. The stock ZWO firmware enables them at boot via `/boot/config.txt` under `[all]`: `gpio=18,12,13,26=op,dh,pu` (all four configured as output, default-high, pull-up). The boot-time `dh` flag is why all four DC ports come up powered as soon as the Pi boots — gear plugged in is "live" before any userspace runs.
 - **Port-to-GPIO mapping** (Pi 4 ASIair Pro): Port 1 = GPIO 12, Port 2 = GPIO 13, Port 3 = GPIO 26, Port 4 = GPIO 18 on `/dev/gpiochip0`. Confirmed against the stock app via direct probe. Note: the order in `/boot/config.txt` (18,12,13,26) is *not* the port order.
@@ -35,7 +35,7 @@ The CM4-based ASIAIR Plus is electrically a Pi-class board and **reuses the exis
 - **Hardware reality**: Raspberry Pi Compute Module 4 (BCM2711). `/proc/device-tree/model` = "Raspberry Pi Compute Module 4 Rev 1.0"; `/dev/gpiochip0` = `pinctrl-bcm2711` (58 lines) — the same bank the Pro driver targets. The board also carries a PCA9685 at I²C `0x40` and an `asiair-overlay` referencing `pwm-2chan` / MCP23017 / AXP209, **but none of those drive the four DC power ports** — they are red herrings (LED/PMIC/expander). The DC ports are plain BCM GPIO.
 - **Port→GPIO mapping is IDENTICAL to the Pi 4 ASIAIR Pro**: Port 1 = GPIO 12, Port 2 = GPIO 13, Port 3 = GPIO 26, Port 4 = GPIO 18 on `/dev/gpiochip0`, active-high, default-on at boot. The stock `/boot/firmware/config.txt` directive is `gpio=12,13,18,26,5,6,16,17=op,dh` (the four DC ports plus four extra control lines 5/6/16/17 that the v1 driver ignores). So `default_asiair_pro_config()` is correct as-is for the CM4 Plus.
 - **Mapping verified by "drive a known config, read it back"**: stock-app duty cycles matched `pigs gdc` exactly (59% → 590, 34% → 340). Gotcha: a single `pigs r <pin>` snapshot of a PWM pin races the duty cycle and often reads 0 — use `pigs gdc` or sample ~200× before concluding anything about a pin.
-- **Reuse wiring**: router accepts `switchType: "asiair-plus-picm4"` and routes it to `create_zwo_asiair_switch` / `default_asiair_pro_config()` with the same config sanitization as `asiair` (the `picm4` id was pre-reserved on the roadmap). Web UI adds an "ASIAIR Plus 12V Power Switch (Pi CM4)" dropdown option that reuses the Pro's per-port GPIO table. End-user setup lives in [AlpacaCore/PowerPorts.md](AlpacaCore/PowerPorts.md) under "ZWO ASIair Plus (Raspberry Pi CM4)".
+- **Reuse wiring**: router accepts `switchType: "asiair-plus-picm4"` and routes it to `create_zwo_asiair_switch` / `default_asiair_pro_config()` with the same config sanitization as `asiair` (the `picm4` id was pre-reserved on the roadmap). Web UI adds an "ASIAIR Plus 12V Power Switch (Pi CM4)" dropdown option that reuses the Pro's per-port GPIO table. End-user setup lives in [AlpacaCore/PowerPorts.md](../../AlpacaCore/PowerPorts.md) under "ZWO ASIair Plus (Raspberry Pi CM4)".
 - **Same OS / coexistence constraints as the Pro**: stock OS is 32-bit `armv7l` (kernel `5.10.27-v7l`) — requires re-imaging to arm64; the stock `pigpiod` / `zwoair_imager` must be disabled (libgpiod vs pigpio line-ownership conflict, `EBUSY`).
 - **Model label (config-driven)**: the CM4 Plus reuses the Pro driver but reports the correct model. `AsiairSwitchConfig` carries a `model_name` (default `"ASIAIR Pro"`) that `get_name()`/`get_description()`/`get_driver_info()` interpolate; the router sets it to `"ASIAIR Plus (Pi CM4)"` for `switchType: asiair-plus-picm4`. So the same driver serves both the Pro and the CM4 Plus, differing only by this label. ConformU 4.3.0 re-validated 2026-06-04 on the live CM4 (host `astro.lan`, `192.168.1.171`) — 0 errors / 0 issues / 0 timing, reporting "ASIAIR Plus (Pi CM4)".
 - **Branding**: user-facing strings were normalized "ASIair" → **"ASIAIR"** (ZWO's actual product branding) across both switch drivers, the Web UI, and tests. Internal `switchType` ids (`asiair`, `asiair-plus-picm4`, `asiair-plus-rk3568`), log categories, and the gpiod consumer label stay lowercase/unchanged.

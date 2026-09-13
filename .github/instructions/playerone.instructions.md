@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/playerone/**,AlpacaCore/include/alpacacore/vendor/playerone/**,AlpacaCore/tests/*playerone*,AlpacaCore/conformu/**/Player One*"
+applyTo: "AlpacaCore/src/vendors/playerone/**,AlpacaCore/include/alpacacore/vendor/playerone/**,AlpacaCore/tests/*playerone*,AlpacaCore/conformu/Player One/**"
 ---
 
 ### Player One

@@ -7,6 +7,17 @@ Resolved incident records live in `docs/failures/`; design rationale lives in
 `docs/decisions/`. Keep current rules here and in scoped instruction files, with
 short pointers to those records rather than copying their history into new rules.
 
+## Load the complete instructions before working
+
+Read this entire file before planning, reviewing, or editing, even if the client
+has automatically supplied only its beginning. Read long files in bounded chunks
+until the end; a truncated tool result does not count as a complete read.
+Then read [the instruction index](docs/agent-instructions.md) and every scoped
+instruction file relevant to the task, including vendors mentioned in the request
+or affected through shared routing, configuration, SDKs, or tests. Follow relevant
+cross-references and memory records. Revisit the index when the task expands.
+These are required reads even when the client does not interpret `applyTo`.
+
 ## Repository Structure and Build Output
 
 - Keep build/output folders inside the owning project directory:

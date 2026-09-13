@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/vendors/ioptron/**,AlpacaCore/include/alpacacore/vendor/ioptron/**,AlpacaCore/tests/*ioptron*,AlpacaCore/conformu/**/iOptron*"
+applyTo: "AlpacaCore/src/vendors/ioptron/**,AlpacaCore/include/alpacacore/vendor/ioptron/**,AlpacaCore/tests/*ioptron*,AlpacaCore/conformu/iOptron/**"
 ---
 
 ### iOptron
