@@ -35,8 +35,8 @@ namespace util {
 //      /etc/localtime is a regular-file copy and so carries no name.
 //
 // Only a value that looks like an IANA name is returned: Area/City segments
-// of letters, digits, '_', '-' and '+', at least one '/', and not "localtime"
-// or "posixrules". The '/' requirement is what rejects a POSIX rule string
+// of letters, digits, '_', '-' and '+', and at least one '/' (which also
+// rejects the zoneinfo/ files "localtime" and "posixrules"). The '/' requirement is what rejects a POSIX rule string
 // ("EST5EDT,M3.2.0,M11.1.0"), which Intl cannot resolve; it also rejects the
 // few slash-free tzdb names Intl does accept ("UTC", "EST5EDT"), which then
 // report as "". Anything else is "" so the UI takes its browser-zone

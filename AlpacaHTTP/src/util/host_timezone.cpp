@@ -61,7 +61,10 @@ std::string zone_from_zoneinfo_path(const std::string& path) {
 }  // namespace
 
 bool looks_like_iana_zone(const std::string& name) {
-    if (name.empty() || name.size() > 64 || name == "localtime" || name == "posixrules") {
+    // "localtime" and "posixrules" (the two non-zone files in zoneinfo/)
+    // need no special case: neither has a '/', so the slash rule below
+    // already rejects them, and the resolver tests pin both.
+    if (name.empty() || name.size() > 64) {
         return false;
     }
     bool slash = false;

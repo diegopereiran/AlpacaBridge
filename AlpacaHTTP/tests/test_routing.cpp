@@ -482,7 +482,8 @@ int main() {
         EXPECT(!looks_like_iana_zone("UTC"));                     // no '/': a slash-free tzdb name, reported as unknown
         EXPECT(!looks_like_iana_zone("EST5EDT"));                 // likewise; the same shape as a POSIX rule prefix
         EXPECT(!looks_like_iana_zone("EST5EDT,M3.2.0,M11.1.0"));  // POSIX rule string, not an IANA name
-        EXPECT(!looks_like_iana_zone("localtime"));
+        EXPECT(!looks_like_iana_zone("localtime"));               // zoneinfo/ files that are not zones: no '/'
+        EXPECT(!looks_like_iana_zone("posixrules"));
         EXPECT(!looks_like_iana_zone("/America/Denver"));
         EXPECT(!looks_like_iana_zone("America/Denver/"));
         EXPECT(!looks_like_iana_zone("America//Denver"));
@@ -3881,11 +3882,14 @@ int main() {
         EXPECT(v.value("SyncSystemClockFromClients", false) == true);
         EXPECT(clock_router.sync_system_clock_from_clients());
         // open-astro#354: the host zone rides along as an IANA name or "".
-        // What it resolves to depends on the build host, so pin only the
-        // shape here; the resolver's own table is the block below.
+        // What it resolves to depends on the build host, so pin the payload
+        // to the resolver's own answer for this host (a stubbed-out
+        // desc["TimeZone"] = "" would fail on any host with a zone) and its
+        // shape; the resolver's own table is the block below.
         EXPECT(v.contains("TimeZone") && v["TimeZone"].is_string());
         {
             const std::string tz = v["TimeZone"].get<std::string>();
+            EXPECT(tz == alpacahttp::util::host_time_zone());
             EXPECT(tz.empty() || alpacahttp::util::looks_like_iana_zone(tz));
         }
 
