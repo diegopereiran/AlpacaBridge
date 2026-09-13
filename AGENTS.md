@@ -511,6 +511,17 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
   threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
   and the next frame restores service.
+- **Exception: a removed device node is a lost connection, not a fault (issue #445,
+  Sky-Watcher direct driver).** A quiet link can come back on the same fd; a node that is gone
+  cannot (the fd's link count is 0, writes fail `EIO`, and the held fd keeps the kernel from
+  reusing `/dev/ttyUSB0`, so the replugged adapter enumerates as `ttyUSB1`). There
+  `get_connected()` asks `SkyWatcherProtocolWrapper::link_alive()`, which compares the
+  configured path's `stat()` with the node opened at connect (no I/O, never waits on an
+  exchange) and closes the dead fd when it can; operations throw `NotConnected`; and a
+  `Connected=true` against the lost link reconnects instead of hitting the idempotency return.
+  Silence with the node still present keeps the rules above. The #237 drivers still treat a
+  removed node as a fault; that has not been changed. Tests: `sever_link()` on
+  `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
 
 ### Reconnect must not self-deadlock: `disconnect_locked()`
 

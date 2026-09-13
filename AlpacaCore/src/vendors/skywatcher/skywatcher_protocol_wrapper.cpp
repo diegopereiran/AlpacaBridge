@@ -28,6 +28,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -686,6 +687,45 @@ public:
         return connected_;
     }
 
+    // open-astro#445: whether the link is still there, without talking to the
+    // board and without waiting behind an exchange in flight (a Connected poll
+    // must stay fast). A serial link is gone when its configured path no
+    // longer resolves to the node that was opened: the node was removed (USB
+    // adapter pulled) or a by-id symlink now points at a replugged adapter.
+    // UDP has no such signal and reports the flag as-is. When the loss is seen
+    // and no exchange holds the link, it is torn down here, so the stale fd
+    // stops pinning the old device name.
+    bool link_alive() {
+        if (!connected_.load()) {
+            return false;
+        }
+#ifndef _WIN32
+        bool present = true;
+        {
+            std::lock_guard<std::mutex> lock(link_id_mutex_);
+            if (!link_path_.empty()) {
+                struct stat st {};
+                if (::stat(link_path_.c_str(), &st) != 0) {
+                    // Only "no such node" is loss; a permission or I/O error on
+                    // the lookup says nothing about the adapter.
+                    present = !(errno == ENOENT || errno == ENOTDIR);
+                } else {
+                    present = st.st_dev == link_dev_ && st.st_ino == link_ino_;
+                }
+            }
+        }
+        if (!present) {
+            std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
+            if (lock.owns_lock() && connected_.load()) {
+                ALPACA_LOG_WARN("SkyWatcher", "Serial device " + info_.port_path + " has gone away; link closed");
+                disconnect_locked();
+            }
+            return false;
+        }
+#endif
+        return connected_.load();
+    }
+
     std::string exchange(const std::string& frame, int timeout_ms, int expected_data_len = -1) {
         std::lock_guard<std::mutex> lock(io_mutex_);
         if (!connected_) {
@@ -730,9 +770,32 @@ private:
             alpacacore::util::mark_serial_port_closed(registered_port_);
             registered_port_.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock(link_id_mutex_);
+            link_path_.clear();
+        }
 #endif
         connected_ = false;
     }
+
+#ifndef _WIN32
+    // open-astro#445: the serial fd is unusable (the adapter left the bus).
+    // Close it -- releasing the port name and its registry claim -- and report
+    // NotConnected, which is what the client needs to act on, rather than a
+    // generic transport error on a link that still claims to be up.
+    [[noreturn]] void lose_serial_link_locked(const std::string& what) {
+        ALPACA_LOG_WARN("SkyWatcher", what + " on " + info_.port_path + "; serial link closed");
+        disconnect_locked();
+        throw AlpacaException(what + "; serial link to the motor controller lost", AlpacaError::NotConnected);
+    }
+
+    // The fd's node has been removed. Checked on the fd itself, so it holds
+    // even while the configured path resolves to a replugged adapter.
+    bool serial_node_removed_locked() const {
+        struct stat st {};
+        return ::fstat(serial_fd_, &st) != 0 || st.st_nlink == 0;
+    }
+#endif
 
     bool connect_serial(const ConnectionInfo& info) {
 #ifndef _WIN32
@@ -799,6 +862,14 @@ private:
         }
         tcflush(serial_fd_, TCIOFLUSH);
         registered_port_ = registry_key;
+        // open-astro#445: remember which node this path reached, for link_alive().
+        struct stat st {};
+        if (::fstat(serial_fd_, &st) == 0) {
+            std::lock_guard<std::mutex> lock(link_id_mutex_);
+            link_path_ = info.port_path;
+            link_dev_ = st.st_dev;
+            link_ino_ = st.st_ino;
+        }
         return true;
 #else
         (void)info;
@@ -893,6 +964,9 @@ private:
         // as this command's reply: a bare "=" ack command (":I") would then be
         // "acknowledged" by the previous command's data while its own frame
         // was never applied.
+        if (serial_node_removed_locked()) {
+            lose_serial_link_locked("Serial device removed");
+        }
         if (serial_dirty_) {
             settle_serial(200);  // ends with its own tcflush
             serial_dirty_ = false;
@@ -900,7 +974,11 @@ private:
             tcflush(serial_fd_, TCIFLUSH);
         }
         if (!util::write_all(serial_fd_, frame.data(), frame.size())) {
-            throw AlpacaException("Serial write failed: " + util::errno_string(errno));
+            const int err = errno;
+            if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                lose_serial_link_locked("Serial write failed: " + util::errno_string(err));
+            }
+            throw AlpacaException("Serial write failed: " + util::errno_string(err));
         }
         std::string reply;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -918,7 +996,14 @@ private:
                     throw AlpacaException("Motor controller reply overflow");
                 }
             } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
-                throw AlpacaException("Serial read failed: " + util::errno_string(errno));
+                const int err = errno;
+                if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF || serial_node_removed_locked()) {
+                    lose_serial_link_locked("Serial read failed: " + util::errno_string(err));
+                }
+                throw AlpacaException("Serial read failed: " + util::errno_string(err));
+            } else if (r == 0 && serial_node_removed_locked()) {
+                // A hung-up tty reads 0 bytes at once, which looks like a quiet board.
+                lose_serial_link_locked("Serial device removed");
             }
         }
         serial_dirty_ = true;
@@ -1131,13 +1216,20 @@ private:
 #endif
 
     mutable std::mutex io_mutex_;
-    bool connected_ = false;
+    // Written only under io_mutex_; atomic so link_alive() can read it without.
+    std::atomic<bool> connected_{false};
     ConnectionInfo info_{};
     std::atomic<bool> step_period_readback_{true};  // see step_period_readback()
 #ifndef _WIN32
     int serial_fd_ = -1;
     int socket_fd_ = -1;
     std::string registered_port_;  // canonical path marked open in the cross-vendor registry
+    // open-astro#445: the configured path and the node it reached at connect.
+    // Own leaf mutex so link_alive() never waits behind io_mutex_.
+    mutable std::mutex link_id_mutex_;
+    std::string link_path_;  // empty: nothing to watch (UDP, or disconnected)
+    dev_t link_dev_ = 0;
+    ino_t link_ino_ = 0;
     // Set after a UDP timeout/error: the next exchange runs a settle drain
     // before sending so a late reply cannot be mis-paired. Guarded by io_mutex_.
     bool link_dirty_ = false;
@@ -1164,6 +1256,8 @@ bool SkyWatcherProtocolWrapper::connect(const ConnectionInfo& info) { return pim
 void SkyWatcherProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 
 bool SkyWatcherProtocolWrapper::is_connected() const { return pimpl_->is_connected(); }
+
+bool SkyWatcherProtocolWrapper::link_alive() { return pimpl_->link_alive(); }
 
 std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, const std::string& data,
                                                     int timeout_ms_override) {

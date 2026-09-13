@@ -265,7 +265,9 @@ public:
 
     bool get_connected() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return connected_;
+        // open-astro#445: connected_ records that a connect succeeded; the
+        // link is asked too, so a pulled adapter reads false at once.
+        return connected_ && SkyWatcherProtocolWrapper::instance().link_alive();
     }
 
     void connect() override { start_connection_task(true); }
@@ -273,11 +275,29 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        if (!connected) {
+        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        bool relink = false;
+        if (connected) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            relink = connected_ && !protocol.link_alive();
+        }
+        if (!connected || relink) {
             // Join background task threads BEFORE taking mutex_ (they take it).
+            // A relink tears a session down too: a slew task left over from
+            // the lost link must not resume against the new one.
             cancel_async_tasks();
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        if (connected && connected_ && !protocol.link_alive()) {
+            // open-astro#445: a connect against a dead link used to hit the
+            // idempotency return below and report success with no reconnect.
+            // Settle the dead session first, then run the gates as for any
+            // disconnected device.
+            ALPACA_LOG_WARN("SkyWatcher", "Connect requested on a lost link; reconnecting");
+            protocol.disconnect();
+            connected_ = false;
+            reset_runtime_state_locked();
+        }
         if (!connected && record_disconnect_if_connect_in_flight(connected_)) {
             return;
         }
@@ -288,7 +308,6 @@ public:
             return;
         }
 
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
         if (connected) {
             // open-astro#274: the mount stores no site of its own, so an
             // unconfigured device would run on 0.0/0.0. hemisphere_south_locked()
@@ -332,31 +351,41 @@ public:
                 model_cache_.clear();
             }
 
-            axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
-            axis_params_[1] = protocol.get_axis_parameters(kAxisDec);
-
-            // Feature inquiry (":q" data 0x000001): bit 0x04 = home index
-            // sensor. Wave 100i reports it on both axes (0x100C); older
-            // boards reject ":q" entirely, so failure just disables AutoHome.
-            has_home_indexer_ = false;
+            // open-astro#445: the sequence below is the first thing the board
+            // is really asked (":e" above may fail by design). If it throws,
+            // the port leads nowhere useful: do not stay latched as connected.
             try {
-                uint32_t ra_features = protocol.get_feature(kAxisRa, kFeatureInquiry);
-                uint32_t dec_features = protocol.get_feature(kAxisDec, kFeatureInquiry);
-                has_home_indexer_ = (ra_features & 0x04) && (dec_features & 0x04);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-                // ":q" unsupported on this motor board.
-            }
+                axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
+                axis_params_[1] = protocol.get_axis_parameters(kAxisDec);
 
-            // First power-up: position registers default to the home offset but
-            // the controller reports "not initialized" and rejects motion until
-            // ":F" is sent. Only stamp the home position when uninitialized so a
-            // reconnect never clobbers an aligned session.
-            for (int axis = kAxisRa; axis <= kAxisDec; ++axis) {
-                AxisStatus status = protocol.inquire_status(axis);
-                if (!status.init_done) {
-                    protocol.set_position(axis, kHomeCounts);
-                    protocol.initialization_done(axis);
+                // Feature inquiry (":q" data 0x000001): bit 0x04 = home index
+                // sensor. Wave 100i reports it on both axes (0x100C); older
+                // boards reject ":q" entirely, so failure just disables AutoHome.
+                has_home_indexer_ = false;
+                try {
+                    uint32_t ra_features = protocol.get_feature(kAxisRa, kFeatureInquiry);
+                    uint32_t dec_features = protocol.get_feature(kAxisDec, kFeatureInquiry);
+                    has_home_indexer_ = (ra_features & 0x04) && (dec_features & 0x04);
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // ":q" unsupported on this motor board.
                 }
+
+                // First power-up: position registers default to the home offset but
+                // the controller reports "not initialized" and rejects motion until
+                // ":F" is sent. Only stamp the home position when uninitialized so a
+                // reconnect never clobbers an aligned session.
+                for (int axis = kAxisRa; axis <= kAxisDec; ++axis) {
+                    AxisStatus status = protocol.inquire_status(axis);
+                    if (!status.init_done) {
+                        protocol.set_position(axis, kHomeCounts);
+                        protocol.initialization_done(axis);
+                    }
+                }
+            } catch (...) {
+                protocol.disconnect();
+                connected_ = false;
+                reset_runtime_state_locked();
+                throw;
             }
 
             // Warm the position cache so first property reads stay inside
@@ -2001,7 +2030,9 @@ public:
 
 private:
     void check_connected() const {
-        if (!connected_) {
+        // open-astro#445: also refuse on a lost link, so cached position reads
+        // cannot keep answering from a mount that is no longer there.
+        if (!connected_ || !SkyWatcherProtocolWrapper::instance().link_alive()) {
             throw AlpacaException("Not connected to Sky-Watcher mount", AlpacaError::NotConnected);
         }
     }
