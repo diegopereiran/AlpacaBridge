@@ -72,7 +72,7 @@ struct AltAz {
  *
  * side_of_pier: -1 = unknown/not reported, 0 = pier east, 1 = pier west.
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
- * :GU# entirely (see AGENTS.md OnStep notes) — callers must fall back to an
+ * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
  */
 struct MountStatus {
@@ -109,7 +109,7 @@ struct TimeInfo {
  *
  * This wrapper isolates the serial command protocol and transport layer from
  * the driver implementation. All platform-specific code is hidden using the
- * PIMPL pattern. See AGENTS.md for the OnStep command reference.
+ * PIMPL pattern. See .github/instructions/onstep.instructions.md for the command reference.
  */
 class OnStepProtocolWrapper {
 public:

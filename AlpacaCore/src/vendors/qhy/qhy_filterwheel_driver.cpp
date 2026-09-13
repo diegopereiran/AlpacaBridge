@@ -120,7 +120,7 @@ public:
             // Deliberately no init_camera(): the CFW port works on the raw
             // opened handle (per the 25.09.29 SDK's ControlCFW.cpp sample,
             // which never calls InitQHYCCD; validated on real miniCam8M
-            // hardware -- see AGENTS.md), so the wheel doesn't need
+            // hardware -- see .github/instructions/qhy.instructions.md), so the wheel doesn't need
             // to wait on -- or trigger -- the imaging chip's init sequence.
             sdk_.open_camera(id);
             try {

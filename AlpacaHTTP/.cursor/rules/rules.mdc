@@ -1,6 +1,11 @@
 ---
 alwaysApply: true
 ---
+
+Before working, read the repository-root `AGENTS.md` in full and follow
+`docs/agent-instructions.md` (both one level above this component). Load the
+relevant scoped files even when working only on tests or shared configuration.
+
 # AlpacaHTTP - Cursor Rules
 
 These rules tell Cursor how to work inside the **AlpacaHTTP** repository.

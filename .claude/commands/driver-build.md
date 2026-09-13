@@ -741,10 +741,11 @@ It must print `Stress-test registration OK` and the new (vendor, device type) pa
 
 ## Step 9 — Vendor-specific notes
 
-Before implementing, read AGENTS.md for any vendor-specific notes that apply. Check:
+Before implementing, read the applicable `.github/instructions/<vendor>.instructions.md` file. Find it with:
 ```bash
-grep -A 50 "### <VendorName>" AGENTS.md
+rg --files .github/instructions | rg "/<vendor>\.instructions\.md$"
 ```
+Read the entire file; vendor sections are no longer in `AGENTS.md`.
 
 Apply any vendor-specific quirks, workarounds, or conventions documented there.
 
@@ -824,7 +825,7 @@ Read the current `SUPPORTED-DRIVERS.md` and add or update the entry for the new 
    - Any notable quirks or limitations for end users
    - Verified OS/Architecture list
 
-3. Also update `AGENTS.md` vendor-specific notes if any quirks or workarounds were discovered during validation.
+3. Also update the applicable `.github/instructions/<vendor>.instructions.md` with vendor-specific quirks or workarounds discovered during validation.
 
 ### Common ConformU failure patterns from past drivers
 
@@ -905,13 +906,13 @@ Every telescope driver in this project has hit most of these:
 
 3. **Motor speed**: Set motor speed to fast on connect so moves complete within ConformU's 60-second timeout.
 
-## Step 11 — Update AGENTS.md with lessons learned (MANDATORY)
+## Step 11 — Update repository instructions with lessons learned (MANDATORY)
 
-After the driver is implemented, tested, and validated, update `AGENTS.md` with any new knowledge discovered during the session. **This step is non-negotiable** — AGENTS.md is the project's living knowledge base and must grow with every driver session.
+After the driver is implemented, tested, and validated, update the applicable `.github/instructions/<vendor>.instructions.md` with vendor-specific knowledge and `AGENTS.md` with shared knowledge discovered during the session. **This step is non-negotiable** — these files are the project's living knowledge base.
 
 ### What to add
 
-1. **New vendor section** — If this is a new vendor, add a `### <Vendor>` section under `## Vendor-Specific Notes` following the existing format:
+1. **New vendor section** — If this is a new vendor, create `.github/instructions/<vendor>.instructions.md` with `applyTo` globs for its implementation and tests, following the existing vendor files. Add a matching `.claude/rules/<vendor>.md` adapter and an entry in `docs/agent-instructions.md`; run `python3 scripts/check_docs_drift.py` to check discovery:
    - Devices supported
    - SDK locations or protocol documentation paths
    - Connection types
@@ -937,7 +938,7 @@ After the driver is implemented, tested, and validated, update `AGENTS.md` with 
 
 ### How to update
 
-Read the current AGENTS.md, find the right section, and add the new notes. Follow the existing format — look at the SynScan, iOptron, Celestron, or SVBONY sections for examples of well-documented vendor notes.
+Read `AGENTS.md` and the applicable vendor instruction file, then add the notes in the right place. Follow the existing format — look at the SynScan, iOptron, Celestron, or SVBONY instruction files for examples of vendor notes.
 
 If in doubt about whether something is worth documenting, document it. A note that saves 30 minutes of debugging next time is always worth the two lines it takes to write.
 

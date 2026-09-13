@@ -48,7 +48,8 @@ namespace alpacacore::test {
  *
  * One production rule this decorator DOES preserve, since open-astro#339:
  * QHYSDKWrapper::cancel_exposure() skips the per-handle call_mutex on purpose
- * (AGENTS.md, "Every SDK call is serialized against its physical handle"),
+ * (.github/instructions/qhy.instructions.md, "Every SDK call is serialized
+ * against its physical handle"),
  * because its whole job is to interrupt a GetQHYCCDSingleFrame blocked on
  * another thread — serializing it the same way as every other call would
  * deadlock it behind the very call it needs to cancel. Here, cancel_exposure()

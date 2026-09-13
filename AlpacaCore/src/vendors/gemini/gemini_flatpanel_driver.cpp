@@ -215,7 +215,7 @@ public:
         // Report the last commanded brightness synchronously rather than
         // re-querying the panel: ConformU reads Brightness immediately after
         // CalibratorOn and expects the just-set value back (same lesson as
-        // WandererCover -- see AGENTS.md), and it also sidesteps the still-
+        // WandererCover -- see .github/instructions/gemini.instructions.md), and it also sidesteps the still-
         // unconfirmed exact wire format of the >J# reply on a cold read.
         std::lock_guard<std::mutex> lock(state_mutex_);
         return commanded_brightness_;
@@ -504,7 +504,7 @@ public:
                 // Seed the idle cover-status cache from this same read: ConformU
                 // reads DeviceState ~0.2 s and CoverState ~0.4 s after Connect(),
                 // inside the connect-adjacent window where even constant
-                // properties cost ~0.08 s client-side (see AGENTS.md), so a
+                // properties cost ~0.08 s client-side (see .github/instructions/gemini.instructions.md), so a
                 // wire read there always misses the 0.1 s FAST target.
                 std::lock_guard<std::mutex> lock(cover_cache_mutex_);
                 cover_status_cache_ = status;
@@ -687,8 +687,8 @@ public:
      * model) does not, so there is no wire command to send here. That would
      * normally mean throwing MethodNotImplemented (as the light-only Cover
      * Lite does for all three cover methods), but this model's CoverState is
-     * a real state, not NotPresent, and per AGENTS.md/the WandererCover
-     * precedent ConformU requires HaltCover to actually function on any
+     * a real state, not NotPresent, and per the WandererCover precedent
+     * (.github/instructions/wandererastro.instructions.md) ConformU requires HaltCover to actually function on any
      * cover-capable device rather than throw. So instead: stop *reporting*
      * Moving immediately (CoverState becomes Unknown, CoverMoving becomes
      * false) while the in-flight open/close command's blocking wire call

@@ -39,9 +39,11 @@ Checks:
      production's cancel skips the per-handle mutex so it can interrupt a
      download blocked on the same handle) -- and the forward sweep in
      test_qhy_fake_sdk.cpp drives all of them.
-  7. Every relative path referenced in AGENTS.md's inline code spans
+  7. Every relative path referenced in AGENTS.md, scoped instructions, and
+     docs/failures/ and docs/decisions/ inline code spans
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
-     that looks like a real repo path actually exists.
+     that looks like a real repo path actually exists. First-party code-comment
+     references to a failure or decision record must resolve too.
   8. The TSan job's filtered runs are identical between ci.yml and
      ci_preflight.sh: the same ordered `alpacacore_tests "<tag>"` invocations
      out of the same build directory, each one followed by a zero-test
@@ -547,6 +549,7 @@ def check_blocking_get_connected_list():
     counted_paths = sorted(
         str(p.relative_to(ROOT))
         for pattern in ("AGENTS.md", "README.md", "docs/**/*.md",
+                        ".github/instructions/**/*.instructions.md",
                         "AlpacaCore/include/**/*.h", "AlpacaCore/src/**/*.h",
                         "AlpacaCore/src/**/*.cpp", "AlpacaCore/tests/**/*.h",
                         "AlpacaCore/tests/**/*.cpp",
@@ -739,7 +742,7 @@ DOUBLE_BACKTICK_SPAN_RE = re.compile(r"``.+?``")
 CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # Tripwire for the span matcher, not a rule about document size: if
 # AGENTS.md is legitimately trimmed below this, lower the floor.
-MIN_AGENTS_MD_PATH_REFS = 50
+MIN_AGENTS_MD_PATH_REFS = 40
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
@@ -775,6 +778,10 @@ def _tracked_paths():
     # core.quotePath=false: a tracked path with non-ASCII bytes must not
     # come back quoted, or it would never match a span.
     tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines())
+    # A migration creates instruction files before they are staged. Include
+    # those files so references to them can be checked in the working tree.
+    for pattern in (".github/instructions/*.instructions.md", "docs/failures/*.md", "docs/decisions/*.md"):
+        tracked.update(str(p.relative_to(ROOT)) for p in ROOT.glob(pattern))
     tracked_dirs = set()
     for f in tracked:
         parts = f.split("/")
@@ -821,6 +828,10 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
             continue
         checked += 1
         path = TRIM_SUFFIX_RE.sub("", span_path)
+        # Historical audit records cite file:line and file:start-end. Check
+        # the file itself; line numbers in a resolved snapshot need not stay
+        # current as code moves.
+        path = re.sub(r":\d+(?:-\d+)?$", "", path)
         # Markdown anchors / fragments (`docs/x.md#section`), glob patterns,
         # and template placeholders (`AlpacaCore/src/vendors/<vendor>/...`)
         # aren't real filesystem paths.
@@ -857,6 +868,69 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
 
 def check_agents_md_paths_exist():
     failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS")
+    instruction_dir = ROOT / ".github/instructions"
+    files = sorted(instruction_dir.glob("*.instructions.md"))
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files", ".github/instructions/*.instructions.md"]).stdout.splitlines()
+    for missing in sorted(set(tracked) - {str(p.relative_to(ROOT)) for p in files}):
+        failures.append("%s is a tracked instruction file but is missing" % missing)
+    for path in files:
+        doc = str(path.relative_to(ROOT))
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "instruction file floor")
+        failures.extend(doc_failures)
+    for directory in ("docs/failures", "docs/decisions"):
+        paths = sorted((ROOT / directory).glob("*.md"))
+        tracked_memory = _run_git(["-c", "core.quotePath=false", "ls-files", directory + "/*.md"]).stdout.splitlines()
+        for missing in sorted(set(tracked_memory) - {str(p.relative_to(ROOT)) for p in paths}):
+            failures.append("%s is a tracked memory record but is missing" % missing)
+        for path in paths:
+            doc = str(path.relative_to(ROOT))
+            doc_failures, _ = _check_doc_path_refs(doc, 0, "memory record floor")
+            failures.extend(doc_failures)
+    failures.extend(check_memory_comment_paths_exist())
+    return failures
+
+
+MEMORY_COMMENT_PATH_RE = re.compile(r"\bdocs/(?:failures|decisions)/[A-Za-z0-9._-]+\.md\b")
+FIRST_PARTY_COMMENT_EXTENSIONS = {".cpp", ".h", ".js", ".py", ".sh"}
+# The real tree has ~330 candidate files; the self-test fixture has a handful.
+MIN_MEMORY_COMMENT_FILES = 5
+
+
+def check_memory_comment_paths_exist(root=ROOT):
+    """Validate memory-record paths named in first-party source comments.
+
+    `root` is a parameter so the self-test can drive this over a fixture
+    tree; the real run passes nothing.
+    """
+    failures = []
+    scanned = 0
+    for component in ("AlpacaCore", "AlpacaHTTP", "scripts"):
+        if not (root / component).is_dir():
+            continue
+        for path in (root / component).rglob("*"):
+            if not path.is_file() or path.suffix not in FIRST_PARTY_COMMENT_EXTENSIONS:
+                continue
+            rel = path.relative_to(root)
+            # Exclusions match repo-relative DIRECTORY components only. The
+            # first version tested `path.parts`, which is absolute and ends in
+            # the file's own name: `scripts/build_deb.sh` was never scanned,
+            # and a checkout under a directory whose name starts with "build"
+            # skipped every file and reported a pass having read nothing.
+            directories = rel.parts[:-1]
+            if "external" in directories or any(part.startswith("build") for part in directories):
+                continue
+            scanned += 1
+            for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                if not line.lstrip().startswith(("//", "#", "*")):
+                    continue
+                for reference in MEMORY_COMMENT_PATH_RE.findall(line):
+                    if not (root / reference).is_file():
+                        failures.append("%s:%d references a missing memory record: %s" % (rel, lineno, reference))
+    # Floor, like the other gates: a renamed component directory or a wrong
+    # root would otherwise read nothing and report a clean pass.
+    if scanned < MIN_MEMORY_COMMENT_FILES:
+        failures.append("memory-comment check scanned only %d first-party source file(s) (floor %d): "
+                        "the component roots or the exclusion rule regressed" % (scanned, MIN_MEMORY_COMMENT_FILES))
     return failures
 
 
@@ -1173,13 +1247,17 @@ def check_license_headers():
     return failures
 
 
+from check_instruction_structure import check as check_instruction_structure
+
+
 CHECKS = [
+    ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
     ("zizmor pin sync (ci.yml vs ci_preflight.sh)", check_zizmor_pin_sync),
     ("cppcheck --suppress sync (ci.yml vs ci_preflight.sh)", check_cppcheck_suppress_sync),
     ("VERSION matches README badge", check_version_matches_readme),
     ("Blocking get_connected() list matches the code", check_blocking_get_connected_list),
-    ("AGENTS.md path references exist", check_agents_md_paths_exist),
+    ("Agent and memory path references exist", check_agents_md_paths_exist),
     ("QHY SDK seam lists agree (interface / LockedQHYSDK / sweep)", check_qhy_seam_lists),
     ("TSan filtered runs sync (ci.yml vs ci_preflight.sh)", check_tsan_filtered_runs_sync),
     ("AGPL header form on every first-party source file", check_license_headers),
@@ -1327,6 +1405,56 @@ def self_test():
           block is not None and "unusedFunction" in block and "notCppcheck" not in block)
     check("an unknown job name yields None, not a widened block",
           _ci_job_block(ci, "no-such-job") is None)
+    check("memory references are found in source comments",
+          MEMORY_COMMENT_PATH_RE.findall("// See docs/decisions/0001-example.md") ==
+          ["docs/decisions/0001-example.md"])
+
+    # check_memory_comment_paths_exist over a fixture tree. The root lives
+    # under a directory named "build-fixture": the checkout's own ancestors
+    # must never count as an excluded component (they did once, and the
+    # check went vacuously green). Each expectation is one rule of the check.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "build-fixture" / "repo"
+        fixture = {
+            "docs/failures/0001-present.md": "# present\n",
+            "AlpacaCore/src/ok.cpp": "// See docs/failures/0001-present.md\n",
+            "AlpacaCore/src/bad.cpp": "// See docs/failures/0002-missing.md\n",
+            "scripts/build_deb.sh": "# See docs/failures/0003-missing.md\n",
+            "AlpacaHTTP/src/code.cpp": 'std::string s = "docs/failures/0004-missing.md";\n',
+            "AlpacaHTTP/src/plain.cpp": "// no memory reference here\n",
+            # Two spare files above MIN_MEMORY_COMMENT_FILES, so raising the
+            # floor by one does not turn this fixture into a floor failure.
+            "AlpacaHTTP/src/spare_a.h": "// spare\n",
+            "scripts/spare_b.py": "# spare\n",
+            "AlpacaCore/build/gen.cpp": "// See docs/failures/0005-missing.md\n",
+            "AlpacaCore/external/sdk.h": "// See docs/failures/0006-missing.md\n",
+            "AlpacaCore/src/notes.txt": "// See docs/failures/0007-missing.md\n",
+        }
+        for name, text in fixture.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text, encoding="utf-8")
+        found = check_memory_comment_paths_exist(root)
+        check("memory comment check: a resolving reference is not reported",
+              not any("ok.cpp" in f for f in found))
+        check("memory comment check: a missing record in a source comment is reported",
+              any(f.startswith("AlpacaCore/src/bad.cpp:1 ") and "0002-missing" in f for f in found))
+        check("memory comment check: a file whose own name starts with build is scanned",
+              any(f.startswith("scripts/build_deb.sh:1 ") for f in found))
+        check("memory comment check: a path in a non-comment line is not a reference",
+              not any("code.cpp" in f for f in found))
+        check("memory comment check: build/ and external/ directories are skipped",
+              not any("gen.cpp" in f or "sdk.h" in f for f in found))
+        check("memory comment check: only first-party source extensions are scanned",
+              not any("notes.txt" in f for f in found))
+        check("memory comment check: exactly the two expected findings", len(found) == 2)
+        empty = Path(tmp) / "empty"
+        empty.mkdir()
+        check("memory comment check: a root with no first-party files trips the floor",
+              any("floor" in f for f in check_memory_comment_paths_exist(empty)))
+
+    from check_instruction_structure import self_test as instruction_self_test
+    instruction_self_test()
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:

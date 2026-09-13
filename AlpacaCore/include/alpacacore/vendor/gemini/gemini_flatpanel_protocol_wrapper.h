@@ -43,7 +43,7 @@ enum class FlatPanelConnectionType : std::uint8_t {
  *     gemini_flatpanel_adapters.cpp), unlike the Lite parsing which was
  *     reverse-engineered from traffic captures of the vendor's own app.
  *     ConformU 4.4.0 validated against a real Rev2 unit (firmware 408,
- *     Linux arm64): 0 errors, 0 issues, 0 timing issues (see AGENTS.md and
+ *     Linux arm64): 0 errors, 0 issues, 0 timing issues (see .github/instructions/gemini.instructions.md and
  *     AlpacaCore/conformu/Gemini/Astro Automatic FlatPanel v2/).
  *   - Pro ("Motorized Flat Panel V3" on the vendor's store): motorized cover
  *     with a different >S# layout, "*S<motor>M<light>L<cover>C..." -- the
@@ -156,7 +156,7 @@ bool is_flatpanel_handshake_reply(const std::string& reply);
  * gemini_flatpanel_adapters.{h,cpp}), not from a vendor spec (none was
  * published) — no Rev2 unit was available at implementation time, but the
  * cover/status commands have since been ConformU-validated against real
- * Rev2 hardware (firmware 408, see AGENTS.md).
+ * Rev2 hardware (firmware 408, see .github/instructions/gemini.instructions.md).
  *
  * Supports USB serial connections only — no WiFi/network variant support yet.
  */

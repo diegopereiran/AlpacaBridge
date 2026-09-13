@@ -4,7 +4,7 @@ Source: reverse-engineered for interoperability from the vendor's Windows ASCOM
 driver, `ASCOM.GeminiPowerBoxPlusAdv3.Switch.dll` (driver version 2.6.0206,
 installer "ASCOM.GeminiPowerAndDataHubAdv3.0.2 Setup.exe" from
 https://geminiastro.cc/downloads). The vendor publishes no protocol document.
-Confirmed on hardware 2026-09-08 (firmware 3.0.9): handshake, firmware reply, frame layout, and every set command below behaved exactly as described. See `AGENTS.md` for the hardware findings.
+Confirmed on hardware 2026-09-08 (firmware 3.0.9): handshake, firmware reply, frame layout, and every set command below behaved exactly as described. See `.github/instructions/gemini.instructions.md` for the hardware findings.
 
 Product page: https://geminiastro.cc/products/powerbox-adv3/
 

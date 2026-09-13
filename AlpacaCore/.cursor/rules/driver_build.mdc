@@ -1,6 +1,11 @@
 ---
 alwaysApply: true
 ---
+
+Before working, read the repository-root `AGENTS.md` in full and follow
+`docs/agent-instructions.md` (both one level above this component). Load the
+relevant scoped files even when working only on tests or shared configuration.
+
 # AlpacaCore Driver Build Guide
 
 This comprehensive guide walks you through building vendor-specific drivers for AlpacaCore, following ASCOM Alpaca standards and AlpacaCore architecture patterns.

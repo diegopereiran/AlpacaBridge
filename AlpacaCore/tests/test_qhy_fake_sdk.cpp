@@ -688,8 +688,8 @@ TEST_CASE("FakeQHYSDK - a shared open during a live exposure still succeeds", "[
     // The other half of the #324 refusal, from the review on PR #463.
     // QHYSDKWrapper::open_camera() reuses a live handle FIRST (open_count > 0
     // just bumps the count) and consults the zombie-worker flag only when
-    // there is no handle to reuse. The camera + CFW pairing AGENTS.md
-    // documents relies on that: the wheel connecting while the camera is
+    // there is no handle to reuse. The camera + CFW pairing
+    // .github/instructions/qhy.instructions.md documents relies on that: the wheel connecting while the camera is
     // mid-exposure is an ordinary shared open, not a reopen over a zombie.
     // The fake once checked the flag before the reuse branch, so that
     // pairing threw InvalidOperation here where production returns.

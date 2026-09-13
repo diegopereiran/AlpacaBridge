@@ -12,7 +12,8 @@
 
 // Connect/disconnect/operate concurrency stress for the OnStep telescope
 // driver, mirroring the SynScan/iOptron [stress] coverage (audit 3.0.1
-// follow-up). OnStep is USB-serial only for end users (see AGENTS.md), but
+// follow-up). OnStep is USB-serial only for end users (see
+// .github/instructions/onstep.instructions.md), but
 // the protocol wrapper's ConnectionType::Network branch exists purely as a
 // test seam so this suite can drive the driver into the CONNECTED state
 // through a FakeMountServer without real hardware — a canned "0#" responder
