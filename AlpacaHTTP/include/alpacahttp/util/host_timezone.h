@@ -22,18 +22,24 @@ namespace util {
 //
 // The web UI header clock renders in this zone so it agrees with the
 // server's own log lines, which are written through localtime_r(). The
-// three sources are consulted in the order the C library itself uses:
+// three sources are consulted in the order that tracks what tzset() reads:
 //
 //   1. the TZ environment variable (a leading ':' is stripped, as tzset()
-//      does; a POSIX rule string such as "EST5EDT" is NOT an IANA name and
-//      is rejected, since a browser's Intl cannot resolve it),
-//   2. /etc/timezone (Debian and derivatives; the file the images ship),
-//   3. the /etc/localtime symlink target, taken after its "zoneinfo/"
-//      component (systemd's timedatectl maintains only this one).
+//      does),
+//   2. the /etc/localtime symlink target, taken after its "zoneinfo/"
+//      component with a "posix/" or "right/" subtree prefix dropped; with
+//      TZ unset this file is the only thing glibc consults, so it outranks
+//      /etc/timezone wherever the two disagree (timedatectl maintains only
+//      this one),
+//   3. /etc/timezone (Debian and derivatives), for a host whose
+//      /etc/localtime is a regular-file copy and so carries no name.
 //
 // Only a value that looks like an IANA name is returned: Area/City segments
 // of letters, digits, '_', '-' and '+', at least one '/', and not "localtime"
-// or "posixrules". Anything else is "" so the UI takes its browser-zone
+// or "posixrules". The '/' requirement is what rejects a POSIX rule string
+// ("EST5EDT,M3.2.0,M11.1.0"), which Intl cannot resolve; it also rejects the
+// few slash-free tzdb names Intl does accept ("UTC", "EST5EDT"), which then
+// report as "". Anything else is "" so the UI takes its browser-zone
 // fallback rather than handing Intl a string it will throw on.
 //
 // Cheap enough to call per description GET (a getenv and at most one small

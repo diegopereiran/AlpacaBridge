@@ -34,14 +34,24 @@ std::string trim(const std::string& s) {
 // The part of a zoneinfo path after its last "zoneinfo/" component, or ""
 // when there is none: "/usr/share/zoneinfo/America/Denver" -> "America/Denver",
 // "../usr/share/zoneinfo/Etc/UTC" -> "Etc/UTC" (Debian ships the relative
-// form), "/etc/localtime" -> "".
+// form), "/etc/localtime" -> "". The "posix/" and "right/" subtrees hold the
+// same zones under names a browser's Intl rejects, so that leading segment
+// is dropped: ".../zoneinfo/right/Europe/Berlin" -> "Europe/Berlin".
 std::string zone_from_zoneinfo_path(const std::string& path) {
     static const std::string kMarker = "zoneinfo/";
     const auto pos = path.rfind(kMarker);
     if (pos == std::string::npos) {
         return "";
     }
-    return path.substr(pos + kMarker.size());
+    std::string zone = path.substr(pos + kMarker.size());
+    for (const char* prefix : {"posix/", "right/"}) {
+        const std::string p = prefix;
+        if (zone.compare(0, p.size(), p) == 0) {
+            zone.erase(0, p.size());
+            break;
+        }
+    }
+    return zone;
 }
 
 }  // namespace
@@ -68,8 +78,10 @@ bool looks_like_iana_zone(const std::string& name) {
         }
         segment_started = true;
     }
-    // "Etc/UTC" and "America/Argentina/Buenos_Aires" pass; a bare "UTC" or a
-    // POSIX rule like "EST5EDT" does not (no '/'), nor does a trailing '/'.
+    // "Etc/UTC" and "America/Argentina/Buenos_Aires" pass; anything without a
+    // '/' does not, nor does a trailing '/'. That rejects POSIX rule strings
+    // ("EST5EDT,M3.2.0,M11.1.0") at the cost of the few slash-free tzdb names
+    // ("UTC", "EST5EDT"), which the caller then reports as unknown.
     return slash && segment_started;
 }
 
@@ -91,23 +103,26 @@ std::string host_time_zone(const char* tz_env, const std::string& etc_dir) {
         return "";
     }
 
-    {
-        std::ifstream in(etc_dir + "/timezone");
-        std::string line;
-        if (in && std::getline(in, line)) {
-            line = trim(line);
-            if (looks_like_iana_zone(line)) {
-                return line;
-            }
-        }
-    }
-
+    // With TZ unset, tzset() reads /etc/localtime and nothing else, so the
+    // symlink is the authority: it names the zone localtime_r() (and so the
+    // log lines) actually use, even where /etc/timezone says otherwise.
     std::error_code ec;
     const auto target = std::filesystem::read_symlink(etc_dir + "/localtime", ec);
     if (!ec) {
         const std::string zone = zone_from_zoneinfo_path(target.string());
         if (looks_like_iana_zone(zone)) {
             return zone;
+        }
+    }
+
+    // /etc/timezone only when the link cannot answer (a regular-file copy of
+    // the zone data carries no name).
+    std::ifstream in(etc_dir + "/timezone");
+    std::string line;
+    if (in && std::getline(in, line)) {
+        line = trim(line);
+        if (looks_like_iana_zone(line)) {
+            return line;
         }
     }
     return "";

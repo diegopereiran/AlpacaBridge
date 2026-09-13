@@ -479,8 +479,9 @@ int main() {
         EXPECT(looks_like_iana_zone("America/Argentina/Buenos_Aires"));
         EXPECT(looks_like_iana_zone("Etc/GMT+12"));
         EXPECT(!looks_like_iana_zone(""));
-        EXPECT(!looks_like_iana_zone("UTC"));      // no '/': Intl accepts it, but so does "EST5EDT" by this shape
-        EXPECT(!looks_like_iana_zone("EST5EDT"));  // POSIX rule string, not an IANA name
+        EXPECT(!looks_like_iana_zone("UTC"));                     // no '/': a slash-free tzdb name, reported as unknown
+        EXPECT(!looks_like_iana_zone("EST5EDT"));                 // likewise; the same shape as a POSIX rule prefix
+        EXPECT(!looks_like_iana_zone("EST5EDT,M3.2.0,M11.1.0"));  // POSIX rule string, not an IANA name
         EXPECT(!looks_like_iana_zone("localtime"));
         EXPECT(!looks_like_iana_zone("/America/Denver"));
         EXPECT(!looks_like_iana_zone("America/Denver/"));
@@ -513,7 +514,7 @@ int main() {
         EXPECT(host_time_zone("EST5EDT", etc_dir) == "");
         EXPECT(host_time_zone("", etc_dir) == "");
 
-        // A junk /etc/timezone falls through to the symlink.
+        // A junk /etc/timezone and no symlink: "".
         { std::ofstream(etc_dir + "/timezone") << "not a zone\n"; }
         EXPECT(host_time_zone(nullptr, etc_dir) == "");
         fs::create_symlink(zoneinfo + "/Pacific/Auckland", etc_dir + "/localtime");
@@ -522,9 +523,24 @@ int main() {
         fs::remove(etc_dir + "/localtime");
         fs::create_symlink("../usr/share/zoneinfo/Etc/UTC", etc_dir + "/localtime");
         EXPECT(host_time_zone(nullptr, etc_dir) == "Etc/UTC");
-        // A regular-file /etc/localtime (no symlink) yields "".
+        // The symlink outranks /etc/timezone when the two disagree: glibc's
+        // tzset() reads /etc/localtime and never /etc/timezone, so the link
+        // is the zone localtime_r() (and the log lines) actually use.
+        { std::ofstream(etc_dir + "/timezone") << "Europe/London\n"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Etc/UTC");
+        // A "posix/" or "right/" zoneinfo subtree is the same zone under a
+        // name Intl rejects; the prefix is stripped.
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("/usr/share/zoneinfo/right/Europe/Berlin", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Europe/Berlin");
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("/usr/share/zoneinfo/posix/Europe/Berlin", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Europe/Berlin");
+        // A regular-file /etc/localtime (no symlink) falls back to the file.
         fs::remove(etc_dir + "/localtime");
         { std::ofstream(etc_dir + "/localtime") << "TZif"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Europe/London");
+        { std::ofstream(etc_dir + "/timezone") << "not a zone\n"; }
         EXPECT(host_time_zone(nullptr, etc_dir) == "");
 
         fs::remove_all(etc_dir);
