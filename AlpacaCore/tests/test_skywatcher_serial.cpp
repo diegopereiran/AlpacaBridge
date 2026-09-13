@@ -324,6 +324,11 @@ TEST_CASE("SkyWatcher serial - Connected=true on a stale link reconnects instead
     CHECK(board->frames().size() == frames_before);
 
     board->sever_link();
+    // devpts assigns st_ino = index + 3, so link_alive() would call a
+    // recycled index the same node -- this only works because the driver
+    // still holds `board`'s old slave fd here, which keeps devpts from
+    // reusing its index before `replugged` is constructed below. Do not
+    // reorder sever_link() / construction / repoint().
     FakeSkyWatcherSerialBoard replugged;
     link.repoint(replugged.slave_path());
     REQUIRE(replugged.frames().empty());
