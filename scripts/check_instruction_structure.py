@@ -22,7 +22,7 @@ def check(root=ROOT):
             failures.append(message)
     def read(path):
         p = root / path
-        return p.read_text() if p.is_file() else ''
+        return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ''
     index = read('docs/agent-instructions.md')
     require('@AGENTS.md' in read('CLAUDE.md') and '@docs/agent-instructions.md' in read('CLAUDE.md'),
             'CLAUDE.md must import the shared core and instruction index')
@@ -33,7 +33,7 @@ def check(root=ROOT):
     scopes = {}
     for path in canonical:
         name = path.name.removesuffix('.instructions.md')
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8", errors="replace")
         metadata = re.match(r'---\napplyTo: ("[^\n]+")\n---\n', text)
         require(metadata is not None, '%s: missing applyTo metadata' % name)
         if not metadata:
@@ -75,7 +75,7 @@ def check(root=ROOT):
     for path in documents:
         if not path.is_file():
             continue
-        for target in re.findall(r'\]\(([^\s)]+)\)', path.read_text()):
+        for target in re.findall(r'\]\(([^\s)]+)\)', path.read_text(encoding="utf-8", errors="replace")):
             if target.startswith(('#', 'http:', 'https:', 'mailto:')):
                 continue
             file = target.split('#', 1)[0]
@@ -108,7 +108,7 @@ def self_test():
         ]
         for file, mutate in mutations:
             path = root / file
-            original = path.read_text()
+            original = path.read_text(encoding="utf-8", errors="replace")
             path.write_text(mutate(original))
             assert set(check(root)) - baseline, 'Mutation escaped detection: ' + file
             path.write_text(original)
