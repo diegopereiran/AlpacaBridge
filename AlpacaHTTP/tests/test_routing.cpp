@@ -2171,6 +2171,7 @@ int main() {
             const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
             EXPECT(std::fabs(site_config(9640).value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(persisted_file_entry(9640).value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
         }
         remove_device(router, "skywatcher", "telescope", 9640);
 
@@ -2200,6 +2201,75 @@ int main() {
             EXPECT(!json.is_discarded() && std::fabs(json.value("Value", 0.0) - (-33.87)) < 1e-9);
         }
         remove_device(router, "skywatcher", "telescope", 9641);
+
+        // A non-boolean flag (a shell/jq-built config sends "false" or 0) is
+        // refused at the POST with the field named, the #388 rule, so it
+        // never reaches the file where a later value() read would throw.
+        nlohmann::json typod = learner;
+        typod["deviceNumber"] = 9642;
+        typod["learnSiteFromClient"] = "false";
+        {
+            const auto resp = route_request(router, "POST", "/management/v1/configuredevice", typod.dump());
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find("learnSiteFromClient") != std::string::npos);
+            EXPECT(site_config(9642).is_null());
+        }
+    }
+    {
+        // issue #444, the hand-edited half: a persisted entry whose
+        // learnSiteFromClient is the string "false" (no API validation ever
+        // saw it) must not turn every site PUT into an error. The setter
+        // succeeds and the site is learned: only a boolean false is the
+        // opt-out. Same one-entry-file + second-Router shape as the #274
+        // block below, for the reasons given there.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9643},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 0.0},
+                           {"siteLongitude", 0.0},
+                           {"learnSiteFromClient", "false"}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+        alpacahttp::Router startup_router;
+        const auto put =
+            nlohmann::json::parse(route_request(startup_router, "PUT", "/api/v1/telescope/9643/sitelatitude",
+                                                "SiteLatitude=-33.87&ClientID=1")
+                                      .body(),
+                                  nullptr, false);
+        const auto listed = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(startup_router, "skywatcher", "telescope", 9643);
+        restore_original();
+
+        EXPECT(!put.is_discarded() && put.value("ErrorNumber", -1) == 0);
+        EXPECT(!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array());
+        bool learned = false;
+        for (const auto& entry : listed["Value"]) {
+            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9643) {
+                const auto cfg = entry.value("Config", nlohmann::json());
+                learned = cfg.is_object() && std::fabs(cfg.value("siteLatitude", 0.0) - (-33.87)) < 1e-9;
+            }
+        }
+        EXPECT(learned);
     }
     {
         // issue #274, the other half: a config already on disk cannot be

@@ -6312,6 +6312,20 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
+        // open-astro#444: the opt-out flag is vendor-agnostic and consumed by
+        // the router alone, so no register_device_from_config() arm types it.
+        // Refuse a non-boolean here (the #388 rule: a wrong-typed field is
+        // named to the caller, never left to throw from a later read) rather
+        // than let sanitize_device_config() copy it verbatim into the file.
+        if (config_has(config, "learnSiteFromClient") && !config["learnSiteFromClient"].is_boolean()) {
+            AlpacaResponse alpaca_response =
+                make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                    std::string("Device config field 'learnSiteFromClient' must be a boolean (got ") +
+                                        config["learnSiteFromClient"].type_name() + ")");
+            response.set_body(alpaca_response);
+            return response;
+        }
+
         std::string error_message;
         if (!register_device_from_config(config, error_message)) {
             if (error_message.empty()) {
@@ -9405,7 +9419,12 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
             // on, because the value the mount is using RIGHT NOW is the one
             // the client set, and a restart should start from the same site
             // the last session ended on rather than an older one.
-            if (!entry.value("learnSiteFromClient", true)) {
+            // Typed, not value(): a hand-edited file can carry "false" or 0
+            // here, and nlohmann's value() throws on that, which would turn
+            // every site PUT into an error. Only a boolean false is the
+            // opt-out; the API path refuses any other type at registration.
+            const auto flag = entry.find("learnSiteFromClient");
+            if (flag != entry.end() && flag->is_boolean() && !flag->get<bool>()) {
                 declined = true;
                 break;
             }
