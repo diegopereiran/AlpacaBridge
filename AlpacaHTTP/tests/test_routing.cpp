@@ -2335,6 +2335,21 @@ int main() {
             EXPECT(std::fabs(driver_value("siteelevation") - 58.0) < 1e-9);
             EXPECT(std::fabs(persisted_file_entry(9640).value("siteElevation", 0.0) - 58.0) < 1e-9);
         }
+        // A NaN passes every driver's range check (both comparisons are
+        // false) and std::stod("nan") parses, so the setter accepts it for
+        // the session; nlohmann dumps a non-finite double as null, which the
+        // next start reads as "absent". The hook must never let that reach
+        // the persisted entry: the surveyed value stays on disk.
+        {
+            const auto resp = route_request(router, "PUT", base + "/sitelatitude", "SiteLatitude=nan&ClientID=1");
+            (void)resp;
+            const auto on_disk = persisted_file_entry(9640);
+            EXPECT(on_disk.is_object() && on_disk.contains("siteLatitude") && on_disk["siteLatitude"].is_number());
+            EXPECT(std::fabs(on_disk.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(site_config(9640).value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            // Restore the driver's own value for the blocks that follow.
+            put_ok(base + "/sitelatitude", "SiteLatitude=-33.87&ClientID=1&ClientTransactionID=7");
+        }
         // A value the driver refuses is not persisted either: the hook runs
         // after the setter, so the throw never reaches it.
         {

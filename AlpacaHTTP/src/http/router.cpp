@@ -9493,6 +9493,14 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
 }
 
 void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const char* key, double value) {
+    // A NaN passes every driver's range check (both comparisons are false)
+    // and parses, so the setter takes it for the session; nlohmann dumps a
+    // non-finite double as null, which the next start reads as "absent" and
+    // the driver then refuses to connect. The surveyed value stays on disk.
+    // read_site_coordinates() applies the same rule on the config path.
+    if (!std::isfinite(value)) {
+        return;
+    }
     if (device.get_device_type() != alpacacore::DeviceType::Telescope) {
         return;
     }
