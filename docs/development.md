@@ -91,6 +91,7 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 sudo apt install git build-essential cmake g++ \
     libusb-1.0-0-dev libudev-dev libgpiod-dev \
     libhidapi-dev \
+    libgphoto2-dev libraw-dev \
     nlohmann-json3-dev libcurl4-openssl-dev \
     catch2
 ```
@@ -138,6 +139,7 @@ cmake --build . --parallel
 | `ALPACACORE_ENABLE_BISQUE` | `OFF` | Bisque/Paramount (TheSkyX) telescope support |
 | `ALPACACORE_ENABLE_WANDERERASTRO` | `OFF` | WandererAstro CoverCalibrator |
 | `ALPACACORE_ENABLE_ASTROASIS` | `OFF` | Astroasis Oasis Focuser |
+| `ALPACACORE_ENABLE_GPHOTO` | `OFF` | gphoto2 DSLR/mirrorless cameras (Canon, Nikon, Sony) |
 
 ## Running tests
 

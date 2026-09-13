@@ -35,6 +35,7 @@ option(ALPACACORE_ENABLE_TOUPTEK "Enable ToupTek vendor support" OFF)
 option(ALPACACORE_ENABLE_PLAYERONE "Enable Player One vendor support" OFF)
 option(ALPACACORE_ENABLE_WANDERERASTRO "Enable WandererAstro CoverCalibrator vendor support" OFF)
 option(ALPACACORE_ENABLE_ASTROASIS "Enable Astroasis Oasis Focuser vendor support" OFF)
+option(ALPACACORE_ENABLE_GPHOTO "Enable gphoto2 DSLR/mirrorless camera vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -54,6 +55,7 @@ if(ALPACACORE_ENABLE_ALL_VENDORS)
     set(ALPACACORE_ENABLE_PLAYERONE ON)
     set(ALPACACORE_ENABLE_WANDERERASTRO ON)
     set(ALPACACORE_ENABLE_ASTROASIS ON)
+    set(ALPACACORE_ENABLE_GPHOTO ON)
 endif()
 
 # Compiler warnings (Linux)
@@ -182,6 +184,13 @@ if(ALPACACORE_ENABLE_SVBONY)
     add_subdirectory(src/vendors/svbony)
     if(TARGET alpacacore_svbony)
         target_link_libraries(alpacacore PRIVATE alpacacore_svbony)
+    endif()
+endif()
+
+if(ALPACACORE_ENABLE_GPHOTO)
+    add_subdirectory(src/vendors/gphoto)
+    if(TARGET alpacacore_gphoto)
+        target_link_libraries(alpacacore PRIVATE alpacacore_gphoto)
     endif()
 endif()
 
@@ -351,6 +360,15 @@ endif()
 
 if(ALPACACORE_ENABLE_SVBONY AND TARGET alpacacore_svbony)
     install(TARGETS alpacacore_svbony
+        EXPORT AlpacaCoreTargets
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+if(ALPACACORE_ENABLE_GPHOTO AND TARGET alpacacore_gphoto)
+    install(TARGETS alpacacore_gphoto
         EXPORT AlpacaCoreTargets
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib

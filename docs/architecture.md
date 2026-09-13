@@ -89,7 +89,7 @@ All interfaces inherit from `AlpacaDriver` which provides device information, co
 - Isolates SDK dependencies from core code
 - Only place where vendor SDK headers are included
 
-Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch). ZWO and ToupTek therefore use both — hence "SDK + protocol wrapper" in the table above.
+Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch). ZWO and ToupTek therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" (libgphoto2/libraw) is an open-source system package rather than a vendored proprietary library — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
 
 #### Layer 3: Vendor implementation
 
@@ -120,6 +120,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
 | Bisque | Telescope | Script/protocol | In development |
+| gphoto (DSLR/mirrorless) | Camera (Canon, Nikon, Sony via libgphoto2) | SDK wrapper (system libgphoto2/libraw, no vendored SDK) | Production |
 
 ### Management components
 
@@ -228,6 +229,7 @@ AlpacaBridge/
 |   |   |   +- synscan/ celestron/
 |   |   |   +- playerone/ svbony/ touptek/
 |   |   |   +- gemini/ wandererastro/ weewx/ bisque/
+|   |   |   +- gphoto/                # No external/ SDK dir -- system libgphoto2/libraw
 |   |   +- management/               # Device registry, discovery
 |   +- external/                      # Vendor SDKs and protocol docs
 |   |   +- ZWO/ QHY/ PlayerOne/      # SDK libraries

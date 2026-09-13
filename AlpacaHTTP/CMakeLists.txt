@@ -152,6 +152,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
     if(TARGET alpacacore_svbony)
         add_definitions(-DALPACACORE_ENABLE_SVBONY)
     endif()
+    if(TARGET alpacacore_gphoto)
+        add_definitions(-DALPACACORE_ENABLE_GPHOTO)
+    endif()
     if(TARGET alpacacore_celestron)
         add_definitions(-DALPACACORE_ENABLE_CELESTRON)
     endif()
@@ -212,6 +215,9 @@ else()
     if(TARGET alpacacore_svbony)
         add_definitions(-DALPACACORE_ENABLE_SVBONY)
     endif()
+    if(TARGET alpacacore_gphoto)
+        add_definitions(-DALPACACORE_ENABLE_GPHOTO)
+    endif()
     if(TARGET alpacacore_celestron)
         add_definitions(-DALPACACORE_ENABLE_CELESTRON)
     endif()
@@ -248,6 +254,7 @@ set(ALPACAHTTP_SOURCES
     src/util/threading.cpp
     src/util/logging_adapter.cpp
     src/util/error_mapping.cpp
+    src/util/host_timezone.cpp
     src/util/wifi_manager.cpp
 )
 
