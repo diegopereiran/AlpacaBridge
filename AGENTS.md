@@ -2382,8 +2382,10 @@ ran there. The southern-hemisphere hardware session (2026-09-06) exercised track
 `MoveAxis` -- and `move_axis()` applies no sign transform at all, so it was never
 exposed to this rule.
 
-**Fix (done).** Both call sites now negate when `(a2 >= 0) != hemisphere_south_locked()`
-(XOR), which reproduces the table above. Two loopback regressions on the EQM-35 Pro
+**Fix (done).** Both call sites now negate when
+`(branch_from_axis_locked(a2) > 0) != hemisphere_south_locked()` (XOR), which reproduces the
+table above (the reader is the plain `a2 >= 0` sign outside the sub-arcsecond deadband at
+the pole, see #459). Two loopback regressions on the EQM-35 Pro
 profile at latitude -37.2 assert the ASCOM contract against the driver's own pointing
 model -- reported Declination RISES under `+DeclinationRate` and after a North pulse --
 and both were confirmed to fail before the fix (axis moved -19.97 arcsec and -11.25

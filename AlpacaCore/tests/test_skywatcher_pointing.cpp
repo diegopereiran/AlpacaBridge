@@ -516,8 +516,10 @@ TEST_CASE("SkyWatcher pointing - a slew to the exact pole reads back the target 
 
         const LandedFrame f = land(*driver, mount, target_ra, target_dec);
         INFO("axes a1=" << f.a1 << " a2=" << f.a2 << " reported RA " << f.reported_ra << " target " << target_ra);
-        // The dec axis really is at the pole: the encoder carries no branch.
-        CHECK(std::abs(f.a2) < 0.01);
+        // The dec axis really is at the pole, inside the two-count deadband
+        // where branch_from_axis_locked() consults the memory: the encoder
+        // carries no branch, so this case exercises the remembered one.
+        CHECK(std::abs(f.a2) <= 2.0 * 360.0 / static_cast<double>(c.profile.cpr));
         // Before #459 the negative-HA rows reported RA 12 h out here.
         CHECK(std::abs(wrap_ha(f.reported_ra - target_ra)) < kHaToleranceHours);
         CHECK(std::abs(f.reported_dec - target_dec) < kDecToleranceDegrees);
@@ -554,6 +556,69 @@ TEST_CASE("SkyWatcher pointing - after leaving the pole the branch comes from th
     CHECK(f.a2 > 1.0);
 
     driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a sync at the exact pole reads back the synced RA, not 12 h out (#459)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // Polar-alignment routines sync at the pole. The sync path writes the
+    // same -0.0 dec-axis angle the goto path does on the negative branch, so
+    // it has to record the branch too; with that line missing the readback
+    // used the stale connect-time branch (+1) and reported RA 12 h out with
+    // SideOfPier on the wrong side.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 0.1, 24.0);  // HA -0.1 h: the negative branch
+    const double target_dec = 90.0;
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
+
+    driver->sync_to_coordinates(target_ra, target_dec);
+
+    const double a2 = mount.physical_degrees(2);
+    INFO("axis a2=" << a2 << " reported RA " << driver->get_right_ascension() << " target " << target_ra);
+    CHECK(std::abs(a2) <= 2.0 * 360.0 / static_cast<double>(alpacacore::test::FakeMountProfile::wave_100i().cpr));
+    CHECK(std::abs(wrap_ha(driver->get_right_ascension() - target_ra)) < kHaToleranceHours);
+    CHECK(std::abs(driver->get_declination() - target_dec) < kDecToleranceDegrees);
+    CHECK(driver->get_side_of_pier() == 1);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - AutoHome resets the remembered branch to the positive side (#459)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // AutoHome ends by stamping the dec axis to the home count, a2 = 0, which
+    // is inside the deadband: the reported RA and SideOfPier there come from
+    // the remembered branch. The re-anchor resets it to the positive branch,
+    // the pre-#459 answer at home; without that reset a FindHome after an
+    // east-side goto would still report the east side at the pole.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    mount.set_home_index_degrees(1, 2.0);
+    mount.set_home_index_degrees(2, 2.0);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    // Park the memory on the negative branch with an east-of-meridian goto.
+    const double lst = driver->get_sidereal_time();
+    const LandedFrame f = land(*driver, mount, std::fmod(lst + 2.0, 24.0), 40.0);  // HA -2 h
+    REQUIRE(f.side_of_pier == 1);
+    REQUIRE(f.a2 < -1.0);
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return driver->get_at_home(); }, 60000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+
+    INFO("after AutoHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
+    REQUIRE(std::abs(driver->get_declination() - 90.0) < 0.2);
+    CHECK(driver->get_side_of_pier() == 0);
+    // The +6 h home term: at home the report is LST - (a1 + 6 h) with a1 = 0.
+    CHECK(std::abs(wrap_ha(driver->get_right_ascension() - (driver->get_sidereal_time() - 6.0))) < 0.05);
+
     driver->set_connected(false);
 }
 
