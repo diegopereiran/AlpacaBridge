@@ -606,4 +606,4 @@ Same policy as the ASIair drivers: at connect the wrapper claims DC1/DC2 at thei
 ## See also
 
 - [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) — full list of validated drivers and hardware
-- [AGENTS.md `### ZWO`](../AGENTS.md) — vendor-specific implementation notes
+- [ZWO instructions](../.github/instructions/zwo.instructions.md) — vendor-specific implementation notes

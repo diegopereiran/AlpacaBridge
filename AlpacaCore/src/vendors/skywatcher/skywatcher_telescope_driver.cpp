@@ -2787,7 +2787,7 @@ private:
     // run would do it). XOR-ing the branch test with the hemisphere is the
     // full fix: MoveAxis, which applies no sign transform at all, is the
     // hardware-observed reference for which way a raw axis rate moves
-    // reported Dec (AGENTS.md, EQM-35 Pro at latitude -37.2).
+    // reported Dec (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at latitude -37.2).
     // The sign is evaluated once at (re)apply time and held: it is NOT
     // re-evaluated as this offset's own motion carries the axis across the
     // branch boundary (a2 through 0). This was tracked as a bug for a while
@@ -2800,7 +2800,7 @@ private:
     // necessarily produces a real cusp in reported Dec (it rises to 90 then
     // falls), on any correctly-behaving mount -- confirmed on hardware during
     // the EQM-35 Pro bring-up ("at a2 = 0, reported Dec rises for EITHER
-    // mechanical direction", see AGENTS.md). Holding the sign is what
+    // mechanical direction", see .github/instructions/skywatcher.instructions.md). Holding the sign is what
     // produces that correct cusp; dynamically flipping it to keep reported
     // Dec monotonic would be fighting the mount's own geometry. Closed as
     // not a bug: see open-astro#255 for the full derivation. Every real
@@ -3354,7 +3354,7 @@ private:
             }
             // Superseded, or the client stopped tracking: not ours any more.
             if (motion_generation_ != entry_generation || !tracking_ || ra_duty_rate_deg_s_ != 0.0) {
-                // AGENTS.md tells the reader to grep for "rate check skipped"
+                // .github/instructions/skywatcher.instructions.md tells the reader to grep for "rate check skipped"
                 // when a slew was never verified (review note on #448). Every
                 // exit that does NOT complete a measurement says so -- this
                 // one, the entry guards, the zero-rate and zero-interval
@@ -3426,7 +3426,7 @@ private:
                 const uint64_t gen = ++motion_generation_;
                 if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
                     // A supersession exit, and it has to say so: the check has
-                    // already stopped the RA axis by this point, and AGENTS.md
+                    // already stopped the RA axis by this point, and .github/instructions/skywatcher.instructions.md
                     // tells an operator to grep for "rate check skipped" when a
                     // slew was never verified (round-3 review).
                     ALPACA_LOG_INFO("SkyWatcher",

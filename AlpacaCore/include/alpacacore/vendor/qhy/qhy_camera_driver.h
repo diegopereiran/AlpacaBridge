@@ -67,7 +67,7 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
  * Do not read this as "a worker that only touches the seam is safe to
  * detach": these workers are unsafe once detached, and the bounded-join
  * discipline is what keeps that window small. See the member comment in
- * qhy_camera_driver.cpp and rule (b) in AGENTS.md.
+ * qhy_camera_driver.cpp and rule (b) in .github/instructions/qhy.instructions.md.
  */
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk);
 std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk);

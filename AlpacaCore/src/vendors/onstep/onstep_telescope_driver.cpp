@@ -440,7 +440,7 @@ public:
     }
 
     // OnStep's custom tracking-rate commands were not confirmed against real
-    // firmware during this implementation (see AGENTS.md OnStep notes) —
+    // firmware during this implementation (see .github/instructions/onstep.instructions.md) —
     // default both to false rather than advertise a setter that would
     // silently no-op.
     bool get_can_set_declination_rate() const override { return false; }
@@ -534,7 +534,7 @@ public:
         // other GEM drivers (SynScan/iOptron/Celestron), and the only source
         // that satisfies ASCOM's SideOfPier contract (a pointing state
         // defined purely by hour-angle sign). :GU#'s E/W flag (see
-        // AGENTS.md OnStep notes) was tried as the primary source instead,
+        // .github/instructions/onstep.instructions.md) was tried as the primary source instead,
         // but ConformU proved it reports the mount's PHYSICAL pier
         // orientation — which only changes on an actual mechanical meridian
         // flip — not the ASCOM pointing state: "Reported SideofPier at HA
@@ -842,7 +842,7 @@ public:
         auto& protocol = OnStepProtocolWrapper::instance();
         // Use the mount's own sync command — do NOT maintain a driver-level
         // offset, which would cause coordinate divergence during subsequent
-        // slews (project-wide rule; see AGENTS.md iOptron/Celestron notes).
+        // slews (project-wide rule; see the iOptron and Celestron files under .github/instructions/).
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
         protocol.sync_to_target();
@@ -1049,7 +1049,7 @@ private:
         // cached_status_, so it (wrongly) assumes both sides always match.
         if (was_slewing && !cached_status_.is_slewing) {
             // Slew just completed: caches are stale and, per the telescope
-            // lessons in AGENTS.md, some LX200-family mounts stop tracking
+            // lessons in .github/instructions/onstep.instructions.md, some LX200-family mounts stop tracking
             // during a GOTO — best-effort restore it. TODO: confirm against
             // real OnStep firmware whether this restoration is needed.
             equatorial_cache_valid_ = false;
