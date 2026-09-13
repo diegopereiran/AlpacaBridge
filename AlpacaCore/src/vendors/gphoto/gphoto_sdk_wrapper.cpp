@@ -222,7 +222,11 @@ public:
             throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
         }
         char* value = nullptr;
-        int result = gp_widget_get_value(widget, static_cast<void*>(&value));
+        // libgphoto2's C API takes an untyped void* out-param whose pointee
+        // type depends on the widget type; for a text/radio/menu widget it
+        // writes a `const char*` through it, so a char** here is required,
+        // not a mistake.
+        int result = gp_widget_get_value(widget, &value);  // NOLINT(bugprone-multi-level-implicit-pointer-conversion)
         std::string out = (result == GP_OK && value != nullptr) ? value : "";
         gp_widget_free(root);
         if (result != GP_OK) {
@@ -294,7 +298,11 @@ public:
             throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
         }
         char* value = nullptr;
-        int result = gp_widget_get_value(widget, static_cast<void*>(&value));
+        // libgphoto2's C API takes an untyped void* out-param whose pointee
+        // type depends on the widget type; for a text/radio/menu widget it
+        // writes a `const char*` through it, so a char** here is required,
+        // not a mistake.
+        int result = gp_widget_get_value(widget, &value);  // NOLINT(bugprone-multi-level-implicit-pointer-conversion)
         std::string out = (result == GP_OK && value != nullptr) ? value : "";
         gp_widget_free(root);
         if (result != GP_OK) {
