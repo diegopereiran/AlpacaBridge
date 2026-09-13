@@ -23,7 +23,6 @@
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
-
 #include <unistd.h>
 
 #include <chrono>

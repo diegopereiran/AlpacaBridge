@@ -288,6 +288,15 @@ public:
             cancel_async_tasks();
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        if (connected && !relink && connected_ && !protocol.link_alive()) {
+            // The loss became visible after the probe above, so the tasks were
+            // not cancelled. A slew task blocked on mutex_ would wake to the
+            // reconnected session and resume against the new link: drop the
+            // lock and join it first, as the probe path does.
+            lock.unlock();
+            cancel_async_tasks();
+            lock.lock();
+        }
         if (connected && connected_ && !protocol.link_alive()) {
             // open-astro#445: a connect against a dead link used to hit the
             // idempotency return below and report success with no reconnect.

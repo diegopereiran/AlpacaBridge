@@ -1001,10 +1001,13 @@ private:
                     lose_serial_link_locked("Serial read failed: " + util::errno_string(err));
                 }
                 throw AlpacaException("Serial read failed: " + util::errno_string(err));
-            } else if (r == 0 && serial_node_removed_locked()) {
-                // A hung-up tty reads 0 bytes at once, which looks like a quiet board.
-                lose_serial_link_locked("Serial device removed");
             }
+        }
+        // A hung-up tty reads 0 bytes at once, which looks like a quiet board
+        // until the deadline. Checked once here rather than on every VTIME
+        // tick, so waiting on a quiet board costs no extra syscalls.
+        if (serial_node_removed_locked()) {
+            lose_serial_link_locked("Serial device removed");
         }
         serial_dirty_ = true;
         ALPACA_LOG_WARN("SkyWatcher", "Timeout (" + std::to_string(timeout_ms) + " ms) waiting for the reply to '" +

@@ -519,7 +519,9 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   configured path's `stat()` with the node opened at connect (no I/O, never waits on an
   exchange) and closes the dead fd when it can; operations throw `NotConnected`; and a
   `Connected=true` against the lost link reconnects instead of hitting the idempotency return.
-  Silence with the node still present keeps the rules above. The #237 drivers still treat a
+  `EIO`, `ENXIO`, `ENODEV` or `EBADF` from a write or read on the link's fd also counts as loss,
+  even before the node lookup reflects it: a tty returns those only when its device is gone or
+  the fd is unusable. Silence with the node still present keeps the rules above. The #237 drivers still treat a
   removed node as a fault; that has not been changed. Tests: `sever_link()` on
   `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
 
