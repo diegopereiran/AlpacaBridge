@@ -35,17 +35,13 @@
 // A settable handshake delay widens the window so the race is reproducible
 // rather than timing-dependent.
 
-#include <fcntl.h>
 #include <poll.h>
-#include <stdlib.h>  // posix_openpt/grantpt/unlockpt/ptsname: POSIX, not the <cstdlib> subset
-#include <termios.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>

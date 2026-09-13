@@ -81,9 +81,10 @@ public:
     // Guarded SOLELY by firmware_mutex_ and never consults connected_: firmware_
     // is non-empty only while connected (set at connect, cleared at disconnect,
     // both under firmware_mutex_), so there is no atomic-vs-mutex ordering to get
-    // wrong. The only windows are the sub-microsecond ones around the
-    // connected_ flips (firmware_ set before the store(true), cleared after the
-    // store(false)), visible to nothing but the web UI's firmware read.
+    // wrong. The only window is the sub-microsecond one on connect (firmware_
+    // set before the store(true)); on disconnect it is cleared before the
+    // store(false), so a disconnected driver never shows a stale string.
+    // Visible to nothing but the web UI's firmware read.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         if (firmware_.empty()) {
@@ -168,13 +169,13 @@ public:
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
-            connected_.store(false);
-            // Clear the cached firmware so get_device_firmware() reports nothing
-            // once disconnected.
+            // The cached firmware goes first, so the store(false) is never
+            // observable beside a stale firmware string.
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
+            connected_.store(false);
             protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Focuser disconnected");
         }

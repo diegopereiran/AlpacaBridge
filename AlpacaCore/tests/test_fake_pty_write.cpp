@@ -22,11 +22,14 @@
 // code fails", because the old code's failure mode IS a hang.
 //
 // The PtyPair cases below pin the ownership contract from issue #387: the
-// pair owns both descriptors, nothing outlives it, and sever() closes both
-// ends and forgets the path. The setup-failure paths themselves (grantpt or
-// the keep-alive open failing) need the kernel's cooperation to force and are
-// not exercised; the descriptor count across a construct/destroy loop is the
-// observable that a leak on the success path would move.
+// pair owns both descriptors, nothing outlives it, sever() closes both ends
+// and forgets the path, and a setup failure after the master is open throws
+// with the master closed. That last one is the leak the issue reported, and
+// it is forced from inside the process: with the soft RLIMIT_NOFILE lowered
+// and every slot but one filled, posix_openpt() takes the last descriptor and
+// the keep-alive open() fails with EMFILE. Against the hand-rolled block the
+// pair replaced, that construction SUCCEEDED with a dead keep-alive, so the
+// case is red without the fix.
 
 #ifndef _WIN32
 
@@ -34,6 +37,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>  // posix_openpt/grantpt/unlockpt/ptsname: POSIX, not the <cstdlib> subset
+#include <sys/resource.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -43,6 +47,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_pty_write.h"
@@ -97,26 +102,74 @@ long elapsed_ms(std::chrono::steady_clock::time_point since) {
 // where that directory does not exist (a non-Linux host). The directory
 // handle used to read it is closed before the count is returned, so it does
 // not count itself.
-int open_fd_count() {
+// Descriptors this process holds open (count) and the highest number among
+// them (max_fd), from /proc/self/fd; count is -1 where that directory does
+// not exist (a non-Linux host). The directory handle used to read it is
+// excluded, so the walk does not count itself.
+struct FdTable {
+    int count = -1;
+    int max_fd = -1;
+};
+
+FdTable fd_table() {
+    FdTable t;
     DIR* dir = opendir("/proc/self/fd");
     if (dir == nullptr) {
-        return -1;
+        return t;
     }
     const int self = dirfd(dir);
-    int n = 0;
+    t.count = 0;
     while (dirent* entry = readdir(dir)) {
         if (entry->d_name[0] == '.') continue;
-        if (std::stoi(entry->d_name) == self) continue;
-        ++n;
+        const int fd = std::stoi(entry->d_name);
+        if (fd == self) continue;
+        ++t.count;
+        if (fd > t.max_fd) t.max_fd = fd;
     }
     closedir(dir);
-    return n;
+    return t;
 }
+
+int open_fd_count() { return fd_table().count; }
+
+// Lowers the soft RLIMIT_NOFILE for the duration of a case and puts it back
+// on every exit, including a failed REQUIRE.
+class ScopedFdLimit {
+public:
+    explicit ScopedFdLimit(rlim_t soft) {
+        ok_ = getrlimit(RLIMIT_NOFILE, &saved_) == 0;
+        if (ok_) {
+            rlimit tight = saved_;
+            tight.rlim_cur = soft;
+            ok_ = setrlimit(RLIMIT_NOFILE, &tight) == 0;
+        }
+    }
+    ~ScopedFdLimit() {
+        if (ok_) setrlimit(RLIMIT_NOFILE, &saved_);
+    }
+    bool ok() const { return ok_; }
+
+private:
+    rlimit saved_{};
+    bool ok_ = false;
+};
+
+// Closes every descriptor it holds on scope exit, whichever way the case
+// leaves.
+struct FdHoard {
+    std::vector<int> fds;
+    ~FdHoard() {
+        for (int fd : fds) ::close(fd);
+    }
+};
 
 }  // namespace
 
 TEST_CASE("PtyPair - owns both descriptors: a construct/destroy loop leaves the fd table unchanged",
           "[fakes][pty][unit]") {
+    // The baseline is taken immediately before the loop and compared
+    // immediately after it, with nothing else in between, so only what the
+    // loop itself opened can move the count.
     const int before = open_fd_count();
     if (before < 0) {
         WARN("/proc/self/fd is not available on this host; the ownership check is skipped");
@@ -131,19 +184,54 @@ TEST_CASE("PtyPair - owns both descriptors: a construct/destroy loop leaves the 
         // now set inside the pair rather than by each fake.
         CHECK((fcntl(pty.master_fd(), F_GETFL, 0) & O_NONBLOCK) != 0);
     }
-    // The leak check: the pair must give back exactly what it took. Asserted
-    // only across the loop, not per iteration as an absolute count, because
-    // anything else in the test binary that lazily opens a descriptor during
-    // the loop (a log file, a leftover thread) is not a PtyPair leak.
+    // The leak check: the pair must give back exactly what it took.
     CHECK(open_fd_count() == before);
 }
 
+TEST_CASE("PtyPair - a keep-alive open that fails throws, with the master closed", "[fakes][pty][unit]") {
+    // The #387 leak, forced in-process. Lower the soft descriptor limit to
+    // just above the highest descriptor already open, fill every free slot
+    // below it with dup(), then free exactly one: posix_openpt() takes that
+    // slot and the keep-alive open() of the slave fails with EMFILE. The
+    // pair must throw and must not leave the master behind. The hand-rolled
+    // block this replaced constructed successfully here, with the keep-alive
+    // at -1 and a confusing EIO waiting on the first read; against it the
+    // REQUIRE_THROWS_AS below is the red line.
+    const FdTable start = fd_table();
+    if (start.count < 0) {
+        WARN("/proc/self/fd is not available on this host; the setup-failure check is skipped");
+        return;
+    }
+    ScopedFdLimit limit(static_cast<rlim_t>(start.max_fd + 4));
+    REQUIRE(limit.ok());
+    FdHoard hoard;
+    for (;;) {
+        const int fd = ::dup(STDERR_FILENO);
+        if (fd < 0) {
+            REQUIRE(errno == EMFILE);
+            break;
+        }
+        hoard.fds.push_back(fd);
+    }
+    REQUIRE_FALSE(hoard.fds.empty());
+    ::close(hoard.fds.back());  // exactly one free slot, for the master
+    hoard.fds.pop_back();
+    const int filled = open_fd_count();  // uses the free slot briefly, then gives it back
+    REQUIRE(filled >= 0);
+
+    REQUIRE_THROWS_AS(PtyPair("PtyPair test"), std::runtime_error);
+    // Nothing left open: the master the constructor took has been closed.
+    CHECK(open_fd_count() == filled);
+}
+
 TEST_CASE("PtyPair - sever closes both ends, forgets the slave path, and is idempotent", "[fakes][pty][unit]") {
-    const int before = open_fd_count();
     PtyPair pty("PtyPair test");
     // What a driver does with the path: open the slave.
     const int driver_fd = ::open(pty.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     REQUIRE(driver_fd >= 0);
+    // Baseline taken immediately before the call under test: the two
+    // descriptors the pair owns plus the driver's one.
+    const int before = open_fd_count();
 
     pty.sever();
     CHECK(pty.master_fd() == -1);
@@ -152,15 +240,17 @@ TEST_CASE("PtyPair - sever closes both ends, forgets the slave path, and is idem
     // let a test reopen a recycled /dev/pts/N.
     CHECK(pty.slave_path().empty());
     if (before >= 0) {
-        CHECK(open_fd_count() == before + 1);  // only the driver's own fd remains
+        CHECK(open_fd_count() == before - 2);  // only the driver's own fd remains
     }
     // The driver's side sees the unplug (issue #237): a write to the orphaned
     // slave fails with EIO, and a read returns at once with no data (0 or
     // EIO, depending on whether the input queue had drained; either is the
-    // hangup, neither is a byte).
-    errno = 0;
-    CHECK(::write(driver_fd, "x", 1) < 0);
-    CHECK(errno == EIO);
+    // hangup, neither is a byte). errno is captured right after the syscall,
+    // before any assertion machinery can run between the two.
+    const ssize_t wrote = ::write(driver_fd, "x", 1);
+    const int write_err = errno;
+    CHECK(wrote < 0);
+    CHECK(write_err == EIO);
     char buf[8];
     CHECK(::read(driver_fd, buf, sizeof(buf)) <= 0);
 

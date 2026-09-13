@@ -21,17 +21,13 @@
 // slow light command or a 10 s cover move does on hardware, which is what
 // the driver's fast-path / background-path selection keys on.
 
-#include <fcntl.h>
 #include <poll.h>
-#include <stdlib.h>
-#include <termios.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>

@@ -174,11 +174,13 @@ public:
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
-            connected_.store(false);
+            // The cached firmware goes first, so the store(false) is never
+            // observable beside a stale firmware string.
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
+            connected_.store(false);
             protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Flat panel disconnected");
         }
@@ -518,11 +520,13 @@ public:
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
-            connected_.store(false);
+            // The cached firmware goes first, so the store(false) is never
+            // observable beside a stale firmware string.
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
+            connected_.store(false);
             protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 disconnected");
         }

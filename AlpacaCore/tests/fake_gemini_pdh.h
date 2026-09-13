@@ -21,18 +21,15 @@
 // firmware might not send. Optionally streams *G status frames unprompted to
 // exercise the reader thread's routing (streamed frame vs. pending request).
 
-#include <fcntl.h>
 #include <poll.h>
-#include <stdlib.h>
-#include <termios.h>
 #include <unistd.h>
 
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
