@@ -2928,11 +2928,20 @@ SDK cleanup checklist does not apply here).
   using, and a racing `start_exposure()` passed `ensure_connected()` and ran a second
   `gp_camera_capture()` on that same handle concurrently — both genuine use-after-close /
   concurrent-SDK-call bugs, not theoretical ones. Publishing `connected_` only after geometry is
-  resolved (both the cache-hit and priming branches) closes both: a racing disconnect during
-  priming is recorded as pending and honored by the task tail once this call returns, and
-  `ensure_connected()` correctly rejects any operational call until then. If you touch this
-  function again, `connected_.store(true)` has to stay the *last* thing that happens on the
-  connect path, not something set up front for a longer-feeling task to run after.
+  resolved (both the cache-hit and priming branches) closes both for the ASYNC `connect()`/
+  `disconnect()` entry points, which is what `conn_task_` tracks. **`set_connected()` is also a
+  public sync entry point in its own right** (the project's own `[stress]` harness calls it
+  directly, bypassing `conn_task_` entirely, which then stays `kConnIdle` for the whole priming
+  window) — round 2 of the same review added `connecting_priming_`, mirroring ToupTek AFW's
+  `connecting_homing_`: a racing sync disconnect calls `record_pending_disconnect()` instead of
+  being dropped as falsely idempotent (`connected_` is still `false` on both sides), a racing sync
+  connect no-ops instead of double-opening and leaking the first handle, and this call consumes
+  the pending flag after re-locking post-priming, closing the handle instead of publishing
+  `connected_` if a disconnect was recorded. `ensure_connected()` correctly rejects any
+  operational call for the whole window either way. If you touch this function again,
+  `connected_.store(true)` has to stay the *last* thing that happens on the connect path, and any
+  new `mutex_`-released window needs its own `connecting_*` flag the same way — the async task
+  gate alone never covers a sync caller.
 - **`set_gain()` holds `mutex_` across the SDK call via `with_handle()`, not just for the handle
   copy** — the same class of bug as above, on a different path: the original code read `handle_`
   under a lock via a `handle_value()` helper, released the lock, then called

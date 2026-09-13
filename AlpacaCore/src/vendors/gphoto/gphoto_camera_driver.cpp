@@ -438,6 +438,20 @@ public:
             stop_exposure_thread();
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        if (!connected && !connected_.load() && connecting_priming_) {
+            // Disconnect requested mid-priming: a sync set_connected(true) on
+            // another thread has released mutex_ for the priming capture --
+            // conn_task_ (the async task's own state) cannot see this, since
+            // set_connected() is also a public sync entry point, and the
+            // project's own concurrency stress harness calls it directly.
+            // connected_ is still false, so the idempotency check below would
+            // silently drop this disconnect (both sides look "disconnected").
+            // Record the intent instead; the in-flight connect consumes it
+            // once priming finishes and closes the handle rather than
+            // publishing connected_.
+            record_pending_disconnect();
+            return;
+        }
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
@@ -451,6 +465,15 @@ public:
         auto& sdk = GPhotoSDKWrapper::instance();
 
         if (connected) {
+            if (connecting_priming_) {
+                // Another set_connected(true) is already mid-priming and has
+                // released mutex_ for the capture. Every gate above passed
+                // (connected_ is still false), so without this we would
+                // double-open the camera and leak the first handle when only
+                // one close ever fires. The in-flight call publishes
+                // handle_/connected_ when it finishes; this call is a no-op.
+                return;
+            }
             auto cameras = sdk.enumerate_cameras();
             if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
                 throw AlpacaException("gphoto camera index not found (is it plugged in and powered on?)",
@@ -483,11 +506,20 @@ public:
             // start_exposure(), via ensure_connected()) run concurrently with
             // the still-unlocked priming capture on the very same libgphoto2
             // handle -- a genuine use-after-close / concurrent-capture window,
-            // not just a theoretical one. Connecting stays true for this
-            // whole window (the async task hasn't returned), which is exactly
-            // what ASCOM clients are supposed to poll through; a disconnect
-            // that arrives during it is recorded as pending and honored by
-            // the task tail once this call returns, not silently dropped.
+            // not just a theoretical one.
+            //
+            // Round 2: that fix alone covers only the ASYNC connect()/
+            // disconnect() entry points, which is what conn_task_ tracks --
+            // set_connected() is also a public sync entry point in its own
+            // right (the project's own [stress] harness calls it directly),
+            // and conn_task_ stays kConnIdle for a sync call. connecting_priming_
+            // (below) closes that second window the same way ToupTek AFW's
+            // connecting_homing_ does for its mutex-released homing poll: a
+            // racing sync disconnect records itself via record_pending_disconnect()
+            // instead of being dropped as falsely idempotent, a racing sync
+            // connect no-ops instead of double-opening, and this call consumes
+            // the pending flag after re-locking post-priming, closing the
+            // handle instead of publishing connected_ if one was recorded.
 
             // Sensor geometry is the same for every camera of this model
             // (see the cache helpers above) -- a rig that has already primed
@@ -507,6 +539,7 @@ public:
             // Best-effort -- see prime_sensor_geometry_and_cache.
             int priming_handle = opened_handle;
             std::string priming_model = info.model;
+            connecting_priming_ = true;
             lock.unlock();
             try {
                 prime_sensor_geometry_and_cache(priming_handle, priming_model);
@@ -515,6 +548,23 @@ public:
                                 "Sensor geometry priming capture failed (will learn on first real "
                                 "exposure instead): " +
                                     std::string(e.what()));
+            }
+            lock.lock();
+            connecting_priming_ = false;
+            if (consume_pending_disconnect(connected_.load())) {
+                // A sync set_connected(false) landed during the mutex-released
+                // priming capture and recorded itself above instead of being
+                // dropped. Honor it: close the handle we just opened and stay
+                // disconnected rather than publishing connected_. Requested,
+                // not a failure -- return cleanly.
+                const int abandoned_handle = handle_;
+                handle_ = -1;
+                camera_info_valid_ = false;
+                reset_exposure_state_locked();
+                if (abandoned_handle >= 0) {
+                    sdk.close_camera(abandoned_handle);
+                }
+                return;
             }
             connected_.store(true);
             return;
@@ -956,6 +1006,13 @@ private:
 
     mutable std::mutex mutex_;
     std::atomic<bool> connected_{false};
+    // True while a sync set_connected(true) has released mutex_ for the
+    // priming capture (review PR #485 round 2) -- guards the window
+    // conn_task_ cannot see, since set_connected() is a public sync entry
+    // point in its own right, not just the async task's body. Mirrors
+    // ToupTek AFW's connecting_homing_; see async_connectable.h's
+    // record_pending_disconnect() doc comment, written for this exact shape.
+    bool connecting_priming_{false};
 
     GPhotoCameraInfo camera_info_{};
     bool camera_info_valid_{false};
