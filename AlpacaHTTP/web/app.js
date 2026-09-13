@@ -334,6 +334,7 @@ const INDEX_FIELDS = [
     { fieldId: 'qhy-camera-index', vendor: 'qhy', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'qhy-cfw-camera-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'cameraIndex', idFieldId: 'qhy-cfw-camera-id' },
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'gphoto-camera-index', vendor: 'gphoto', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
     { fieldId: 'touptek-filterwheel-index', vendor: 'touptek', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'touptek-filterwheel-id' },
@@ -950,6 +951,8 @@ function startEditDevice(device) {
         setFormValue('astroasis-hid-path', config.hidPath);
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
+    } else if (vendor === 'gphoto') {
+        setFormValue('gphoto-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek' && deviceType === 'switch') {
         // switchType selects the backend: 'thermal' (camera dew heater + fan) or
         // 'stellavita' (GPIO PowerBox, the default for legacy configs).
@@ -1329,6 +1332,10 @@ async function loadServerInfo() {
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
         const clockText = clockStateText(desc);
+        // open-astro#354: adopt the host zone for the header clock. A missing
+        // field (older server) or '' keeps the browser-zone rendering.
+        serverTimeZone = String(resolveDescriptionValue(desc, ['TimeZone']) || '');
+        updateServerClock();
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.
@@ -1761,6 +1768,10 @@ async function syncTime() {
 // network traffic. Re-synced every 60 s and after a Sync Time. If server and
 // browser disagree by more than 2 s the clock turns red as a "needs sync" hint.
 let serverClockOffsetMs = null;
+// open-astro#354: the host's IANA zone from the description payload's
+// TimeZone field ('' until the first successful load, or when the host
+// cannot name one); formatServerClock() falls back to the browser's zone.
+let serverTimeZone = '';
 
 async function refreshServerClockOffset() {
     try {
@@ -1812,7 +1823,7 @@ function updateServerClock() {
         return;
     }
     const serverNow = new Date(Date.now() + serverClockOffsetMs);
-    el.textContent = formatServerClock(serverNow);
+    el.textContent = formatServerClock(serverNow, serverTimeZone);
     // The GET returns whole seconds, so up to ±1 s of the offset is
     // quantization, not drift; only flag beyond 2 s.
     el.classList.toggle('drift', Math.abs(serverClockOffsetMs) > 2000);
@@ -2279,6 +2290,11 @@ function updateVendorOptions() {
         svbonyOption.disabled = !isCamera;
         svbonyOption.hidden = !isCamera;
     }
+    const gphotoOption = vendorSelect.querySelector('option[value="gphoto"]');
+    if (gphotoOption) {
+        gphotoOption.disabled = !isCamera;
+        gphotoOption.hidden = !isCamera;
+    }
     const touptekOption = vendorSelect.querySelector('option[value="touptek"]');
     if (touptekOption) {
         // ToupTek provides cameras, the AAF focuser, the AFW filter wheel, and
@@ -2350,6 +2366,9 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
+    if (!isCamera && vendorSelect.value === 'gphoto') {
+        vendorSelect.value = '';
+    }
     if (!isCamera && !isFocuser && !isFilterWheel && !isSwitch && vendorSelect.value === 'touptek') {
         vendorSelect.value = '';
     }
@@ -2397,6 +2416,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('qhy-config').style.display = 'block';
     } else if (vendor === 'svbony') {
         document.getElementById('svbony-config').style.display = 'block';
+    } else if (vendor === 'gphoto') {
+        document.getElementById('gphoto-config').style.display = 'block';
     } else if (vendor === 'touptek') {
         document.getElementById('touptek-config').style.display = 'block';
     } else if (vendor === 'playerone') {
@@ -3655,6 +3676,9 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'svbony') {
         const svbonyCameraIndex = readOptionalNumber(formData, 'svbonyCameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
+    } else if (deviceData.vendor === 'gphoto') {
+        const gphotoCameraIndex = readOptionalNumber(formData, 'gphotoCameraIndex');
+        deviceData.cameraIndex = gphotoCameraIndex !== null ? gphotoCameraIndex : 0;
     } else if (deviceData.vendor === 'touptek' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
         // Unique field name (not "switchType") to avoid the FormData collision
         // with ZWO's switch-type select, which also submits while hidden.
