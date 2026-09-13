@@ -35,17 +35,25 @@
 // header reading against a log line meant knowing the host's offset and doing
 // the arithmetic by eye.
 //
-// This renders the same instant in the viewer's zone, in the log lines' own
-// "YYYY-MM-DD HH:MM:SS" shape, and keeps a zone label so the reading stays
-// unambiguous. The host's zone would be the better label for a remote
-// operator, but it is not in the description payload yet; adding it touches
-// add_clock_fields(), which two open PRs are already editing.
+// This renders the same instant in the SERVER's zone when the description
+// payload names one (its TimeZone field, an IANA name read from the host,
+// which is the zone the log lines are in), else in the viewer's own zone,
+// and keeps a zone label either way so the reading stays unambiguous. The
+// two tiers differ for a remote operator: a rig in a paddock twelve hours
+// away should read as the rig's wall clock, since that is what its logs say.
 //
-// Falls back to the previous UTC rendering if Intl cannot produce the parts:
-// a wrong-looking clock is worse than an unfashionable one.
-function localZoneLabel(date) {
+// `timeZone` is optional. An empty or unrecognised value (Intl throws a
+// RangeError for a name its tz database lacks) takes the viewer-zone tier,
+// which was the whole behaviour before the field existed; and if Intl cannot
+// produce the parts at all, the previous UTC rendering: a wrong-looking
+// clock is worse than an unfashionable one.
+function localZoneLabel(date, timeZone) {
     try {
-        const part = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+        const options = { timeZoneName: 'short' };
+        if (timeZone) {
+            options.timeZone = timeZone;
+        }
+        const part = new Intl.DateTimeFormat(undefined, options)
             .formatToParts(date)
             .find((p) => p.type === 'timeZoneName');
         return part ? part.value : '';
@@ -54,9 +62,20 @@ function localZoneLabel(date) {
     }
 }
 
-function formatServerClock(date) {
+function formatServerClock(date, timeZone) {
+    if (timeZone) {
+        // Prove the zone before using it: the viewer-zone tier is the right
+        // fallback for a name this browser's Intl does not know, and it must
+        // not be collapsed into the UTC tier below, which exists for a
+        // broken engine, not a stale tz database.
+        try {
+            new Intl.DateTimeFormat('en-CA', { timeZone: timeZone });
+        } catch (e) {
+            return formatServerClock(date, '');
+        }
+    }
     try {
-        const parts = new Intl.DateTimeFormat('en-CA', {
+        const options = {
             year: 'numeric',
             month: '2-digit',
             day: '2-digit',
@@ -65,7 +84,11 @@ function formatServerClock(date) {
             second: '2-digit',
             hourCycle: 'h23',
             timeZoneName: 'short'
-        }).formatToParts(date).reduce((acc, part) => {
+        };
+        if (timeZone) {
+            options.timeZone = timeZone;
+        }
+        const parts = new Intl.DateTimeFormat('en-CA', options).formatToParts(date).reduce((acc, part) => {
             acc[part.type] = part.value;
             return acc;
         }, {});
@@ -86,7 +109,7 @@ function formatServerClock(date) {
         // viewer's own locale, which yields the abbreviation an operator
         // recognises (NZST rather than GMT+12) wherever the browser has one,
         // and falls back to the offset where it does not.
-        const zone = localZoneLabel(date) || parts.timeZoneName || '';
+        const zone = localZoneLabel(date, timeZone) || parts.timeZoneName || '';
         if (!zone) {
             // An engine that accepted the options but produced no zone part
             // would otherwise render a bare "2026-09-11 23:30:48" -- an

@@ -22,9 +22,15 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
+#include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <filesystem>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -213,6 +219,281 @@ TEST_CASE("SkyWatcher serial - the dual-baud probe finds a Synta EQ board at 115
         REQUIRE(board.frames().empty());
         alpacacore::util::mark_serial_port_closed(key);
     }
+}
+
+// ── open-astro#445: Connected follows the serial link ──────────────────────
+
+namespace {
+
+sw::ConnectionInfo serial_info(const std::string& path) {
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Serial;
+    info.port_path = path;
+    info.baud_rate = 9600;
+    info.response_timeout_ms = 300;
+    return info;
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> serial_driver(const std::string& path) {
+    return sw::create_skywatcher_telescope(0, serial_info(path), -37.0, 175.0, 50.0);
+}
+
+void require_not_connected_error(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        return;
+    }
+    FAIL("expected AlpacaException(NotConnected)");
+}
+
+// A by-id style symlink to a fake board, repointable to a "replugged" one.
+struct PortLink {
+    std::filesystem::path path;
+    explicit PortLink(const std::string& target) {
+        path = std::filesystem::temp_directory_path() /
+               ("alpacacore-sw445-" + std::to_string(::getpid()) + "-" +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_symlink(target, path);
+    }
+    void repoint(const std::string& target) const {
+        std::filesystem::remove(path);
+        std::filesystem::create_symlink(target, path);
+    }
+    ~PortLink() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("SkyWatcher serial - Connected drops when the adapter is pulled, with no client I/O",
+          "[skywatcher][serial][connected]") {
+    // The #445 rig trace: `connected` read True on every sample for 80 s with
+    // the device node gone. Nothing is asked of the mount between the unplug
+    // and the read, so the answer must come from the link, not from an error.
+    FakeSkyWatcherSerialBoard board;
+    const std::string key = std::filesystem::canonical(board.slave_path()).string();
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    board.sever_link();
+    CHECK_FALSE(driver->get_connected());
+    // The stale descriptor is what kept the kernel from handing the returning
+    // adapter its old name (/dev/ttyUSB0 -> ttyUSB1); noticing the loss
+    // releases it, and the port's registry claim with it.
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
+    require_not_connected_error([&] { driver->get_right_ascension(); });
+
+    // An explicit disconnect of the dead link still completes cleanly.
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("SkyWatcher serial - an operation that hits a dead link fails NotConnected and drops Connected",
+          "[skywatcher][serial][connected]") {
+    // The other half of the trace: "Serial write failed: Input/output error"
+    // from every read, as a generic driver error, with Connected still True.
+    FakeSkyWatcherSerialBoard board;
+    auto& proto = sw::SkyWatcherProtocolWrapper::instance();
+    REQUIRE(proto.connect(serial_info(board.slave_path())));
+    REQUIRE_FALSE(proto.get_motor_board_version().empty());
+
+    board.sever_link();
+    require_not_connected_error([&] { proto.inquire_position(sw::kAxisRa); });
+    CHECK_FALSE(proto.is_connected());
+    proto.disconnect();
+}
+
+TEST_CASE("SkyWatcher serial - Connected=true on a stale link reconnects instead of short-circuiting",
+          "[skywatcher][serial][connected]") {
+    // The #445 recovery path: the adapter comes back (here under the same
+    // by-id style symlink, repointed as udev does) and the client re-sends
+    // Connected=true without a disconnect first. That used to return success
+    // with no driver activity at all.
+    auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
+    PortLink link(board->slave_path());
+    auto driver = serial_driver(link.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // A redundant connect on a LIVE link is still a no-op: nothing on the wire.
+    const std::size_t frames_before = board->frames().size();
+    driver->set_connected(true);
+    CHECK(board->frames().size() == frames_before);
+
+    // Captured BEFORE sever_link(): PtyPair::sever() clears slave_path_, so
+    // reading it off `board` after severing would always be empty and the
+    // guard below would compare against "" -- true for any pty and unable
+    // to catch the reorder it exists to catch.
+    const std::string old_path = board->slave_path();
+    board->sever_link();
+    // devpts assigns st_ino = index + 3, so link_alive() would call a
+    // recycled index the same node -- this only works because the driver
+    // still holds `board`'s old slave fd here, which keeps devpts from
+    // reusing its index before `replugged` is constructed below. Do not
+    // reorder sever_link() / construction / repoint().
+    FakeSkyWatcherSerialBoard replugged;
+    // Self-checking: if a future edit moves construction earlier or drops the
+    // driver's fd first, devpts could recycle the index and hand back the
+    // severed board's own path, which would let this case pass vacuously.
+    REQUIRE(replugged.slave_path() != old_path);
+    link.repoint(replugged.slave_path());
+    REQUIRE(replugged.frames().empty());
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(replugged.count_frames('e') >= 1);  // the connect sequence really ran
+    CHECK_NOTHROW(driver->get_right_ascension());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - a connect whose board never answers leaves Connected false",
+          "[skywatcher][serial][connected]") {
+    // open() and tcsetattr() succeeding proves only that a port exists. The
+    // ":e" identity query is allowed to fail, but the axis-parameter reads
+    // after it are not; when they throw, the connect must not stay latched.
+    FakeSkyWatcherSerialBoard board;
+    board.answer_only_at_baud(115200);  // the driver speaks 9600: nothing decodes
+    const std::string key = std::filesystem::canonical(board.slave_path()).string();
+    auto driver = serial_driver(board.slave_path());
+
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
+}
+
+TEST_CASE("SkyWatcher serial - separate drivers keep separate links", "[skywatcher][serial][connected]") {
+    FakeSkyWatcherSerialBoard first;
+    FakeSkyWatcherSerialBoard second;
+    first.set_version_reply("032732");
+    auto a = serial_driver(first.slave_path());
+    auto b = sw::create_skywatcher_telescope(1, serial_info(second.slave_path()), -37.0, 175.0, 50.0);
+    a->set_connected(true);
+    b->set_connected(true);
+    CHECK(a->command_string("e1", false) == "=032732");
+    CHECK(b->command_string("e1", false) == "=033A44");
+    CHECK(a->get_connected());
+    // Disconnecting B must not close A's descriptor or change A's Connected.
+    b->set_connected(false);
+    CHECK(a->get_connected());
+    CHECK_NOTHROW(a->get_right_ascension());
+    b->set_connected(true);
+    first.sever_link();
+    CHECK_FALSE(a->get_connected());
+    CHECK(b->get_connected());
+    CHECK_NOTHROW(b->get_right_ascension());
+    a->set_connected(false);
+    CHECK(b->get_connected());
+    b->set_connected(false);
+}
+
+// Uses the real transport, but makes a link disappear immediately after one
+// successful health probe. The next probe observes loss deterministically.
+class LateLossProtocol final : public sw::SkyWatcherProtocolWrapper {
+public:
+    void arm(std::function<void()> callback) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        owner_ = std::this_thread::get_id();
+        after_probe_ = std::move(callback);
+    }
+    bool link_alive() override {
+        const bool result = sw::SkyWatcherProtocolWrapper::link_alive();
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            if (owner_ == std::this_thread::get_id()) {
+                callback = std::move(after_probe_);
+                after_probe_ = {};
+            }
+        }
+        if (callback) callback();
+        return result;
+    }
+
+private:
+    std::mutex callback_mutex_;
+    std::thread::id owner_;
+    std::function<void()> after_probe_;
+};
+
+TEST_CASE("SkyWatcher serial - late loss joins an old pulse before reconnecting",
+          "[skywatcher][serial][connected][late-loss]") {
+    FakeSkyWatcherSerialBoard board;
+    FakeSkyWatcherSerialBoard replugged;
+    PortLink port(board.slave_path());
+    auto protocol = std::make_unique<LateLossProtocol>();
+    auto* probe = protocol.get();
+    auto driver =
+        sw::create_skywatcher_telescope(0, serial_info(port.path.string()), -37.0, 175.0, 50.0, std::move(protocol));
+    driver->set_connected(true);
+    // Only the fake board moves. Wait for dispatch before introducing the loss.
+    driver->pulse_guide(0, 400);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (board.count_frames('J') == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    REQUIRE(board.count_frames('J') > 0);
+    probe->arm([&] {
+        board.sever_link();
+        port.repoint(replugged.slave_path());
+    });
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(replugged.count_frames('e') > 0);
+    // Without the late-loss join, the old pulse timer sends its stop to the
+    // NEW board after reconnect. Observe beyond the original pulse deadline.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(replugged.count_frames('K') == 0);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - immediate no-progress reads do not spin at the timeout",
+          "[skywatcher][serial][read-stall]") {
+    const int retry = GENERATE(0, EAGAIN, EINTR);
+    FakeSkyWatcherSerialBoard board;
+    bool no_progress = false;
+    int reads = 0;
+    sw::SkyWatcherProtocolWrapper protocol([&](int fd, char* data, std::size_t size) -> std::ptrdiff_t {
+        if (no_progress) {
+            ++reads;
+            errno = retry;
+            return retry == 0 ? 0 : -1;
+        }
+        return ::read(fd, data, size);
+    });
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+    REQUIRE_FALSE(protocol.get_motor_board_version().empty());
+    no_progress = true;
+    CHECK_THROWS(protocol.send_command('j', 1, "", 60));
+    CHECK(reads > 0);
+    CHECK(reads <= 100);
+    // A still-present node with no answer retains the existing timeout policy.
+    CHECK(protocol.link_alive());
+}
+
+TEST_CASE("SkyWatcher serial - read errors on a present node lose the link", "[skywatcher][serial][connected]") {
+    const int failure = GENERATE(EIO, ENXIO, ENODEV, EBADF);
+    FakeSkyWatcherSerialBoard board;
+    bool fail_read = false;
+    sw::SkyWatcherProtocolWrapper protocol([&](int fd, char* data, std::size_t size) -> std::ptrdiff_t {
+        if (fail_read) {
+            errno = failure;
+            return -1;
+        }
+        return ::read(fd, data, size);
+    });
+    const std::string key = std::filesystem::canonical(board.slave_path()).string();
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+    REQUIRE_FALSE(protocol.get_motor_board_version().empty());
+    fail_read = true;
+    REQUIRE(std::filesystem::exists(board.slave_path()));
+    require_not_connected_error([&] { protocol.inquire_position(1); });
+    CHECK_FALSE(protocol.link_alive());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
 }
 
 #endif  // _WIN32
