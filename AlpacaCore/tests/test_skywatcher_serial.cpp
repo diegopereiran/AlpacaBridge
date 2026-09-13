@@ -323,6 +323,11 @@ TEST_CASE("SkyWatcher serial - Connected=true on a stale link reconnects instead
     driver->set_connected(true);
     CHECK(board->frames().size() == frames_before);
 
+    // Captured BEFORE sever_link(): PtyPair::sever() clears slave_path_, so
+    // reading it off `board` after severing would always be empty and the
+    // guard below would compare against "" -- true for any pty and unable
+    // to catch the reorder it exists to catch.
+    const std::string old_path = board->slave_path();
     board->sever_link();
     // devpts assigns st_ino = index + 3, so link_alive() would call a
     // recycled index the same node -- this only works because the driver
@@ -333,7 +338,7 @@ TEST_CASE("SkyWatcher serial - Connected=true on a stale link reconnects instead
     // Self-checking: if a future edit moves construction earlier or drops the
     // driver's fd first, devpts could recycle the index and hand back the
     // severed board's own path, which would let this case pass vacuously.
-    REQUIRE(replugged.slave_path() != board->slave_path());
+    REQUIRE(replugged.slave_path() != old_path);
     link.repoint(replugged.slave_path());
     REQUIRE(replugged.frames().empty());
 
