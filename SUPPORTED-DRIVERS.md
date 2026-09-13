@@ -168,7 +168,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO ASI Camera SDK Version 1.40 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
-- **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version, date and counts for that camera.
+- **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and the pass counts for that camera (the run date is readable from the `LastExposureStartTime` lines in the report).
 
 </details>
 
