@@ -66,20 +66,13 @@ public:
     // open-astro#445: pull the cable. Closing the master is what a USB-serial
     // adapter leaving the bus does to the driver's side of the link: the node
     // is removed (the held fd's link count drops to 0), writes fail with EIO
-    // and reads return 0. Idempotent; the destructor copes with either state.
+    // and reads return 0. Idempotent (PtyPair::sever); slave_path() is empty after it.
     void sever_link() {
         stop_.store(true);
         if (worker_.joinable()) {
             worker_.join();
         }
-        if (keepalive_fd_ >= 0) {
-            close(keepalive_fd_);
-            keepalive_fd_ = -1;
-        }
-        if (master_fd_ >= 0) {
-            close(master_fd_);
-            master_fd_ = -1;
-        }
+        pty_.sever();
     }
 
     /// Position counts the board reports for ":j<axis>".
