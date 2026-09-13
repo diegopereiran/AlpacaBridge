@@ -359,7 +359,7 @@ Identical to the ASIair Pro driver: `close()` releases our fd without driving th
 
 ### What about the USB power ports and the button?
 
-The same `pwm_gpio.ko` module also controls the two USB2 ports, two USB3 ports, the two status LEDs, and the physical button (ioctl indices 0, 1, 2, 8, 9, 10, 11). They are **not** exposed by the v1 AlpacaBridge Switch driver — the v1 surface is 4 DC ports only, matching the four-channel ASCOM Switch interface most clients expect. Extending the driver to control them is straightforward (the kernel ioctls are identical) — track interest in `AGENTS.md`.
+The same `pwm_gpio.ko` module also controls the two USB2 ports, two USB3 ports, the two status LEDs, and the physical button (ioctl indices 0, 1, 2, 8, 9, 10, 11). They are **not** exposed by the v1 AlpacaBridge Switch driver — the v1 surface is 4 DC ports only, matching the four-channel ASCOM Switch interface most clients expect. Extending the driver to control them is straightforward (the kernel ioctls are identical) — track interest in `.github/instructions/zwo.instructions.md`.
 
 ---
 

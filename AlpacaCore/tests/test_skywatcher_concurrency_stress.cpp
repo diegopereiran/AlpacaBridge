@@ -59,7 +59,7 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(const FakeSkyWatcherMou
 // join: slew_task_thread_, pulse_task_thread_, both per-axis
 // stop_task_thread_[axis] (MoveAxis stops issued close together — the exact
 // shape of the 2026-09-06 "superseded MoveAxis stop task strands Slewing"
-// bug in AGENTS.md), rate_verify_thread_ (open-astro #248) and the
+// bug in .github/instructions/skywatcher.instructions.md), rate_verify_thread_ (open-astro #248) and the
 // duty_thread_ that set_tracking starts and stops.
 //
 // The rate-verify task only spawns on an in-place rate change: tracking must

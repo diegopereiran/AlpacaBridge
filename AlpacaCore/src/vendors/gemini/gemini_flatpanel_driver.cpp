@@ -687,8 +687,8 @@ public:
      * model) does not, so there is no wire command to send here. That would
      * normally mean throwing MethodNotImplemented (as the light-only Cover
      * Lite does for all three cover methods), but this model's CoverState is
-     * a real state, not NotPresent, and per AGENTS.md/the WandererCover
-     * precedent ConformU requires HaltCover to actually function on any
+     * a real state, not NotPresent, and per the WandererCover precedent
+     * (.github/instructions/wandererastro.instructions.md) ConformU requires HaltCover to actually function on any
      * cover-capable device rather than throw. So instead: stop *reporting*
      * Moving immediately (CoverState becomes Unknown, CoverMoving becomes
      * false) while the in-flight open/close command's blocking wire call

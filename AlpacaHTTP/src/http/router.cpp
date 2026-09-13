@@ -2428,7 +2428,8 @@ Response Router::dispatch_device_method(
                 // 8 s deadline below never fired. A connect requested while a
                 // task is in flight is still handed to the driver: the base
                 // class queues it against an in-flight disconnect and drops
-                // it against an in-flight connect (AGENTS.md).
+                // it against an in-flight connect
+                // (.github/instructions/alpaca-http-conformance.instructions.md).
                 if (connected && (device->get_connecting() || !device->get_connected())) {
                     // Use async connect then poll for completion.
                     // Slow-connecting devices (serial focusers etc.) can exceed

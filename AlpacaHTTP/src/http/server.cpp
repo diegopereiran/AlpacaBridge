@@ -1240,11 +1240,12 @@ void Server::wake_reactor() {
 // when the bus is wedged.
 //
 // Its own thread, not the reactor's: the reactor must not block in anything
-// but poll() (AGENTS.md), and a second spent in the probe there would delay
-// the next request of every parked keep-alive connection, plus their idle
-// deadlines -- the same stall moved to a worse place. The probe settles after
-// one successful read, so on a host with an RTC this costs nothing within a
-// minute of start; on a host without one each pass is an opendir.
+// but poll() (.github/instructions/alpaca-http-conformance.instructions.md),
+// and a second spent in the probe there would delay the next request of every
+// parked keep-alive connection, plus their idle deadlines -- the same stall
+// moved to a worse place. The probe settles after one successful read, so on
+// a host with an RTC this costs nothing within a minute of start; on a host
+// without one each pass is an opendir.
 //
 // The interval comes from Config (HostClock::kRtcProbeRateLimit + 1 s by
 // default, deliberately not the limiter itself: equal periods race, and a

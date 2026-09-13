@@ -94,7 +94,8 @@ TEST_CASE("Player One camera - destruction races an in-flight connect", "[player
 }
 
 // The thermal Switch driver (DewHeater + Fan; cooling deliberately lives on
-// the Camera interface, see AGENTS.md) shares the camera's SDK handle, so on
+// the Camera interface, see .github/instructions/playerone.instructions.md) shares the
+// camera's SDK handle, so on
 // a hardware-free host it fails fast at the same enumeration; with a camera
 // attached the same cases exercise the full connect path.
 TEST_CASE("Player One switch - concurrent connect/disconnect/operate stress", "[playerone][switch][stress]") {

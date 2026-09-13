@@ -2227,7 +2227,7 @@ int main() {
         // Only this entry, rather than appending to whatever is on disk: the
         // second Router below re-registers EVERY entry in the file and builds
         // that vendor's driver, and some vendors touch hardware eagerly (the
-        // astroasis by-index path AGENTS.md warns about). Appending would make
+        // astroasis by-index path .github/instructions/astroasis.instructions.md warns about). Appending would make
         // this case depend on every earlier block having removed what it added,
         // which nothing enforces. The original contents are restored below.
         nlohmann::json entries = nlohmann::json::array();
