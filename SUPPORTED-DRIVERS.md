@@ -434,6 +434,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | EAF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAF/) |
+| EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAFN/) |
 
 <details>
 <summary><strong>ZWO Focuser Driver Notes</strong></summary>
@@ -441,6 +442,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
+- **EAF and EAFN**: the EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) is served by the same driver with the same configuration as the EAF; there is no model selector. `Name` is whatever the EAF SDK reports for the unit; both validated units report `EAF`.
 
 </details>
 
