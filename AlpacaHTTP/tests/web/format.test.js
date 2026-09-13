@@ -85,6 +85,51 @@ test('renders the instant in the viewer\'s zone, not UTC', () => {
     }));
 });
 
+// open-astro#354, second half: the description payload's TimeZone field
+// (the host's IANA zone) takes precedence over the viewer's zone, so a
+// remote operator reads the rig's wall clock, which is what its logs say.
+test('renders in the server zone when one is given, whatever the viewer zone', () => {
+    withTZ('UTC', () => withFormat(({ formatServerClock }) => {
+        const rendered = formatServerClock(INSTANT, 'Pacific/Auckland');
+        assert.match(rendered, SHAPE);
+        assert.ok(rendered.startsWith('2026-09-11 23:30:48 '), rendered);
+        assert.ok(!rendered.includes('(UTC)'), rendered);
+    }));
+    withTZ('Pacific/Auckland', () => withFormat(({ formatServerClock }) => {
+        const rendered = formatServerClock(INSTANT, 'Etc/UTC');
+        assert.ok(rendered.startsWith('2026-09-11 11:30:48 '), rendered);
+    }));
+});
+
+test('an empty or missing server zone keeps the viewer-zone rendering', () => {
+    withTZ('Pacific/Auckland', () => withFormat(({ formatServerClock }) => {
+        assert.strictEqual(formatServerClock(INSTANT, ''), formatServerClock(INSTANT));
+        assert.strictEqual(formatServerClock(INSTANT, undefined), formatServerClock(INSTANT));
+        assert.ok(formatServerClock(INSTANT, '').startsWith('2026-09-11 23:30:48 '));
+    }));
+});
+
+test('a server zone this Intl does not know falls back to the viewer zone, not UTC', () => {
+    // A stale browser tz database (or a host zone name that is not IANA
+    // after all) must degrade to the pre-#354 behaviour, not to the UTC tier
+    // that exists for a broken engine.
+    withTZ('Pacific/Auckland', () => withFormat(({ formatServerClock }) => {
+        const rendered = formatServerClock(INSTANT, 'Mars/Olympus_Mons');
+        assert.match(rendered, SHAPE);
+        assert.ok(rendered.startsWith('2026-09-11 23:30:48 '), rendered);
+        assert.ok(!rendered.includes('(UTC)'), rendered);
+    }));
+});
+
+test('the zone label follows the server zone', () => {
+    withTZ('UTC', () => withFormat(({ localZoneLabel }) => {
+        const label = localZoneLabel(INSTANT, 'Pacific/Auckland');
+        // The viewer's locale decides between "NZST" and "GMT+12"; either
+        // way it must not be the viewer's own UTC.
+        assert.ok(label && label !== 'UTC', label);
+    }));
+});
+
 test('local midnight does not roll the date backwards', () => {
     // 2026-09-11 12:00 UTC is 2026-09-12 00:00 in Auckland. A padding or
     // rounding slip here shows up as a date that disagrees with the time.

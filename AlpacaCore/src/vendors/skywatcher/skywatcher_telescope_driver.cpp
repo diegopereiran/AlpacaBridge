@@ -183,10 +183,12 @@ public:
 
     SkyWatcherTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                               std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-                              std::optional<double> site_elevation_m)
+                              std::optional<double> site_elevation_m,
+                              std::unique_ptr<SkyWatcherProtocolWrapper> protocol)
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
           connection_info_(connection_info),
+          protocol_(protocol ? std::move(protocol) : std::make_unique<SkyWatcherProtocolWrapper>()),
           site_latitude_(site_latitude_deg.value_or(0.0)),
           site_longitude_(site_longitude_deg.value_or(0.0)),
           site_elevation_m_(site_elevation_m.value_or(0.0)),
@@ -262,7 +264,9 @@ public:
 
     bool get_connected() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return connected_;
+        // open-astro#445: connected_ records that a connect succeeded; the
+        // link is asked too, so a pulled adapter reads false at once.
+        return connected_ && protocol_->link_alive();
     }
 
     void connect() override { start_connection_task(true); }
@@ -270,11 +274,38 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        if (!connected) {
+        auto& protocol = *protocol_;
+        bool relink = false;
+        if (connected) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            relink = connected_ && !protocol.link_alive();
+        }
+        if (!connected || relink) {
             // Join background task threads BEFORE taking mutex_ (they take it).
+            // A relink tears a session down too: a slew task left over from
+            // the lost link must not resume against the new one.
             cancel_async_tasks();
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        if (connected && !relink && connected_ && !protocol.link_alive()) {
+            // The loss became visible after the probe above, so the tasks were
+            // not cancelled. A slew task blocked on mutex_ would wake to the
+            // reconnected session and resume against the new link: drop the
+            // lock and join it first, as the probe path does.
+            lock.unlock();
+            cancel_async_tasks();
+            lock.lock();
+        }
+        if (connected && connected_ && !protocol.link_alive()) {
+            // open-astro#445: a connect against a dead link used to hit the
+            // idempotency return below and report success with no reconnect.
+            // Settle the dead session first, then run the gates as for any
+            // disconnected device.
+            ALPACA_LOG_WARN("SkyWatcher", "Connect requested on a lost link; reconnecting");
+            protocol.disconnect();
+            connected_ = false;
+            reset_runtime_state_locked();
+        }
         if (!connected && record_disconnect_if_connect_in_flight(connected_)) {
             return;
         }
@@ -285,7 +316,6 @@ public:
             return;
         }
 
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
         if (connected) {
             // open-astro#274: the mount stores no site of its own, so an
             // unconfigured device would run on 0.0/0.0. hemisphere_south_locked()
@@ -329,31 +359,41 @@ public:
                 model_cache_.clear();
             }
 
-            axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
-            axis_params_[1] = protocol.get_axis_parameters(kAxisDec);
-
-            // Feature inquiry (":q" data 0x000001): bit 0x04 = home index
-            // sensor. Wave 100i reports it on both axes (0x100C); older
-            // boards reject ":q" entirely, so failure just disables AutoHome.
-            has_home_indexer_ = false;
+            // open-astro#445: the sequence below is the first thing the board
+            // is really asked (":e" above may fail by design). If it throws,
+            // the port leads nowhere useful: do not stay latched as connected.
             try {
-                uint32_t ra_features = protocol.get_feature(kAxisRa, kFeatureInquiry);
-                uint32_t dec_features = protocol.get_feature(kAxisDec, kFeatureInquiry);
-                has_home_indexer_ = (ra_features & 0x04) && (dec_features & 0x04);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-                // ":q" unsupported on this motor board.
-            }
+                axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
+                axis_params_[1] = protocol.get_axis_parameters(kAxisDec);
 
-            // First power-up: position registers default to the home offset but
-            // the controller reports "not initialized" and rejects motion until
-            // ":F" is sent. Only stamp the home position when uninitialized so a
-            // reconnect never clobbers an aligned session.
-            for (int axis = kAxisRa; axis <= kAxisDec; ++axis) {
-                AxisStatus status = protocol.inquire_status(axis);
-                if (!status.init_done) {
-                    protocol.set_position(axis, kHomeCounts);
-                    protocol.initialization_done(axis);
+                // Feature inquiry (":q" data 0x000001): bit 0x04 = home index
+                // sensor. Wave 100i reports it on both axes (0x100C); older
+                // boards reject ":q" entirely, so failure just disables AutoHome.
+                has_home_indexer_ = false;
+                try {
+                    uint32_t ra_features = protocol.get_feature(kAxisRa, kFeatureInquiry);
+                    uint32_t dec_features = protocol.get_feature(kAxisDec, kFeatureInquiry);
+                    has_home_indexer_ = (ra_features & 0x04) && (dec_features & 0x04);
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // ":q" unsupported on this motor board.
                 }
+
+                // First power-up: position registers default to the home offset but
+                // the controller reports "not initialized" and rejects motion until
+                // ":F" is sent. Only stamp the home position when uninitialized so a
+                // reconnect never clobbers an aligned session.
+                for (int axis = kAxisRa; axis <= kAxisDec; ++axis) {
+                    AxisStatus status = protocol.inquire_status(axis);
+                    if (!status.init_done) {
+                        protocol.set_position(axis, kHomeCounts);
+                        protocol.initialization_done(axis);
+                    }
+                }
+            } catch (...) {
+                protocol.disconnect();
+                connected_ = false;
+                reset_runtime_state_locked();
+                throw;
             }
 
             // Warm the position cache so first property reads stay inside
@@ -402,7 +442,7 @@ public:
         (void)raw;
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        SkyWatcherProtocolWrapper::instance().send_raw_command(std::string(command) + "\r");
+        protocol_->send_raw_command(std::string(command) + "\r");
         return "";
     }
 
@@ -410,7 +450,7 @@ public:
         (void)raw;
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        std::string reply = SkyWatcherProtocolWrapper::instance().send_raw_command(std::string(command) + "\r");
+        std::string reply = protocol_->send_raw_command(std::string(command) + "\r");
         return !reply.empty() && reply[0] == '=';
     }
 
@@ -418,7 +458,7 @@ public:
         (void)raw;
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        return SkyWatcherProtocolWrapper::instance().send_raw_command(std::string(command) + "\r");
+        return protocol_->send_raw_command(std::string(command) + "\r");
     }
 
     AlignmentMode get_alignment_mode() const override {
@@ -1284,7 +1324,7 @@ public:
                     try {
                         std::lock_guard<std::mutex> lock(mutex_);
                         const double restore_rate = effective_ra_rate_locked();
-                        auto& proto = SkyWatcherProtocolWrapper::instance();
+                        auto& proto = *protocol_;
                         proto.set_step_period(kAxisRa, tracking_step_period_for(restore_rate),
                                               /*with_readback=*/false);
                         proto.start_motion(kAxisRa);
@@ -1316,7 +1356,7 @@ public:
                 if (axis == kAxisRa) {
                     reap_rate_verify_task();
                 }
-                auto& proto = SkyWatcherProtocolWrapper::instance();
+                auto& proto = *protocol_;
                 if (axis == kAxisDec) {
                     start_speed_motion_locked(lock, kAxisDec, dec_rate);
                 } else if (restore_tracking && !pulse_restart) {
@@ -1396,7 +1436,7 @@ public:
             // never ran (or a non-restoring pulse) behaves as before.
             double applied_ra_restore_rate = ra_restore_rate_deg_per_sec;
             auto stop_axis = [this, axis, restore_tracking, pulse_restart, &applied_ra_restore_rate]() {
-                auto& proto = SkyWatcherProtocolWrapper::instance();
+                auto& proto = *protocol_;
                 // Re-derived here, NOT the value captured at dispatch: since
                 // the drive direction became hemisphere-dependent, a
                 // SiteLatitude write that crosses the equator during the
@@ -1694,7 +1734,7 @@ public:
         check_not_parked_locked("SyncToCoordinates");
         validate_ra_dec(ra, dec, "SyncToCoordinates");
 
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
 
         // ":E" requires the motors fully stopped — pause tracking around the
         // position write, then resume. This is the mount's native sync (the
@@ -1760,7 +1800,7 @@ public:
         if (was_parking) {
             // The park slew may still be moving the axes; stop them.
             try {
-                auto& protocol = SkyWatcherProtocolWrapper::instance();
+                auto& protocol = *protocol_;
                 protocol.stop_motion(kAxisRa);
                 protocol.stop_motion(kAxisDec);
             } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -1819,7 +1859,7 @@ public:
                 // the axis reports fully stopped (the deceleration ramp can
                 // exceed 1 s), then restores the previous tracking state per
                 // ASCOM.
-                SkyWatcherProtocolWrapper::instance().stop_motion(channel);
+                protocol_->stop_motion(channel);
                 cmd_axis_rate_deg_s_[axis] = 0.0;
                 // The stop is a motion command: bump and capture the
                 // generation so the background restore-tracking task can tell
@@ -1857,7 +1897,7 @@ public:
             tlock.lock();
         }
         stop_task_thread_[axis] = std::thread([this, channel, axis, stop_task_generation]() {
-            auto& protocol = SkyWatcherProtocolWrapper::instance();
+            auto& protocol = *protocol_;
             auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
             bool stopped = false;
             while (std::chrono::steady_clock::now() < deadline) {
@@ -1963,7 +2003,7 @@ public:
         // cancel flag alone only catches it after the re-dispatch).
         ++motion_generation_;
         reap_rate_verify_task();  // AbortSlew stops RA too: no resend into it
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
         // Instant stop (":L") rather than the ramped ":K": AbortSlew's contract
         // is to stop NOW, and the ramp-down from an 800x slew otherwise leaves
         // the axes reporting a GOTO in progress for over a second, which the
@@ -2003,7 +2043,9 @@ public:
 
 private:
     void check_connected() const {
-        if (!connected_) {
+        // open-astro#445: also refuse on a lost link, so cached position reads
+        // cannot keep answering from a mount that is no longer there.
+        if (!connected_ || !protocol_->link_alive()) {
             throw AlpacaException("Not connected to Sky-Watcher mount", AlpacaError::NotConnected);
         }
     }
@@ -2411,7 +2453,7 @@ private:
             (now - last_position_update_) < kOffsetModelHold) {
             return;
         }
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
         try {
             uint32_t ra_counts = protocol.inquire_position(kAxisRa);
             uint32_t dec_counts = protocol.inquire_position(kAxisDec);
@@ -2493,7 +2535,7 @@ private:
         if (previous_rate_deg_per_sec == expected_rate_deg_per_sec) {
             return;  // nothing changed, nothing to verify
         }
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
         const AxisParameters& params = axis_params_[static_cast<std::size_t>(channel - 1)];
         const double expected_counts_per_sec =
             std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
@@ -2650,7 +2692,7 @@ private:
             // sampling the tracking rate must not resend it after the stop.
             reap_rate_verify_task();
         }
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
         cmd_axis_rate_deg_s_[channel - 1] = 0.0;
         protocol.stop_motion(channel);
         auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
@@ -2677,7 +2719,7 @@ private:
     // Start speed-mode motion at a signed rate on one axis (assumes the caller
     // wants the axis re-commanded from stopped).
     void start_speed_motion_locked(std::unique_lock<std::mutex>& lock, int channel, double signed_rate_deg_per_sec) {
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
         const uint64_t gen = ++motion_generation_;
         if (!stop_axis_and_wait_locked(lock, channel, gen)) {
             throw AlpacaException("Motion superseded before dispatch");
@@ -3006,7 +3048,7 @@ private:
             // spawn_rate_verify_task_locked for why reaping under mutex_ is
             // safe).
             reap_rate_verify_task();
-            auto& protocol = SkyWatcherProtocolWrapper::instance();
+            auto& protocol = *protocol_;
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             protocol.start_motion(kAxisRa);
             cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
@@ -3054,7 +3096,7 @@ private:
 
     void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg,
                               double target_dec_axis_deg) {
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
         const uint64_t gen = ++motion_generation_;
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
@@ -3246,7 +3288,7 @@ private:
                                                           : "the RA drive is in the duty-cycled sub-floor regime"));
             return;
         }
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
         const double expected_cps =
             std::abs(effective_ra_rate_locked()) * axis_params_[0].counts_per_revolution / 360.0;
         if (expected_cps <= 0.0) {
@@ -3446,7 +3488,7 @@ private:
         }
         bool was_slewing = slewing_cached_;
         try {
-            auto& protocol = SkyWatcherProtocolWrapper::instance();
+            auto& protocol = *protocol_;
             AxisStatus ra = protocol.inquire_status(kAxisRa);
             AxisStatus dec = protocol.inquire_status(kAxisDec);
             // Trust the controller's status register: a GOTO is in progress
@@ -3494,7 +3536,7 @@ private:
     }
 
     void autohome_wait_axes_stopped(std::unique_lock<std::mutex>& lock) const {
-        auto& proto = SkyWatcherProtocolWrapper::instance();
+        auto& proto = *protocol_;
         const auto start = std::chrono::steady_clock::now();
         while (proto.inquire_status(kAxisRa).running || proto.inquire_status(kAxisDec).running) {
             if (std::chrono::steady_clock::now() - start > std::chrono::seconds(300)) {
@@ -3505,7 +3547,7 @@ private:
     }
 
     void run_autohome(std::unique_lock<std::mutex>& lock) {
-        auto& proto = SkyWatcherProtocolWrapper::instance();
+        auto& proto = *protocol_;
         const int axes[2] = {kAxisRa, kAxisDec};
         auto read_idx = [&](int i) { return proto.get_feature(axes[i], kIndexerInquiry); };
         auto reset_idx = [&](int i) { proto.set_feature(axes[i], kIndexerReset); };
@@ -3651,7 +3693,7 @@ private:
     // kLandingSettle): poll until it reads stopped AND two position reads
     // kLandingSettle apart agree. Releases mutex_ around every sleep.
     void wait_axis_stationary_locked(std::unique_lock<std::mutex>& lock, int channel) const {
-        auto& protocol = SkyWatcherProtocolWrapper::instance();
+        auto& protocol = *protocol_;
         const auto deadline = std::chrono::steady_clock::now() + kLandingSettleTimeout;
         try {
             uint32_t last = protocol.inquire_position(channel);
@@ -3756,7 +3798,7 @@ private:
             return;
         }
         try {
-            auto& protocol = SkyWatcherProtocolWrapper::instance();
+            auto& protocol = *protocol_;
             protocol.instant_stop(kAxisRa);
             protocol.instant_stop(kAxisDec);
             cmd_axis_rate_deg_s_[0] = 0.0;
@@ -3879,6 +3921,7 @@ private:
 
     int device_number_;
     ConnectionInfo connection_info_;
+    std::unique_ptr<SkyWatcherProtocolWrapper> protocol_;
     mutable std::mutex mutex_;
     bool connected_ = false;
 
@@ -4073,9 +4116,10 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
                                                              std::optional<double> site_latitude_deg,
                                                              std::optional<double> site_longitude_deg,
-                                                             std::optional<double> site_elevation_m) {
+                                                             std::optional<double> site_elevation_m,
+                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol) {
     return std::make_unique<SkyWatcherTelescopeDriver>(device_number, connection_info, site_latitude_deg,
-                                                       site_longitude_deg, site_elevation_m);
+                                                       site_longitude_deg, site_elevation_m, std::move(protocol));
 }
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_number, int mount_index,

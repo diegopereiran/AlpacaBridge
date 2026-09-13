@@ -34,6 +34,7 @@ repository root.
 | WandererAstro covers, rotators, SFW wheels, boxes | [WandererAstro](../.github/instructions/wandererastro.instructions.md) |
 | WeeWX weather integration | [WeeWX](../.github/instructions/weewx.instructions.md) |
 | OnStep mounts | [OnStep](../.github/instructions/onstep.instructions.md) |
+| GPhoto DSLR and mirrorless cameras (Canon, Nikon, Sony via libgphoto2) | [GPhoto](../.github/instructions/gphoto.instructions.md) |
 | Any AlpacaHTTP change, routing, serialization, API or HTTP tests | [AlpacaHTTP conformance](../.github/instructions/alpaca-http-conformance.instructions.md) |
 | WiFi management, startup, routing, web UI, polkit or network setup | [WiFi manager](../.github/instructions/wifi-manager.instructions.md) |
 

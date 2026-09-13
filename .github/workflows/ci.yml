@@ -116,6 +116,8 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
+            libgphoto2-dev \
+            libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev
@@ -242,6 +244,8 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
+            libgphoto2-dev \
+            libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev
@@ -414,6 +418,8 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
+            libgphoto2-dev \
+            libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
             libcurl4-openssl-dev

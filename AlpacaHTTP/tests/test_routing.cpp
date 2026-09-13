@@ -18,6 +18,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <alpacahttp/util/host_timezone.h>
 #include <alpacahttp/version.h>
 #include <unistd.h>
 
@@ -297,6 +298,7 @@ public:
     int get_interface_version() const override { return 1; }
     bool get_connected() const override { return connected_; }
     void set_connected(bool connected) override {
+        if (!connected) cleanup_pending = false;
         if (connected && !connected_) {
             ++connect_count;
         } else if (!connected && connected_) {
@@ -313,7 +315,12 @@ public:
 
     // Simulate the upstream link dying underneath the bridge (USB unplug,
     // serial wedge) without going through disconnect().
-    void drop_link() { connected_ = false; }
+    void drop_link() {
+        connected_ = false;
+        cleanup_pending = true;
+    }
+
+    bool cleanup_pending = false;
 
     int connect_count = 0;
     int disconnect_count = 0;
@@ -465,6 +472,97 @@ void put_connected(alpacahttp::Router& router, const std::string& path_base, con
 } // namespace
 
 int main() {
+    // open-astro#354: host_time_zone() resolution table, through the seam
+    // (explicit TZ and an /etc stand-in under a temp dir) so the answer does
+    // not depend on the build host's own zone.
+    {
+        using alpacahttp::util::host_time_zone;
+        using alpacahttp::util::looks_like_iana_zone;
+        namespace fs = std::filesystem;
+
+        EXPECT(looks_like_iana_zone("America/Denver"));
+        EXPECT(looks_like_iana_zone("Etc/UTC"));
+        EXPECT(looks_like_iana_zone("America/Argentina/Buenos_Aires"));
+        EXPECT(looks_like_iana_zone("Etc/GMT+12"));
+        EXPECT(!looks_like_iana_zone(""));
+        EXPECT(!looks_like_iana_zone("UTC"));                     // no '/': a slash-free tzdb name, reported as unknown
+        EXPECT(!looks_like_iana_zone("EST5EDT"));                 // likewise; the same shape as a POSIX rule prefix
+        EXPECT(!looks_like_iana_zone("EST5EDT,M3.2.0,M11.1.0"));  // POSIX rule string, not an IANA name
+        EXPECT(!looks_like_iana_zone("localtime"));               // zoneinfo/ files that are not zones: no '/'
+        EXPECT(!looks_like_iana_zone("posixrules"));
+        EXPECT(!looks_like_iana_zone("/America/Denver"));
+        EXPECT(!looks_like_iana_zone("America/Denver/"));
+        EXPECT(!looks_like_iana_zone("America//Denver"));
+        EXPECT(!looks_like_iana_zone("America/Den ver"));
+        EXPECT(!looks_like_iana_zone("../../etc/passwd"));
+
+        char tmpl[] = "/tmp/ab_tz_etc_XXXXXX";
+        const char* etc = ::mkdtemp(tmpl);
+        EXPECT(etc != nullptr);
+        const std::string etc_dir = etc ? etc : "";
+        const std::string zoneinfo = etc_dir + "/zoneinfo";
+        fs::create_directories(zoneinfo + "/Pacific");
+        { std::ofstream(zoneinfo + "/Pacific/Auckland") << "TZif"; }
+
+        // Nothing configured: "".
+        EXPECT(host_time_zone(nullptr, etc_dir) == "");
+
+        // TZ wins outright, with the tzset() ':' prefix stripped and the
+        // absolute-path form reduced to its zone.
+        EXPECT(host_time_zone("Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+        EXPECT(host_time_zone(":Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+        EXPECT(host_time_zone(":/usr/share/zoneinfo/Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+        // A zoneinfo-relative TZ in the posix/ or right/ subtree, absolute or not.
+        EXPECT(host_time_zone("posix/Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+        EXPECT(host_time_zone(":/usr/share/zoneinfo/right/Pacific/Auckland", etc_dir) == "Pacific/Auckland");
+
+        // /etc/timezone, trimmed.
+        { std::ofstream(etc_dir + "/timezone") << "America/Denver\n"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "America/Denver");
+        // A set-but-unusable TZ governs localtime_r() and must not be
+        // contradicted by the file: "" rather than "America/Denver".
+        EXPECT(host_time_zone("EST5EDT", etc_dir) == "");
+        EXPECT(host_time_zone("", etc_dir) == "");
+
+        // A junk /etc/timezone and no symlink: "".
+        { std::ofstream(etc_dir + "/timezone") << "not a zone\n"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "");
+        fs::create_symlink(zoneinfo + "/Pacific/Auckland", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Pacific/Auckland");
+        // Debian's relative symlink form resolves the same way.
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("../usr/share/zoneinfo/Etc/UTC", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Etc/UTC");
+        // The symlink outranks /etc/timezone when the two disagree: glibc's
+        // tzset() reads /etc/localtime and never /etc/timezone, so the link
+        // is the zone localtime_r() (and the log lines) actually use.
+        { std::ofstream(etc_dir + "/timezone") << "Europe/London\n"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Etc/UTC");
+        // The symlink answering with a name this resolver cannot express
+        // (timedatectl set-timezone UTC -> zoneinfo/UTC, no '/') is NOT the
+        // symlink being absent: the file must not get to contradict it.
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("../usr/share/zoneinfo/UTC", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "");
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("../usr/share/zoneinfo/Etc/UTC", etc_dir + "/localtime");
+        // A "posix/" or "right/" zoneinfo subtree is the same zone under a
+        // name Intl rejects; the prefix is stripped.
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("/usr/share/zoneinfo/right/Europe/Berlin", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Europe/Berlin");
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("/usr/share/zoneinfo/posix/Europe/Berlin", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Europe/Berlin");
+        // A regular-file /etc/localtime (no symlink) falls back to the file.
+        fs::remove(etc_dir + "/localtime");
+        { std::ofstream(etc_dir + "/localtime") << "TZif"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "Europe/London");
+        { std::ofstream(etc_dir + "/timezone") << "not a zone\n"; }
+        EXPECT(host_time_zone(nullptr, etc_dir) == "");
+
+        fs::remove_all(etc_dir);
+    }
     std::cout << "Testing routing...\n";
 
     alpacahttp::Router router;
@@ -1689,6 +1787,18 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_GPHOTO
+    {
+        // gphoto / camera
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "gphoto"}, {"deviceType", "camera"}, {"deviceNumber", 9620}, {"cameraIndex", 1}},
+            "Camera", 9620);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("cameraIndex", -1) == 1);
+        remove_device(router, "gphoto", "camera", 9620);
+    }
+#endif
+
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
     {
         // touptek / switch (StellaVita PowerBox) — field survival, not just
@@ -2710,6 +2820,28 @@ int main() {
         EXPECT(!stub->get_connected());
 
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9701);
+    }
+
+    // A false link-health getter does not prove driver teardown completed.
+    // Both Platform 6 and 7 must deliver an explicit disconnect to the driver.
+    {
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9790);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9790";
+        for (bool platform7 : {false, true}) {
+            put_connected(router, base, "445", true);
+            stub->drop_link();
+            EXPECT(!get_connected_value(router, base, "445"));
+            EXPECT(stub->cleanup_pending);
+            if (platform7)
+                route_request(router, "PUT", base + "/disconnect", "ClientID=445");
+            else
+                put_connected(router, base, "445", false);
+            EXPECT(!stub->cleanup_pending);
+            EXPECT(!stub->get_connected());
+        }
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9790);
     }
 
     // Issue #163: the client key is qualified by peer address, so two clients
@@ -3777,6 +3909,17 @@ int main() {
         EXPECT(v["ClockSynchronized"].get<bool>() == (source == "ntp"));
         EXPECT(v.value("SyncSystemClockFromClients", false) == true);
         EXPECT(clock_router.sync_system_clock_from_clients());
+        // open-astro#354: the host zone rides along as an IANA name or "".
+        // What it resolves to depends on the build host, so pin the payload
+        // to the resolver's own answer for this host (a stubbed-out
+        // desc["TimeZone"] = "" would fail on any host with a zone) and its
+        // shape; the resolver's own table is the block below.
+        EXPECT(v.contains("TimeZone") && v["TimeZone"].is_string());
+        {
+            const std::string tz = v["TimeZone"].get<std::string>();
+            EXPECT(tz == alpacahttp::util::host_time_zone());
+            EXPECT(tz.empty() || alpacahttp::util::looks_like_iana_zone(tz));
+        }
 
         // Boolean and string forms are both accepted; the value persists to the config file.
         auto put = route_request(clock_router, "PUT", "/management/v1/description",

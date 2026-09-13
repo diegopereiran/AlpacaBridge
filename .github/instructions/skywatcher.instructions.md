@@ -801,3 +801,15 @@ autoguiding session (PHD2 calibration reports the Dec direction directly) or a
 plate-solved drift run with a non-zero `DeclinationRate`. Do this before ConformU: the
 suite's offset-rate tests measure the Dec direction and will fail on the old code at a
 southern site.
+
+### Sky-Watcher serial recovery tests (PR #522)
+
+Each direct-driver instance owns its protocol wrapper; never use the legacy singleton
+from a driver operation or worker. A second configured mount must not replace the first
+mount's transport. Both HTTP disconnect endpoints deliver last-client cleanup even when
+`get_connected()` is already false: link health is not proof that runtime state was reset.
+A cable-pull followed by an HTTP connect tests the first relink branch because the router
+probes link health first. The late-loss branch needs a deterministic probe seam and an
+outstanding fake-board task; assert that the old task never sends commands to the new link.
+Zero-byte reads are not themselves proof of removal; back off within the response deadline
+so a hung-up-but-present tty cannot busy-spin, while retaining the quiet-board timeout policy.
