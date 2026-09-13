@@ -104,6 +104,7 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | QHY268C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/QHY268C/) |
 | miniCam8M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/miniCam8M/) |
+| QHY5III585M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/QHY5III585M/) |
 
 <details>
 <summary><strong>QHY Driver Notes</strong></summary>
@@ -119,7 +120,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **Reconnecting refuses to proceed while a prior exposure worker might still be wedged, rather than risking a second physical handle.** If a download's `join_exposure_thread()` timed out (2s) and detached rather than joined, the worker can still be alive inside `GetQHYCCDSingleFrame` when a client later disconnects and reconnects. `disconnect()`'s `close_camera()` call erases the SDK wrapper's handle-map entry regardless, and `open_camera()` only reuses a handle while that entry survives — so a bare reconnect would otherwise `OpenQHYCCD()` a second, independent handle to the same physical USB device while the zombie's own handle might still be in flight. `connect()` now checks `exposure_thread_running_` first and throws a clear "still finishing" error instead; the client can retry once the zombie's blocking call eventually returns (or the process needs a restart, same ceiling as every other reap path in this driver).
 - **Exposure watchdog's buffer-size-derived deadline extension only applies to readout modes other than index 0.** Index 0 ("Full Resolution") is the SDK's fast/default mode on every QHY camera examined so far and its transfers complete in a few seconds; extending its watchdog deadline using the same buffer-size floor as HDR-style modes would only delay detecting a genuine hang on it (e.g. a 36MB buffer would otherwise compute an ~87s floor, versus the flat 60s margin that already covers that mode).
 - **Tested model**: miniCam8M on Linux arm64
-- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing issues
+- **Tested model**: QHY5III585M on Linux arm64
+- **ConformU**: 4.5.0 (miniCam8M) / 4.5.1 (QHY5III585M) — 0 errors, 0 issues, 0 timing issues
 
 </details>
 
