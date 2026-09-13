@@ -399,6 +399,40 @@ std::string to_lower_copy(std::string value) {
     return value;
 }
 
+// The (vendor, deviceType, deviceNumber) key of a persisted-list entry, read
+// through typed guards rather than value() (#388): a hand-edited file can
+// carry "deviceNumber": "3", and that entry stays in persisted_devices_ (only
+// its registration fails), so every walk over the list must step past it
+// instead of throwing type_error on a PUT or POST aimed at a different,
+// valid device. Absent or wrong-typed type/number yields no key; vendor is
+// "" when missing. deviceType is lowercased, since the web UI and the tests
+// post it lowercase while the registry answers "Telescope".
+struct PersistedKey {
+    std::string vendor;
+    std::string device_type;  // lowercase
+    int device_number = -1;
+};
+
+std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
+    if (!entry.is_object()) {
+        return std::nullopt;
+    }
+    const auto type_it = entry.find("deviceType");
+    const auto number_it = entry.find("deviceNumber");
+    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end() ||
+        !number_it->is_number_integer()) {
+        return std::nullopt;
+    }
+    PersistedKey key;
+    key.device_type = to_lower_copy(type_it->get<std::string>());
+    key.device_number = number_it->get<int>();
+    const auto vendor_it = entry.find("vendor");
+    if (vendor_it != entry.end() && vendor_it->is_string()) {
+        key.vendor = vendor_it->get<std::string>();
+    }
+    return key;
+}
+
 // Throw a parameter-validation failure with an explicit ASCOM error code, so
 // the ErrorNumber on the wire is deterministic rather than inferred from the
 // message text. A missing or unparseable parameter is InvalidValue (0x401).
@@ -1894,11 +1928,8 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             std::transform(target_type.begin(), target_type.end(), target_type.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             for (const auto& entry : persisted_snapshot) {
-                std::string entry_type = entry.value("deviceType", "");
-                std::transform(entry_type.begin(), entry_type.end(), entry_type.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (entry_type == target_type &&
-                    entry.value("deviceNumber", -1) == device_number) {
+                const auto key = persisted_key(entry);
+                if (key && key->device_type == target_type && key->device_number == device_number) {
                     return &entry;
                 }
             }
@@ -1972,8 +2003,9 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         }
 
         for (const auto& entry : persisted_snapshot) {
-            std::string ptype = entry.value("deviceType", "");
-            int pnum = entry.value("deviceNumber", -1);
+            const auto pkey = persisted_key(entry);
+            std::string ptype = pkey ? pkey->device_type : "";
+            int pnum = pkey ? pkey->device_number : -1;
             bool already_listed = false;
             for (const auto& cap : capabilities) {
                 std::string cap_type = alpacacore::device_type_to_string(cap.type);
@@ -9405,15 +9437,13 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     {
         std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
         for (auto& entry : persisted_devices_) {
-            // deviceType is stored as the caller posted it; the web UI and
-            // the tests both send lowercase, the registry answers
-            // "Telescope", so compare case-insensitively as the lookup on the
-            // configureddevices side does.
-            if (to_lower_copy(entry.value("deviceType", "")) != "telescope" ||
-                entry.value("deviceNumber", -1) != device_number) {
+            // Typed reads (persisted_key), never value(): a malformed
+            // neighbour in the list is simply not a match.
+            const auto pkey = persisted_key(entry);
+            if (!pkey || pkey->device_type != "telescope" || pkey->device_number != device_number) {
                 continue;
             }
-            vendor = entry.value("vendor", "");
+            vendor = pkey->vendor;
             // The opt-out: an operator with a surveyed pier position does not
             // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
             // on, because the value the mount is using RIGHT NOW is the one
@@ -9430,7 +9460,8 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
             }
             // Unchanged: no file write on a client that re-sends its site on
             // every connect (most do).
-            if (entry.contains(key) && entry[key].is_number() && entry[key].get<double>() == value) {
+            const auto current = entry.find(key);
+            if (current != entry.end() && current->is_number() && current->get<double>() == value) {
                 break;
             }
             entry[key] = value;
@@ -9450,8 +9481,8 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     // cheap-read rule does not apply, and this runs once per changed value.
     save_persisted_devices();
     std::ostringstream msg;
-    msg << "Telescope " << device_number << " (" << vendor << "): persisted client " << key << " = "
-        << std::setprecision(7) << value << " to config/registered_devices.json";
+    msg << "Telescope " << device_number << " (" << vendor << "): persisted client " << key << " = " << std::fixed
+        << std::setprecision(6) << value << " to config/registered_devices.json";
     util::log_info(msg.str());
 }
 
@@ -9461,10 +9492,12 @@ void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
     }
 
     std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+    const std::string vendor = config_get(config, "vendor", "");
+    const std::string device_type = to_lower_copy(config_get(config, "deviceType", ""));
+    const int device_number = config_get(config, "deviceNumber", -1);
     for (auto& existing : persisted_devices_) {
-        if (existing.value("vendor", "") == config_get(config, "vendor", "") &&
-            existing.value("deviceType", "") == config_get(config, "deviceType", "") &&
-            existing.value("deviceNumber", -1) == config_get(config, "deviceNumber", -1)) {
+        const auto key = persisted_key(existing);
+        if (key && key->vendor == vendor && key->device_type == device_type && key->device_number == device_number) {
             existing = config;
             return;
         }
@@ -9480,22 +9513,16 @@ bool Router::remove_persisted_device(const std::string& vendor, const std::strin
 
     std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
     std::size_t before = persisted_devices_.size();
-    persisted_devices_.erase(
-        std::remove_if(
-            persisted_devices_.begin(),
-            persisted_devices_.end(),
-            [&](const nlohmann::json& entry) {
-                if (entry.value("deviceType", "") != device_type ||
-                    entry.value("deviceNumber", -1) != device_number) {
-                    return false;
-                }
-                if (vendor.empty()) {
-                    return true;
-                }
-                return entry.value("vendor", "") == vendor;
-            }),
-        persisted_devices_.end()
-    );
+    persisted_devices_.erase(std::remove_if(persisted_devices_.begin(), persisted_devices_.end(),
+                                            [&](const nlohmann::json& entry) {
+                                                const auto key = persisted_key(entry);
+                                                if (!key || key->device_type != to_lower_copy(device_type) ||
+                                                    key->device_number != device_number) {
+                                                    return false;
+                                                }
+                                                return vendor.empty() || key->vendor == vendor;
+                                            }),
+                             persisted_devices_.end());
     return persisted_devices_.size() < before;
 }
 
