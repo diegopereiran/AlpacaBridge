@@ -435,6 +435,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | EAF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAF/) |
+| EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAFN/) |
 
 <details>
 <summary><strong>ZWO Focuser Driver Notes</strong></summary>
@@ -442,6 +443,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
+- **EAF and EAFN**: the EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) is served by the same driver with the same configuration as the EAF; there is no model selector. `Name` is whatever the EAF SDK reports for the unit; both validated units report `EAF`.
 
 </details>
 
@@ -697,7 +699,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested model**: Wave 100i, motor board firmware 3.58 (mount code 0x44; the board reports `=033A44`, which is firmware major/minor plus the mount identity byte, not a three-part version), on Linux arm64 (USB).
 - **Tested model (EQ class)**: EQM-35 Pro, motor board firmware 3.39 (mount code 0x32), over the mount's built-in USB port (soldered Prolific PL2303, 115200 baud), on Linux arm64 (Raspberry Pi 3 Model B, ConformU run on the Pi against localhost, chrony-disciplined clock). ConformU 4.5.1 (2026-09-13): 0 errors, 0 issues, 0 timing violations on the full suite including the physically measured pulse-guide, rate-offset, sync and slew checks. Site coordinates in the report are rounded to whole degrees. Goto landing and the post-slew tracking restart are verified against the controller (stopped AND stationary; restart rate-checked, except where the sample window cannot resolve the expected rate, which is logged) and the goto aim-ahead uses per-session measured goto overhead and restart latency, seeded from the Wave constants.
 - **AutoHome**: FindHome runs the SynScan-style AutoHome procedure using the mount's home index sensors, re-anchoring the position counters to the physical home mark regardless of the power-on position. Requires the home-index feature bit (Wave 100i reports it on both axes).
-- **Tracking**: Sidereal, Lunar, and Solar drive rates, plus RA/Dec tracking rate offsets (comet/satellite tracking) at the Sidereal drive rate. Declination rates below the motor controller's ~0.26 arcsec/s slow-mode floor are produced by duty-cycling. The linked Wave 100i reports predate the rate-offset feature; a re-run including ConformU's measured-rate offset tests is the merge gate for that feature and those reports will be refreshed with it. The EQM-35 Pro report (ConformU 4.5.1) already includes the measured rate-offset tests.
+- **Tracking**: Sidereal, Lunar, and Solar drive rates, plus RA/Dec tracking rate offsets (comet/satellite tracking) at the Sidereal drive rate. Declination rates below the motor controller's ~0.26 arcsec/s slow-mode floor are produced by duty-cycling. The measured rate-offset tests are in the EQM-35 Pro report (ConformU 4.5.1); the linked Wave 100i reports predate the feature and will be refreshed on the next Wave full-suite run.
 - **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. The RA/Dec tracking-rate offsets were validated afterwards on the Wave 100i over USB (ConformU 4.5.0, 2026-08-25): 0 errors, 0 issues, all 32 measured offset-rate checks within tolerance; that run's only marks were two 0.10x s FAST readings on constant `Can*` getters caused by the dev-VM network path (ConformU now runs on the SBC over localhost, see `/conformu`), so the linked logs remain the earlier full-suite reports. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
 
 </details>
