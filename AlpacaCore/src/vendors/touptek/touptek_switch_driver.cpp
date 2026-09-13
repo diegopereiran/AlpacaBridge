@@ -91,6 +91,10 @@ public:
 
     int get_interface_version() const override { return 3; }
 
+    // Lock-free: is_open() is an atomic the wrapper publishes from inside
+    // its own open()/close() critical sections (issue #382), so this never
+    // waits behind a connect or disconnect and never nests a lock with
+    // AsyncConnectable's pending_mutex_.
     bool get_connected() const override { return wrapper_.is_open(); }
 
     void connect() override { start_connection_task(true); }

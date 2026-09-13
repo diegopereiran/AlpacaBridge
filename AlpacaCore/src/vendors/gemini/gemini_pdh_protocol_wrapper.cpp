@@ -524,6 +524,17 @@ public:
         teardown_locked_free();
     }
 
+    /// Forget the cached firmware now, ahead of disconnect(). The driver
+    /// calls this before it stores connected_ = false (issue #387): the
+    /// teardown clears the cache only after joining the reader, which can
+    /// sit in a 500 ms read, and the driver's firmware getter relies on the
+    /// cache being empty whenever the driver reports disconnected
+    /// (AGENTS.md) rather than consulting connected_.
+    void clear_firmware() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        firmware_.clear();
+    }
+
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(io_mutex_);
         return connected_;
@@ -878,6 +889,7 @@ GeminiPdhProtocolWrapper::~GeminiPdhProtocolWrapper() = default;
 int GeminiPdhProtocolWrapper::connect(const PdhConnectionConfig& config) { return impl_->connect(config); }
 
 void GeminiPdhProtocolWrapper::disconnect() { impl_->disconnect(); }
+void GeminiPdhProtocolWrapper::clear_firmware() { impl_->clear_firmware(); }
 
 bool GeminiPdhProtocolWrapper::is_connected() const { return impl_->is_connected(); }
 

@@ -227,7 +227,7 @@ fi
 # --- gate 2d: docs drift check -----------------------------------------
 
 section "Docs drift check"
-if python3 scripts/check_docs_drift.py; then
+if python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs_drift.py; then
   record PASS "docs drift check"
 else
   record FAIL "docs drift check"

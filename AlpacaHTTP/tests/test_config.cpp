@@ -10,6 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/host_clock.h>
 #include <alpacahttp/config.h>
 #include <unistd.h>
 
@@ -67,9 +68,13 @@ int main() {
         EXPECT(fresh.keep_alive_lifetime_seconds() == 1);
         fresh.set_keep_alive_lifetime_seconds(42);
         EXPECT(fresh.keep_alive_lifetime_seconds() == 42);
-        // open-astro#314: same shape for the RTC probe period. 31 s by
-        // default, deliberately not the probe's own 30 s rate limit.
-        EXPECT(fresh.rtc_probe_interval_seconds() == 31);
+        // open-astro#314: same shape for the RTC probe period. The default
+        // is deliberately above the probe's own rate limit. The relation is
+        // what matters (#406): a default at or below the limiter has passes
+        // swallowed with nothing failing, so it is asserted against the
+        // limiter itself, not against a literal (and not against the
+        // definition's `+ 1`, which would only restate config.h).
+        EXPECT(fresh.rtc_probe_interval_seconds() > alpacacore::util::HostClock::kRtcProbeRateLimit.count());
         fresh.set_rtc_probe_interval_seconds(0);
         EXPECT(fresh.rtc_probe_interval_seconds() == 1);
         fresh.set_rtc_probe_interval_seconds(7);

@@ -389,6 +389,40 @@ TEST_CASE("Gemini PDH Switch Driver - Connects over a fake hub and serves the fi
     CHECK(driver->get_connected());
 }
 
+TEST_CASE("Gemini PDH Switch Driver - Disconnect is never observed beside a stale firmware string",
+          "[gemini][switch][unit][fake]") {
+    // Issue #387 ordering: connected_ is stored false before the wrapper's
+    // close, and that close clears the firmware cache only after joining a
+    // reader that can sit in a 500 ms read. The getter relies on the cache
+    // being empty while disconnected (AGENTS.md), so the driver must clear it
+    // before the store. A sampler reads (connected, firmware) pairs for the
+    // whole disconnect; one pair of (false, present) is the defect. Red
+    // without the clear_firmware() call (hundreds of stale samples), green
+    // with it.
+    FakeGeminiPdh hub;
+    auto driver = connect_fake_hub(hub);
+    REQUIRE(driver->get_device_firmware().has_value());
+
+    std::atomic<bool> done{false};
+    std::atomic<int> stale{0};
+    std::thread sampler([&] {
+        while (!done.load()) {
+            const bool connected = driver->get_connected();
+            const auto firmware = driver->get_device_firmware();
+            if (!connected && firmware.has_value()) {
+                stale.fetch_add(1);
+            }
+        }
+    });
+    driver->set_connected(false);
+    done.store(true);
+    sampler.join();
+
+    CHECK(stale.load() == 0);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+}
+
 TEST_CASE("Gemini PDH Switch Driver - Writes go on the wire and read back as commanded",
           "[gemini][switch][unit][fake]") {
     FakeGeminiPdh hub;

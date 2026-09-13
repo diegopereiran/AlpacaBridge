@@ -334,10 +334,11 @@ private:
             // it under pending_mutex_ is an ABBA deadlock. The drivers that
             // create that hazard are the Bisque, Celestron, iOptron, OnStep
             // and Sky-Watcher telescopes. The wrapper-backed switch drivers
-            // (iOptron iMate PowerBox, ToupTek StellaVita, ZWO ASIAIR and
-            // ASIAIR Plus) also lock in get_connected(), via the wrapper's
-            // is_open(), but release it before their set_connected reaches
-            // pending_mutex_, so they never nest the two. The read here is a
+            // () used to lock in get_connected() via the wrapper's is_open();
+            // since open-astro#382 every wrapper publishes an atomic instead,
+            // so that list is empty on purpose and the gate below keeps it
+            // that way (a wrapper is_open() that takes a lock again puts its
+            // driver back in). The read here is a
             // momentary snapshot whichever driver answers it -- nothing holds
             // a driver lock across the call, so the value cannot be pinned by
             // this thread -- and a stale value is benign: the deferred
