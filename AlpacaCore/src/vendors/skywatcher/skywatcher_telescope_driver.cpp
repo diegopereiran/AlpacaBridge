@@ -1725,9 +1725,11 @@ public:
         constexpr double kSyncRestartLatencySeconds = 0.25;
         auto [axis1, axis2] = ra_dec_to_axis_degrees_locked(
             ra, dec, was_tracking ? kSyncRestartLatencySeconds * kLstHoursPerSecond : 0.0);
-        remember_command_branch_locked(axis2);
         protocol.set_position(kAxisRa, degrees_to_counts(axis1, axis_params_[0].counts_per_revolution));
         protocol.set_position(kAxisDec, degrees_to_counts(axis2, axis_params_[1].counts_per_revolution));
+        // After the writes, for the same reason dispatch_goto_locked() records
+        // after its motor commands (open-astro#459).
+        remember_command_branch_locked(axis2);
         if (was_tracking) {
             set_tracking_locked(lock, true);
         }
@@ -2319,8 +2321,11 @@ private:
     }
 
     // Record the branch a commanded dec-axis angle sits on. Called wherever
-    // ra_dec_to_axis_degrees_locked()'s result reaches the hardware (goto,
-    // sync), never for a mere DestinationSideOfPier computation. The
+    // a dec-axis angle reaches the hardware (dispatch_goto_locked() for every
+    // goto, sync after its position writes), never for a mere
+    // DestinationSideOfPier computation. A goto to home (a2 = +0.0: the
+    // no-indexer FindHome, the default Park) therefore lands on the positive
+    // branch, the same answer AutoHome's re-anchor and connect give. The
     // command-path angle keeps its sign bit at the pole (-0.0 on the
     // negative branch), so std::signbit is the right reader here, and only
     // here.
@@ -3094,6 +3099,14 @@ private:
         }
         protocol.start_motion(kAxisRa);
         protocol.start_motion(kAxisDec);
+        // open-astro#459: every commanded dec-axis angle passes through here
+        // (sky goto, the no-indexer FindHome and Park gotos to home, the
+        // AutoHome hunt phases), so this is the one place the branch memory
+        // is set for a goto. AFTER the motor commands: a dispatch that threw
+        // above must not leave the memory claiming a branch the mount never
+        // moved to (a mount sitting at the pole would flip its reported RA
+        // by 12 h without moving).
+        remember_command_branch_locked(target_dec_axis_deg);
     }
 
     // LST advances 24 sidereal hours per sidereal day of SI seconds.
@@ -3132,8 +3145,7 @@ private:
         last_goto_dist_deg_ = dist;
         double est_seconds = dist / kMaxMoveAxisRateDegPerSec + goto_overhead_seconds_ + resume_latency_seconds_;
         auto [t1, t2] = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond);
-        remember_command_branch_locked(t2);
-        dispatch_goto_locked(lock, t1, t2);
+        dispatch_goto_locked(lock, t1, t2);  // records the branch of t2 once the goto is on its way
     }
 
     // After the first goto lands, close the residual (prediction error) with
