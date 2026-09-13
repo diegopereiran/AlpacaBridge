@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -2209,6 +2210,457 @@ int main() {
         const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
         EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
         remove_device(router, "skywatcher", "telescope", 9619);
+    }
+    {
+        // issue #444: a site a client writes through the ASCOM setters is
+        // persisted to the device's entry, so a location that only ever came
+        // from a client (a phone's GPS through an app, gpsd) survives a
+        // restart. Registered with null island, then each of the three
+        // coordinates PUT through /api/v1, then read back through
+        // configureddevices (the persisted entry's Config) and from the file.
+        const auto site_config = [&](int number) {
+            const auto listed = nlohmann::json::parse(
+                route_request(router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+            EXPECT(!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array());
+            for (const auto& entry : listed["Value"]) {
+                if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == number) {
+                    return entry.value("Config", nlohmann::json());
+                }
+            }
+            return nlohmann::json();
+        };
+        const auto put_ok = [&](const std::string& path, const std::string& body) {
+            const auto resp = route_request(router, "PUT", path, body);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        };
+        const auto persisted_file_entry = [&](int number) {
+            std::ifstream in(std::filesystem::path("config") / "registered_devices.json");
+            const auto file = nlohmann::json::parse(in, nullptr, false);
+            EXPECT(!file.is_discarded() && file.is_array());
+            for (const auto& entry : file) {
+                if (entry.value("deviceNumber", -1) == number) {
+                    return entry;
+                }
+            }
+            return nlohmann::json();
+        };
+
+        nlohmann::json learner = {{"vendor", "skywatcher"},     {"deviceType", "telescope"},  {"deviceNumber", 9640},
+                                  {"connectionType", "serial"}, {"portPath", "/dev/ttyUSB9"}, {"baudRate", 9600},
+                                  {"siteLatitude", 0.0},        {"siteLongitude", 0.0}};
+        {
+            const auto ok = route_request(router, "POST", "/management/v1/configuredevice", learner.dump());
+            const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
+            EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
+        }
+        const std::string base = "/api/v1/telescope/9640";
+        // #274 allows the setters before Connected, which is what makes a
+        // client-supplied site usable at all on this vendor.
+        put_ok(base + "/sitelatitude", "SiteLatitude=-33.87&ClientID=1&ClientTransactionID=1");
+        put_ok(base + "/sitelongitude", "SiteLongitude=151.21&ClientID=1&ClientTransactionID=2");
+        put_ok(base + "/siteelevation", "SiteElevation=58&ClientID=1&ClientTransactionID=3");
+        {
+            const auto cfg = site_config(9640);
+            EXPECT(cfg.is_object() && std::fabs(cfg.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(cfg.value("siteLongitude", 0.0) - 151.21) < 1e-9);
+            EXPECT(std::fabs(cfg.value("siteElevation", 0.0) - 58.0) < 1e-9);
+            // The other fields of the entry are untouched by the write-through.
+            EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB9");
+            EXPECT(cfg.value("baudRate", -1) == 9600);
+            // And it reached the file, not just the in-memory list: that is
+            // what a restart reads.
+            const auto on_disk = persisted_file_entry(9640);
+            EXPECT(on_disk.is_object() && std::fabs(on_disk.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(on_disk.value("siteLongitude", 0.0) - 151.21) < 1e-9);
+            EXPECT(std::fabs(on_disk.value("siteElevation", 0.0) - 58.0) < 1e-9);
+        }
+        // Unchanged: a client that re-sends its site on every connect (most
+        // do) causes no file write. Delete the file, PUT the same value, and
+        // the file is not recreated.
+        {
+            std::filesystem::remove(std::filesystem::path("config") / "registered_devices.json");
+            put_ok(base + "/sitelatitude", "SiteLatitude=-33.87&ClientID=1&ClientTransactionID=4");
+            EXPECT(!std::filesystem::exists(std::filesystem::path("config") / "registered_devices.json"));
+            // A changed value writes it again, so the later file assertions
+            // in this block still hold.
+            put_ok(base + "/siteelevation", "SiteElevation=59&ClientID=1&ClientTransactionID=5");
+            EXPECT(std::fabs(persisted_file_entry(9640).value("siteElevation", 0.0) - 59.0) < 1e-9);
+            put_ok(base + "/siteelevation", "SiteElevation=58&ClientID=1&ClientTransactionID=6");
+        }
+        // The three site PUTs rewrite persisted configuration, so they carry
+        // the cross-origin guard configuredevice and UTCDate (#401) carry: a
+        // foreign Origin is refused with 403 before the value is parsed, the
+        // driver or the file is touched; a same-origin write and one with no
+        // Origin (native clients) go through. Same three-case shape as the
+        // UTCDate block.
+        {
+            const auto send = [&](const std::string& member, const std::string& body, const std::string& origin) {
+                std::ostringstream raw;
+                raw << "PUT " << base << "/" << member << " HTTP/1.1\r\n"
+                    << "Host: localhost\r\n";
+                if (!origin.empty()) {
+                    raw << "Origin: " << origin << "\r\n";
+                }
+                raw << "Content-Type: application/x-www-form-urlencoded\r\n"
+                    << "Content-Length: " << body.size() << "\r\n\r\n"
+                    << body;
+                alpacahttp::Request request;
+                EXPECT(request.parse(raw.str()));
+                return router.route(request, 1);
+            };
+            const auto driver_value = [&](const std::string& member) {
+                const auto json =
+                    nlohmann::json::parse(route_request(router, "GET", base + "/" + member).body(), nullptr, false);
+                return json.is_discarded() ? -1e9 : json.value("Value", -1e9);
+            };
+            EXPECT(send("sitelatitude", "SiteLatitude=10&ClientID=1", "http://evil.example").status_code() == 403);
+            EXPECT(send("sitelongitude", "SiteLongitude=20&ClientID=1", "http://evil.example").status_code() == 403);
+            EXPECT(send("siteelevation", "SiteElevation=30&ClientID=1", "http://evil.example").status_code() == 403);
+            // Refused ahead of the parser too: a body that would fail
+            // parse_double still gets the 403, not an InvalidValue.
+            EXPECT(send("sitelatitude", "SiteLatitude=abc&ClientID=1", "http://evil.example").status_code() == 403);
+            EXPECT(std::fabs(driver_value("sitelatitude") - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(driver_value("sitelongitude") - 151.21) < 1e-9);
+            EXPECT(std::fabs(driver_value("siteelevation") - 58.0) < 1e-9);
+            {
+                const auto on_disk = persisted_file_entry(9640);
+                EXPECT(on_disk.is_object() && std::fabs(on_disk.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+                EXPECT(std::fabs(on_disk.value("siteLongitude", 0.0) - 151.21) < 1e-9);
+                EXPECT(std::fabs(on_disk.value("siteElevation", 0.0) - 58.0) < 1e-9);
+            }
+            EXPECT(send("siteelevation", "SiteElevation=61&ClientID=1", "http://localhost").status_code() != 403);
+            EXPECT(std::fabs(driver_value("siteelevation") - 61.0) < 1e-9);
+            EXPECT(send("siteelevation", "SiteElevation=58&ClientID=1", "").status_code() != 403);
+            EXPECT(std::fabs(driver_value("siteelevation") - 58.0) < 1e-9);
+            EXPECT(std::fabs(persisted_file_entry(9640).value("siteElevation", 0.0) - 58.0) < 1e-9);
+        }
+        // A NaN passes every driver's range check (both comparisons are
+        // false) and std::stod("nan") parses, so the setter accepts it for
+        // the session; nlohmann dumps a non-finite double as null, which the
+        // next start reads as "absent". The hook must never let that reach
+        // the persisted entry: the surveyed value stays on disk.
+        {
+            const auto resp = route_request(router, "PUT", base + "/sitelatitude", "SiteLatitude=nan&ClientID=1");
+            (void)resp;
+            const auto on_disk = persisted_file_entry(9640);
+            EXPECT(on_disk.is_object() && on_disk.contains("siteLatitude") && on_disk["siteLatitude"].is_number());
+            EXPECT(std::fabs(on_disk.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(site_config(9640).value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            // Restore the driver's own value for the blocks that follow.
+            put_ok(base + "/sitelatitude", "SiteLatitude=-33.87&ClientID=1&ClientTransactionID=7");
+        }
+        // A value the driver refuses is not persisted either: the hook runs
+        // after the setter, so the throw never reaches it.
+        {
+            const auto resp = route_request(router, "PUT", base + "/sitelatitude", "SiteLatitude=95&ClientID=1");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(std::fabs(site_config(9640).value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(persisted_file_entry(9640).value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+        }
+        remove_device(router, "skywatcher", "telescope", 9640);
+
+        // The opt-out: learnSiteFromClient=false keeps a surveyed position
+        // against a client's GPS. The flag itself round-trips through
+        // sanitize_device_config, the setter still succeeds (the driver takes
+        // the value for this session), and the persisted entry is unchanged.
+        nlohmann::json surveyed = learner;
+        surveyed["deviceNumber"] = 9641;
+        surveyed["siteLatitude"] = 39.7392;
+        surveyed["siteLongitude"] = -104.9903;
+        surveyed["learnSiteFromClient"] = false;
+        {
+            const auto ok = route_request(router, "POST", "/management/v1/configuredevice", surveyed.dump());
+            const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
+            EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
+        }
+        put_ok("/api/v1/telescope/9641/sitelatitude", "SiteLatitude=-33.87&ClientID=1");
+        put_ok("/api/v1/telescope/9641/siteelevation", "SiteElevation=58&ClientID=1");
+        {
+            const auto cfg = site_config(9641);
+            EXPECT(cfg.is_object() && cfg.value("learnSiteFromClient", true) == false);
+            EXPECT(std::fabs(cfg.value("siteLatitude", 0.0) - 39.7392) < 1e-9);
+            EXPECT(!cfg.contains("siteElevation"));
+            const auto resp = route_request(router, "GET", "/api/v1/telescope/9641/sitelatitude?ClientID=1");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && std::fabs(json.value("Value", 0.0) - (-33.87)) < 1e-9);
+        }
+        remove_device(router, "skywatcher", "telescope", 9641);
+
+        // A non-boolean flag (a shell/jq-built config sends "false" or 0) is
+        // refused at the POST with the field named, the #388 rule, so it
+        // never reaches the file where a later value() read would throw.
+        nlohmann::json typod = learner;
+        typod["deviceNumber"] = 9642;
+        typod["learnSiteFromClient"] = "false";
+        {
+            const auto resp = route_request(router, "POST", "/management/v1/configuredevice", typod.dump());
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find("learnSiteFromClient") != std::string::npos);
+            EXPECT(site_config(9642).is_null());
+        }
+    }
+    {
+        // issue #444, the hand-edited half: a persisted entry whose
+        // learnSiteFromClient is the string "false" (no API validation ever
+        // saw it) must not turn every site PUT into an error. The setter
+        // succeeds and the site is learned: only a boolean false is the
+        // opt-out. Same one-entry-file + second-Router shape as the #274
+        // block below, for the reasons given there.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9643},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 0.0},
+                           {"siteLongitude", 0.0},
+                           {"learnSiteFromClient", "false"}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+        alpacahttp::Router startup_router;
+        const auto put =
+            nlohmann::json::parse(route_request(startup_router, "PUT", "/api/v1/telescope/9643/sitelatitude",
+                                                "SiteLatitude=-33.87&ClientID=1")
+                                      .body(),
+                                  nullptr, false);
+        const auto listed = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(startup_router, "skywatcher", "telescope", 9643);
+        restore_original();
+
+        EXPECT(!put.is_discarded() && put.value("ErrorNumber", -1) == 0);
+        EXPECT(!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array());
+        bool learned = false;
+        for (const auto& entry : listed["Value"]) {
+            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9643) {
+                const auto cfg = entry.value("Config", nlohmann::json());
+                learned = cfg.is_object() && std::fabs(cfg.value("siteLatitude", 0.0) - (-33.87)) < 1e-9;
+            }
+        }
+        EXPECT(learned);
+    }
+    {
+        // issue #444, the concurrency half: site PUTs run on the worker pool,
+        // so two clients can reach save_persisted_devices() at once. A
+        // truncate-in-place write from two threads interleaves and leaves the
+        // file as one dump's head plus the other's tail, invalid JSON, and
+        // the next start then loads NO devices. A pair of telescopes, a thread each,
+        // each pushing an alternating coordinate; the file must parse after
+        // every write, so it is checked from a third thread throughout and
+        // once more at the end.
+        nlohmann::json a = {{"vendor", "skywatcher"},     {"deviceType", "telescope"},  {"deviceNumber", 9653},
+                            {"connectionType", "serial"}, {"portPath", "/dev/ttyUSB9"}, {"baudRate", 9600},
+                            {"siteLatitude", 0.0},        {"siteLongitude", 0.0}};
+        nlohmann::json b = a;
+        b["deviceNumber"] = 9654;
+        for (const auto& cfg : {a, b}) {
+            const auto ok = route_request(router, "POST", "/management/v1/configuredevice", cfg.dump());
+            const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
+            EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
+        }
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::atomic<bool> done{false};
+        std::atomic<int> unreadable{0};
+        std::atomic<int> failed_puts{0};
+        const auto pusher = [&](int number, const char* name, double base) {
+            for (int i = 0; i < 150; ++i) {
+                // Every value differs from the last, so every PUT is a write.
+                const double v = base + 0.001 * (i + 1);
+                const auto resp = route_request(
+                    router, "PUT", "/api/v1/telescope/" + std::to_string(number) + "/" + name + "?ClientID=1",
+                    std::string(name == std::string("sitelatitude") ? "SiteLatitude" : "SiteElevation") + "=" +
+                        std::to_string(v) + "&ClientID=1");
+                const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+                if (json.is_discarded() || json.value("ErrorNumber", -1) != 0) {
+                    ++failed_puts;
+                }
+            }
+        };
+        std::thread reader([&] {
+            while (!done) {
+                std::ifstream in(persisted);
+                std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                if (!text.empty() && nlohmann::json::parse(text, nullptr, false).is_discarded()) {
+                    ++unreadable;
+                }
+            }
+        });
+        std::thread t1(pusher, 9653, "sitelatitude", -33.0);
+        std::thread t2(pusher, 9654, "siteelevation", 100.0);
+        t1.join();
+        t2.join();
+        done = true;
+        reader.join();
+        EXPECT(failed_puts == 0);
+        EXPECT(unreadable == 0);
+        {
+            std::ifstream in(persisted);
+            const auto file = nlohmann::json::parse(in, nullptr, false);
+            EXPECT(!file.is_discarded() && file.is_array());
+        }
+        remove_device(router, "skywatcher", "telescope", 9653);
+        remove_device(router, "skywatcher", "telescope", 9654);
+    }
+    {
+        // issue #444, the malformed-neighbour half: a hand-edited entry whose
+        // deviceNumber is the string "3" stays in the persisted list (only
+        // its registration fails), and a site PUT to a DIFFERENT, valid
+        // telescope walks past it. The hook must read that entry through
+        // typed guards, never value(), or the PUT to the good device fails.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", "3"},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB7"},
+                           {"baudRate", 9600}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9652},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB8"},
+                           {"baudRate", 9600},
+                           {"siteLatitude", 0.0},
+                           {"siteLongitude", 0.0}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+        alpacahttp::Router startup_router;
+        const auto put =
+            nlohmann::json::parse(route_request(startup_router, "PUT", "/api/v1/telescope/9652/sitelatitude",
+                                                "SiteLatitude=-33.87&ClientID=1")
+                                      .body(),
+                                  nullptr, false);
+        const auto listed = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        restore_original();
+        remove_device(startup_router, "skywatcher", "telescope", 9652);
+        restore_original();
+
+        EXPECT(!put.is_discarded() && put.value("ErrorNumber", -1) == 0);
+        EXPECT(!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array());
+        bool learned = false;
+        for (const auto& entry : listed["Value"]) {
+            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9652) {
+                const auto cfg = entry.value("Config", nlohmann::json());
+                learned = cfg.is_object() && std::fabs(cfg.value("siteLatitude", 0.0) - (-33.87)) < 1e-9;
+            }
+        }
+        EXPECT(learned);
+    }
+    {
+        // The persisted_key() readers pin three behaviours the #444 refactor
+        // carries, each on a hand-edited file loaded by a fresh Router:
+        // (1) deviceType compares case-insensitively, so an entry stored as
+        //     "Telescope" is matched by a lowercase removedevice and does not
+        //     come back after a restart; (2) an entry whose registration
+        //     failed is listed with its DeviceType lowercased; (3) a
+        //     deviceNumber written as 9656.0 registers as device 9656 (the
+        //     int config reader converts any number), so the persisted walk
+        //     must match it the same way: it is listed, and removedevice
+        //     takes it out of the file too, not only out of the registry.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        // Registration fails (unknown vendor), so the entry is listed from
+        // the persisted snapshot, not from a live driver.
+        entries.push_back({{"vendor", "no-such-vendor"}, {"deviceType", "Telescope"}, {"deviceNumber", 9655}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9656.0},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB9"},
+                           {"baudRate", 9600}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+        alpacahttp::Router startup_router;
+        const auto listed = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        bool listed_lowercase = false;
+        bool float_listed = false;
+        if (!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array()) {
+            for (const auto& entry : listed["Value"]) {
+                if (entry.value("DeviceNumber", -1) == 9655) {
+                    listed_lowercase = entry.value("DeviceType", "") == "telescope";
+                }
+                if (entry.value("DeviceNumber", -1) == 9656) {
+                    float_listed = true;
+                }
+            }
+        }
+        const auto remove_upper = nlohmann::json::parse(
+            route_request(
+                startup_router, "POST", "/management/v1/removedevice",
+                nlohmann::json({{"vendor", "no-such-vendor"}, {"deviceType", "telescope"}, {"deviceNumber", 9655}})
+                    .dump())
+                .body(),
+            nullptr, false);
+        (void)route_request(
+            startup_router, "POST", "/management/v1/removedevice",
+            nlohmann::json({{"vendor", "skywatcher"}, {"deviceType", "telescope"}, {"deviceNumber", 9656}}).dump());
+        nlohmann::json on_disk;
+        {
+            std::ifstream in(persisted);
+            on_disk = nlohmann::json::parse(in, nullptr, false);
+        }
+        {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        }
+        EXPECT(listed_lowercase);
+        EXPECT(float_listed);
+        EXPECT(!remove_upper.is_discarded() && remove_upper.value("ErrorNumber", -1) == 0);
+        bool upper_gone = true;
+        bool float_gone = true;
+        if (on_disk.is_array()) {
+            for (const auto& entry : on_disk) {
+                if (entry.value("vendor", "") == "no-such-vendor") {
+                    upper_gone = false;
+                }
+                if (entry.contains("deviceNumber") && entry["deviceNumber"].is_number_float()) {
+                    float_gone = false;
+                }
+            }
+        }
+        EXPECT(upper_gone);
+        EXPECT(float_gone);
     }
     {
         // issue #274, the other half: a config already on disk cannot be

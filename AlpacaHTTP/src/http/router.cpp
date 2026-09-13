@@ -403,6 +403,43 @@ std::string to_lower_copy(std::string value) {
     return value;
 }
 
+// The (vendor, deviceType, deviceNumber) key of a persisted-list entry, read
+// through typed guards rather than value() (#388): a hand-edited file can
+// carry "deviceNumber": "3", and that entry stays in persisted_devices_ (only
+// its registration fails), so every walk over the list must step past it
+// instead of throwing type_error on a PUT or POST aimed at a different,
+// valid device. Absent or wrong-typed type/number yields no key; vendor is
+// "" when missing. deviceType is lowercased, since the web UI and the tests
+// post it lowercase while the registry answers "Telescope".
+struct PersistedKey {
+    std::string vendor{};
+    std::string device_type{};  // lowercase
+    int device_number = -1;
+};
+
+std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
+    if (!entry.is_object()) {
+        return std::nullopt;
+    }
+    const auto type_it = entry.find("deviceType");
+    const auto number_it = entry.find("deviceNumber");
+    // Any JSON number is accepted, as config_get<int>() accepts it at
+    // registration: a hand-written 3.0 registers as device 3, so the walks
+    // over the persisted list must find that same entry or removedevice
+    // would drop it from the registry and leave it in the file.
+    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end() || !number_it->is_number()) {
+        return std::nullopt;
+    }
+    PersistedKey key;
+    key.device_type = to_lower_copy(type_it->get<std::string>());
+    key.device_number = number_it->get<int>();
+    const auto vendor_it = entry.find("vendor");
+    if (vendor_it != entry.end() && vendor_it->is_string()) {
+        key.vendor = vendor_it->get<std::string>();
+    }
+    return key;
+}
+
 // Throw a parameter-validation failure with an explicit ASCOM error code, so
 // the ErrorNumber on the wire is deterministic rather than inferred from the
 // message text. A missing or unparseable parameter is InvalidValue (0x401).
@@ -1355,8 +1392,9 @@ std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
 
 // Defined further down with the management guards, but declared here because
 // every state-changing management handler needs it and handle_description()
-// is the first of them in file order. Also used by the one device setter with
-// a host-level side effect (open-astro#401).
+// is the first of them in file order. Also used by the four device setters
+// with a side effect beyond the driver: UTCDate steps the host clock
+// (open-astro#401) and the three site setters rewrite persisted config (#444).
 //
 // Takes the client's ClientTransactionID as well as the server's: the 403 body
 // echoes it like every other error path in these handlers (open-astro#384).
@@ -1921,11 +1959,8 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             std::transform(target_type.begin(), target_type.end(), target_type.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             for (const auto& entry : persisted_snapshot) {
-                std::string entry_type = entry.value("deviceType", "");
-                std::transform(entry_type.begin(), entry_type.end(), entry_type.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (entry_type == target_type &&
-                    entry.value("deviceNumber", -1) == device_number) {
+                const auto key = persisted_key(entry);
+                if (key && key->device_type == target_type && key->device_number == device_number) {
                     return &entry;
                 }
             }
@@ -1999,8 +2034,9 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         }
 
         for (const auto& entry : persisted_snapshot) {
-            std::string ptype = entry.value("deviceType", "");
-            int pnum = entry.value("deviceNumber", -1);
+            const auto pkey = persisted_key(entry);
+            std::string ptype = pkey ? pkey->device_type : "";
+            int pnum = pkey ? pkey->device_number : -1;
             bool already_listed = false;
             for (const auto& cap : capabilities) {
                 std::string cap_type = alpacacore::device_type_to_string(cap.type);
@@ -3552,8 +3588,14 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
+                // open-astro#444: this PUT rewrites persisted device config,
+                // the effect configuredevice already guards (#401 precedent).
+                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteElevation")) {
+                    return *rejected;
+                }
                 double value = parse_double("SiteElevation");
                 telescope->set_site_elevation(value);
+                persist_client_site(*telescope, "siteElevation", value);  // open-astro#444
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -3567,8 +3609,14 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
+                // open-astro#444: this PUT rewrites persisted device config,
+                // the effect configuredevice already guards (#401 precedent).
+                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteLatitude")) {
+                    return *rejected;
+                }
                 double value = parse_double("SiteLatitude");
                 telescope->set_site_latitude(value);
+                persist_client_site(*telescope, "siteLatitude", value);  // open-astro#444
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -3582,8 +3630,14 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
+                // open-astro#444: this PUT rewrites persisted device config,
+                // the effect configuredevice already guards (#401 precedent).
+                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteLongitude")) {
+                    return *rejected;
+                }
                 double value = parse_double("SiteLongitude");
                 telescope->set_site_longitude(value);
+                persist_client_site(*telescope, "siteLongitude", value);  // open-astro#444
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
                 return response;
@@ -6335,6 +6389,20 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
                 util::ErrorCode::INVALID_VALUE,
                 "Missing required fields: deviceType and vendor"
             );
+            response.set_body(alpaca_response);
+            return response;
+        }
+
+        // open-astro#444: the opt-out flag is vendor-agnostic and consumed by
+        // the router alone, so no register_device_from_config() arm types it.
+        // Refuse a non-boolean here (the #388 rule: a wrong-typed field is
+        // named to the caller, never left to throw from a later read) rather
+        // than let sanitize_device_config() copy it verbatim into the file.
+        if (config_has(config, "learnSiteFromClient") && !config["learnSiteFromClient"].is_boolean()) {
+            AlpacaResponse alpaca_response =
+                make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                    std::string("Device config field 'learnSiteFromClient' must be a boolean (got ") +
+                                        config["learnSiteFromClient"].type_name() + ")");
             response.set_body(alpaca_response);
             return response;
         }
@@ -9420,9 +9488,86 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     copy_if_present("siteLatitude");
     copy_if_present("siteLongitude");
     copy_if_present("siteElevation");
+    copy_if_present("learnSiteFromClient");  // open-astro#444
     copy_if_present("syncTimeOnConnect");
 
     return sanitized;
+}
+
+void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const char* key, double value) {
+    // A NaN passes every driver's range check (both comparisons are false)
+    // and parses, so the setter takes it for the session; nlohmann dumps a
+    // non-finite double as null, which the next start reads as "absent" and
+    // the driver then refuses to connect. The surveyed value stays on disk.
+    // read_site_coordinates() applies the same rule on the config path.
+    if (!std::isfinite(value)) {
+        return;
+    }
+    if (device.get_device_type() != alpacacore::DeviceType::Telescope) {
+        return;
+    }
+    const int device_number = device.get_device_number();
+    bool changed = false;
+    bool declined = false;
+    std::string vendor{};
+    {
+        std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+        for (auto& entry : persisted_devices_) {
+            // Typed reads (persisted_key), never value(): a malformed
+            // neighbour in the list is simply not a match.
+            const auto pkey = persisted_key(entry);
+            if (!pkey || pkey->device_type != "telescope" || pkey->device_number != device_number) {
+                continue;
+            }
+            vendor = pkey->vendor;
+            // The opt-out: an operator with a surveyed pier position does not
+            // want a phone's GPS, good to perhaps 5 m, overwriting it. Default
+            // on, because the value the mount is using RIGHT NOW is the one
+            // the client set, and a restart should start from the same site
+            // the last session ended on rather than an older one.
+            // Typed, not value(): a hand-edited file can carry "false" or 0
+            // here, and nlohmann's value() throws on that, which would turn
+            // every site PUT into an error. Only a boolean false is the
+            // opt-out; the API path refuses any other type at registration.
+            const auto flag = entry.find("learnSiteFromClient");
+            if (flag != entry.end() && flag->is_boolean() && !flag->get<bool>()) {
+                declined = true;
+                break;
+            }
+            // Unchanged: no file write on a client that re-sends its site on
+            // every connect (most do).
+            const auto current = entry.find(key);
+            if (current != entry.end() && current->is_number() && current->get<double>() == value) {
+                break;
+            }
+            entry[key] = value;
+            changed = true;
+            break;
+        }
+    }
+    if (declined) {
+        util::log_debug("Telescope " + std::to_string(device_number) + ": client " + key +
+                        " not persisted (learnSiteFromClient is false)");
+        return;
+    }
+    if (!changed) {
+        return;  // no persisted entry (a device registered for this process only), or same value
+    }
+    // File I/O on a PUT setter, not on a getter or DeviceState: AGENTS.md's
+    // cheap-read rule does not apply, and this runs once per changed value.
+    std::ostringstream msg;
+    msg << "Telescope " << device_number << " (" << vendor << "): client " << key << " = " << std::fixed
+        << std::setprecision(6) << value;
+    if (save_persisted_devices()) {
+        util::log_info(msg.str() + " persisted to config/registered_devices.json");
+    } else {
+        // The entry in memory holds the value (the driver is using it), so
+        // the same value re-sent takes the unchanged skip; say plainly that
+        // the file does not have it rather than claiming it was persisted.
+        util::log_warning(msg.str() +
+                          " is in use for this session but could NOT be written to "
+                          "config/registered_devices.json (see the error above)");
+    }
 }
 
 void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
@@ -9431,10 +9576,12 @@ void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
     }
 
     std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+    const std::string vendor = config_get(config, "vendor", "");
+    const std::string device_type = to_lower_copy(config_get(config, "deviceType", ""));
+    const int device_number = config_get(config, "deviceNumber", -1);
     for (auto& existing : persisted_devices_) {
-        if (existing.value("vendor", "") == config_get(config, "vendor", "") &&
-            existing.value("deviceType", "") == config_get(config, "deviceType", "") &&
-            existing.value("deviceNumber", -1) == config_get(config, "deviceNumber", -1)) {
+        const auto key = persisted_key(existing);
+        if (key && key->vendor == vendor && key->device_type == device_type && key->device_number == device_number) {
             existing = config;
             return;
         }
@@ -9450,45 +9597,78 @@ bool Router::remove_persisted_device(const std::string& vendor, const std::strin
 
     std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
     std::size_t before = persisted_devices_.size();
-    persisted_devices_.erase(
-        std::remove_if(
-            persisted_devices_.begin(),
-            persisted_devices_.end(),
-            [&](const nlohmann::json& entry) {
-                if (entry.value("deviceType", "") != device_type ||
-                    entry.value("deviceNumber", -1) != device_number) {
-                    return false;
-                }
-                if (vendor.empty()) {
-                    return true;
-                }
-                return entry.value("vendor", "") == vendor;
-            }),
-        persisted_devices_.end()
-    );
+    persisted_devices_.erase(std::remove_if(persisted_devices_.begin(), persisted_devices_.end(),
+                                            [&](const nlohmann::json& entry) {
+                                                const auto key = persisted_key(entry);
+                                                if (!key || key->device_type != to_lower_copy(device_type) ||
+                                                    key->device_number != device_number) {
+                                                    return false;
+                                                }
+                                                return vendor.empty() || key->vendor == vendor;
+                                            }),
+                             persisted_devices_.end());
     return persisted_devices_.size() < before;
 }
 
-void Router::save_persisted_devices() const {
+bool Router::save_persisted_devices() const {
     try {
         if (kPersistedDevicesFile.has_parent_path()) {
             std::filesystem::create_directories(kPersistedDevicesFile.parent_path());
         }
 
-        std::ofstream out(kPersistedDevicesFile);
-        if (!out) {
-            throw std::runtime_error("Unable to open " + kPersistedDevicesFile.string() + " for writing");
-        }
-
+        // One writer at a time, and never in place: site PUTs from two
+        // clients run on two workers (#444), and two truncate-and-write
+        // passes on the same file end as one dump's head plus the other's
+        // tail, which the next start cannot parse and so loads NO devices.
+        // Writing a sibling temp file and renaming it over the real one
+        // makes each save atomic for a concurrent reader: the file is always
+        // a complete dump. (Atomic against readers, not against power loss:
+        // without fsync on the temp file and its directory, a crash right
+        // after the rename can still leave a zero-length file on ext4.)
+        //
+        // The file lock is taken BEFORE the snapshot (lock order: file, then
+        // list, the same everywhere). Snapshotting first let worker A copy
+        // the list, lose the CPU, and rename its older copy over the newer
+        // dump worker B had just written: memory right, disk one revision
+        // stale until the next changed PUT, lost across a restart.
+        std::lock_guard<std::mutex> file_lock(persisted_file_mutex_);
         nlohmann::json payload;
         {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             payload = persisted_devices_;
         }
-        out << payload.dump(4);
-        out.flush();
+        const std::filesystem::path temp = kPersistedDevicesFile.string() + ".tmp";
+        try {
+            {
+                std::ofstream out(temp, std::ios::trunc);
+                if (!out) {
+                    throw std::runtime_error("Unable to open " + temp.string() + " for writing");
+                }
+                out << payload.dump(4);
+                out.flush();
+                if (!out) {
+                    throw std::runtime_error("Unable to write " + temp.string());
+                }
+            }
+            // The rename swaps the inode, so the mode the package's postinst
+            // (or an operator) set on the real file would otherwise be
+            // replaced by this process's umask. Carry it over.
+            std::error_code ec;
+            const auto existing = std::filesystem::status(kPersistedDevicesFile, ec);
+            if (!ec && std::filesystem::is_regular_file(existing)) {
+                std::filesystem::permissions(temp, existing.permissions(), ec);
+            }
+            std::filesystem::rename(temp, kPersistedDevicesFile);
+        } catch (...) {
+            // Never leave a half-written .tmp beside the real file.
+            std::error_code ec;
+            std::filesystem::remove(temp, ec);
+            throw;
+        }
+        return true;
     } catch (const std::exception& e) {
         util::log_error("Failed to persist registered devices: " + std::string(e.what()));
+        return false;
     }
 }
 

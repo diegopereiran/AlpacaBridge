@@ -859,6 +859,10 @@ function startEditDevice(device) {
         setFormValue('skywatcher-site-latitude', config.siteLatitude);
         setFormValue('skywatcher-site-longitude', config.siteLongitude);
         setFormValue('skywatcher-site-elevation', config.siteElevation);
+        const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
+        if (skywatcherLearnSite) {
+            skywatcherLearnSite.checked = config.learnSiteFromClient !== false;
+        }
         updateApertureAreaFromDiameter('skywatcher-aperture-diameter', 'skywatcher-aperture-area');
         const skywatcherConnectionTypeEl = document.getElementById('skywatcher-connection-type');
         if (skywatcherConnectionTypeEl) {
@@ -917,6 +921,10 @@ function startEditDevice(device) {
         const zwoMountSyncTimeCheckbox = document.getElementById('zwo-mount-sync-time-on-connect');
         if (zwoMountSyncTimeCheckbox) {
             zwoMountSyncTimeCheckbox.checked = config.syncTimeOnConnect !== false;
+        }
+        const zwoMountLearnSite = document.getElementById('zwo-mount-learn-site-from-client');
+        if (zwoMountLearnSite) {
+            zwoMountLearnSite.checked = config.learnSiteFromClient !== false;
         }
         updateApertureAreaFromDiameter('zwo-mount-aperture-diameter', 'zwo-mount-aperture-area');
         const zwoMountConnectionTypeEl = document.getElementById('zwo-mount-connection-type');
@@ -3453,6 +3461,10 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (skywatcherSiteElevation !== null) {
             deviceData.siteElevation = skywatcherSiteElevation;
         }
+        const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
+        if (skywatcherLearnSite) {
+            deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444
+        }
     } else if (deviceData.vendor === 'onstep') {
         deviceData.connectionType = formData.get('onstepConnectionType') || 'auto';
         if (deviceData.connectionType === 'serial') {
@@ -3519,6 +3531,10 @@ document.getElementById('device-form').addEventListener('submit', async function
             const zwoMountSyncTimeCheckbox = document.getElementById('zwo-mount-sync-time-on-connect');
             if (zwoMountSyncTimeCheckbox) {
                 deviceData.syncTimeOnConnect = zwoMountSyncTimeCheckbox.checked;
+            }
+            const zwoMountLearnSite = document.getElementById('zwo-mount-learn-site-from-client');
+            if (zwoMountLearnSite) {
+                deviceData.learnSiteFromClient = zwoMountLearnSite.checked;  // open-astro#444
             }
 
         }

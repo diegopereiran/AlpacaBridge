@@ -226,7 +226,8 @@ private:
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
     void add_or_replace_persisted_device(const nlohmann::json& config);
     bool remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
-    void save_persisted_devices() const;
+    // True when the file was written; false is already logged at ERROR.
+    bool save_persisted_devices() const;
     void load_persisted_devices();
 
     nlohmann::json build_description_payload() const;
@@ -337,6 +338,16 @@ private:
     void add_clock_fields(nlohmann::json& desc) const;
     void warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const;
 
+    // open-astro#444: a client-set site coordinate (SiteLatitude, SiteLongitude
+    // or SiteElevation PUT) is written through to the device's persisted
+    // entry in config/registered_devices.json, so a location that only ever
+    // arrives from a client (a phone's GPS through an app, a gpsd feed) is
+    // still there after a restart. Called only after the driver has accepted
+    // the value. `key` is the persisted camelCase field name. A persisted
+    // entry whose `learnSiteFromClient` is false is left alone; an unchanged
+    // value is not re-saved; a device with no persisted entry is a no-op.
+    void persist_client_site(const alpacacore::AlpacaDriver& device, const char* key, double value);
+
     // True while `device` is still the DeviceRegistry's driver for its
     // type/number. Straggler requests that fetched the shared_ptr before a
     // removedevice must not re-insert registry/op-mutex entries for it —
@@ -352,6 +363,14 @@ private:
     // Guards persisted_devices_ and persisted_devices_loaded_. Never held
     // together with server_info_mutex_ or across driver-registry calls.
     mutable std::mutex persisted_devices_mutex_;
+    // Serialises the file write in save_persisted_devices(): request workers
+    // reach it concurrently through persist_client_site() (#444), and two
+    // truncate-and-write passes interleave into invalid JSON. Lock order:
+    // this one FIRST, then persisted_devices_mutex_ inside it for the
+    // snapshot, so a save can never rename an older snapshot over a newer
+    // dump. Consequently save_persisted_devices() must never be called while
+    // persisted_devices_mutex_ is held (it would self-deadlock).
+    mutable std::mutex persisted_file_mutex_;
     std::vector<nlohmann::json> persisted_devices_;
     bool persisted_devices_loaded_ = false;
 
