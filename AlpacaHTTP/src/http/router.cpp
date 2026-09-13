@@ -1392,8 +1392,9 @@ std::string connect_failure_reason(const alpacacore::AlpacaDriver& device) {
 
 // Defined further down with the management guards, but declared here because
 // every state-changing management handler needs it and handle_description()
-// is the first of them in file order. Also used by the one device setter with
-// a host-level side effect (open-astro#401).
+// is the first of them in file order. Also used by the four device setters
+// with a side effect beyond the driver: UTCDate steps the host clock
+// (open-astro#401) and the three site setters rewrite persisted config (#444).
 //
 // Takes the client's ClientTransactionID as well as the server's: the 403 body
 // echoes it like every other error path in these handlers (open-astro#384).
