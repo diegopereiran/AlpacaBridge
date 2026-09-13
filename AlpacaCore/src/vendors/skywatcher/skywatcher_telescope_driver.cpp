@@ -2118,12 +2118,8 @@ private:
     // The clock the mount is AIMED by: LST, SiderealTime,
     // DestinationSideOfPier and every goto. Honours the client's offset only
     // when the host clock was undisciplined at the time of the write
-    // (open-astro#301); see detail::pointing_uses_client_offset(). History:
-    // open-astro#287 first routed every LST computation through this one
-    // function, because get_utc_date() had reported the client offset while
-    // goto/RA math ignored it; #301 then made the offset conditional here
-    // while the UTCDate readback (client_utc_now_locked) still always honours
-    // the client's write.
+    // (open-astro#301); see detail::pointing_uses_client_offset().
+    // See docs/decisions/0001-skywatcher-pointing-clock.md for the rationale.
     std::chrono::system_clock::time_point utc_now_locked() const {
         const auto system_now = std::chrono::system_clock::now();
         const bool survives = client_offset_survives_locked(system_now);

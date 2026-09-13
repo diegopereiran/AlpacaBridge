@@ -347,7 +347,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 <details>
 <summary><strong>[3.0.1] - 2026-07-14</strong></summary>
 
-Full-codebase audit sweep (AUDIT.MD, 2026-07-11): all Critical/High/Medium findings and the tractable Low findings resolved. Network-authentication items were out of scope by design — ASCOM Alpaca has no auth model.
+Full-codebase audit sweep (docs/failures/2026-07-11-code-audit.md, 2026-07-11): all Critical/High/Medium findings and the tractable Low findings resolved. Network-authentication items were out of scope by design — ASCOM Alpaca has no auth model.
 
 ### Security
 - **HTTP: path-traversal / arbitrary file read in static web serving** (audit C1): `handle_static_file` built filesystem paths by string concatenation, so `GET /web/../../../../etc/passwd` returned any file the process could read. Requests containing `..` segments are now rejected outright and every resolved path is canonicalized (`weakly_canonical`) and confined under the canonical web root, which also blocks symlink escapes.
