@@ -1695,8 +1695,11 @@ datagrams before each send so replies cannot get off-by-one.
   the same way calls it too.
 - Pointing convention (#432): home = counterweight down, tube parallel to the polar axis
   pointing at the visible pole, counts offset `0x800000`, axis angles `a1`/`a2` in degrees
-  from home in the increasing-count direction. **`HA = s * (a1/15) + (a2 >= 0 ? +6 h : -6 h)`
-  and `dec = s * (90 - |a2|)`, with `s = +1` north and `-1` south.** The 6 h term is the
+  from home in the increasing-count direction. **`HA = s * (a1/15) + (branch * 6 h)`
+  and `dec = s * (90 - |a2|)`, with `s = +1` north and `-1` south**, where `branch` is the
+  sign of `a2` away from the pole and, inside a two-count deadband of `a2 = 0` where the
+  encoder cannot say, the branch the last goto or sync commanded
+  (`branch_from_axis_locked()`, #459). The 6 h term is the
   counterweight-down home: the dec axis lies in the meridian plane there, so a dec-only
   rotation sweeps the HA = ±6 h circle and the meridian needs the bar horizontal
   (`a1 = ±90`); every reachable target keeps `|a1| <= 90`, which is the
@@ -1706,7 +1709,8 @@ datagrams before each send so replies cannot get off-by-one.
   derived, and #458 is open on it**: geometry says the 6 h term must flip too, and the
   two mounts it was fitted to (EQM-35 Pro south, Wave 150i north) cannot separate a
   hemisphere effect from a per-board dec-axis count sense. Pier side is hemisphere-independent
-  (`a2 >= 0` -> pierEast), since the goto picks the branch from the sky hour angle.
+  (`branch > 0` -> pierEast, the same reader), since the goto picks the branch from the sky
+  hour angle.
   Tracking, `RightAscensionRate` and East/West pulses go through `ra_axis_sign_locked()`
   (counts up north, down south); `MoveAxis`, goto deltas and AutoHome are mechanical and
   never apply it. This matches `indi-eqmod`'s `EncodersToRADec()` exactly in the north;
