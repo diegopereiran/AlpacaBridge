@@ -2517,6 +2517,90 @@ int main() {
         EXPECT(learned);
     }
     {
+        // The persisted_key() readers pin three behaviours the #444 refactor
+        // carries, each on a hand-edited file loaded by a fresh Router:
+        // (1) deviceType compares case-insensitively, so an entry stored as
+        //     "Telescope" is matched by a lowercase removedevice and does not
+        //     come back after a restart; (2) an entry whose registration
+        //     failed is listed with its DeviceType lowercased; (3) a
+        //     deviceNumber written as 9656.0 registers as device 9656 (the
+        //     int config reader converts any number), so the persisted walk
+        //     must match it the same way: it is listed, and removedevice
+        //     takes it out of the file too, not only out of the registry.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        // Registration fails (unknown vendor), so the entry is listed from
+        // the persisted snapshot, not from a live driver.
+        entries.push_back({{"vendor", "no-such-vendor"}, {"deviceType", "Telescope"}, {"deviceNumber", 9655}});
+        entries.push_back({{"vendor", "skywatcher"},
+                           {"deviceType", "telescope"},
+                           {"deviceNumber", 9656.0},
+                           {"connectionType", "serial"},
+                           {"portPath", "/dev/ttyUSB9"},
+                           {"baudRate", 9600}});
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << entries.dump();
+        }
+        alpacahttp::Router startup_router;
+        const auto listed = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        bool listed_lowercase = false;
+        bool float_listed = false;
+        if (!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array()) {
+            for (const auto& entry : listed["Value"]) {
+                if (entry.value("DeviceNumber", -1) == 9655) {
+                    listed_lowercase = entry.value("DeviceType", "") == "telescope";
+                }
+                if (entry.value("DeviceNumber", -1) == 9656) {
+                    float_listed = true;
+                }
+            }
+        }
+        const auto remove_upper = nlohmann::json::parse(
+            route_request(
+                startup_router, "POST", "/management/v1/removedevice",
+                nlohmann::json({{"vendor", "no-such-vendor"}, {"deviceType", "telescope"}, {"deviceNumber", 9655}})
+                    .dump())
+                .body(),
+            nullptr, false);
+        (void)route_request(
+            startup_router, "POST", "/management/v1/removedevice",
+            nlohmann::json({{"vendor", "skywatcher"}, {"deviceType", "telescope"}, {"deviceNumber", 9656}}).dump());
+        nlohmann::json on_disk;
+        {
+            std::ifstream in(persisted);
+            on_disk = nlohmann::json::parse(in, nullptr, false);
+        }
+        {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        }
+        EXPECT(listed_lowercase);
+        EXPECT(float_listed);
+        EXPECT(!remove_upper.is_discarded() && remove_upper.value("ErrorNumber", -1) == 0);
+        bool upper_gone = true;
+        bool float_gone = true;
+        if (on_disk.is_array()) {
+            for (const auto& entry : on_disk) {
+                if (entry.value("vendor", "") == "no-such-vendor") {
+                    upper_gone = false;
+                }
+                if (entry.contains("deviceNumber") && entry["deviceNumber"].is_number_float()) {
+                    float_gone = false;
+                }
+            }
+        }
+        EXPECT(upper_gone);
+        EXPECT(float_gone);
+    }
+    {
         // issue #274, the other half: a config already on disk cannot be
         // corrected by its caller. Dropping it at startup would keep it out of
         // the device registry, and configureddevices -- the web UI's only

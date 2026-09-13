@@ -423,8 +423,11 @@ std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     }
     const auto type_it = entry.find("deviceType");
     const auto number_it = entry.find("deviceNumber");
-    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end() ||
-        !number_it->is_number_integer()) {
+    // Any JSON number is accepted, as config_get<int>() accepts it at
+    // registration: a hand-written 3.0 registers as device 3, so the walks
+    // over the persisted list must find that same entry or removedevice
+    // would drop it from the registry and leave it in the file.
+    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end() || !number_it->is_number()) {
         return std::nullopt;
     }
     PersistedKey key;
@@ -9580,12 +9583,6 @@ void Router::save_persisted_devices() const {
             std::filesystem::create_directories(kPersistedDevicesFile.parent_path());
         }
 
-        nlohmann::json payload;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            payload = persisted_devices_;
-        }
-
         // One writer at a time, and never in place: site PUTs from two
         // clients run on two workers (#444), and two truncate-and-write
         // passes on the same file end as one dump's head plus the other's
@@ -9593,20 +9590,46 @@ void Router::save_persisted_devices() const {
         // Writing a sibling temp file and renaming it over the real one
         // makes each save atomic for a reader (and for a power cut mid-write,
         // the observatory case): the file is always a complete dump.
+        //
+        // The file lock is taken BEFORE the snapshot (lock order: file, then
+        // list, the same everywhere). Snapshotting first let worker A copy
+        // the list, lose the CPU, and rename its older copy over the newer
+        // dump worker B had just written: memory right, disk one revision
+        // stale until the next changed PUT, lost across a restart.
         std::lock_guard<std::mutex> file_lock(persisted_file_mutex_);
-        const std::filesystem::path temp = kPersistedDevicesFile.string() + ".tmp";
+        nlohmann::json payload;
         {
-            std::ofstream out(temp, std::ios::trunc);
-            if (!out) {
-                throw std::runtime_error("Unable to open " + temp.string() + " for writing");
-            }
-            out << payload.dump(4);
-            out.flush();
-            if (!out) {
-                throw std::runtime_error("Unable to write " + temp.string());
-            }
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            payload = persisted_devices_;
         }
-        std::filesystem::rename(temp, kPersistedDevicesFile);
+        const std::filesystem::path temp = kPersistedDevicesFile.string() + ".tmp";
+        try {
+            {
+                std::ofstream out(temp, std::ios::trunc);
+                if (!out) {
+                    throw std::runtime_error("Unable to open " + temp.string() + " for writing");
+                }
+                out << payload.dump(4);
+                out.flush();
+                if (!out) {
+                    throw std::runtime_error("Unable to write " + temp.string());
+                }
+            }
+            // The rename swaps the inode, so the mode the package's postinst
+            // (or an operator) set on the real file would otherwise be
+            // replaced by this process's umask. Carry it over.
+            std::error_code ec;
+            const auto existing = std::filesystem::status(kPersistedDevicesFile, ec);
+            if (!ec && std::filesystem::is_regular_file(existing)) {
+                std::filesystem::permissions(temp, existing.permissions(), ec);
+            }
+            std::filesystem::rename(temp, kPersistedDevicesFile);
+        } catch (...) {
+            // Never leave a half-written .tmp beside the real file.
+            std::error_code ec;
+            std::filesystem::remove(temp, ec);
+            throw;
+        }
     } catch (const std::exception& e) {
         util::log_error("Failed to persist registered devices: " + std::string(e.what()));
     }
