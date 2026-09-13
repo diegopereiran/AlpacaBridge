@@ -3586,6 +3586,11 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
+                // open-astro#444: this PUT rewrites persisted device config,
+                // the effect configuredevice already guards (#401 precedent).
+                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteElevation")) {
+                    return *rejected;
+                }
                 double value = parse_double("SiteElevation");
                 telescope->set_site_elevation(value);
                 persist_client_site(*telescope, "siteElevation", value);  // open-astro#444
@@ -3602,6 +3607,11 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
+                // open-astro#444: this PUT rewrites persisted device config,
+                // the effect configuredevice already guards (#401 precedent).
+                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteLatitude")) {
+                    return *rejected;
+                }
                 double value = parse_double("SiteLatitude");
                 telescope->set_site_latitude(value);
                 persist_client_site(*telescope, "siteLatitude", value);  // open-astro#444
@@ -3618,6 +3628,11 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (request.method() == HttpMethod::PUT) {
+                // open-astro#444: this PUT rewrites persisted device config,
+                // the effect configuredevice already guards (#401 precedent).
+                if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "SiteLongitude")) {
+                    return *rejected;
+                }
                 double value = parse_double("SiteLongitude");
                 telescope->set_site_longitude(value);
                 persist_client_site(*telescope, "siteLongitude", value);  // open-astro#444
@@ -9530,11 +9545,19 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     }
     // File I/O on a PUT setter, not on a getter or DeviceState: AGENTS.md's
     // cheap-read rule does not apply, and this runs once per changed value.
-    save_persisted_devices();
     std::ostringstream msg;
-    msg << "Telescope " << device_number << " (" << vendor << "): persisted client " << key << " = " << std::fixed
-        << std::setprecision(6) << value << " to config/registered_devices.json";
-    util::log_info(msg.str());
+    msg << "Telescope " << device_number << " (" << vendor << "): client " << key << " = " << std::fixed
+        << std::setprecision(6) << value;
+    if (save_persisted_devices()) {
+        util::log_info(msg.str() + " persisted to config/registered_devices.json");
+    } else {
+        // The entry in memory holds the value (the driver is using it), so
+        // the same value re-sent takes the unchanged skip; say plainly that
+        // the file does not have it rather than claiming it was persisted.
+        util::log_warning(msg.str() +
+                          " is in use for this session but could NOT be written to "
+                          "config/registered_devices.json (see the error above)");
+    }
 }
 
 void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
@@ -9577,7 +9600,7 @@ bool Router::remove_persisted_device(const std::string& vendor, const std::strin
     return persisted_devices_.size() < before;
 }
 
-void Router::save_persisted_devices() const {
+bool Router::save_persisted_devices() const {
     try {
         if (kPersistedDevicesFile.has_parent_path()) {
             std::filesystem::create_directories(kPersistedDevicesFile.parent_path());
@@ -9630,8 +9653,10 @@ void Router::save_persisted_devices() const {
             std::filesystem::remove(temp, ec);
             throw;
         }
+        return true;
     } catch (const std::exception& e) {
         util::log_error("Failed to persist registered devices: " + std::string(e.what()));
+        return false;
     }
 }
 
