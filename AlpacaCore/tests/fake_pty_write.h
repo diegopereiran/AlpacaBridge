@@ -12,10 +12,16 @@
 
 #pragma once
 
-// Bounded writes for the pty-backed fakes (issue #424, the shape #364
-// describes).
+// The shared pty plumbing for the pty-backed fakes: PtyPair, which owns the
+// pseudo-terminal pair a fake answers a driver over (issue #387), and
+// pty_write_bounded(), the bounded write every reply goes through (issue
+// #424, the shape #364 describes). All six fakes -- the five fake_*.h doubles
+// plus FakeSerialHandset in test_synscan_handset_probe.cpp -- hold one PtyPair
+// and write only through the bounded helper; the hand-rolled posix_openpt()
+// block that PtyPair replaced leaked the master on every setup-failure path
+// and ignored a failed keep-alive open.
 //
-// Every one of these fakes wrote its reply with a bare
+// Why the write is bounded: every one of these fakes wrote its reply with a bare
 //
 //     (void)!write(master_fd_, reply.data(), reply.size());
 //
@@ -33,8 +39,7 @@
 //
 // Two rules, applied to all six pty-backed fakes rather than to the one that
 // was caught (AGENTS.md: a template bug found in one place is fixed
-// everywhere) -- the five fake_*.h doubles plus FakeSerialHandset in
-// test_synscan_handset_probe.cpp:
+// everywhere):
 //
 //   1. The master is opened non-blocking, so a write can never park.
 //   2. A reply that cannot be written within a short bound, or while the fake
@@ -112,12 +117,23 @@ public:
     PtyPair& operator=(const PtyPair&) = delete;
 
     int master_fd() const { return master_fd_; }
+    /// The keep-alive slave handle. It shares one termios with every other
+    /// fd open on the slave, so a fake can read back the line speed the
+    /// driver configured (FakeSkyWatcherSerialBoard::line_baud()).
+    int keepalive_fd() const { return keepalive_fd_; }
+    /// Empty after sever(): the path named a pty that no longer exists.
     const std::string& slave_path() const { return slave_path_; }
 
     /// Close both ends now: the driver's reads and writes on the slave fail
     /// with EIO from here on, which is what a USB unplug looks like
-    /// (issue #237). Not reversible.
-    void sever() { close_all(); }
+    /// (issue #237). Not reversible, and slave_path() is cleared here (not
+    /// in close_all(), which the destructor also runs) so a test that tried
+    /// to reopen the severed pty fails on an empty path rather than on
+    /// ENOENT, or on a recycled /dev/pts/N belonging to someone else.
+    void sever() {
+        close_all();
+        slave_path_.clear();
+    }
 
 private:
     void close_all() {

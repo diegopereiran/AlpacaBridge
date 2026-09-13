@@ -1371,7 +1371,8 @@ non-blocking and write through `pty_write_bounded()` from
 pair through `PtyPair` in that same header rather than a hand-rolled
 `posix_openpt()` block: the hand-rolled shape leaked the master on every
 setup-failure path and ignored a failed keep-alive open, and it had been
-copied six times before #387 replaced the three Gemini copies. A bare
+copied six times before #387 replaced every copy; all six fakes now hold a
+`PtyPair`, and `test_fake_pty_write.cpp` pins its ownership contract. A bare
 `write(master_fd_, ...)` on a blocking master parks the fake's worker thread as
 soon as the driver stops draining — which is normal as a concurrency test winds
 down — and the destructor's `join()` then never returns, because the thread is

@@ -20,9 +20,18 @@
 // These cases pin the two properties that make that impossible, on the shared
 // helper all six pty fakes now use. They cannot be written as "assert the old
 // code fails", because the old code's failure mode IS a hang.
+//
+// The PtyPair cases below pin the ownership contract from issue #387: the
+// pair owns both descriptors, nothing outlives it, and sever() closes both
+// ends and forgets the path. The setup-failure paths themselves (grantpt or
+// the keep-alive open failing) need the kernel's cooperation to force and are
+// not exercised; the descriptor count across a construct/destroy loop is the
+// observable that a leak on the success path would move.
 
 #ifndef _WIN32
 
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>  // posix_openpt/grantpt/unlockpt/ptsname: POSIX, not the <cstdlib> subset
 #include <termios.h>
@@ -84,7 +93,78 @@ long elapsed_ms(std::chrono::steady_clock::time_point since) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count();
 }
 
+// Number of descriptors this process holds open, from /proc/self/fd, or -1
+// where that directory does not exist (a non-Linux host). The directory
+// handle used to read it is closed before the count is returned, so it does
+// not count itself.
+int open_fd_count() {
+    DIR* dir = opendir("/proc/self/fd");
+    if (dir == nullptr) {
+        return -1;
+    }
+    const int self = dirfd(dir);
+    int n = 0;
+    while (dirent* entry = readdir(dir)) {
+        if (entry->d_name[0] == '.') continue;
+        if (std::stoi(entry->d_name) == self) continue;
+        ++n;
+    }
+    closedir(dir);
+    return n;
+}
+
 }  // namespace
+
+TEST_CASE("PtyPair - owns both descriptors: a construct/destroy loop leaves the fd table unchanged",
+          "[fakes][pty][unit]") {
+    const int before = open_fd_count();
+    if (before < 0) {
+        WARN("/proc/self/fd is not available on this host; the ownership check is skipped");
+        return;
+    }
+    for (int i = 0; i < 32; ++i) {
+        PtyPair pty("PtyPair test");
+        REQUIRE(pty.master_fd() >= 0);
+        REQUIRE(pty.keepalive_fd() >= 0);
+        REQUIRE_FALSE(pty.slave_path().empty());
+        // The master is non-blocking from construction: the #424 property,
+        // now set inside the pair rather than by each fake.
+        CHECK((fcntl(pty.master_fd(), F_GETFL, 0) & O_NONBLOCK) != 0);
+        // Exactly the two descriptors the pair says it owns are open.
+        CHECK(open_fd_count() == before + 2);
+    }
+    CHECK(open_fd_count() == before);
+}
+
+TEST_CASE("PtyPair - sever closes both ends, forgets the slave path, and is idempotent", "[fakes][pty][unit]") {
+    const int before = open_fd_count();
+    PtyPair pty("PtyPair test");
+    // What a driver does with the path: open the slave.
+    const int driver_fd = ::open(pty.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    REQUIRE(driver_fd >= 0);
+
+    pty.sever();
+    CHECK(pty.master_fd() == -1);
+    CHECK(pty.keepalive_fd() == -1);
+    // The path named a pty that no longer exists; handing it out again would
+    // let a test reopen a recycled /dev/pts/N.
+    CHECK(pty.slave_path().empty());
+    if (before >= 0) {
+        CHECK(open_fd_count() == before + 1);  // only the driver's own fd remains
+    }
+    // The driver's side sees the unplug (issue #237): a write to the orphaned
+    // slave fails with EIO, and a read never blocks and never returns data
+    // (Linux reports the hangup as end-of-file, 0, on the read side).
+    errno = 0;
+    CHECK(::write(driver_fd, "x", 1) < 0);
+    CHECK(errno == EIO);
+    char buf[8];
+    CHECK(::read(driver_fd, buf, sizeof(buf)) <= 0);
+
+    pty.sever();  // a second sever, and then the destructor, must be no-ops
+    CHECK(pty.master_fd() == -1);
+    ::close(driver_fd);
+}
 
 TEST_CASE("fake pty write - make_pty_nonblocking actually sets O_NONBLOCK", "[fakes][pty][unit]") {
     UndrainedPty pty;

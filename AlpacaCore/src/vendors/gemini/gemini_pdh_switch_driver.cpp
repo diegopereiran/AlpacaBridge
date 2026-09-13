@@ -174,6 +174,11 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Firmware ("3.0.8") captured at connect and cleared on disconnect. Web UI only.
+    // The wrapper clears it inside protocol_.disconnect(), which runs after
+    // connected_ is stored false, so there is a sub-microsecond window in
+    // which the driver reports disconnected with a stale firmware string,
+    // the same window the focuser documents. Visible to nothing but the web
+    // UI's firmware read.
     std::optional<std::string> get_device_firmware() const override { return protocol_.get_firmware(); }
 
     int get_interface_version() const override { return 3; }
