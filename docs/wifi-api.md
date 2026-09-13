@@ -159,10 +159,12 @@ method check (200 with `INVALID_OPERATION`) rather than 403, while
 anything, so the difference is in the status code only. This
 blocks drive-by CSRF from malicious websites open on a LAN browser. It does
 not affect native clients (no `Origin` header is sent — Ara over HTTP is
-unaffected) or the same-origin web portal. One device endpoint takes the same
+unaffected) or the same-origin web portal. Four device endpoints take the same
 guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
-a UTCDate write steps the system clock (see the Clock section above). Every
-other device setter is unguarded.
+a UTCDate write steps the system clock (see the Clock section above), and
+`PUT /api/v1/telescope/{n}/sitelatitude`, `sitelongitude` and `siteelevation`,
+because since #444 they also rewrite the device's persisted configuration, the
+effect `configuredevice` guards. Every other device setter is unguarded.
 
 Since issue #348 this is not specific to the WiFi endpoints: every
 state-changing management endpoint carries the same guard — `synctime`,
