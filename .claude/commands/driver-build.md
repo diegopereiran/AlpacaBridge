@@ -683,7 +683,7 @@ The unit cases above run without hardware because they never connect. Concurrenc
 
 **1. The seam.** Pick the shape by what the driver talks to:
 
-- **Vendor SDK** (camera, filter wheel, anything linking a vendor `.so`): the abstract-interface pattern. An abstract `<Vendor>SDK` interface, the production wrapper implementing it, a `<Vendor>SDK&`-taking overload on every `create_<vendor>_*` factory beside the existing one, a scripted fake in `tests/fake_<vendor>_sdk.h`, and a mutex-taking decorator in `tests/locked_<vendor>_sdk.h` that wraps the fake wherever it is injected, so a TSan report points at driver code rather than at the fake. Worked examples: QHY (`QHYSDK`, `tests/fake_qhy_sdk.h`, `tests/locked_qhy_sdk.h`) and ToupTek (the same three files under the `touptek` names). Read them; do not write a mock that subclasses the singleton wrapper, it has no virtual functions and will not build.
+- **Vendor SDK** (camera, filter wheel, anything linking a vendor `.so`): the abstract-interface pattern. An abstract `<Vendor>SDK` interface, the production wrapper implementing it, a `<Vendor>SDK&`-taking overload on every `create_<vendor>_*` factory beside the existing one, a scripted fake in `tests/fake_<vendor>_sdk.h`, and a mutex-taking decorator in `tests/locked_<vendor>_sdk.h` that wraps the fake wherever it is injected, so a TSan report points at driver code rather than at the fake. Worked examples: QHY (`QHYSDK`, `tests/fake_qhy_sdk.h`, `tests/locked_qhy_sdk.h`) and ToupTek (the same three files under the `touptek` names). Read them; do not write a mock that subclasses the production wrapper: it is declared `final`, so the subclass will not build. Subclass the abstract `<Vendor>SDK` interface instead.
 - **Serial or network protocol** (mounts, focusers, hubs): a fake device on the other end of the real transport. A pseudo-terminal fake for serial (`tests/fake_gemini_focuser.h`, `tests/fake_skywatcher_serial_board.h`; `PtyPair` in `tests/fake_pty_write.h` owns the pty), a loopback server for TCP/UDP (`tests/fake_mount_server.h`, `tests/fake_skywatcher_mount.h`). The driver connects through its real protocol wrapper, so the wrapper's own threads and timeouts are what get stormed.
 
 A driver whose seam cannot be built yet (no fake is possible without the hardware in hand) still registers: with every connect failing fast at enumeration the storm exercises the `AsyncConnectable` machinery, the failure-path cleanup and the getters racing the lifecycle, which is where this driver family's findings have lived. Say so in the file's header comment, the way `test_zwo_concurrency_stress.cpp` does.
@@ -692,7 +692,7 @@ A driver whose seam cannot be built yet (no fake is possible without the hardwar
 
 **3. Do not add an `ALLOWLIST` entry.** `scripts/check_stress_registration.py` fails a driver with no `[stress]` case and its message names the `ALLOWLIST` as an alternative. That list exists only for the drivers that predate the gate (seeded at 20 pairs in 2026-09, two left) and is expected to shrink, never grow. A new driver built from this command has no reason to be on it; if you find yourself adding one, the seam in part 1 is the work you skipped.
 
-**4. Gate it in CMake.** The stress file goes in the same `if(TARGET alpacacore_<vendor>)` block as the unit file (below); an unconditional listing is itself a gate failure, because the file would compile with the vendor absent and register nothing.
+**4. Gate it in CMake.** The stress file goes in the same `if(TARGET alpacacore_<vendor>)` block as the unit file (below); an unconditional listing is itself a gate failure, because a `[stress]` case that compiles with the vendor absent satisfies the TSan zero-test grep vacuously (issue #396).
 
 ### CMake integration (also mandatory)
 
@@ -732,8 +732,10 @@ All tests must pass — not just the new driver's tests.
 Then run the registration gate locally, exactly as CI and the pre-flight do, so a missing or misplaced `[stress]` case is caught here rather than in review:
 
 ```bash
-python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py
+cd "$(git rev-parse --show-toplevel)" && python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py
 ```
+
+(The `cd` matters: the build block above leaves the shell in `AlpacaCore/`, and from there the script's `git ls-files` sees no driver and reports every ALLOWLIST entry as stale.)
 
 It must print `Stress-test registration OK` and the new (vendor, device type) pair must not be on the `ALLOWLIST` (Step 7b). Run the storm itself under ThreadSanitizer before opening the PR: `RUN_TSAN=1 ./scripts/ci_preflight.sh`, or the full pre-flight, which includes it.
 
