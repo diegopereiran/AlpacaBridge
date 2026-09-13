@@ -21,6 +21,7 @@
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/router.h>
 #include <alpacahttp/util/error_mapping.h>
+#include <alpacahttp/util/host_timezone.h>
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/version.h>
 #include <zlib.h>
@@ -1720,6 +1721,9 @@ void Router::add_clock_fields(nlohmann::json& desc) const {
     desc["ClockSynchronized"] = host_clock_.synchronized();
     desc["ClockSource"] = host_clock_.source();  // "ntp" | "client" | "rtc" | "none"
     desc["SyncSystemClockFromClients"] = host_clock_.enabled();
+    // open-astro#354: the host's IANA zone ("" when unknown) so the web UI
+    // header clock can render in the same zone as the log lines.
+    desc["TimeZone"] = util::host_time_zone();
 }
 
 Response Router::handle_description(const Request& request, std::uint32_t server_tx_id) {

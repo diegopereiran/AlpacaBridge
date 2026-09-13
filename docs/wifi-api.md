@@ -223,7 +223,9 @@ NTP or RTC). It never overrides NTP/chrony/GPS, applies the same 2000-2100
 window, ignores sub-second deltas, and logs every step with the delta and the
 client address. `GET /management/v1/description` reports the state:
 `ClockSynchronized` (kernel-disciplined), `ClockSource` (`ntp` | `client` |
-`rtc` | `none`) and `SyncSystemClockFromClients`; `PUT` the last one as a boolean to
+`rtc` | `none`), `SyncSystemClockFromClients` and `TimeZone` (the host's IANA
+zone name, e.g. `America/Denver`, or `""` when it cannot be determined; the web
+UI header clock renders in it); `PUT` `SyncSystemClockFromClients` as a boolean to
 opt out (persisted as `sync_system_clock_from_clients` under `server:` in the
 config file). A telescope connecting while the clock is `none` always logs a
 WARN. On an `rtc` host the line is an INFO only while something can still

@@ -1324,6 +1324,10 @@ async function loadServerInfo() {
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
         const clockText = clockStateText(desc);
+        // open-astro#354: adopt the host zone for the header clock. A missing
+        // field (older server) or '' keeps the browser-zone rendering.
+        serverTimeZone = String(resolveDescriptionValue(desc, ['TimeZone']) || '');
+        updateServerClock();
 
         // Mirror the server-reported version (sourced from the VERSION file at
         // build time) into the header badge.
@@ -1756,6 +1760,10 @@ async function syncTime() {
 // network traffic. Re-synced every 60 s and after a Sync Time. If server and
 // browser disagree by more than 2 s the clock turns red as a "needs sync" hint.
 let serverClockOffsetMs = null;
+// open-astro#354: the host's IANA zone from the description payload's
+// TimeZone field ('' until the first successful load, or when the host
+// cannot name one); formatServerClock() falls back to the browser's zone.
+let serverTimeZone = '';
 
 async function refreshServerClockOffset() {
     try {
@@ -1807,7 +1815,7 @@ function updateServerClock() {
         return;
     }
     const serverNow = new Date(Date.now() + serverClockOffsetMs);
-    el.textContent = formatServerClock(serverNow);
+    el.textContent = formatServerClock(serverNow, serverTimeZone);
     // The GET returns whole seconds, so up to ±1 s of the offset is
     // quantization, not drift; only flag beyond 2 s.
     el.classList.toggle('drift', Math.abs(serverClockOffsetMs) > 2000);

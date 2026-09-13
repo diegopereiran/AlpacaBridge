@@ -254,6 +254,7 @@ set(ALPACAHTTP_SOURCES
     src/util/threading.cpp
     src/util/logging_adapter.cpp
     src/util/error_mapping.cpp
+    src/util/host_timezone.cpp
     src/util/wifi_manager.cpp
 )
 
