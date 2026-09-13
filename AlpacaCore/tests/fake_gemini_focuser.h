@@ -69,7 +69,7 @@ public:
     FakeGeminiFocuser(const FakeGeminiFocuser&) = delete;
     FakeGeminiFocuser& operator=(const FakeGeminiFocuser&) = delete;
 
-    const std::string& slave_path() const { return pty_.slave_path(); }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     /// Every command received so far, in wire order (e.g. ":03#", ":05100#").
     std::vector<std::string> commands() const {

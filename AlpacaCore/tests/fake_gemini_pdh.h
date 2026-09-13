@@ -57,7 +57,7 @@ public:
     FakeGeminiPdh(const FakeGeminiPdh&) = delete;
     FakeGeminiPdh& operator=(const FakeGeminiPdh&) = delete;
 
-    const std::string& slave_path() const { return pty_.slave_path(); }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);

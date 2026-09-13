@@ -121,8 +121,10 @@ public:
     /// fd open on the slave, so a fake can read back the line speed the
     /// driver configured (FakeSkyWatcherSerialBoard::line_baud()).
     int keepalive_fd() const { return keepalive_fd_; }
-    /// Empty after sever(): the path named a pty that no longer exists.
-    const std::string& slave_path() const { return slave_path_; }
+    /// Empty after sever(): the path named a pty that no longer exists. By
+    /// value, so a copy taken before the cut is not emptied underneath the
+    /// caller by sever() clearing the member.
+    std::string slave_path() const { return slave_path_; }
 
     /// Close both ends now: the driver's reads and writes on the slave fail
     /// with EIO from here on, which is what a USB unplug looks like

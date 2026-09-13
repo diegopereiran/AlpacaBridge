@@ -193,6 +193,13 @@ TEST_CASE("PtyPair - a keep-alive open that fails throws, with the master closed
     // block this replaced constructed successfully here, with the keep-alive
     // at -1 and a confusing EIO waiting on the first read; against it the
     // REQUIRE_THROWS_AS below is the red line.
+    //
+    // The limit is process-wide while this block runs, so anything the
+    // runtime lazily opens inside it fails too: a sanitizer's symbolizer, or
+    // Catch2's own report if a REQUIRE here goes red. The window is a few
+    // syscalls wide and the limit is restored on every exit path; if it ever
+    // flakes under the ASan/TSan jobs, gate this case out there rather than
+    // loosening the check.
     const FdTable start = fd_table();
     if (start.count < 0) {
         WARN("/proc/self/fd is not available on this host; the setup-failure check is skipped");

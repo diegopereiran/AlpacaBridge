@@ -19,6 +19,7 @@
 #ifndef _WIN32
 
 #include <alpacacore/util/synscan_handset_probe.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -57,7 +58,7 @@ public:
     FakeSerialHandset(const FakeSerialHandset&) = delete;
     FakeSerialHandset& operator=(const FakeSerialHandset&) = delete;
 
-    const std::string& slave_path() const { return pty_.slave_path(); }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     std::string received() const {
         std::lock_guard<std::mutex> lock(mutex_);

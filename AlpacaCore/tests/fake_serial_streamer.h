@@ -52,7 +52,7 @@ public:
     FakeSerialStreamer(const FakeSerialStreamer&) = delete;
     FakeSerialStreamer& operator=(const FakeSerialStreamer&) = delete;
 
-    const std::string& slave_path() const { return pty_.slave_path(); }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     void set_frame(std::string frame) {
         std::lock_guard<std::mutex> lock(mutex_);

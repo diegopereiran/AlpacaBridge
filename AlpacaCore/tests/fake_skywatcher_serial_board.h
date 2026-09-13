@@ -61,7 +61,7 @@ public:
     FakeSkyWatcherSerialBoard(const FakeSkyWatcherSerialBoard&) = delete;
     FakeSkyWatcherSerialBoard& operator=(const FakeSkyWatcherSerialBoard&) = delete;
 
-    const std::string& slave_path() const { return pty_.slave_path(); }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     /// Position counts the board reports for ":j<axis>".
     void set_counts(int axis, uint32_t counts) {

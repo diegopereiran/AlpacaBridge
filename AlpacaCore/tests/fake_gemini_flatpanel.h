@@ -55,7 +55,7 @@ public:
     FakeGeminiFlatPanel(const FakeGeminiFlatPanel&) = delete;
     FakeGeminiFlatPanel& operator=(const FakeGeminiFlatPanel&) = delete;
 
-    const std::string& slave_path() const { return pty_.slave_path(); }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     /// Every command received so far, in wire order (e.g. ">L#", ">B128#").
     std::vector<std::string> commands() const {
