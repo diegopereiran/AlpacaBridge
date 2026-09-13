@@ -147,7 +147,8 @@ public:
         shutdown_connection();
         if (connected_.load()) {
             try {
-                connected_.store(false);  // driver state first, then the close (issue #387)
+                protocol_.clear_firmware();  // driver state first, then the close (issue #387)
+                connected_.store(false);
                 protocol_.disconnect();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Error during power hub destruction: " + std::string(e.what()));
@@ -174,11 +175,12 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Firmware ("3.0.8") captured at connect and cleared on disconnect. Web UI only.
-    // The wrapper clears it inside protocol_.disconnect(), which runs after
-    // connected_ is stored false, so there is a sub-microsecond window in
-    // which the driver reports disconnected with a stale firmware string,
-    // the same window the focuser documents. Visible to nothing but the web
-    // UI's firmware read.
+    // Never consults connected_: the cache is empty whenever the driver reports
+    // disconnected, because both disconnect sites call protocol_.clear_firmware()
+    // BEFORE storing connected_ = false. The wrapper's own clear inside
+    // protocol_.disconnect() comes only after the reader join, up to 500 ms
+    // later, which is why it cannot be the one relied on. The only window is
+    // the sub-microsecond one on connect (firmware set before the store(true)).
     std::optional<std::string> get_device_firmware() const override { return protocol_.get_firmware(); }
 
     int get_interface_version() const override { return 3; }
@@ -247,9 +249,13 @@ public:
             // Driver state first, SDK close second (AGENTS.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
-            // the contract, not the current wrapper's behaviour.
+            // the contract, not the current wrapper's behaviour. The cached
+            // firmware goes before the store so the driver is never seen
+            // disconnected beside a stale string (the teardown's own clear is
+            // behind a reader join of up to 500 ms).
+            protocol_.clear_firmware();
             connected_.store(false);
-            protocol_.disconnect();  // joins the reader, clears cached firmware
+            protocol_.disconnect();  // joins the reader, closes the port
             ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 disconnected");
         }
     }
