@@ -7,6 +7,10 @@ harness-readiness evaluation that prompted this script). Every check below
 is read-only and file-local -- no network, no build.
 
 Run from the repo root:  python3 scripts/check_docs_drift.py
+Self-test (no repo state): python3 scripts/check_docs_drift.py --self-test
+  -- drives check 8's pairing and job-scoping helpers over literal fixtures,
+  one per mutation the check exists to catch, so an extractor that stops
+  matching fails here instead of degrading the gate to its floor (#455).
 
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
@@ -39,11 +43,33 @@ Checks:
      (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
      that looks like a real repo path actually exists.
   8. The TSan job's filtered runs are identical between ci.yml and
-     ci_preflight.sh: the same set of `alpacacore_tests "<tag>"` invocations,
-     and the same zero-test grep pattern guarding each one (issue #341). The
-     pre-flight script only has value while it runs what CI runs, and this
-     pair is written out twice with nothing comparing it -- the same shape as
-     checks 2 and 3.
+     ci_preflight.sh: the same ordered `alpacacore_tests "<tag>"` invocations
+     out of the same build directory, each one followed by a zero-test
+     `grep -qE` that reads the log that run's `tee` wrote, with the same
+     pattern in both files (issue #341, tightened in issue #455: a guard is
+     paired with the run it reads, not counted). The pre-flight script only
+     has value while it runs what CI runs, and this pair is written out twice
+     with nothing comparing it -- the same shape as checks 2 and 3.
+  9. Every first-party source file carries the CURRENT AGPL-3.0-or-later
+     header: the "This file is part of <Component>." line plus the short
+     form that names the licence id and points at the LICENSE file for the
+     vendor-SDK linking exception (issue #450). The rule was prompt-only,
+     and two files added on 2026-09-09 carried the pre-#113 long-form GNU
+     boilerplate, which names neither. Vendored SDKs under external/ are
+     excluded, as everywhere else.
+ 10. Every backticked repo path in the Cursor rule files
+     (AlpacaCore/.cursor/rules/*.mdc, AlpacaHTTP/.cursor/rules/*.mdc) and in
+     AlpacaCore/external/README.md exists, the same way check 7 does it for
+     AGENTS.md (issue #457). Those files are `alwaysApply: true`, so an agent
+     reads them before touching a driver, and #453 found a versioned QHY SDK
+     path and a directory that never existed in one of them. Paths in these
+     files are relative to the component the file lives under
+     (`external/QHY/...` in an AlpacaCore rule means `AlpacaCore/external/QHY/...`),
+     so each span is resolved against its component root as well as the
+     repo root. Fenced blocks, including the illustrative directory trees,
+     are skipped exactly as in check 7; a stale entry inside a tree block
+     stays unchecked, and that is an accepted limit of this check, not an
+     oversight. Each file carries its own floor.
 """
 
 import glob
@@ -128,6 +154,33 @@ def check_zizmor_pin_sync():
 SUPPRESS_RE = re.compile(r"--suppress=(\S+)")
 
 
+_CI_JOB_RE = re.compile(r"^  [A-Za-z0-9_-]+:[ \t]*$", re.MULTILINE)
+
+
+def _ci_job_block(ci_text, job_name):
+    r"""The text of one top-level job in ci.yml, from its `  <job>:` line to the
+    next job's line (or EOF).
+
+    Checks 3 and 8 used to end their scope at a NAMED neighbour (`\n  zizmor:`,
+    `\n  format:`), which silently widened the scope whenever a job was
+    inserted between the two -- and a widened scope carrying a `grep -qE` or a
+    `--suppress=` of its own would then fire the check with a message pointing
+    at the wrong gate (issue #455). Ending at "the next job at this indent"
+    makes the scope follow the job, not the file's current ordering.
+    """
+    start = ci_text.find("\n  %s:" % job_name)
+    if start == -1:
+        return None
+    start += 1
+    # Search from the end of the job's own line, not from an arithmetic
+    # offset that hard-codes the indent and the colon.
+    line_end = ci_text.find("\n", start)
+    if line_end == -1:
+        return ci_text[start:]
+    m = _CI_JOB_RE.search(ci_text, line_end)
+    return ci_text[start:m.start()] if m else ci_text[start:]
+
+
 def _scoped_block(text, start_marker, end_markers):
     """text from start_marker to the first of end_markers found after it (or EOF).
 
@@ -158,7 +211,7 @@ def check_cppcheck_suppress_sync():
     # scope explicitly anyway (mirroring check_zizmor_pin_sync) so this stays
     # correct if a second tool with its own --suppress flag is ever added to
     # either file.
-    ci = _scoped_block(ci_full, "- name: Analyze changed C/C++ files", ("\n  zizmor:",))
+    ci = _scoped_block(_ci_job_block(ci_full, "cppcheck") or "", "- name: Analyze changed C/C++ files", ())
     preflight = _scoped_block(preflight_full, 'section "cppcheck (changed files)"', ('section "',))
     if ci is None or preflight is None:
         failures.append(
@@ -709,18 +762,16 @@ def _is_gitignored(path):
     return _run_git(["check-ignore", "-q", path], check=False).returncode == 0
 
 
-def check_agents_md_paths_exist():
-    failures = []
-    text = FENCED_BLOCK_RE.sub("", read("AGENTS.md"))
-    text = DOUBLE_BACKTICK_SPAN_RE.sub("", text)
-    # With fences gone every backtick must pair up; one stray backtick would
-    # invert every span after it, and the count floor below only catches a
-    # large inversion. Fail loudly on parity instead.
-    if text.count("`") % 2 != 0:
-        return ["AGENTS.md has an unbalanced backtick outside fenced blocks; "
-                "the path-reference check cannot pair code spans reliably"]
-    seen = set()
+_TRACKED_PATHS_CACHE = None
 
+
+def _tracked_paths():
+    """(tracked files, tracked directories with a trailing slash), computed once
+    per invocation: six documents share it and the listing walks the vendored
+    SDK trees."""
+    global _TRACKED_PATHS_CACHE
+    if _TRACKED_PATHS_CACHE is not None:
+        return _TRACKED_PATHS_CACHE
     # core.quotePath=false: a tracked path with non-ASCII bytes must not
     # come back quoted, or it would never match a span.
     tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines())
@@ -729,14 +780,47 @@ def check_agents_md_paths_exist():
         parts = f.split("/")
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]) + "/")
+    _TRACKED_PATHS_CACHE = (tracked, tracked_dirs)
+    return _TRACKED_PATHS_CACHE
+
+
+def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefixes=()):
+    """Every backticked path span in `doc` names a tracked file or directory.
+
+    `component` (e.g. "AlpacaCore/") is where a span starting with one of
+    `relative_prefixes` ("src/", "external/", ...) is resolved: the Cursor
+    rule files write paths relative to the component they live under, not
+    to the repo root. Repo-root spans (PATH_PREFIXES) are accepted in every
+    document. Returns (failures, checked).
+    """
+    failures = []
+    if not (ROOT / doc).is_file():
+        return (["%s is listed for path checking but does not exist -- it was renamed or deleted; "
+                 "update the list" % doc], 0)
+    text = FENCED_BLOCK_RE.sub("", read(doc))
+    text = DOUBLE_BACKTICK_SPAN_RE.sub("", text)
+    # With fences gone every backtick must pair up; one stray backtick would
+    # invert every span after it, and the count floor below only catches a
+    # large inversion. Fail loudly on parity instead.
+    if text.count("`") % 2 != 0:
+        return ["%s has an unbalanced backtick outside fenced blocks; "
+                "the path-reference check cannot pair code spans reliably" % doc], 0
+    seen = set()
+    tracked, tracked_dirs = _tracked_paths()
 
     checked = 0
     for m in CODE_SPAN_RE.finditer(text):
         span = m.group(1)
-        if "\n" in span or not span.startswith(PATH_PREFIXES):
+        if "\n" in span:
+            continue
+        if span.startswith(PATH_PREFIXES):
+            span_path = span
+        elif component and span.startswith(relative_prefixes):
+            span_path = component + span
+        else:
             continue
         checked += 1
-        path = TRIM_SUFFIX_RE.sub("", span)
+        path = TRIM_SUFFIX_RE.sub("", span_path)
         # Markdown anchors / fragments (`docs/x.md#section`), glob patterns,
         # and template placeholders (`AlpacaCore/src/vendors/<vendor>/...`)
         # aren't real filesystem paths.
@@ -746,7 +830,8 @@ def check_agents_md_paths_exist():
             continue
         seen.add(path)
 
-        if path in tracked or path in tracked_dirs:
+        # A directory may be named with or without its trailing slash.
+        if path in tracked or path in tracked_dirs or path + "/" in tracked_dirs:
             continue
         # A span with whitespace is validated only when it names a tracked
         # file or directory verbatim (e.g. `AlpacaCore/conformu/Astroasis/
@@ -761,13 +846,64 @@ def check_agents_md_paths_exist():
         # be absent from a clean checkout, so it isn't a documentation error.
         if _is_gitignored(path):
             continue
-        failures.append("AGENTS.md references a path that does not exist: %s" % path)
-    if checked < MIN_AGENTS_MD_PATH_REFS:
+        failures.append("%s references a path that does not exist: %s" % (doc, path))
+    if checked < floor:
         failures.append(
-            "only %d backticked path references found in AGENTS.md (floor %d): "
-            "either the code-span matcher regressed, or AGENTS.md was trimmed "
-            "and MIN_AGENTS_MD_PATH_REFS should be lowered"
-            % (checked, MIN_AGENTS_MD_PATH_REFS))
+            "only %d backticked path references found in %s (floor %d): "
+            "either the code-span matcher regressed, or the file was trimmed "
+            "and %s should be lowered" % (checked, doc, floor, floor_name))
+    return failures, checked
+
+
+def check_agents_md_paths_exist():
+    failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS")
+    return failures
+
+
+# --- check 10: Cursor rule files' path references exist (issue #457) --------
+
+# Spans in a rule file that are relative to its component root. `include/`
+# is here for `include/alpacacore/...`; a vendor SDK's own `include/` is
+# not a repo-relative path and must be written out from `external/` (the
+# ZWO block was, in #457).
+# No `docs/` here: PATH_PREFIXES already holds it and is tried first, so a
+# `docs/x` span in a rule file always resolves at the repo root (neither
+# component has a docs/ tree of its own today).
+# `.cursor/` is component-relative on purpose: there is no repo-root .cursor/
+# tree, and the rule files cross-reference each other as `.cursor/rules/...`.
+RULE_FILE_RELATIVE_PREFIXES = (
+    "src/", "include/", "tests/", "external/", "conformu/", "examples/", "web/", ".cursor/",
+)
+# (document, component root, floor). Floors are per file, as the issue asks,
+# so a matcher that stops working on one of them fails rather than reporting
+# nothing to check; each is set well under today's count and is a tripwire,
+# not a target. AlpacaHTTP's rule file names no repo paths today (its spans
+# are URL shapes), so its floor is 0: it is listed so a path added there
+# later is checked, not to guard the matcher.
+RULE_FILE_PATH_CHECKS = (
+    ("AlpacaCore/.cursor/rules/driver_build.mdc", "AlpacaCore/", 20),
+    ("AlpacaCore/.cursor/rules/driver_test.mdc", "AlpacaCore/", 3),
+    ("AlpacaCore/.cursor/rules/rules.mdc", "AlpacaCore/", 5),
+    ("AlpacaHTTP/.cursor/rules/rules.mdc", "AlpacaHTTP/", 0),
+    ("AlpacaCore/external/README.md", "AlpacaCore/", 3),
+)
+
+
+def check_rule_file_paths_exist():
+    failures = []
+    # The tuple is hand-written; every tracked rule file must be in it, or a
+    # fifth .mdc added later is silently unchecked -- the drift class this
+    # check exists for (review note on PR #474).
+    listed = {doc for doc, _, _ in RULE_FILE_PATH_CHECKS}
+    tracked_rule_files = [f for f in _run_git(["-c", "core.quotePath=false", "ls-files",
+                                               "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"]).stdout.splitlines() if f]
+    for f in sorted(set(tracked_rule_files) - listed):
+        failures.append("%s is a tracked Cursor rule file but is not in RULE_FILE_PATH_CHECKS -- add it "
+                        "with its component and a floor" % f)
+    for doc, component, floor in RULE_FILE_PATH_CHECKS:
+        doc_failures, _ = _check_doc_path_refs(
+            doc, floor, "its RULE_FILE_PATH_CHECKS floor", component, RULE_FILE_RELATIVE_PREFIXES)
+        failures.extend(doc_failures)
     return failures
 
 
@@ -782,12 +918,28 @@ def check_agents_md_paths_exist():
 # pre-flight would stop being a faithful mirror of CI. Issue #341.
 #
 # Matches both spellings of the invocation: bare in ci.yml
-# (`alpacacore_tests "[stress]"`) and quoted-path in ci_preflight.sh
-# (`"${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]"`). The trailing
-# quoted tag is what distinguishes a real run from the `test -x` / `[ -x ... ]`
-# existence probes on the same binary in both files.
-TSAN_RUN_RE = re.compile(r'alpacacore_tests"?\s+"(\[[^"]+\])"')
-TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'")
+# (`./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress]" | tee stress-run.log`)
+# and quoted-path in ci_preflight.sh
+# (`"${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" | tee "${TSAN_BUILD_DIR}/stress-run.log"`).
+# The trailing quoted tag is what distinguishes a real run from the `test -x`
+# / `[ -x ... ]` existence probes on the same binary in both files. The build
+# directory (the path segment before `/tests/`) and the `tee` target are
+# captured too: the first so a build-directory rename in one file only is
+# visible, the second so each zero-test grep can be paired with the log its
+# run actually wrote (issue #455).
+# The tag is what makes an invocation a run; the `| tee <log>` that follows is
+# OPTIONAL in the match so a run written without one is still counted, still
+# tag-compared and still required to have a guard -- which it cannot have,
+# since no grep can read a log it never wrote, so the pairing reports it
+# (review finding on PR #472: with `tee` mandatory, such a run was invisible
+# to the whole check).
+TSAN_RUN_RE = re.compile(
+    r'([^\s"]*)/tests/alpacacore_tests"?\s+"(\[[^"]+\])"'
+    r'(?:\s*(?:2>&1\s*)?\|&?\s*tee\s+"?([^\s"]+)"?)?')
+TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'\s+(?:<\s*)?\"?([^\s\"<]+)\"?")
+# ci_preflight.sh spells the build directory through a variable; this is its
+# one assignment, so the two paths can be compared by basename.
+TSAN_BUILD_DIR_RE = re.compile(r'^\s*TSAN_BUILD_DIR="?([^"\n]+?)"?\s*$', re.MULTILINE)
 
 # A floor, not a count: it exists only so a regex that stops matching fails
 # loudly instead of comparing two empty sets and passing. Deliberately NOT set
@@ -797,12 +949,89 @@ TSAN_GREP_RE = re.compile(r"grep\s+-qE\s+'([^']+)'")
 MIN_TSAN_FILTERED_RUNS = 1
 
 
-def check_tsan_filtered_runs_sync():
-    failures = []
-    ci_full = read(".github/workflows/ci.yml")
-    preflight_full = read("scripts/ci_preflight.sh")
+def _basename(path):
+    return path.rsplit("/", 1)[-1]
 
-    ci = _scoped_block(ci_full, "  sanitizers-tsan:", ("\n  format:",))
+
+def _tsan_events(block):
+    """The filtered runs and zero-test greps of one TSan block, in file order.
+
+    Each run is ("run", tag, build_dir, tee_log) and each grep is
+    ("grep", pattern, log), all paths reduced to their basename so ci.yml's
+    literal `stress-run.log` pairs with ci_preflight.sh's
+    `"${TSAN_BUILD_DIR}/stress-run.log"` without expanding the variable.
+    A run with no `| tee` has tee_log None: it is still a run, and the
+    pairing below reports it, because no grep can guard a log never written.
+    """
+    events = []
+    for m in TSAN_RUN_RE.finditer(block):
+        tee_log = _basename(m.group(3)) if m.group(3) else None
+        events.append((m.start(), ("run", m.group(2), _basename(m.group(1)), tee_log)))
+    for m in TSAN_GREP_RE.finditer(block):
+        events.append((m.start(), ("grep", m.group(1), _basename(m.group(2)))))
+    return [event for _, event in sorted(events)]
+
+
+def _pair_tsan_runs(label, events, failures):
+    """Pair every run with the grep that follows it; return [(tag, pattern)].
+
+    The rule is positional, not a count: a retagged run whose `tee` target
+    was not retagged would leave the run count and the grep count equal
+    while its grep read the PREVIOUS run's log, which is the vacuous-pass
+    shape the greps exist to prevent, reached from a direction a count
+    cannot see (issue #455).
+    """
+    pairs = []
+    pending = None
+    for event in events:
+        if event[0] == "run":
+            if pending is not None:
+                failures.append(
+                    "%s: filtered TSan run %s is not followed by a zero-test "
+                    "grep of its log %s before the next run -- every filtered "
+                    "run needs its own guard, or the run reports success having "
+                    "executed nothing" % (label, pending[1], pending[3] or "(no tee)"))
+            pending = event
+            continue
+        _, pattern, log = event
+        if pending is None:
+            failures.append(
+                "%s: zero-test grep of %s has no filtered TSan run before it -- "
+                "an unpaired guard means the two files have drifted"
+                % (label, log))
+            continue
+        if pending[3] is None:
+            failures.append(
+                "%s: filtered TSan run %s does not `| tee` a log, so the grep of "
+                "%s that follows it cannot be reading that run's output -- pipe "
+                "the run into a log and grep that log" % (label, pending[1], log))
+            pending = None
+            continue
+        if log != pending[3]:
+            failures.append(
+                "%s: filtered TSan run %s writes %s but the grep that follows "
+                "it reads %s -- the guard must read the log of the run it "
+                "guards" % (label, pending[1], pending[3], log))
+        pairs.append((pending[1], pattern))
+        pending = None
+    if pending is not None:
+        failures.append(
+            "%s: filtered TSan run %s is not followed by a zero-test grep of "
+            "its log %s -- every filtered run needs its own guard, or the run "
+            "reports success having executed nothing"
+            % (label, pending[1], pending[3] or "(no tee)"))
+    return pairs
+
+
+def check_tsan_filtered_runs_sync():
+    return _tsan_findings(read(".github/workflows/ci.yml"), read("scripts/ci_preflight.sh"))
+
+
+def _tsan_findings(ci_full, preflight_full):
+    """Check 8 over the two files' text. Pure, so --self-test can drive it
+    over literal fixtures without touching the repo."""
+    failures = []
+    ci = _ci_job_block(ci_full, "sanitizers-tsan")
     preflight = _scoped_block(
         preflight_full,
         'section "ThreadSanitizer (concurrency stress, all vendors)"',
@@ -816,50 +1045,131 @@ def check_tsan_filtered_runs_sync():
         )
         return failures
 
-    ci_tags = sorted(TSAN_RUN_RE.findall(ci))
-    pf_tags = sorted(TSAN_RUN_RE.findall(preflight))
-    ci_greps = TSAN_GREP_RE.findall(ci)
-    pf_greps = TSAN_GREP_RE.findall(preflight)
+    ci_events = _tsan_events(ci)
+    pf_events = _tsan_events(preflight)
+    ci_runs = [e for e in ci_events if e[0] == "run"]
+    pf_runs = [e for e in pf_events if e[0] == "run"]
 
-    for label, tags in (("ci.yml", ci_tags), ("ci_preflight.sh", pf_tags)):
-        if len(tags) < MIN_TSAN_FILTERED_RUNS:
+    for label, runs in (("ci.yml", ci_runs), ("ci_preflight.sh", pf_runs)):
+        if len(runs) < MIN_TSAN_FILTERED_RUNS:
             failures.append(
                 "found %d filtered TSan run(s) in %s (floor %d) -- either the "
                 "invocation matcher regressed or the TSan gate was removed"
-                % (len(tags), label, MIN_TSAN_FILTERED_RUNS)
+                % (len(runs), label, MIN_TSAN_FILTERED_RUNS)
             )
     if failures:
         return failures
 
-    if ci_tags != pf_tags:
+    # Ordered, not a set: swapping the two guards between the two runs in one
+    # file is harmless only while both patterns are identical.
+    ci_pairs = _pair_tsan_runs("ci.yml", ci_events, failures)
+    pf_pairs = _pair_tsan_runs("ci_preflight.sh", pf_events, failures)
+    if [tag for tag, _ in ci_pairs] != [tag for tag, _ in pf_pairs]:
         failures.append(
             "TSan filtered runs differ: ci.yml runs %s, ci_preflight.sh runs "
-            "%s -- a filtered run must be added, retagged or removed in both"
-            % (ci_tags, pf_tags)
+            "%s -- a filtered run must be added, retagged or removed in both, "
+            "in the same order"
+            % ([tag for tag, _ in ci_pairs], [tag for tag, _ in pf_pairs])
         )
-
-    # One zero-test guard per filtered run, in each file. A run that loses its
-    # grep goes green on zero tests, which is the whole reason the grep is
-    # there; a count mismatch catches that without depending on the two
-    # appearing in any particular order.
-    for label, tags, greps in (
-        ("ci.yml", ci_tags, ci_greps),
-        ("ci_preflight.sh", pf_tags, pf_greps),
-    ):
-        if len(greps) != len(tags):
-            failures.append(
-                "%s has %d filtered TSan run(s) but %d zero-test grep(s) -- "
-                "every filtered run needs its own guard, or the run reports "
-                "success having executed nothing"
-                % (label, len(tags), len(greps))
-            )
-
-    if set(ci_greps) != set(pf_greps):
+    elif ci_pairs != pf_pairs:
         failures.append(
             "TSan zero-test grep pattern differs: ci.yml has %s, "
             "ci_preflight.sh has %s"
-            % (sorted(set(ci_greps)), sorted(set(pf_greps)))
+            % (ci_pairs, pf_pairs)
         )
+
+    # The build directory: ci.yml names it literally, ci_preflight.sh through
+    # TSAN_BUILD_DIR. Renaming it in one file only leaves the other running
+    # (or failing to find) a different tree.
+    ci_dirs = sorted({run[2] for run in ci_runs})
+    pf_dirs = set()
+    for run in pf_runs:
+        d = run[2]
+        if d.startswith("${") and d.endswith("}"):
+            m = TSAN_BUILD_DIR_RE.search(preflight_full)
+            if m is None:
+                failures.append(
+                    "ci_preflight.sh runs the TSan binary out of %s but assigns "
+                    "no TSAN_BUILD_DIR -- update this check's variable matcher "
+                    "if the gate's structure changed" % d)
+                continue
+            d = _basename(m.group(1))
+        pf_dirs.add(d)
+    pf_dirs = sorted(pf_dirs)
+    if ci_dirs != pf_dirs:
+        failures.append(
+            "TSan build directory differs: ci.yml runs out of %s, "
+            "ci_preflight.sh out of %s" % (ci_dirs, pf_dirs))
+    return failures
+
+
+# --- check 9: AGPL header form (issue #450) ---------------------------------
+
+# First-party source trees and the extensions that must carry the header.
+# AlpacaCore/external/ is third-party and never scanned.
+LICENSE_HEADER_PREFIXES = (
+    "AlpacaCore/src/", "AlpacaCore/include/", "AlpacaCore/tests/",
+    "AlpacaCore/examples/",
+    "AlpacaHTTP/src/", "AlpacaHTTP/include/", "AlpacaHTTP/tests/",
+    "AlpacaHTTP/examples/",
+)
+# Every C/C++ extension git ls-files could hand back, not only the ones in use
+# today: the 100-file floor cannot notice a single unscanned file.
+LICENSE_HEADER_EXTENSIONS = (".h", ".hpp", ".hxx", ".hh", ".inl", ".ipp", ".c", ".cc", ".cpp", ".cxx")
+# The header must START within this many lines. The block itself is matched
+# against the whole file from that point, so a block that begins on line 20
+# is not cut mid-way and misreported as missing.
+LICENSE_HEADER_LINES = 25
+
+# The current form, one block per component. Matched as a whole, not by a
+# single token: grepping for `AGPL` misses nothing but reports the old form
+# as "no header", and grepping for `Affero General Public License` accepts
+# both forms and catches neither drift (issue #450).
+LICENSE_HEADER_FORM = (
+    "// {c} is licensed under the GNU Affero General Public License,\n"
+    "// version 3 or (at your option) any later version (AGPL-3.0-or-later),\n"
+    "// with an additional permission allowing combination with proprietary\n"
+    "// device-vendor SDKs. See the LICENSE file in this repository for the full\n"
+    "// license text and the vendor-SDK linking exception, or the license online at:\n"
+    "// https://www.gnu.org/licenses/agpl-3.0.html\n"
+)
+# The pre-#113 form, named in the finding so the fix is obvious.
+LICENSE_HEADER_OLD_FORM_MARK = "is free software: you can redistribute it and/or modify"
+
+# A floor, not a count (see check 5): the tree has a few hundred first-party
+# source files, so a file list that shrinks to a handful means the listing
+# or the prefixes regressed, not that the tree did.
+MIN_LICENSE_HEADER_FILES = 100
+
+
+def check_license_headers():
+    failures = []
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines()
+    files = [f for f in tracked
+             if f.startswith(LICENSE_HEADER_PREFIXES) and f.endswith(LICENSE_HEADER_EXTENSIONS)]
+    if len(files) < MIN_LICENSE_HEADER_FILES:
+        return ["found only %d first-party source file(s) to check for a licence "
+                "header (floor %d) -- the file listing or LICENSE_HEADER_PREFIXES "
+                "regressed" % (len(files), MIN_LICENSE_HEADER_FILES)]
+    for f in files:
+        component = f.split("/", 1)[0]
+        text = read(f)
+        head = "".join(text.splitlines(keepends=True)[:LICENSE_HEADER_LINES])
+        if "This file is part of %s." % component not in head:
+            failures.append("%s: missing the 'This file is part of %s.' line in its "
+                            "first %d lines" % (f, component, LICENSE_HEADER_LINES))
+        block_at = text.find(LICENSE_HEADER_FORM.format(c=component))
+        if block_at >= 0 and text.count("\n", 0, block_at) < LICENSE_HEADER_LINES:
+            continue
+        if LICENSE_HEADER_OLD_FORM_MARK in head:
+            failures.append("%s: carries the pre-#113 long-form GNU header, which names "
+                            "neither AGPL-3.0-or-later nor the vendor-SDK linking "
+                            "exception -- replace it with the current six-line form "
+                            "(copy it from any sibling file)" % f)
+        else:
+            failures.append("%s: missing the current AGPL-3.0-or-later header block in its "
+                            "first %d lines (copy it from any sibling file)"
+                            % (f, LICENSE_HEADER_LINES))
     return failures
 
 
@@ -872,6 +1182,8 @@ CHECKS = [
     ("AGENTS.md path references exist", check_agents_md_paths_exist),
     ("QHY SDK seam lists agree (interface / LockedQHYSDK / sweep)", check_qhy_seam_lists),
     ("TSan filtered runs sync (ci.yml vs ci_preflight.sh)", check_tsan_filtered_runs_sync),
+    ("AGPL header form on every first-party source file", check_license_headers),
+    ("Cursor rule file path references exist", check_rule_file_paths_exist),
 ]
 
 
@@ -895,5 +1207,138 @@ def main():
     return 0
 
 
+# --- self-test ---------------------------------------------------------------
+
+# Literal fixtures in the shape of today's two files (the [ -x ... ] probe and
+# the unrelated jobs after the TSan and cppcheck jobs are deliberate: they are
+# what the scoping rules must ignore).
+_SELF_TEST_CI = """\
+jobs:
+  build:
+    steps:
+      - run: echo build
+  sanitizers-tsan:
+    steps:
+      - name: Run
+        run: |
+          test -x build-tsan/tests/alpacacore_tests  # probe, not a run
+          build-tsan/tests/alpacacore_tests "[stress]" 2>&1 | tee stress-run.log
+          grep -qE 'test cases: *[1-9]' stress-run.log
+          build-tsan/tests/alpacacore_tests "[stress-guard]" 2>&1 | tee stress-guard-run.log
+          grep -qE 'test cases: *[1-9]' stress-guard-run.log
+  format:
+    steps:
+      - run: grep -qE 'unrelated' other.log
+  cppcheck:
+    steps:
+      - run: cppcheck --suppress=missingInclude --suppress=unusedFunction src
+  zizmor:
+    steps:
+      - run: echo --suppress=notCppcheck
+"""
+
+_SELF_TEST_PREFLIGHT = """\
+# --- gate 3: sanitizers ------------------------------------------------------
+TSAN_BUILD_DIR="AlpacaCore/build-tsan"
+section "ThreadSanitizer (concurrency stress, all vendors)"
+if [ -x "${TSAN_BUILD_DIR}/tests/alpacacore_tests" ]; then
+  "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-run.log"
+  if grep -qE 'test cases: *[1-9]' "${TSAN_BUILD_DIR}/stress-run.log"; then echo ok; fi
+  "${TSAN_BUILD_DIR}/tests/alpacacore_tests" "[stress-guard]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-guard-run.log"
+  if grep -qE 'test cases: *[1-9]' "${TSAN_BUILD_DIR}/stress-guard-run.log"; then echo ok; fi
+fi
+# --- gate 4: something else --------------------------------------------------
+grep -qE 'unrelated' "${TSAN_BUILD_DIR}/other.log"
+"""
+
+
+def self_test():
+    """Regression guard for check 8's helpers and the job-scoping rule.
+
+    Every fixture is a literal string, so this needs no repo state. The
+    mutations are the ones the #455 review tabulated; each must produce the
+    finding named for it, and the unmutated pair must produce none (which is
+    also what catches a run matcher that silently stops matching: the floor
+    fires and the baseline is no longer clean).
+    """
+    checks = []
+
+    def check(name, condition):
+        checks.append((name, condition))
+
+    def sub(text, old, new, count=1):
+        assert text.count(old) == count, (old, text.count(old))
+        return text.replace(old, new)
+
+    ci, pf = _SELF_TEST_CI, _SELF_TEST_PREFLIGHT
+    baseline = _tsan_findings(ci, pf)
+    check("baseline fixtures produce no finding: %r" % baseline, baseline == [])
+    check("the [ -x ] / test -x probes are not counted as runs",
+          len([e for e in _tsan_events(_ci_job_block(ci, "sanitizers-tsan")) if e[0] == "run"]) == 2)
+
+    # 1. a retagged run whose tee target was not retagged.
+    m = sub(ci, '"[stress-guard]" 2>&1 | tee stress-guard-run.log', '"[stress-guard]" 2>&1 | tee stress-run.log')
+    f = _tsan_findings(m, pf)
+    check("guard run keeping the old tee target is paired by log, not count",
+          any("run [stress-guard] writes stress-run.log but the grep that follows it reads stress-guard-run.log" in x for x in f))
+
+    # 2. one pattern loosened in ci.yml only.
+    m = sub(ci, "grep -qE 'test cases: *[1-9]' stress-run.log", "grep -qE 'test cases' stress-run.log")
+    check("a loosened pattern in one file is a pattern finding",
+          any("grep pattern differs" in x for x in _tsan_findings(m, pf)))
+
+    # 3. the two runs swapped in ci_preflight.sh only (greps left in place).
+    m = pf.replace('"[stress]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-run.log"', "@A@")
+    m = m.replace('"[stress-guard]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-guard-run.log"',
+                  '"[stress]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-run.log"')
+    m = m.replace("@A@", '"[stress-guard]" 2>&1 | tee "${TSAN_BUILD_DIR}/stress-guard-run.log"')
+    f = _tsan_findings(ci, m)
+    check("swapped runs report both pairs as reading the wrong log",
+          len([x for x in f if "the guard must read the log of the run it guards" in x]) == 2)
+
+    # 4. a grep deleted in ci.yml.
+    m = sub(ci, "          grep -qE 'test cases: *[1-9]' stress-guard-run.log\n", "")
+    check("a deleted grep leaves its run unguarded",
+          any("run [stress-guard] is not followed by a zero-test grep" in x for x in _tsan_findings(m, pf)))
+
+    # 5. the build directory renamed in ci.yml for one run only.
+    m = sub(ci, 'build-tsan/tests/alpacacore_tests "[stress-guard]"', 'build-tsan2/tests/alpacacore_tests "[stress-guard]"')
+    check("a build-dir rename in ci.yml is a build-directory finding",
+          any("build directory differs" in x and "build-tsan2" in x for x in _tsan_findings(m, pf)))
+
+    # 6. TSAN_BUILD_DIR renamed in ci_preflight.sh only.
+    m = sub(pf, 'TSAN_BUILD_DIR="AlpacaCore/build-tsan"', 'TSAN_BUILD_DIR="AlpacaCore/tsan-build"')
+    check("a TSAN_BUILD_DIR rename is a build-directory finding",
+          any("build directory differs" in x and "tsan-build" in x for x in _tsan_findings(ci, m)))
+
+    # 7. a run that does not tee at all.
+    m = sub(ci, '"[stress]" 2>&1 | tee stress-run.log', '"[stress]"')
+    check("a run without tee is reported, not skipped",
+          any("does not `| tee` a log" in x for x in _tsan_findings(m, pf)))
+
+    # 8. scope: the unrelated grep after the TSan job and the unrelated
+    #    --suppress= after the cppcheck job are outside both blocks; an
+    #    inserted job between them must not widen either.
+    inserted = sub(ci, "  format:\n", "  extra-after-tsan:\n    steps:\n      - run: grep -qE 'x' x.log\n  format:\n")
+    check("an inserted job after sanitizers-tsan does not widen check 8's scope",
+          _tsan_findings(inserted, pf) == [])
+    block = _ci_job_block(inserted, "cppcheck")
+    check("check 3's cppcheck block ends at the next job whatever its name",
+          block is not None and "unusedFunction" in block and "notCppcheck" not in block)
+    check("an unknown job name yields None, not a widened block",
+          _ci_job_block(ci, "no-such-job") is None)
+
+    failed = [name for name, ok in checks if not ok]
+    for name, ok in checks:
+        print("[%s] %s" % ("PASS" if ok else "FAIL", name))
+    if failed:
+        print("\n%d/%d self-test(s) failed." % (len(failed), len(checks)))
+        return 1
+    print("\nAll %d self-test(s) passed." % len(checks))
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     sys.exit(main())

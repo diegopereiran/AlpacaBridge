@@ -3,18 +3,12 @@
 //
 // This file is part of AlpacaCore.
 //
-// AlpacaCore is free software: you can redistribute it and/or modify it under
-// the terms of the GNU Affero General Public License as published by the Free
-// Software Foundation, either version 3 of the License, or (at your option)
-// any later version.
-//
-// AlpacaCore is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
-// for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with AlpacaCore. If not, see <https://www.gnu.org/licenses/>.
+// AlpacaCore is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
 
 #pragma once
 
@@ -30,9 +24,7 @@
 // and an OK reply of the wrong length for the command (mispair_next). Both
 // are one-shot and consumed by the next matching frame.
 
-#include <fcntl.h>
 #include <poll.h>
-#include <stdlib.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -40,7 +32,6 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -51,31 +42,12 @@ namespace alpacacore::test {
 
 class FakeSkyWatcherSerialBoard {
 public:
-    FakeSkyWatcherSerialBoard() {
-        master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
-        // Issue #424: the master goes non-blocking here, so a reply to a
-        // driver that has stopped draining can never park this fake's
-        // worker inside write() and hang the destructor's join. Folded
-        // into the same throw as the other setup failures: a silent
-        // fallback to a blocking master would look exactly like the hang
-        // this exists to remove. See fake_pty_write.h.
-        if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0 ||
-            !make_pty_nonblocking(master_fd_)) {
-            throw std::runtime_error("FakeSkyWatcherSerialBoard: cannot open pty");
-        }
-        const char* name = ptsname(master_fd_);
-        if (name == nullptr) {
-            throw std::runtime_error("FakeSkyWatcherSerialBoard: ptsname failed");
-        }
-        slave_path_ = name;
-        // Hold the slave open so the master never sees HUP between the
-        // wrapper's connect/disconnect cycles, and make it raw.
-        keepalive_fd_ = open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
-        struct termios tty {};
-        if (keepalive_fd_ >= 0 && tcgetattr(keepalive_fd_, &tty) == 0) {
-            cfmakeraw(&tty);
-            tcsetattr(keepalive_fd_, TCSANOW, &tty);
-        }
+    FakeSkyWatcherSerialBoard() : pty_("FakeSkyWatcherSerialBoard") {
+        // The pty pair is owned by pty_ (fake_pty_write.h), constructed
+        // before this body runs; a setup failure throws from there with
+        // nothing left open (issue #387). Its keep-alive slave is what holds
+        // the master clear of HUP between the wrapper's connect/disconnect
+        // cycles.
         worker_ = std::thread([this] { run(); });
     }
 
@@ -84,18 +56,12 @@ public:
         if (worker_.joinable()) {
             worker_.join();
         }
-        if (keepalive_fd_ >= 0) {
-            close(keepalive_fd_);
-        }
-        if (master_fd_ >= 0) {
-            close(master_fd_);
-        }
     }
 
     FakeSkyWatcherSerialBoard(const FakeSkyWatcherSerialBoard&) = delete;
     FakeSkyWatcherSerialBoard& operator=(const FakeSkyWatcherSerialBoard&) = delete;
 
-    const std::string& slave_path() const { return slave_path_; }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     /// Position counts the board reports for ":j<axis>".
     void set_counts(int axis, uint32_t counts) {
@@ -196,7 +162,7 @@ private:
     // keepalive fd share one termios).
     int line_baud() const {
         struct termios tty {};
-        if (keepalive_fd_ < 0 || tcgetattr(keepalive_fd_, &tty) != 0) return 0;
+        if (pty_.keepalive_fd() < 0 || tcgetattr(pty_.keepalive_fd(), &tty) != 0) return 0;
         switch (cfgetispeed(&tty)) {
             case B9600:
                 return 9600;
@@ -270,11 +236,11 @@ private:
         char buf[64];
         while (!stop_.load()) {
             struct pollfd pfd {};
-            pfd.fd = master_fd_;
+            pfd.fd = pty_.master_fd();
             pfd.events = POLLIN;
             const int r = poll(&pfd, 1, 10);
             if (r <= 0) continue;
-            const ssize_t n = read(master_fd_, buf, sizeof(buf));
+            const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
             for (ssize_t i = 0; i < n; ++i) {
                 const char ch = buf[i];
                 if (ch == ':') {
@@ -304,7 +270,7 @@ private:
                 if (delay > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
                 }
-                pty_write_bounded(master_fd_, reply, stop_);
+                pty_write_bounded(pty_.master_fd(), reply, stop_);
                 std::string straggler;
                 int straggler_ms = 0;
                 {
@@ -317,15 +283,15 @@ private:
                 }
                 if (!straggler.empty()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(straggler_ms));
-                    pty_write_bounded(master_fd_, straggler, stop_);
+                    pty_write_bounded(pty_.master_fd(), straggler, stop_);
                 }
             }
         }
     }
 
-    int master_fd_ = -1;
-    int keepalive_fd_ = -1;
-    std::string slave_path_;
+    // First member: constructed before the worker, destroyed after it has
+    // been joined.
+    PtyPair pty_;
     std::thread worker_;
     std::atomic<bool> stop_{false};
     mutable std::mutex mutex_;

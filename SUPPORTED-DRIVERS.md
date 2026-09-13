@@ -168,8 +168,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO ASI Camera SDK Version 1.40 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
-- **Tested models**: ASI585MC Pro (cooled, IMX585) and ASI533MC Pro (cooled colour, IMX533, 3008x3008 RGGB) on Linux arm64.
-- **ConformU**: 4.5.0 — ASI585MC Pro: 0 errors, 0 issues, 0 timing issues. 4.5.1 — ASI533MC Pro, 2026-09-12: 0 errors, 0 issues, 0 timing issues. (Note: ConformU 4.5.0 on arm64 has a known timing-report bug unrelated to any driver — see General Notes above.)
+- **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and the pass counts for that camera (the run date is readable from the `LastExposureStartTime` lines in the report).
 
 </details>
 
@@ -435,6 +434,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | EAF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAF/) |
+| EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAFN/) |
 
 <details>
 <summary><strong>ZWO Focuser Driver Notes</strong></summary>
@@ -442,6 +442,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
+- **EAF and EAFN**: the EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) is served by the same driver with the same configuration as the EAF; there is no model selector. `Name` is whatever the EAF SDK reports for the unit; both validated units report `EAF`.
 
 </details>
 
