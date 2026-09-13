@@ -412,8 +412,8 @@ std::string to_lower_copy(std::string value) {
 // "" when missing. deviceType is lowercased, since the web UI and the tests
 // post it lowercase while the registry answers "Telescope".
 struct PersistedKey {
-    std::string vendor;
-    std::string device_type;  // lowercase
+    std::string vendor{};
+    std::string device_type{};  // lowercase
     int device_number = -1;
 };
 
@@ -9481,7 +9481,7 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     const int device_number = device.get_device_number();
     bool changed = false;
     bool declined = false;
-    std::string vendor;
+    std::string vendor{};
     {
         std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
         for (auto& entry : persisted_devices_) {

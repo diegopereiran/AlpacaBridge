@@ -2400,7 +2400,7 @@ int main() {
         // so two clients can reach save_persisted_devices() at once. A
         // truncate-in-place write from two threads interleaves and leaves the
         // file as one dump's head plus the other's tail, invalid JSON, and
-        // the next start then loads NO devices. Two telescopes, two threads,
+        // the next start then loads NO devices. A pair of telescopes, a thread each,
         // each pushing an alternating coordinate; the file must parse after
         // every write, so it is checked from a third thread throughout and
         // once more at the end.
