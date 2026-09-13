@@ -473,7 +473,21 @@ public:
             camera_info_valid_ = true;
             pixel_size_um_ = lookup_known_pixel_size_um(info.model);
             reset_exposure_state_locked();
-            connected_.store(true);
+
+            // Review PR #485: connected_ is published only once geometry is
+            // fully resolved (cache hit or priming capture), never before --
+            // AsyncConnectable's record_disconnect_if_connect_in_flight() /
+            // consume_pending_disconnect() contract (see async_connectable.h)
+            // assumes connected_==true means this connect task's real work is
+            // done. Publishing it early let a racing set_connected(false) (or
+            // start_exposure(), via ensure_connected()) run concurrently with
+            // the still-unlocked priming capture on the very same libgphoto2
+            // handle -- a genuine use-after-close / concurrent-capture window,
+            // not just a theoretical one. Connecting stays true for this
+            // whole window (the async task hasn't returned), which is exactly
+            // what ASCOM clients are supposed to poll through; a disconnect
+            // that arrives during it is recorded as pending and honored by
+            // the task tail once this call returns, not silently dropped.
 
             // Sensor geometry is the same for every camera of this model
             // (see the cache helpers above) -- a rig that has already primed
@@ -482,6 +496,7 @@ public:
             if (auto cached = load_cached_sensor_geometry(info.model)) {
                 set_geometry_locked(cached->width, cached->height, cached->bayer_offset_x, cached->bayer_offset_y,
                                     cached->max_adu);
+                connected_.store(true);
                 return;
             }
 
@@ -501,6 +516,7 @@ public:
                                 "exposure instead): " +
                                     std::string(e.what()));
             }
+            connected_.store(true);
             return;
         }
 
@@ -665,9 +681,13 @@ public:
 
     void set_gain(int gain) override {
         ensure_connected();
-        std::string choice;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
+        // Review PR #485: the TOCTOU checked exposure_active_ and then
+        // dropped the lock before the SDK call, so a StartExposure racing
+        // this write could slip in between the check and the write. The
+        // whole validate-check-write-and-record sequence now runs inside
+        // one with_handle() hold, matching AGENTS.md's guidance that the
+        // driver's mutex_ is what actually serializes SDK calls per handle.
+        with_handle([&](int handle) {
             require_iso_supported_locked();
             if (gain < 0 || gain >= static_cast<int>(iso_choices_.size())) {
                 throw AlpacaException("Gain index out of range", AlpacaError::InvalidValue);
@@ -675,11 +695,11 @@ public:
             if (exposure_active_.load()) {
                 throw AlpacaException("Cannot change ISO during an exposure", AlpacaError::InvalidOperation);
             }
-            choice = iso_choices_[static_cast<std::size_t>(gain)];
-        }
-        GPhotoSDKWrapper::instance().set_choice_value(handle_value(), "iso", choice);
-        std::lock_guard<std::mutex> lock(mutex_);
-        current_iso_index_ = gain;
+            const std::string& choice = iso_choices_[static_cast<std::size_t>(gain)];
+            GPhotoSDKWrapper::instance().set_choice_value(handle, "iso", choice);
+            current_iso_index_ = gain;
+            return 0;
+        });
     }
 
     // ASCOM's Gain interface has three mutually-exclusive modes: "Gain
@@ -989,12 +1009,19 @@ private:
         }
     }
 
-    int handle_value() const {
+    // Holds mutex_ across the whole SDK call, not just the handle copy --
+    // review PR #485: a "copy the handle out, then call the SDK" helper
+    // (the previous handle_value()) is a use-after-close trap, since a
+    // concurrent set_connected(false) can close the handle in the window
+    // between the copy and the unlocked SDK call. Same pattern as
+    // ToupTek's with_handle(), the project's reference for this.
+    template <typename Fn>
+    auto with_handle(Fn&& fn) const -> decltype(fn(0)) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (handle_ < 0) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
-        return handle_;
+        return fn(handle_);
     }
 
     void require_geometry_known_locked() const {

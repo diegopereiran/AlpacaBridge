@@ -141,6 +141,16 @@ TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][cam
     require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->get_offset_min(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->get_offsets(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+
+    // Review PR #485: ASCOM's Gain interface has three mutually exclusive
+    // modes (Value/Index/Not Implemented) -- this driver is "Gain Index"
+    // (Gain/Gains work, see the connected test below), so GainMin/GainMax
+    // must throw PropertyNotImplemented unconditionally, same as get_offsets
+    // above. Un-tested, this fix regresses silently: only a hardware
+    // ConformU run would catch GainMin/GainMax coming back readable again.
+    require_alpaca_error([&]() { driver->get_gain_max(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&]() { driver->get_gain_min(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+
     require_alpaca_error([&]() { driver->get_set_ccd_temperature(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->set_set_ccd_temperature(0.0); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->get_fast_readout(); }, alpacacore::AlpacaError::NotImplemented);

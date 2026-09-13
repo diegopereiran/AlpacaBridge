@@ -2865,14 +2865,17 @@ it is never reachable through `router.cpp` or the web UI.
 
 Devices: Camera.
 
-**STATUS: implemented but NOT YET ConformU-validated on real hardware.** Built from
-libgphoto2/libraw API documentation and source reading, plus the reference indi-gphoto driver
-(`indilib/indi-3rdparty`) for protocol shape — no physical DSLR was available in this session
-(issue #241, target hardware: a contributor's Nikon D5300). Do not add an entry to
-SUPPORTED-DRIVERS.md until a real camera has been run through `/conformu` per the project's
-"only ConformU-verified drivers are listed" policy. The next session with hardware access should
-run `/deploy-test` + `/conformu` against a real body and update both this section and
-SUPPORTED-DRIVERS.md with what actually happened.
+**STATUS: ConformU-validated against two real Nikon bodies (D5300, D3200).** Originally built
+from libgphoto2/libraw API documentation and source reading, plus the reference indi-gphoto
+driver (`indilib/indi-3rdparty`) for protocol shape, with no physical DSLR available in the
+session that added it (issue #241). A later session with hardware access ran `/deploy-test` +
+`/conformu` against both bodies on the same rig and device slot (swapped with no reconfiguration)
+and fixed what that surfaced: `gp_camera_autodetect()`'s return-value contract, the Gain-mode
+ASCOM contract, a `StartExposure` ROI bounds check, and the `PixelSizeX`/`PixelSizeY` lookup table
+described below. Both runs are clean (0 errors, 0 issues, 0 timing violations); see
+`SUPPORTED-DRIVERS.md` and `AlpacaCore/conformu/GPhoto/`. Coverage beyond these two specific
+bodies (other Canon/Nikon/Sony models, bulb-mode capture, the SDK's other transports) is still
+only as validated as the notes below say for each.
 
 SDK: **system packages**, not vendored — `libgphoto2-dev` + `libraw-dev` via pkg-config
 (`AlpacaCore/src/vendors/gphoto/CMakeLists.txt`). Unlike every other camera vendor, gphoto has no
@@ -2908,10 +2911,39 @@ SDK cleanup checklist does not apply here).
   `InvalidOperation`, until the caller's own first real exposure) rather than failing Connect.
   See `prime_sensor_geometry_and_cache`/`set_geometry_locked`/the cache helpers in
   `gphoto_camera_driver.cpp`.
-- **`PixelSizeX`/`PixelSizeY` return `0.0`** — libgphoto2 exposes no pixel-pitch query and there
-  is no per-model table yet (unlike sensor geometry above, pixel pitch in microns isn't
-  recoverable from decoding a RAW frame either — libraw doesn't expose it). Likely a ConformU
-  finding; fix by adding a small model→pitch lookup if validation requires a nonzero value.
+- **`connected_` is published only after the priming capture finishes, never before it** (review
+  PR #485) — the first version of this code set `connected_.store(true)` before starting the
+  priming capture, then unlocked `mutex_` for the capture's multi-second duration. That looked
+  harmless (priming is best-effort and `Connecting` stays true the whole time) but broke
+  `AsyncConnectable`'s `record_disconnect_if_connect_in_flight()` / `consume_pending_disconnect()`
+  contract (see `async_connectable.h`), which assumes `connected_==true` means the connect task's
+  real work is already done: a `set_connected(false)` racing in during priming saw `connected_`
+  already true and proceeded straight to `sdk.close_camera()` on the handle priming was still
+  using, and a racing `start_exposure()` passed `ensure_connected()` and ran a second
+  `gp_camera_capture()` on that same handle concurrently — both genuine use-after-close /
+  concurrent-SDK-call bugs, not theoretical ones. Publishing `connected_` only after geometry is
+  resolved (both the cache-hit and priming branches) closes both: a racing disconnect during
+  priming is recorded as pending and honored by the task tail once this call returns, and
+  `ensure_connected()` correctly rejects any operational call until then. If you touch this
+  function again, `connected_.store(true)` has to stay the *last* thing that happens on the
+  connect path, not something set up front for a longer-feeling task to run after.
+- **`set_gain()` holds `mutex_` across the SDK call via `with_handle()`, not just for the handle
+  copy** — the same class of bug as above, on a different path: the original code read `handle_`
+  under a lock via a `handle_value()` helper, released the lock, then called
+  `GPhotoSDKWrapper::set_choice_value()` unlocked. A concurrent `set_connected(false)` could close
+  the handle in that window. `with_handle()` (mirroring ToupTek's helper of the same name) takes
+  `mutex_` for the whole validate-then-call sequence; `handle_value()` no longer exists; if a
+  future property setter needs the SDK handle, go through `with_handle()`, not a bare handle copy.
+- **`PixelSizeX`/`PixelSizeY` come from a static per-model lookup table** — libgphoto2 exposes no
+  pixel-pitch query, and unlike sensor geometry above, pixel pitch in microns isn't recoverable
+  from decoding a RAW frame either (libraw doesn't expose it), so this is the one geometry-like
+  property that can't be learned from the camera itself. `known_pixel_size_um_table()` in
+  `gphoto_camera_driver.cpp` covers ~140 interchangeable-lens Nikon and Canon bodies (Canon's
+  Rebel/Kiss/EOS-number regional rebrand names included as separate keys with identical values,
+  since libgphoto2 reports whichever name matches the camera's actual USB product ID). A model not
+  in the table — every fixed-lens compact/camcorder libgphoto2 also supports, or a body released
+  after the table was last updated — still reports `0.0` (ASCOM "unknown") rather than a guess.
+  D5300 confirmed against ConformU: 3.91 microns; D3200: 3.86 microns.
 - **ISO is a discrete `Gains()` list, not a continuous register** — deliberate departure from
   every other camera driver here (ZWO/QHY/SVBONY/PlayerOne/ToupTek all throw
   `PropertyNotImplemented` for `get_gains()` and treat `Gain` as a raw numeric register). A DSLR's
