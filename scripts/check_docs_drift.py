@@ -1423,6 +1423,10 @@ def self_test():
             "scripts/build_deb.sh": "# See docs/failures/0003-missing.md\n",
             "AlpacaHTTP/src/code.cpp": 'std::string s = "docs/failures/0004-missing.md";\n',
             "AlpacaHTTP/src/plain.cpp": "// no memory reference here\n",
+            # Two spare files above MIN_MEMORY_COMMENT_FILES, so raising the
+            # floor by one does not turn this fixture into a floor failure.
+            "AlpacaHTTP/src/spare_a.h": "// spare\n",
+            "scripts/spare_b.py": "# spare\n",
             "AlpacaCore/build/gen.cpp": "// See docs/failures/0005-missing.md\n",
             "AlpacaCore/external/sdk.h": "// See docs/failures/0006-missing.md\n",
             "AlpacaCore/src/notes.txt": "// See docs/failures/0007-missing.md\n",
