@@ -731,12 +731,27 @@ public:
 
     void set_gain(int gain) override {
         ensure_connected();
-        // Review PR #485: the TOCTOU checked exposure_active_ and then
-        // dropped the lock before the SDK call, so a StartExposure racing
-        // this write could slip in between the check and the write. The
-        // whole validate-check-write-and-record sequence now runs inside
-        // one with_handle() hold, matching AGENTS.md's guidance that the
-        // driver's mutex_ is what actually serializes SDK calls per handle.
+        // Review PR #485 round 3: exposure_active_ alone is not a safe "is
+        // the SDK busy" gate -- stop_exposure() and the get_camera_state()
+        // watchdog both clear it *before* run_exposure()'s thread has
+        // actually left libgphoto2 (stop_exposure() clears it, then joins;
+        // the watchdog clears it with no join at all). A set_gain() that
+        // only checked the flag could slip an SDK call in on the same
+        // handle while the exposure thread was still inside
+        // gp_camera_capture(), corrupting the shared PTP session.
+        //
+        // Taking exposure_lifecycle_mutex_ here -- the same mutex
+        // start_exposure()/stop_exposure() hold for their setup-or-join
+        // duration -- blocks set_gain() until any in-flight
+        // exposure_thread_ has actually been joined, matching the lock
+        // order used everywhere else in this class (lifecycle mutex,
+        // then mutex_). This closes the ordinary StopExposure/SetGain
+        // race. It does not (and cannot) close the watchdog's forced-idle
+        // case: libgphoto2 has no capture-cancel primitive, so a thread
+        // truly wedged inside the SDK past the watchdog deadline is a
+        // pre-existing, documented limitation (see the watchdog's own log
+        // message in get_camera_state()), not something a mutex can fix.
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         with_handle([&](int handle) {
             require_iso_supported_locked();
             if (gain < 0 || gain >= static_cast<int>(iso_choices_.size())) {

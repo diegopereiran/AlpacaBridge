@@ -2949,6 +2949,20 @@ SDK cleanup checklist does not apply here).
   the handle in that window. `with_handle()` (mirroring ToupTek's helper of the same name) takes
   `mutex_` for the whole validate-then-call sequence; `handle_value()` no longer exists; if a
   future property setter needs the SDK handle, go through `with_handle()`, not a bare handle copy.
+- **`with_handle()`/`mutex_` alone does not serialize against the exposure worker thread** (review
+  PR #485 round 3) — `run_exposure()` (the `exposure_thread_` body) makes its libgphoto2 calls
+  (`gp_camera_capture()`/bulb loop) *without* holding `mutex_`, and `exposure_active_` is cleared
+  to `false` *before* the thread has actually left the SDK in two places: `stop_exposure()` stores
+  `false` then joins, and the `get_camera_state()` watchdog force-clears it with no join at all
+  (a truly wedged capture has no cancel primitive in libgphoto2, so that one stays a documented,
+  accepted gap). A setter like `set_gain()` that only checked `exposure_active_.load()` under
+  `with_handle()`'s `mutex_` could still slip an SDK call in during the narrow window after
+  `stop_exposure()` clears the flag but before `exposure_thread_.join()` returns, corrupting the
+  shared PTP session. Fix: `set_gain()` now takes `exposure_lifecycle_mutex_` (same mutex
+  `start_exposure()`/`stop_exposure()` hold for their setup-or-join duration, same lock order as
+  everywhere else in this class — lifecycle mutex first, then `mutex_`) before its `with_handle()`
+  call, so it blocks until any in-flight `exposure_thread_` has actually been joined. Any future
+  SDK-touching setter needs the same `exposure_lifecycle_mutex_` guard, not just `with_handle()`.
 - **`PixelSizeX`/`PixelSizeY` come from a static per-model lookup table** — libgphoto2 exposes no
   pixel-pitch query, and unlike sensor geometry above, pixel pitch in microns isn't recoverable
   from decoding a RAW frame either (libraw doesn't expose it), so this is the one geometry-like
