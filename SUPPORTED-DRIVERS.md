@@ -435,7 +435,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | EAF | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAF/) |
-| EAFN (SKU ZWO-EAFN) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAFN/) |
+| EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/EAFN/) |
 
 <details>
 <summary><strong>ZWO Focuser Driver Notes</strong></summary>
