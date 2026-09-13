@@ -113,18 +113,19 @@ std::string host_time_zone(const char* tz_env, const std::string& etc_dir) {
 
     // With TZ unset, tzset() reads /etc/localtime and nothing else, so the
     // symlink is the authority: it names the zone localtime_r() (and so the
-    // log lines) actually use, even where /etc/timezone says otherwise.
+    // log lines) actually use, even where /etc/timezone says otherwise. A
+    // link that answers with a name this resolver cannot express (timedatectl
+    // set-timezone UTC -> zoneinfo/UTC, no '/') is still an answer: report
+    // "" rather than let a stale file contradict the zone the logs are in.
     std::error_code ec;
     const auto target = std::filesystem::read_symlink(etc_dir + "/localtime", ec);
     if (!ec) {
         const std::string zone = zone_from_zoneinfo_path(target.string());
-        if (looks_like_iana_zone(zone)) {
-            return zone;
-        }
+        return looks_like_iana_zone(zone) ? zone : "";
     }
 
-    // /etc/timezone only when the link cannot answer (a regular-file copy of
-    // the zone data carries no name).
+    // /etc/timezone only when there is no link to read (a regular-file copy
+    // of the zone data carries no name).
     std::ifstream in(etc_dir + "/timezone");
     std::string line;
     if (in && std::getline(in, line)) {

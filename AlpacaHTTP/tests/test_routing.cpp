@@ -531,6 +531,14 @@ int main() {
         // is the zone localtime_r() (and the log lines) actually use.
         { std::ofstream(etc_dir + "/timezone") << "Europe/London\n"; }
         EXPECT(host_time_zone(nullptr, etc_dir) == "Etc/UTC");
+        // The symlink answering with a name this resolver cannot express
+        // (timedatectl set-timezone UTC -> zoneinfo/UTC, no '/') is NOT the
+        // symlink being absent: the file must not get to contradict it.
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("../usr/share/zoneinfo/UTC", etc_dir + "/localtime");
+        EXPECT(host_time_zone(nullptr, etc_dir) == "");
+        fs::remove(etc_dir + "/localtime");
+        fs::create_symlink("../usr/share/zoneinfo/Etc/UTC", etc_dir + "/localtime");
         // A "posix/" or "right/" zoneinfo subtree is the same zone under a
         // name Intl rejects; the prefix is stripped.
         fs::remove(etc_dir + "/localtime");

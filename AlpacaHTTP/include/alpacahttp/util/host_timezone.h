@@ -28,10 +28,10 @@ namespace util {
 //      does),
 //   2. the /etc/localtime symlink target, taken after its "zoneinfo/"
 //      component with a "posix/" or "right/" subtree prefix dropped; with
-//      TZ unset this file is the only thing glibc consults, so it outranks
-//      /etc/timezone wherever the two disagree (timedatectl maintains only
-//      this one),
-//   3. /etc/timezone (Debian and derivatives), for a host whose
+//      TZ unset this file is the only thing glibc consults, so whenever the
+//      link can be read it is the whole answer (timedatectl maintains only
+//      this one), and a target this resolver cannot express reports "",
+//   3. /etc/timezone (Debian and derivatives), only for a host whose
 //      /etc/localtime is a regular-file copy and so carries no name.
 //
 // Only a value that looks like an IANA name is returned: Area/City segments
@@ -42,8 +42,8 @@ namespace util {
 // report as "". Anything else is "" so the UI takes its browser-zone
 // fallback rather than handing Intl a string it will throw on.
 //
-// Cheap enough to call per description GET (a getenv and at most one small
-// read or readlink), and deliberately NOT cached: timedatectl set-timezone
+// Cheap enough to call per description GET (a getenv, a readlink, and one
+// small read only when there is no link), and deliberately NOT cached: timedatectl set-timezone
 // changes the answer at runtime and the header should follow it on the next
 // refresh, as the log lines do.
 std::string host_time_zone();
