@@ -125,8 +125,8 @@ public:
         // NOT reset the MCU: the tty is still open, connect_serial() clears
         // HUPCL so DTR stays asserted, and Linux runs port activation only on
         // the 0->1 open count, so a second open() on a live tty raises no DTR
-        // edge -- see the DTR/HUPCL note in AGENTS.md.) The window is wide, not a single instruction -- the
-        // handshake retry ladder is ~9.1 s in the worst case.
+        // edge -- see the DTR/HUPCL note in .github/instructions/gemini.instructions.md.) The window is wide,
+        // not a single instruction -- the handshake retry ladder is ~9.1 s in the worst case.
         //
         // Deliberately NOT the base's connection mutex, and not shared with
         // firmware_mutex_ (see its comment below): this serializes

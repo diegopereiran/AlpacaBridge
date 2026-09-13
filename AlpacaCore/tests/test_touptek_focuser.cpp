@@ -211,7 +211,7 @@ TEST_CASE("ToupTek AAF Focuser Driver - connected, StepSize and TempComp are not
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    // AGENTS.md pins the AAF rule: NotImplemented, not DriverException.
+    // .github/instructions/touptek.instructions.md pins the AAF rule: NotImplemented, not DriverException.
     require_alpaca_error([&]() { driver->get_step_size(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotImplemented);
 

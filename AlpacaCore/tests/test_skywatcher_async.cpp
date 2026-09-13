@@ -230,7 +230,7 @@ TEST_CASE(
     // (1) reap_stop_task() used to cancel+join a SINGLE stop-completion thread shared by
     //     both axes. Stopping axis 1 while axis 0's stop task was still polling a
     //     ramping mount (CCDciel issues MoveAxis stop pairs ~44ms apart on button
-    //     release -- see AGENTS.md) cancelled the RA task before it reached
+    //     release -- see .github/instructions/skywatcher.instructions.md) cancelled the RA task before it reached
     //     manual_axis_slewing_[0] = false, stranding Slewing true FOREVER
     //     (get_hardware_slewing_locked() ORs both axes' flags) -- exactly the hardware
     //     symptom. Fixed: each axis now has its own stop-task thread and cancel flag.
@@ -800,7 +800,8 @@ TEST_CASE("SkyWatcher EQM-35 - FindHome uses the count-frame fallback", "[skywat
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
 
-    // CanFindHome is unconditionally true by design (AGENTS.md): boards
+    // CanFindHome is unconditionally true by design
+    // (.github/instructions/skywatcher.instructions.md): boards
     // without the sensor fall back to a goto of the power-on count frame.
     CHECK(driver->get_can_find_home() == true);
 
@@ -1282,7 +1283,8 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
 // start_speed_motion_locked() (see 48afe0d) -- just for Dec, and for
 // DeclinationRate/PulseGuide instead of plain tracking.
 //
-// The hardware-validated MoveAxis data point (AGENTS.md, EQM-35 Pro at
+// The hardware-validated MoveAxis data point
+// (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at
 // latitude -37.2: pressing N increased reported Dec, i.e. a POSITIVE a1/a2
 // axis rate on the a2 >= 0 branch increases sky Dec below the equator) is
 // the independent check that the south-of-equator direction asserted here
@@ -2449,7 +2451,7 @@ TEST_CASE("SkyWatcher async - the goto aim-ahead is measured, not the seeded con
     // (goto_overhead_seconds_, resume_latency_seconds_) is a behaviour change
     // that nothing pinned -- delete both update blocks, re-seed from the
     // constants, and the suite stayed green. That is exactly the failure mode
-    // this PR's own AGENTS.md rule warns about.
+    // this PR's own rule in .github/instructions/skywatcher.instructions.md warns about.
     //
     // The estimates are private, so the observable is what they steer: the
     // landing residual in RA, which is pure aim-ahead error (Dec has no time

@@ -140,8 +140,8 @@ TEST_CASE("SynScan - get_connected() answers at once while a connect is in fligh
     // the connect task holds mutex_ for the next few hundred milliseconds.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     // The flag's value mid-task is driver-specific (SynScan raises it before
-    // the warm-up queries, see AGENTS.md on why get_connected() is not a
-    // completion signal); the contract under test is that the read returns
+    // the warm-up queries, see .github/instructions/alpaca-http-conformance.instructions.md
+    // on why get_connected() is not a completion signal); the contract under test is that the read returns
     // at once while Connecting is still true.
     const auto t0 = Clock::now();
     static_cast<void>(driver->get_connected());

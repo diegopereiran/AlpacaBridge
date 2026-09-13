@@ -374,7 +374,7 @@ public:
         //
         // Same order as production: a live handle is reused FIRST, and the
         // zombie flag is consulted only when there is none. The camera + CFW
-        // pairing (AGENTS.md, shared handle) has the wheel connect while the
+        // pairing (.github/instructions/qhy.instructions.md, shared handle) has the wheel connect while the
         // camera is mid-exposure; that is a shared open, not a reopen over a
         // zombie, and refusing it here would fail a [stress] run with a false
         // red on the filter-wheel driver (review finding on PR #463).

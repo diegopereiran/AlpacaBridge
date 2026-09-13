@@ -386,7 +386,8 @@ public:
         // WandererCover serial protocol has no halt command. Stop tracking the
         // in-progress move so CoverState/CoverMoving immediately stop reporting
         // Moving; the cover then completes its current travel mechanically (the
-        // controller stops the motor at the configured end stop). See AGENTS.md.
+        // controller stops the motor at the configured end stop). See
+        // .github/instructions/wandererastro.instructions.md.
         std::lock_guard<std::mutex> lock(state_mutex_);
         commanded_ = CoverTarget::None;
     }

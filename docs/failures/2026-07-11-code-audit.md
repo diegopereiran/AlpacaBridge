@@ -1,5 +1,7 @@
 # AlpacaBridge Code Audit
 
+> Historical resolved audit snapshot, retained for evidence. Current rules and regression records live in `AGENTS.md` and `docs/failures/`.
+
 > **RESOLUTION (2026-07-11, branch `audit-fixes-3.0.1`):** All Critical, High, and Medium findings and the tractable Low findings below are **fixed** on this branch (see CHANGELOG 3.0.1 UNRELEASED for the itemized list). Test-coverage gaps closed: telescope-driver TSan `[stress]` suites (ZWO/Celestron/SynScan/iOptron over a new loopback fake-mount seam), a `persisted_devices_` concurrency test, and router-level path-traversal / Content-Length tests. Deliberately not addressed: network-authentication-dependent items (CSRF on `/shutdown`/`/restart`) — ASCOM Alpaca defines no authentication model; and the full multi-device redesign of the singleton protocol wrappers (a connect-steal guard now throws a clear error instead of silently stealing).
 
 **Date:** 2026-07-11

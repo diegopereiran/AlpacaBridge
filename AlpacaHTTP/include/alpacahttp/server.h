@@ -177,9 +177,10 @@ private:
     // than the reactor's, because the probe reads
     // /sys/class/rtc/rtcN/since_epoch and can block on a wedged I2C bus for
     // about a second, while the reactor must never block in anything but
-    // poll() (AGENTS.md) -- a stalled reactor delays every parked keep-alive
-    // connection's next request, which is the cost this change exists to
-    // avoid. Wakes every 31 s, or immediately when stop() sets the flag.
+    // poll() (.github/instructions/alpaca-http-conformance.instructions.md) --
+    // a stalled reactor delays every parked keep-alive connection's next
+    // request, which is the cost this change exists to avoid. Wakes every
+    // 31 s, or immediately when stop() sets the flag.
     std::thread rtc_probe_thread_;
     std::mutex rtc_probe_mutex_;
     std::condition_variable rtc_probe_cv_;

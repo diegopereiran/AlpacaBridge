@@ -346,7 +346,7 @@ After committing, run `git status` to confirm the working tree is clean (or show
 
 After the commit, suggest next steps if appropriate:
 - "There are more unstaged changes — want to commit those separately?"
-- "AGENTS.md vendor notes could be updated with what we learned — want to do that?"
+- "The vendor instruction file could be updated with what we learned — want to do that?"
 - "Tests haven't been added yet — this driver needs unit tests before it's PR-ready."
 - "Want to push this branch to the remote?"
 - "Ready to submit a PR? Use `/submit-pr`."

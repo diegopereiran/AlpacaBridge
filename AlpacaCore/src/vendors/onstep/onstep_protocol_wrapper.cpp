@@ -207,7 +207,7 @@ std::string format_longitude(double longitude_degrees) {
 MountStatus parse_status(const std::string& raw) {
     MountStatus status;
     status.raw_status = raw;
-    // See AGENTS.md "OnStep" notes for the full :GU# status-character table,
+    // See .github/instructions/onstep.instructions.md for the full :GU# status-character table,
     // verified against real OnStep firmware (Command.ino) and live hardware
     // during driver development: 'n' is only appended when tracking is NOT
     // sidereal, and 'N' is only appended when there is NO goto in progress —
