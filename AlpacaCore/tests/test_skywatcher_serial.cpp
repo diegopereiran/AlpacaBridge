@@ -330,6 +330,10 @@ TEST_CASE("SkyWatcher serial - Connected=true on a stale link reconnects instead
     // reusing its index before `replugged` is constructed below. Do not
     // reorder sever_link() / construction / repoint().
     FakeSkyWatcherSerialBoard replugged;
+    // Self-checking: if a future edit moves construction earlier or drops the
+    // driver's fd first, devpts could recycle the index and hand back the
+    // severed board's own path, which would let this case pass vacuously.
+    REQUIRE(replugged.slave_path() != board->slave_path());
     link.repoint(replugged.slave_path());
     REQUIRE(replugged.frames().empty());
 

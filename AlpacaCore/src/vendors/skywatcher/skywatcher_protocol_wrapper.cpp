@@ -715,6 +715,11 @@ public:
             }
         }
         if (!present) {
+            // Best-effort teardown: if an exchange holds io_mutex_ right now,
+            // this call reports the loss without closing the fd. The next
+            // poll, the in-flight exchange's own node check, or a relink all
+            // retry the close; nothing is lost, but until one of those runs
+            // the stale fd stays open with Connected already reading false.
             std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
             if (lock.owns_lock() && connected_.load()) {
                 ALPACA_LOG_WARN("SkyWatcher", "Serial device " + info_.port_path + " has gone away; link closed");
@@ -863,12 +868,18 @@ private:
         tcflush(serial_fd_, TCIOFLUSH);
         registered_port_ = registry_key;
         // open-astro#445: remember which node this path reached, for link_alive().
+        // fstat on a just-opened fd essentially cannot fail; if it ever does,
+        // link_path_ stays empty and link_alive() silently falls back to the
+        // pre-#445 connected_-only read, so log it rather than degrade quietly.
         struct stat st {};
         if (::fstat(serial_fd_, &st) == 0) {
             std::lock_guard<std::mutex> lock(link_id_mutex_);
             link_path_ = info.port_path;
             link_dev_ = st.st_dev;
             link_ino_ = st.st_ino;
+        } else {
+            ALPACA_LOG_WARN("SkyWatcher", "fstat failed on the newly opened serial port; link-loss detection "
+                                           "disabled for this connection: " + util::errno_string(errno));
         }
         return true;
 #else
