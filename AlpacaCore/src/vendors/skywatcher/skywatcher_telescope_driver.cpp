@@ -44,11 +44,8 @@ constexpr uint32_t kHomeCounts = 0x800000;
 // along the HA = +/-6 h circle (see the pointing-model comment in the driver).
 constexpr double kHomeHourAngleOffsetHours = 6.0;
 
-// Signed 6 h home term for a dec-axis angle: which side of the dec axis the
-// OTA sits on, NOT which hemisphere the mount is in.
-inline double home_hour_angle_offset(double dec_axis_degrees) {
-    return dec_axis_degrees >= 0.0 ? kHomeHourAngleOffsetHours : -kHomeHourAngleOffsetHours;
-}
+// The signed home term itself is `kHomeHourAngleOffsetHours * branch`, with
+// the branch read back through branch_from_axis_locked() (open-astro#459).
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
@@ -749,8 +746,10 @@ public:
         // The same rule in both hemispheres: the goto picks the a2 >= 0
         // branch for a target at HA >= 0 (see ra_dec_to_axis_degrees_locked),
         // so reading the branch back off the axis reproduces the side that
-        // get_destination_side_of_pier() computes from hour angle.
-        return cached_dec_axis_deg_ >= 0.0 ? 0 : 1;
+        // get_destination_side_of_pier() computes from hour angle. At the
+        // pole the axis cannot say which branch it is on; the remembered
+        // one answers (open-astro#459).
+        return branch_from_axis_locked(cached_dec_axis_deg_) > 0 ? 0 : 1;
     }
 
     void set_side_of_pier(int side) override {
@@ -1232,7 +1231,7 @@ public:
                 // this call site carried the identical bug, and an autoguider
                 // below the equator would have pushed every Dec correction the
                 // wrong way.
-                if ((cached_dec_axis_deg_ >= 0.0) != hemisphere_south_locked()) {
+                if ((branch_from_axis_locked(cached_dec_axis_deg_) > 0) != hemisphere_south_locked()) {
                     dec_rate_deg_per_sec = -dec_rate_deg_per_sec;
                 }
             } else {
@@ -1766,6 +1765,9 @@ public:
             ra, dec, was_tracking ? kSyncRestartLatencySeconds * kLstHoursPerSecond : 0.0);
         protocol.set_position(kAxisRa, degrees_to_counts(axis1, axis_params_[0].counts_per_revolution));
         protocol.set_position(kAxisDec, degrees_to_counts(axis2, axis_params_[1].counts_per_revolution));
+        // After the writes, for the same reason dispatch_goto_locked() records
+        // after its motor commands (open-astro#459).
+        remember_command_branch_locked(axis2);
         if (was_tracking) {
             set_tracking_locked(lock, true);
         }
@@ -2104,6 +2106,7 @@ private:
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         position_cache_valid_ = false;
+        pointing_branch_ = 1;  // open-astro#459: the a2 >= 0 branch, the pre-#459 answer at home
         // Both are MEASURED off the mount that was connected, so they must not
         // survive into the next one: a driver instance reconnected to
         // different hardware would otherwise aim a goto ahead by the previous
@@ -2220,8 +2223,11 @@ private:
     //   Branch A (dec axis angle >= 0): dec_mech = 90 - a2, ha_mech = a1/15 + 6.
     //   Branch B (dec axis angle <  0): dec_mech = 90 + a2, ha_mech = a1/15 - 6.
     // The code carries the two terms separately: `ha_mech_hours` below holds
-    // the a1 term alone, and home_hour_angle_offset() adds the 6 h term after
-    // the hemisphere sign, which is what the SKY frame paragraph describes.
+    // the a1 term alone, and the signed 6 h term is added after the
+    // hemisphere sign, which is what the SKY frame paragraph describes. The
+    // branch is read off the axis angle except at the pole, where both
+    // branches sit on the same encoder count and the one the command path
+    // last chose is remembered instead (branch_from_axis_locked, #459).
     // The 6 h term is the counterweight-down home: with the counterweight bar
     // vertical the dec axis lies IN the meridian plane, so a pure dec
     // rotation sweeps the OTA along the HA = +/-6 h great circle, and the
@@ -2300,17 +2306,15 @@ private:
         dt = std::clamp(dt, 0.0, rate_offsets_active_locked() && tracking_ ? 3600.0 : 5.0);
         double a1 = cached_ra_axis_deg_ + cmd_axis_rate_deg_s_[0] * dt;
         double a2 = cached_dec_axis_deg_ + cmd_axis_rate_deg_s_[1] * dt;
-        double dec_mech = 0.0;
-        double ha_mech_hours = 0.0;
-        if (a2 >= 0.0) {
-            dec_mech = 90.0 - a2;
-        } else {
-            dec_mech = 90.0 + a2;
-        }
-        ha_mech_hours = a1 / kHoursToDegrees;
+        // dec_mech = 90 - |a2| on both branches; the branch decides only the
+        // sign of the 6 h home term, and at the pole it is the remembered one
+        // (see branch_from_axis_locked, open-astro#459).
+        const double dec_mech = 90.0 - std::abs(a2);
+        const double ha_mech_hours = a1 / kHoursToDegrees;
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec = sky_sign * dec_mech;
-        const double ha_hours = wrap_hour_angle(sky_sign * ha_mech_hours + home_hour_angle_offset(a2));
+        const double ha_hours =
+            wrap_hour_angle(sky_sign * ha_mech_hours + kHomeHourAngleOffsetHours * branch_from_axis_locked(a2));
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ra = wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
@@ -2335,6 +2339,37 @@ private:
         const double a1 = sky_sign * (ha - kHomeHourAngleOffsetHours * branch) * kHoursToDegrees;
         return {a1, a2};
     }
+
+    // open-astro#459: which dec-axis branch the mount is on, read back from
+    // the axis angle. Away from a2 = 0 the sign of the angle IS the branch.
+    // At the exact pole both branches command the same count (a2 =
+    // branch * (90 - 90) rounds to the home count either way), so nothing
+    // read back from the encoder can tell them apart: the -0.0 the command
+    // path produces on the negative branch never survives the int32 counts
+    // it is stored as. Inside a deadband of two encoder counts (one count of
+    // rounding on the way out, one on the way back) the answer is the branch
+    // the command path last committed, pointing_branch_. Every site that
+    // branches on the dec-axis sign (the 6 h home term, SideOfPier, the Dec
+    // guide and rate signs) goes through here so they agree by construction.
+    int branch_from_axis_locked(double a2) const {
+        const auto cpr = axis_params_[1].counts_per_revolution;
+        const double deadband = cpr > 0 ? 2.0 * 360.0 / static_cast<double>(cpr) : 0.0;
+        if (std::abs(a2) <= deadband) {
+            return pointing_branch_;
+        }
+        return a2 >= 0.0 ? 1 : -1;
+    }
+
+    // Record the branch a commanded dec-axis angle sits on. Called wherever
+    // a dec-axis angle reaches the hardware (dispatch_goto_locked() for every
+    // goto, sync after its position writes), never for a mere
+    // DestinationSideOfPier computation. A goto to home (a2 = +0.0: the
+    // no-indexer FindHome, the default Park) therefore lands on the positive
+    // branch, the same answer AutoHome's re-anchor and connect give. The
+    // command-path angle keeps its sign bit at the pole (-0.0 on the
+    // negative branch), so std::signbit is the right reader here, and only
+    // here.
+    void remember_command_branch_locked(double commanded_a2) { pointing_branch_ = std::signbit(commanded_a2) ? -1 : 1; }
 
     std::pair<double, double> compute_alt_az_locked() const {
         auto [ra, dec] = compute_ra_dec_locked();
@@ -2786,7 +2821,7 @@ private:
             return;
         }
         refresh_position_cache_locked(false);
-        if ((cached_dec_axis_deg_ >= 0.0) != hemisphere_south_locked()) {
+        if ((branch_from_axis_locked(cached_dec_axis_deg_) > 0) != hemisphere_south_locked()) {
             rate = -rate;
         }
         // Rates within kSlowModeFloorPad of the floor still duty-cycle: an
@@ -3104,6 +3139,14 @@ private:
         }
         protocol.start_motion(kAxisRa);
         protocol.start_motion(kAxisDec);
+        // open-astro#459: every commanded dec-axis angle passes through here
+        // (sky goto, the no-indexer FindHome and Park gotos to home, the
+        // AutoHome hunt phases), so this is the one place the branch memory
+        // is set for a goto. AFTER the motor commands: a dispatch that threw
+        // above must not leave the memory claiming a branch the mount never
+        // moved to (a mount sitting at the pole would flip its reported RA
+        // by 12 h without moving).
+        remember_command_branch_locked(target_dec_axis_deg);
     }
 
     // LST advances 24 sidereal hours per sidereal day of SI seconds.
@@ -3142,7 +3185,7 @@ private:
         last_goto_dist_deg_ = dist;
         double est_seconds = dist / kMaxMoveAxisRateDegPerSec + goto_overhead_seconds_ + resume_latency_seconds_;
         auto [t1, t2] = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond);
-        dispatch_goto_locked(lock, t1, t2);
+        dispatch_goto_locked(lock, t1, t2);  // records the branch of t2 once the goto is on its way
     }
 
     // After the first goto lands, close the residual (prediction error) with
@@ -3641,6 +3684,7 @@ private:
         autohome_wait_axes_stopped(lock);
         proto.set_position(kAxisRa, kHomeCounts);
         proto.set_position(kAxisDec, kHomeCounts);
+        pointing_branch_ = 1;  // open-astro#459: re-anchored at home, no branch commanded yet
         invalidate_position_cache_locked();
         ALPACA_LOG_INFO("SkyWatcher", "AutoHome: complete, count frame re-anchored to home");
     }
@@ -3920,6 +3964,10 @@ private:
 
     mutable double cached_ra_axis_deg_ = 0.0;
     mutable double cached_dec_axis_deg_ = 0.0;
+    // open-astro#459: the dec-axis branch (+1: a2 >= 0, -1: a2 < 0) the
+    // command path last committed; the readback's answer inside the pole
+    // deadband where the encoder cannot say. See branch_from_axis_locked().
+    int pointing_branch_ = 1;
     mutable bool position_cache_valid_ = false;
     mutable std::chrono::steady_clock::time_point last_position_update_{};
 
