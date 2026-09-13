@@ -226,7 +226,8 @@ private:
     nlohmann::json sanitize_device_config(const nlohmann::json& config) const;
     void add_or_replace_persisted_device(const nlohmann::json& config);
     bool remove_persisted_device(const std::string& vendor, const std::string& device_type, int device_number);
-    void save_persisted_devices() const;
+    // True when the file was written; false is already logged at ERROR.
+    bool save_persisted_devices() const;
     void load_persisted_devices();
 
     nlohmann::json build_description_payload() const;
@@ -364,8 +365,11 @@ private:
     mutable std::mutex persisted_devices_mutex_;
     // Serialises the file write in save_persisted_devices(): request workers
     // reach it concurrently through persist_client_site() (#444), and two
-    // truncate-and-write passes interleave into invalid JSON. Never held
-    // together with persisted_devices_mutex_ (the snapshot is taken first).
+    // truncate-and-write passes interleave into invalid JSON. Lock order:
+    // this one FIRST, then persisted_devices_mutex_ inside it for the
+    // snapshot, so a save can never rename an older snapshot over a newer
+    // dump. Consequently save_persisted_devices() must never be called while
+    // persisted_devices_mutex_ is held (it would self-deadlock).
     mutable std::mutex persisted_file_mutex_;
     std::vector<nlohmann::json> persisted_devices_;
     bool persisted_devices_loaded_ = false;
