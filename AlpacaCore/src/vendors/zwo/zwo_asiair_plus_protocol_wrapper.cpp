@@ -151,7 +151,7 @@ public:
             fd_ = -1;
             throw;
         }
-        open_ = true;
+        open_.store(true, std::memory_order_release);
 
         // Soft-PWM workers: spawn one thread per pwm_enabled port. Each
         // thread runs pwm_loop() which (a) initializes the kernel-side port
@@ -183,7 +183,7 @@ public:
             if (!open_) {
                 return;
             }
-            open_ = false;
+            open_.store(false, std::memory_order_release);
             for (auto& state : port_states_) {
                 state->stop_pwm.store(true, std::memory_order_release);
             }
@@ -208,10 +208,14 @@ public:
         }
     }
 
-    bool is_open() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return open_;
-    }
+    // Lock-free on purpose (issue #382): the driver answers get_connected()
+    // with this, and AGENTS.md wants that getter cheap. open() holds mutex_
+    // for its whole sequence and close() holds it for its locked phases
+    // (it drops the lock to join the PWM workers), so a locked read here
+    // waited behind whichever phase was running. open_ is written only
+    // inside those critical sections and published as an atomic; the
+    // snapshot is momentary, which is what a connected-state read is anyway.
+    bool is_open() const { return open_.load(std::memory_order_acquire); }
 
     std::size_t port_count() const { return ports_.size(); }
 
@@ -490,7 +494,7 @@ private:
 
     mutable std::mutex mutex_;
     int fd_;
-    bool open_;
+    std::atomic<bool> open_;  // see is_open()
     std::vector<std::unique_ptr<PortState>> port_states_;
 };
 

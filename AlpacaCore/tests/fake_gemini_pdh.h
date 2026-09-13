@@ -21,18 +21,15 @@
 // firmware might not send. Optionally streams *G status frames unprompted to
 // exercise the reader thread's routing (streamed frame vs. pending request).
 
-#include <fcntl.h>
 #include <poll.h>
-#include <stdlib.h>
-#include <termios.h>
 #include <unistd.h>
 
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,29 +40,10 @@ namespace alpacacore::test {
 
 class FakeGeminiPdh {
 public:
-    FakeGeminiPdh() {
-        master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
-        // Issue #424: the master goes non-blocking here, so a reply to a
-        // driver that has stopped draining can never park this fake's
-        // worker inside write() and hang the destructor's join. Folded
-        // into the same throw as the other setup failures: a silent
-        // fallback to a blocking master would look exactly like the hang
-        // this exists to remove. See fake_pty_write.h.
-        if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0 ||
-            !make_pty_nonblocking(master_fd_)) {
-            throw std::runtime_error("FakeGeminiPdh: cannot open pty");
-        }
-        const char* name = ptsname(master_fd_);
-        if (name == nullptr) {
-            throw std::runtime_error("FakeGeminiPdh: ptsname failed");
-        }
-        slave_path_ = name;
-        keepalive_fd_ = open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
-        struct termios tty {};
-        if (keepalive_fd_ >= 0 && tcgetattr(keepalive_fd_, &tty) == 0) {
-            cfmakeraw(&tty);
-            tcsetattr(keepalive_fd_, TCSANOW, &tty);
-        }
+    FakeGeminiPdh() : pty_("FakeGeminiPdh") {
+        // The pty pair is owned by pty_ (fake_pty_write.h), constructed
+        // before this body runs; a setup failure throws from there with
+        // nothing left open (issue #387).
         reader_ = std::thread([this] { run(); });
     }
 
@@ -74,18 +52,12 @@ public:
         if (reader_.joinable()) {
             reader_.join();
         }
-        if (keepalive_fd_ >= 0) {
-            close(keepalive_fd_);
-        }
-        if (master_fd_ >= 0) {
-            close(master_fd_);
-        }
     }
 
     FakeGeminiPdh(const FakeGeminiPdh&) = delete;
     FakeGeminiPdh& operator=(const FakeGeminiPdh&) = delete;
 
-    const std::string& slave_path() const { return slave_path_; }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -129,20 +101,15 @@ public:
     /// Tear the pty down underneath the driver: the master side closes, so
     /// the driver's reads and writes on the slave fail with EIO from here on
     /// (what a USB re-enumeration / unplug looks like, issue #237). Not
-    /// reversible; the fake only records commands received before the cut.
+    /// reversible; the fake only records commands received before the cut,
+    /// and slave_path() is empty afterwards (copy it first if the test still
+    /// needs it).
     void sever_link() {
         stop_.store(true);
         if (reader_.joinable()) {
             reader_.join();
         }
-        if (keepalive_fd_ >= 0) {
-            close(keepalive_fd_);
-            keepalive_fd_ = -1;
-        }
-        if (master_fd_ >= 0) {
-            close(master_fd_);
-            master_fd_ = -1;
-        }
+        pty_.sever();
     }
 
     bool output(int channel) const {  // 1..11 wire channel
@@ -169,11 +136,11 @@ private:
         auto last_stream = std::chrono::steady_clock::now();
         while (!stop_.load()) {
             struct pollfd pfd {};
-            pfd.fd = master_fd_;
+            pfd.fd = pty_.master_fd();
             pfd.events = POLLIN;
             const int r = poll(&pfd, 1, 10);
             if (r > 0) {
-                const ssize_t n = read(master_fd_, buf, sizeof(buf));
+                const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
                 for (ssize_t i = 0; i < n; ++i) {
                     const char ch = buf[i];
                     if (ch == '\r' || ch == '\n') {
@@ -199,7 +166,7 @@ private:
 
     void send(const std::string& reply) {
         if (muted_.load()) return;
-        pty_write_bounded(master_fd_, reply, stop_);
+        pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
     // Vendor layout: "*G" + DC2..5 digits + 'U' + USB A..F digits + 'A' aht +
@@ -256,9 +223,7 @@ private:
         }
     }
 
-    int master_fd_ = -1;
-    int keepalive_fd_ = -1;
-    std::string slave_path_;
+    PtyPair pty_;
     std::thread reader_;
     std::atomic<bool> stop_{false};
     std::atomic<int> firmware_{308};

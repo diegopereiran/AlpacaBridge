@@ -173,7 +173,7 @@ public:
         ::gpiod_line_config_free(line_cfg);
         ::gpiod_line_settings_free(settings);
 
-        open_ = true;
+        open_.store(true, std::memory_order_release);
 
         for (std::size_t i = 0; i < ports_.size(); ++i) {
             if (ports_[i].pwm_enabled) {
@@ -210,13 +210,17 @@ public:
             ::gpiod_chip_close(chip_);
             chip_ = nullptr;
         }
-        open_ = false;
+        open_.store(false, std::memory_order_release);
     }
 
-    bool is_open() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return open_;
-    }
+    // Lock-free on purpose (issue #382): the driver answers get_connected()
+    // with this, and AGENTS.md wants that getter cheap. open() holds mutex_
+    // for its whole sequence and close() holds it for its locked phases
+    // (it drops the lock to join the PWM workers), so a locked read here
+    // waited behind whichever phase was running. open_ is written only
+    // inside those critical sections and published as an atomic; the
+    // snapshot is momentary, which is what a connected-state read is anyway.
+    bool is_open() const { return open_.load(std::memory_order_acquire); }
 
     std::size_t port_count() const { return ports_.size(); }
 
@@ -372,7 +376,7 @@ private:
     std::mutex io_mutex_;
     gpiod_chip* chip_;
     gpiod_line_request* request_;
-    bool open_;
+    std::atomic<bool> open_;  // see is_open()
     std::vector<std::unique_ptr<PortState>> port_states_;
 };
 

@@ -222,6 +222,16 @@ public:
     /** @brief Disconnect: stop the reader thread and close the serial port. */
     void disconnect();
 
+    /**
+     * @brief Forget the cached firmware now, ahead of disconnect().
+     *
+     * The driver calls this before it stores connected_ = false (issue #387):
+     * disconnect() clears the cache only after joining the reader, which can
+     * sit in a 500 ms read, and the driver's firmware getter relies on the
+     * cache being empty whenever the driver reports disconnected.
+     */
+    void clear_firmware();
+
     /** @brief Check if connected. */
     bool is_connected() const;
 
