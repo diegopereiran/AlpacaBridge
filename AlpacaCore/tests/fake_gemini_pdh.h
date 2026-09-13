@@ -104,7 +104,9 @@ public:
     /// Tear the pty down underneath the driver: the master side closes, so
     /// the driver's reads and writes on the slave fail with EIO from here on
     /// (what a USB re-enumeration / unplug looks like, issue #237). Not
-    /// reversible; the fake only records commands received before the cut.
+    /// reversible; the fake only records commands received before the cut,
+    /// and slave_path() is empty afterwards (copy it first if the test still
+    /// needs it).
     void sever_link() {
         stop_.store(true);
         if (reader_.joinable()) {
