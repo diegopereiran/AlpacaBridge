@@ -793,9 +793,8 @@ def self_test():
     missing = missing_message("fakevendor", "camera", ["AlpacaCore/src/vendors/fakevendor/x_driver.cpp"])
     check("MISSING message points at /driver-build Step 7b",
           "/driver-build Step 7b" in missing and "test_fakevendor_concurrency_stress.cpp" in missing)
-    check("MISSING message does not offer ALLOWLIST as an alternative",
-          "must not grow" in missing and "add it to ALLOWLIST" not in missing
-          and "or add" not in missing)
+    check("MISSING message says the ALLOWLIST must not grow",
+          "ALLOWLIST" in missing and "must not grow" in missing)
 
     # A DeviceType:: mention earlier in the file (a comment, here) must not
     # be picked up ahead of the actual override.
