@@ -704,7 +704,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(link_id_mutex_);
             if (!link_path_.empty()) {
-                struct stat st {};
+                struct stat st{};
                 if (::stat(link_path_.c_str(), &st) != 0) {
                     // Only "no such node" is loss; a permission or I/O error on
                     // the lookup says nothing about the adapter.
@@ -797,7 +797,7 @@ private:
     // The fd's node has been removed. Checked on the fd itself, so it holds
     // even while the configured path resolves to a replugged adapter.
     bool serial_node_removed_locked() const {
-        struct stat st {};
+        struct stat st{};
         return ::fstat(serial_fd_, &st) != 0 || st.st_nlink == 0;
     }
 #endif
@@ -871,15 +871,17 @@ private:
         // fstat on a just-opened fd essentially cannot fail; if it ever does,
         // link_path_ stays empty and link_alive() silently falls back to the
         // pre-#445 connected_-only read, so log it rather than degrade quietly.
-        struct stat st {};
+        struct stat st{};
         if (::fstat(serial_fd_, &st) == 0) {
             std::lock_guard<std::mutex> lock(link_id_mutex_);
             link_path_ = info.port_path;
             link_dev_ = st.st_dev;
             link_ino_ = st.st_ino;
         } else {
-            ALPACA_LOG_WARN("SkyWatcher", "fstat failed on the newly opened serial port; link-loss detection "
-                                           "disabled for this connection: " + util::errno_string(errno));
+            ALPACA_LOG_WARN("SkyWatcher",
+                            "fstat failed on the newly opened serial port; link-loss detection "
+                            "disabled for this connection: " +
+                                util::errno_string(errno));
         }
         return true;
 #else
