@@ -362,6 +362,11 @@ private:
     // Guards persisted_devices_ and persisted_devices_loaded_. Never held
     // together with server_info_mutex_ or across driver-registry calls.
     mutable std::mutex persisted_devices_mutex_;
+    // Serialises the file write in save_persisted_devices(): request workers
+    // reach it concurrently through persist_client_site() (#444), and two
+    // truncate-and-write passes interleave into invalid JSON. Never held
+    // together with persisted_devices_mutex_ (the snapshot is taken first).
+    mutable std::mutex persisted_file_mutex_;
     std::vector<nlohmann::json> persisted_devices_;
     bool persisted_devices_loaded_ = false;
 

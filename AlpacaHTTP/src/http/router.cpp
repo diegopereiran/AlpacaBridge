@@ -9505,18 +9505,33 @@ void Router::save_persisted_devices() const {
             std::filesystem::create_directories(kPersistedDevicesFile.parent_path());
         }
 
-        std::ofstream out(kPersistedDevicesFile);
-        if (!out) {
-            throw std::runtime_error("Unable to open " + kPersistedDevicesFile.string() + " for writing");
-        }
-
         nlohmann::json payload;
         {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             payload = persisted_devices_;
         }
-        out << payload.dump(4);
-        out.flush();
+
+        // One writer at a time, and never in place: site PUTs from two
+        // clients run on two workers (#444), and two truncate-and-write
+        // passes on the same file end as one dump's head plus the other's
+        // tail, which the next start cannot parse and so loads NO devices.
+        // Writing a sibling temp file and renaming it over the real one
+        // makes each save atomic for a reader (and for a power cut mid-write,
+        // the observatory case): the file is always a complete dump.
+        std::lock_guard<std::mutex> file_lock(persisted_file_mutex_);
+        const std::filesystem::path temp = kPersistedDevicesFile.string() + ".tmp";
+        {
+            std::ofstream out(temp, std::ios::trunc);
+            if (!out) {
+                throw std::runtime_error("Unable to open " + temp.string() + " for writing");
+            }
+            out << payload.dump(4);
+            out.flush();
+            if (!out) {
+                throw std::runtime_error("Unable to write " + temp.string());
+            }
+        }
+        std::filesystem::rename(temp, kPersistedDevicesFile);
     } catch (const std::exception& e) {
         util::log_error("Failed to persist registered devices: " + std::string(e.what()));
     }

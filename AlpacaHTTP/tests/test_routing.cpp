@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -2270,6 +2271,68 @@ int main() {
             }
         }
         EXPECT(learned);
+    }
+    {
+        // issue #444, the concurrency half: site PUTs run on the worker pool,
+        // so two clients can reach save_persisted_devices() at once. A
+        // truncate-in-place write from two threads interleaves and leaves the
+        // file as one dump's head plus the other's tail, invalid JSON, and
+        // the next start then loads NO devices. Two telescopes, two threads,
+        // each pushing an alternating coordinate; the file must parse after
+        // every write, so it is checked from a third thread throughout and
+        // once more at the end.
+        nlohmann::json a = {{"vendor", "skywatcher"},     {"deviceType", "telescope"},  {"deviceNumber", 9653},
+                            {"connectionType", "serial"}, {"portPath", "/dev/ttyUSB9"}, {"baudRate", 9600},
+                            {"siteLatitude", 0.0},        {"siteLongitude", 0.0}};
+        nlohmann::json b = a;
+        b["deviceNumber"] = 9654;
+        for (const auto& cfg : {a, b}) {
+            const auto ok = route_request(router, "POST", "/management/v1/configuredevice", cfg.dump());
+            const auto ok_json = nlohmann::json::parse(ok.body(), nullptr, false);
+            EXPECT(!ok_json.is_discarded() && ok_json.value("ErrorNumber", -1) == 0);
+        }
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::atomic<bool> done{false};
+        std::atomic<int> unreadable{0};
+        std::atomic<int> failed_puts{0};
+        const auto pusher = [&](int number, const char* name, double base) {
+            for (int i = 0; i < 150; ++i) {
+                // Every value differs from the last, so every PUT is a write.
+                const double v = base + 0.001 * (i + 1);
+                const auto resp = route_request(
+                    router, "PUT", "/api/v1/telescope/" + std::to_string(number) + "/" + name + "?ClientID=1",
+                    std::string(name == std::string("sitelatitude") ? "SiteLatitude" : "SiteElevation") + "=" +
+                        std::to_string(v) + "&ClientID=1");
+                const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+                if (json.is_discarded() || json.value("ErrorNumber", -1) != 0) {
+                    ++failed_puts;
+                }
+            }
+        };
+        std::thread reader([&] {
+            while (!done) {
+                std::ifstream in(persisted);
+                std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                if (!text.empty() && nlohmann::json::parse(text, nullptr, false).is_discarded()) {
+                    ++unreadable;
+                }
+            }
+        });
+        std::thread t1(pusher, 9653, "sitelatitude", -33.0);
+        std::thread t2(pusher, 9654, "siteelevation", 100.0);
+        t1.join();
+        t2.join();
+        done = true;
+        reader.join();
+        EXPECT(failed_puts == 0);
+        EXPECT(unreadable == 0);
+        {
+            std::ifstream in(persisted);
+            const auto file = nlohmann::json::parse(in, nullptr, false);
+            EXPECT(!file.is_discarded() && file.is_array());
+        }
+        remove_device(router, "skywatcher", "telescope", 9653);
+        remove_device(router, "skywatcher", "telescope", 9654);
     }
     {
         // issue #274, the other half: a config already on disk cannot be
