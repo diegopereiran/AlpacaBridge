@@ -98,10 +98,6 @@ long elapsed_ms(std::chrono::steady_clock::time_point since) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count();
 }
 
-// Number of descriptors this process holds open, from /proc/self/fd, or -1
-// where that directory does not exist (a non-Linux host). The directory
-// handle used to read it is closed before the count is returned, so it does
-// not count itself.
 // Descriptors this process holds open (count) and the highest number among
 // them (max_fd), from /proc/self/fd; count is -1 where that directory does
 // not exist (a non-Linux host). The directory handle used to read it is
