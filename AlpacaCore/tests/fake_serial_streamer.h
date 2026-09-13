@@ -19,18 +19,16 @@
 // failure modes for the issue #237 link-health tests:
 //   - set_muted(true): the stream stops, the fd stays healthy (hung MCU);
 //   - sever_link(): the pty master closes, so the driver's reads and writes
-//     fail with EIO from then on (USB re-enumeration / unplug).
+//     fail with EIO from then on (USB re-enumeration / unplug), and
+//     slave_path() is empty afterwards: the path named a pty that no longer
+//     exists, so copy it before the cut if the test still needs it.
 
-#include <fcntl.h>
 #include <poll.h>
-#include <stdlib.h>
-#include <termios.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -42,29 +40,10 @@ namespace alpacacore::test {
 class FakeSerialStreamer {
 public:
     FakeSerialStreamer(std::string frame, std::chrono::milliseconds interval)
-        : interval_ms_(static_cast<int>(interval.count())), frame_(std::move(frame)) {
-        master_fd_ = posix_openpt(O_RDWR | O_NOCTTY);
-        // Issue #424: the master goes non-blocking here, so a reply to a
-        // driver that has stopped draining can never park this fake's
-        // worker inside write() and hang the destructor's join. Folded
-        // into the same throw as the other setup failures: a silent
-        // fallback to a blocking master would look exactly like the hang
-        // this exists to remove. See fake_pty_write.h.
-        if (master_fd_ < 0 || grantpt(master_fd_) != 0 || unlockpt(master_fd_) != 0 ||
-            !make_pty_nonblocking(master_fd_)) {
-            throw std::runtime_error("FakeSerialStreamer: cannot open pty");
-        }
-        const char* name = ptsname(master_fd_);
-        if (name == nullptr) {
-            throw std::runtime_error("FakeSerialStreamer: ptsname failed");
-        }
-        slave_path_ = name;
-        keepalive_fd_ = open(slave_path_.c_str(), O_RDWR | O_NOCTTY);
-        struct termios tty {};
-        if (keepalive_fd_ >= 0 && tcgetattr(keepalive_fd_, &tty) == 0) {
-            cfmakeraw(&tty);
-            tcsetattr(keepalive_fd_, TCSANOW, &tty);
-        }
+        : pty_("FakeSerialStreamer"), interval_ms_(static_cast<int>(interval.count())), frame_(std::move(frame)) {
+        // The pty pair is owned by pty_ (fake_pty_write.h), constructed
+        // before this body runs; a setup failure throws from there with
+        // nothing left open (issue #387).
         worker_ = std::thread([this] { run(); });
     }
 
@@ -73,7 +52,7 @@ public:
     FakeSerialStreamer(const FakeSerialStreamer&) = delete;
     FakeSerialStreamer& operator=(const FakeSerialStreamer&) = delete;
 
-    const std::string& slave_path() const { return slave_path_; }
+    std::string slave_path() const { return pty_.slave_path(); }
 
     void set_frame(std::string frame) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -99,14 +78,7 @@ public:
         if (worker_.joinable()) {
             worker_.join();
         }
-        if (keepalive_fd_ >= 0) {
-            close(keepalive_fd_);
-            keepalive_fd_ = -1;
-        }
-        if (master_fd_ >= 0) {
-            close(master_fd_);
-            master_fd_ = -1;
-        }
+        pty_.sever();
     }
 
 private:
@@ -116,11 +88,11 @@ private:
         auto last_stream = std::chrono::steady_clock::now() - std::chrono::hours(1);
         while (!stop_.load()) {
             struct pollfd pfd {};
-            pfd.fd = master_fd_;
+            pfd.fd = pty_.master_fd();
             pfd.events = POLLIN;
             const int r = poll(&pfd, 1, 10);
             if (r > 0) {
-                const ssize_t n = read(master_fd_, buf, sizeof(buf));
+                const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
                 for (ssize_t i = 0; i < n; ++i) {
                     const char ch = buf[i];
                     if (ch == '\n' || ch == '\r') {
@@ -142,14 +114,14 @@ private:
                     std::lock_guard<std::mutex> lock(mutex_);
                     frame = frame_;
                 }
-                pty_write_bounded(master_fd_, frame, stop_);
+                pty_write_bounded(pty_.master_fd(), frame, stop_);
             }
         }
     }
 
-    int master_fd_ = -1;
-    int keepalive_fd_ = -1;
-    std::string slave_path_;
+    // First member: constructed before the worker, destroyed after it has
+    // been joined.
+    PtyPair pty_;
     std::thread worker_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> muted_{false};
