@@ -25,10 +25,12 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -361,6 +363,136 @@ TEST_CASE("SkyWatcher serial - a connect whose board never answers leaves Connec
 
     CHECK_THROWS(driver->set_connected(true));
     CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
+}
+
+TEST_CASE("SkyWatcher serial - separate drivers keep separate links", "[skywatcher][serial][connected]") {
+    FakeSkyWatcherSerialBoard first;
+    FakeSkyWatcherSerialBoard second;
+    first.set_version_reply("032732");
+    auto a = serial_driver(first.slave_path());
+    auto b = sw::create_skywatcher_telescope(1, serial_info(second.slave_path()), -37.0, 175.0, 50.0);
+    a->set_connected(true);
+    b->set_connected(true);
+    CHECK(a->command_string("e1", false) == "=032732");
+    CHECK(b->command_string("e1", false) == "=033A44");
+    CHECK(a->get_connected());
+    // Disconnecting B must not close A's descriptor or change A's Connected.
+    b->set_connected(false);
+    CHECK(a->get_connected());
+    CHECK_NOTHROW(a->get_right_ascension());
+    b->set_connected(true);
+    first.sever_link();
+    CHECK_FALSE(a->get_connected());
+    CHECK(b->get_connected());
+    CHECK_NOTHROW(b->get_right_ascension());
+    a->set_connected(false);
+    CHECK(b->get_connected());
+    b->set_connected(false);
+}
+
+// Uses the real transport, but makes a link disappear immediately after one
+// successful health probe. The next probe observes loss deterministically.
+class LateLossProtocol final : public sw::SkyWatcherProtocolWrapper {
+public:
+    void arm(std::function<void()> callback) {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        owner_ = std::this_thread::get_id();
+        after_probe_ = std::move(callback);
+    }
+    bool link_alive() override {
+        const bool result = sw::SkyWatcherProtocolWrapper::link_alive();
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            if (owner_ == std::this_thread::get_id()) {
+                callback = std::move(after_probe_);
+                after_probe_ = {};
+            }
+        }
+        if (callback) callback();
+        return result;
+    }
+
+private:
+    std::mutex callback_mutex_;
+    std::thread::id owner_;
+    std::function<void()> after_probe_;
+};
+
+TEST_CASE("SkyWatcher serial - late loss joins an old pulse before reconnecting",
+          "[skywatcher][serial][connected][late-loss]") {
+    FakeSkyWatcherSerialBoard board;
+    FakeSkyWatcherSerialBoard replugged;
+    PortLink port(board.slave_path());
+    auto protocol = std::make_unique<LateLossProtocol>();
+    auto* probe = protocol.get();
+    auto driver =
+        sw::create_skywatcher_telescope(0, serial_info(port.path.string()), -37.0, 175.0, 50.0, std::move(protocol));
+    driver->set_connected(true);
+    // Only the fake board moves. Wait for dispatch before introducing the loss.
+    driver->pulse_guide(0, 400);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (board.count_frames('J') == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    REQUIRE(board.count_frames('J') > 0);
+    probe->arm([&] {
+        board.sever_link();
+        port.repoint(replugged.slave_path());
+    });
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(replugged.count_frames('e') > 0);
+    // Without the late-loss join, the old pulse timer sends its stop to the
+    // NEW board after reconnect. Observe beyond the original pulse deadline.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(replugged.count_frames('K') == 0);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - immediate no-progress reads do not spin at the timeout",
+          "[skywatcher][serial][read-stall]") {
+    const int retry = GENERATE(0, EAGAIN, EINTR);
+    FakeSkyWatcherSerialBoard board;
+    bool no_progress = false;
+    int reads = 0;
+    sw::SkyWatcherProtocolWrapper protocol([&](int fd, char* data, std::size_t size) -> std::ptrdiff_t {
+        if (no_progress) {
+            ++reads;
+            errno = retry;
+            return retry == 0 ? 0 : -1;
+        }
+        return ::read(fd, data, size);
+    });
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+    REQUIRE_FALSE(protocol.get_motor_board_version().empty());
+    no_progress = true;
+    CHECK_THROWS(protocol.send_command('j', 1, "", 60));
+    CHECK(reads > 0);
+    CHECK(reads <= 100);
+    // A still-present node with no answer retains the existing timeout policy.
+    CHECK(protocol.link_alive());
+}
+
+TEST_CASE("SkyWatcher serial - read errors on a present node lose the link", "[skywatcher][serial][connected]") {
+    const int failure = GENERATE(EIO, ENXIO, ENODEV, EBADF);
+    FakeSkyWatcherSerialBoard board;
+    bool fail_read = false;
+    sw::SkyWatcherProtocolWrapper protocol([&](int fd, char* data, std::size_t size) -> std::ptrdiff_t {
+        if (fail_read) {
+            errno = failure;
+            return -1;
+        }
+        return ::read(fd, data, size);
+    });
+    const std::string key = std::filesystem::canonical(board.slave_path()).string();
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+    REQUIRE_FALSE(protocol.get_motor_board_version().empty());
+    fail_read = true;
+    REQUIRE(std::filesystem::exists(board.slave_path()));
+    require_not_connected_error([&] { protocol.inquire_position(1); });
+    CHECK_FALSE(protocol.link_alive());
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
 }
 

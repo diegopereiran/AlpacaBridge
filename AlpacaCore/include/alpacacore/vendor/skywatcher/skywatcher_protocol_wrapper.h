@@ -12,7 +12,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -112,6 +114,12 @@ struct AxisParameters {
 
 class SkyWatcherProtocolWrapper {
 public:
+    // One wrapper owns one transport. Drivers own distinct instances; the legacy
+    // singleton remains available for standalone protocol callers.
+    using SerialRead = std::function<std::ptrdiff_t(int, char*, std::size_t)>;
+    // An optional read seam exercises quiet/hung-up tty behavior without hardware.
+    explicit SkyWatcherProtocolWrapper(SerialRead serial_read = {});
+    virtual ~SkyWatcherProtocolWrapper();
     static SkyWatcherProtocolWrapper& instance();
 
     bool connect(const ConnectionInfo& info);
@@ -120,7 +128,7 @@ public:
     // open-astro#445: is_connected() without I/O and without waiting on an
     // exchange, that also notices a serial device which has gone away (and
     // closes the dead link when it can). Safe to call from a Connected poll.
-    bool link_alive();
+    virtual bool link_alive();
 
     // Low-level framed exchange: sends ":<cmd><axis><data>\r", returns the
     // payload of a "=" response (without the leading "=" or trailing CR).
@@ -158,9 +166,6 @@ public:
     static uint32_t decode_u24(const std::string& data);
 
 private:
-    SkyWatcherProtocolWrapper();
-    ~SkyWatcherProtocolWrapper();
-
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };

@@ -479,6 +479,18 @@ it at disconnect (both under `firmware_mutex_`), and read only it from the gette
 a `firmware_mutex_`). Do NOT consult `connected_` in the getter — rely on the
 cache being empty while disconnected, so there is no atomic-vs-mutex ordering bug.
 
+### Sky-Watcher serial recovery tests (PR #522)
+
+Each direct-driver instance owns its protocol wrapper; never use the legacy singleton
+from a driver operation or worker. A second configured mount must not replace the first
+mount's transport. Both HTTP disconnect endpoints deliver last-client cleanup even when
+`get_connected()` is already false: link health is not proof that runtime state was reset.
+A cable-pull followed by an HTTP connect tests the first relink branch because the router
+probes link health first. The late-loss branch needs a deterministic probe seam and an
+outstanding fake-board task; assert that the old task never sends commands to the new link.
+Zero-byte reads are not themselves proof of removal; back off within the response deadline
+so a hung-up-but-present tty cannot busy-spin, while retaining the quiet-board timeout policy.
+
 ### Cache-backed reads must track link health (issue #237)
 
 A driver whose reads are served from a cache that a background reader fills (streamed status

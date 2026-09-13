@@ -297,6 +297,7 @@ public:
     int get_interface_version() const override { return 1; }
     bool get_connected() const override { return connected_; }
     void set_connected(bool connected) override {
+        if (!connected) cleanup_pending = false;
         if (connected && !connected_) {
             ++connect_count;
         } else if (!connected && connected_) {
@@ -313,7 +314,12 @@ public:
 
     // Simulate the upstream link dying underneath the bridge (USB unplug,
     // serial wedge) without going through disconnect().
-    void drop_link() { connected_ = false; }
+    void drop_link() {
+        connected_ = false;
+        cleanup_pending = true;
+    }
+
+    bool cleanup_pending = false;
 
     int connect_count = 0;
     int disconnect_count = 0;
@@ -2710,6 +2716,28 @@ int main() {
         EXPECT(!stub->get_connected());
 
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9701);
+    }
+
+    // A false link-health getter does not prove driver teardown completed.
+    // Both Platform 6 and 7 must deliver an explicit disconnect to the driver.
+    {
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto stub = std::make_shared<ConnectStubDriver>(9790);
+        EXPECT(registry.register_device(stub));
+        const std::string base = "/api/v1/covercalibrator/9790";
+        for (bool platform7 : {false, true}) {
+            put_connected(router, base, "445", true);
+            stub->drop_link();
+            EXPECT(!get_connected_value(router, base, "445"));
+            EXPECT(stub->cleanup_pending);
+            if (platform7)
+                route_request(router, "PUT", base + "/disconnect", "ClientID=445");
+            else
+                put_connected(router, base, "445", false);
+            EXPECT(!stub->cleanup_pending);
+            EXPECT(!stub->get_connected());
+        }
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, 9790);
     }
 
     // Issue #163: the client key is qualified by peer address, so two clients

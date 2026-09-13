@@ -646,7 +646,7 @@ std::vector<SkyWatcherHostInfo> discover_skywatcher_hosts(int timeout_ms) {
 
 class SkyWatcherProtocolWrapper::Impl {
 public:
-    Impl() = default;
+    explicit Impl(SerialRead serial_read) : serial_read_(std::move(serial_read)) {}
 
     ~Impl() { disconnect(); }
 
@@ -998,7 +998,9 @@ private:
         while (std::chrono::steady_clock::now() < deadline) {
             char ch = 0;
             // Serialized transport: one in-flight command per link, bounded by VTIME.
-            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            const auto r = serial_read_
+                               ? serial_read_(serial_fd_, &ch, 1)
+                               : ::read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
             if (r == 1) {
                 if (ch == kFrameEnd) {
                     return reply;
@@ -1014,6 +1016,12 @@ private:
                     lose_serial_link_locked("Serial read failed: " + util::errno_string(err));
                 }
                 throw AlpacaException("Serial read failed: " + util::errno_string(err));
+            } else {
+                // VTIME paces a quiet tty, but EOF and nonblocking retries can
+                // return immediately. Preserve the deadline without burning a
+                // core while the node still exists (zero alone is not loss).
+                std::this_thread::sleep_until(
+                    std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)));
             }
         }
         // A hung-up tty reads 0 bytes at once, which looks like a quiet board
@@ -1231,6 +1239,7 @@ private:
     }
 #endif
 
+    SerialRead serial_read_;
     mutable std::mutex io_mutex_;
     // Written only under io_mutex_; atomic so link_alive() can read it without.
     std::atomic<bool> connected_{false};
@@ -1259,7 +1268,8 @@ private:
 
 // ── Public wrapper API ──────────────────────────────────────────────────────
 
-SkyWatcherProtocolWrapper::SkyWatcherProtocolWrapper() : pimpl_(std::make_unique<Impl>()) {}
+SkyWatcherProtocolWrapper::SkyWatcherProtocolWrapper(SerialRead serial_read)
+    : pimpl_(std::make_unique<Impl>(std::move(serial_read))) {}
 SkyWatcherProtocolWrapper::~SkyWatcherProtocolWrapper() = default;
 
 SkyWatcherProtocolWrapper& SkyWatcherProtocolWrapper::instance() {

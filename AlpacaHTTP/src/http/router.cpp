@@ -2447,8 +2447,10 @@ Response Router::dispatch_device_method(
                     // mutex — see async_connectable.h for which is which and
                     // why only the telescopes create the ABBA hazard — without a
                     // per-driver capability flag, which is future work.
-                } else if (!connected && unregister_client_connection(device.get(), client_key) == 0 &&
-                           (device->get_connecting() || device->get_connected())) {
+                } else if (!connected && unregister_client_connection(device.get(), client_key) == 0) {
+                    // A lost-link getter can report false before driver cleanup.
+                    // Deliver explicit disconnect even then, as PUT /disconnect
+                    // does; the driver owns idempotency and runtime-state reset.
                     // Last client out: tear down the upstream link. While other
                     // clients remain registered the device stays connected —
                     // one client's disconnect must not take the mount away
