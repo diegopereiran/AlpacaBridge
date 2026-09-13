@@ -113,6 +113,12 @@ struct AltAz {
 // reached only with the counterweight bar horizontal. Its SIGN follows which
 // side of the dec axis the tube is on, and does NOT flip with hemisphere.
 // The a1 term does flip, because the mount faces the opposite pole.
+//
+// Caveat (open-astro#459): this oracle reads the branch from the sign of a2
+// alone. Inside the driver's two-count deadband of a2 = 0 the driver answers
+// the branch it last commanded instead, so a case landing there must judge
+// the report against the target, as the pole cases below do, never through
+// check_landing().
 SkyPoint sky_from_axes(double latitude_degrees, double a1_degrees, double a2_degrees) {
     const double s = latitude_degrees < 0.0 ? -1.0 : 1.0;
     const double ha = s * (a1_degrees / 15.0) + (a2_degrees >= 0.0 ? 6.0 : -6.0);
@@ -473,6 +479,233 @@ TEST_CASE("SkyWatcher pointing - an East guide pulse slows the axis in the track
     CHECK(wrap_ha(ra_after - ra_before) > 0.0);  // an autoguider sees RA rise
 
     driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// open-astro#459: at the exact pole both dec-axis branches command the same
+// encoder count (a2 = branch * (90 - 90) rounds to home either way), so the
+// branch cannot be read back from the axis. The driver remembers the branch
+// the command path chose and uses it inside a two-count deadband of a2 = 0.
+// The oracle above is deliberately left as the pure axis formula: at the pole
+// its HA is undefined physically (the tube points at the pole whatever a1
+// says), so these cases judge the driver's REPORT against the target rather
+// than the oracle.
+namespace {
+struct PoleCase {
+    alpacacore::test::FakeMountProfile profile;
+    double latitude;
+    double longitude;
+    double ha_hours;    // target hour angle; the sign picks the branch
+    int expected_side;  // ASCOM side for that hour angle
+};
+}  // namespace
+
+TEST_CASE("SkyWatcher pointing - a slew to the exact pole reads back the target RA, not 12 h out (#459)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    const PoleCase cases[] = {
+        {alpacacore::test::FakeMountProfile::wave_100i(), 45.0, 11.0, -0.1, 1},    // north, east of the meridian
+        {alpacacore::test::FakeMountProfile::wave_100i(), 45.0, 11.0, +0.1, 0},    // north, west
+        {alpacacore::test::FakeMountProfile::eqm35_pro(), -35.0, 150.0, -0.1, 1},  // south, east
+    };
+    for (const auto& c : cases) {
+        FakeSkyWatcherMount mount(c.profile);
+        REQUIRE(mount.ok());
+        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), c.latitude, c.longitude, 100.0);
+        driver->set_connected(true);
+        driver->set_tracking(true);
+
+        const double lst = driver->get_sidereal_time();
+        const double target_ra = std::fmod(lst - c.ha_hours + 24.0, 24.0);
+        const double target_dec = c.latitude < 0.0 ? -90.0 : 90.0;
+        INFO("HA " << c.ha_hours << " h, latitude " << c.latitude);
+        REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == c.expected_side);
+
+        const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+        INFO("axes a1=" << f.a1 << " a2=" << f.a2 << " reported RA " << f.reported_ra << " target " << target_ra);
+        // The dec axis really is at the pole, inside the two-count deadband
+        // where branch_from_axis_locked() consults the memory: the encoder
+        // carries no branch, so this case exercises the remembered one.
+        CHECK(std::abs(f.a2) <= 2.0 * 360.0 / static_cast<double>(c.profile.cpr));
+        // Before #459 the negative-HA rows reported RA 12 h out here.
+        CHECK(std::abs(wrap_ha(f.reported_ra - target_ra)) < kHaToleranceHours);
+        CHECK(std::abs(f.reported_dec - target_dec) < kDecToleranceDegrees);
+        // SideOfPier agrees with the branch the goto chose, by construction.
+        CHECK(f.side_of_pier == c.expected_side);
+
+        driver->set_tracking(false);
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("SkyWatcher pointing - after leaving the pole the branch comes from the axis again (#459)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    const double latitude = 45.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 11.0, 200.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    // Park the remembered branch on the NEGATIVE side with a pole slew ...
+    double lst = driver->get_sidereal_time();
+    const LandedFrame pole = land(*driver, mount, std::fmod(lst + 0.1, 24.0), 90.0);
+    REQUIRE(pole.side_of_pier == 1);
+
+    // ... then a goto west of the meridian, which commands the positive
+    // branch (a2 > 0). The readback must follow the axis, not the stale
+    // memory: the oracle, the report and the pier side all say west.
+    lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst - 3.0 + 24.0, 24.0);  // HA +3 h
+    const double target_dec = 20.0;
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, target_ra, target_dec, 0);
+    CHECK(f.a2 > 1.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a sync at the exact pole reads back the synced RA, not 12 h out (#459)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // Polar-alignment routines sync at the pole. The sync path writes the
+    // same -0.0 dec-axis angle the goto path does on the negative branch, so
+    // it has to record the branch too; with that line missing the readback
+    // used the stale connect-time branch (+1) and reported RA 12 h out with
+    // SideOfPier on the wrong side.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 0.1, 24.0);  // HA -0.1 h: the negative branch
+    const double target_dec = 90.0;
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
+
+    driver->sync_to_coordinates(target_ra, target_dec);
+
+    const double a2 = mount.physical_degrees(2);
+    INFO("axis a2=" << a2 << " reported RA " << driver->get_right_ascension() << " target " << target_ra);
+    CHECK(std::abs(a2) <= 2.0 * 360.0 / static_cast<double>(alpacacore::test::FakeMountProfile::wave_100i().cpr));
+    CHECK(std::abs(wrap_ha(driver->get_right_ascension() - target_ra)) < kHaToleranceHours);
+    CHECK(std::abs(driver->get_declination() - target_dec) < kDecToleranceDegrees);
+    CHECK(driver->get_side_of_pier() == 1);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - AutoHome resets the remembered branch to the positive side (#459)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // AutoHome ends by stamping the dec axis to the home count, a2 = 0, which
+    // is inside the deadband: the reported RA and SideOfPier there come from
+    // the remembered branch. The re-anchor resets it to the positive branch,
+    // the pre-#459 answer at home; without that reset a FindHome after an
+    // east-side goto would still report the east side at the pole.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    mount.set_home_index_degrees(1, 2.0);
+    mount.set_home_index_degrees(2, 2.0);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    // Park the memory on the negative branch with an east-of-meridian goto,
+    // close to the pole so the AutoHome hunt afterwards is short.
+    const double lst = driver->get_sidereal_time();
+    const LandedFrame f = land(*driver, mount, std::fmod(lst + 2.0, 24.0), 85.0);  // HA -2 h
+    REQUIRE(f.side_of_pier == 1);
+    REQUIRE(f.a2 < -1.0);
+
+    // Tracking off, as the FindHome fixture in test_skywatcher_async.cpp does;
+    // the hunt starts 40 degrees from the index, so it takes longer than the
+    // from-home run there.
+    driver->set_tracking(false);
+    driver->find_home();
+    REQUIRE(wait_until([&] { return driver->get_at_home(); }, 180000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+
+    INFO("after AutoHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
+    REQUIRE(std::abs(driver->get_declination() - 90.0) < 0.2);
+    CHECK(driver->get_side_of_pier() == 0);
+    // The +6 h home term: at home the report is LST - (a1 + 6 h) with a1 = 0.
+    CHECK(std::abs(wrap_ha(driver->get_right_ascension() - (driver->get_sidereal_time() - 6.0))) < 0.05);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - the no-indexer FindHome lands on the positive branch (#459)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // A board without home sensors (the EQM-35 Pro profile) homes with a plain
+    // goto to a2 = +0.0. That goto has to set the branch memory like any
+    // other, or FindHome would answer a different SideOfPier than AutoHome
+    // does for the same mechanical state.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0, 150.0, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const LandedFrame f = land(*driver, mount, std::fmod(lst + 2.0, 24.0), -50.0);  // HA -2 h, east
+    REQUIRE(f.side_of_pier == 1);
+    REQUIRE(f.a2 < -1.0);
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return driver->get_at_home(); }, 60000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    INFO("after FindHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
+    CHECK(driver->get_side_of_pier() == 0);
+    CHECK(std::abs(wrap_ha(driver->get_right_ascension() - (driver->get_sidereal_time() - 6.0))) < 0.05);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - the default Park lands on the positive branch (#459)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // Default park is the home position, a goto to a2 = +0.0, so the parked
+    // report agrees with FindHome and with connect.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const LandedFrame f = land(*driver, mount, std::fmod(lst + 2.0, 24.0), 40.0);  // HA -2 h, east
+    REQUIRE(f.side_of_pier == 1);
+
+    driver->park();
+    REQUIRE(wait_until([&] { return driver->get_at_park(); }, 60000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    INFO("parked a2=" << mount.physical_degrees(2));
+    CHECK(driver->get_side_of_pier() == 0);
+
+    driver->unpark();
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a reconnect forgets the commanded branch (#459)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    // reset_runtime_state_locked() puts the memory back on the positive
+    // branch at connect. Observable only across a reconnect of the same
+    // instance: park the memory negative with a pole goto, reconnect, and
+    // the pole must report the positive side again.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const LandedFrame pole = land(*driver, mount, std::fmod(lst + 0.1, 24.0), 90.0);  // HA -0.1 h
+    REQUIRE(pole.side_of_pier == 1);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+    driver->set_connected(true);
+    INFO("after reconnect a2=" << mount.physical_degrees(2));
+    CHECK(driver->get_side_of_pier() == 0);
+
     driver->set_connected(false);
 }
 

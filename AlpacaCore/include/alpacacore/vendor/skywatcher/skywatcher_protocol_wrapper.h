@@ -117,6 +117,10 @@ public:
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    // open-astro#445: is_connected() without I/O and without waiting on an
+    // exchange, that also notices a serial device which has gone away (and
+    // closes the dead link when it can). Safe to call from a Connected poll.
+    bool link_alive();
 
     // Low-level framed exchange: sends ":<cmd><axis><data>\r", returns the
     // payload of a "=" response (without the leading "=" or trailing CR).
