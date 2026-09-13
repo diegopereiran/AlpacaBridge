@@ -742,7 +742,7 @@ DOUBLE_BACKTICK_SPAN_RE = re.compile(r"``.+?``")
 CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # Tripwire for the span matcher, not a rule about document size: if
 # AGENTS.md is legitimately trimmed below this, lower the floor.
-MIN_AGENTS_MD_PATH_REFS = 50
+MIN_AGENTS_MD_PATH_REFS = 40
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
