@@ -894,22 +894,34 @@ MEMORY_COMMENT_PATH_RE = re.compile(r"\bdocs/(?:failures|decisions)/[A-Za-z0-9._
 FIRST_PARTY_COMMENT_EXTENSIONS = {".cpp", ".h", ".js", ".py", ".sh"}
 
 
-def check_memory_comment_paths_exist():
-    """Validate memory-record paths named in first-party source comments."""
+def check_memory_comment_paths_exist(root=ROOT):
+    """Validate memory-record paths named in first-party source comments.
+
+    `root` is a parameter so the self-test can drive this over a fixture
+    tree; the real run passes nothing.
+    """
     failures = []
     for component in ("AlpacaCore", "AlpacaHTTP", "scripts"):
-        for path in (ROOT / component).rglob("*"):
+        if not (root / component).is_dir():
+            continue
+        for path in (root / component).rglob("*"):
             if not path.is_file() or path.suffix not in FIRST_PARTY_COMMENT_EXTENSIONS:
                 continue
-            if "external" in path.relative_to(ROOT).parts or any(part.startswith("build") for part in path.parts):
+            rel = path.relative_to(root)
+            # Exclusions match repo-relative DIRECTORY components only. The
+            # first version tested `path.parts`, which is absolute and ends in
+            # the file's own name: `scripts/build_deb.sh` was never scanned,
+            # and a checkout under a directory whose name starts with "build"
+            # skipped every file and reported a pass having read nothing.
+            directories = rel.parts[:-1]
+            if "external" in directories or any(part.startswith("build") for part in directories):
                 continue
             for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 if not line.lstrip().startswith(("//", "#", "*")):
                     continue
                 for reference in MEMORY_COMMENT_PATH_RE.findall(line):
-                    if not (ROOT / reference).is_file():
-                        failures.append("%s:%d references a missing memory record: %s" %
-                                        (path.relative_to(ROOT), lineno, reference))
+                    if not (root / reference).is_file():
+                        failures.append("%s:%d references a missing memory record: %s" % (rel, lineno, reference))
     return failures
 
 
@@ -1387,6 +1399,41 @@ def self_test():
     check("memory references are found in source comments",
           MEMORY_COMMENT_PATH_RE.findall("// See docs/decisions/0001-example.md") ==
           ["docs/decisions/0001-example.md"])
+
+    # check_memory_comment_paths_exist over a fixture tree. The root lives
+    # under a directory named "build-fixture": the checkout's own ancestors
+    # must never count as an excluded component (they did once, and the
+    # check went vacuously green). Each expectation is one rule of the check.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "build-fixture" / "repo"
+        fixture = {
+            "docs/failures/0001-present.md": "# present\n",
+            "AlpacaCore/src/ok.cpp": "// See docs/failures/0001-present.md\n",
+            "AlpacaCore/src/bad.cpp": "// See docs/failures/0002-missing.md\n",
+            "scripts/build_deb.sh": "# See docs/failures/0003-missing.md\n",
+            "AlpacaHTTP/src/code.cpp": 'std::string s = "docs/failures/0004-missing.md";\n',
+            "AlpacaCore/build/gen.cpp": "// See docs/failures/0005-missing.md\n",
+            "AlpacaCore/external/sdk.h": "// See docs/failures/0006-missing.md\n",
+            "AlpacaCore/src/notes.txt": "// See docs/failures/0007-missing.md\n",
+        }
+        for name, text in fixture.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text, encoding="utf-8")
+        found = check_memory_comment_paths_exist(root)
+        check("memory comment check: a resolving reference is not reported",
+              not any("ok.cpp" in f for f in found))
+        check("memory comment check: a missing record in a source comment is reported",
+              any(f.startswith("AlpacaCore/src/bad.cpp:1 ") and "0002-missing" in f for f in found))
+        check("memory comment check: a file whose own name starts with build is scanned",
+              any(f.startswith("scripts/build_deb.sh:1 ") for f in found))
+        check("memory comment check: a path in a non-comment line is not a reference",
+              not any("code.cpp" in f for f in found))
+        check("memory comment check: build/ and external/ directories are skipped",
+              not any("gen.cpp" in f or "sdk.h" in f for f in found))
+        check("memory comment check: only first-party source extensions are scanned",
+              not any("notes.txt" in f for f in found))
+        check("memory comment check: exactly the two expected findings", len(found) == 2)
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
