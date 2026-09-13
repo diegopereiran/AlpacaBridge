@@ -892,6 +892,8 @@ def check_agents_md_paths_exist():
 
 MEMORY_COMMENT_PATH_RE = re.compile(r"\bdocs/(?:failures|decisions)/[A-Za-z0-9._-]+\.md\b")
 FIRST_PARTY_COMMENT_EXTENSIONS = {".cpp", ".h", ".js", ".py", ".sh"}
+# The real tree has ~330 candidate files; the self-test fixture has a handful.
+MIN_MEMORY_COMMENT_FILES = 5
 
 
 def check_memory_comment_paths_exist(root=ROOT):
@@ -901,6 +903,7 @@ def check_memory_comment_paths_exist(root=ROOT):
     tree; the real run passes nothing.
     """
     failures = []
+    scanned = 0
     for component in ("AlpacaCore", "AlpacaHTTP", "scripts"):
         if not (root / component).is_dir():
             continue
@@ -916,12 +919,18 @@ def check_memory_comment_paths_exist(root=ROOT):
             directories = rel.parts[:-1]
             if "external" in directories or any(part.startswith("build") for part in directories):
                 continue
+            scanned += 1
             for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 if not line.lstrip().startswith(("//", "#", "*")):
                     continue
                 for reference in MEMORY_COMMENT_PATH_RE.findall(line):
                     if not (root / reference).is_file():
                         failures.append("%s:%d references a missing memory record: %s" % (rel, lineno, reference))
+    # Floor, like the other gates: a renamed component directory or a wrong
+    # root would otherwise read nothing and report a clean pass.
+    if scanned < MIN_MEMORY_COMMENT_FILES:
+        failures.append("memory-comment check scanned only %d first-party source file(s) (floor %d): "
+                        "the component roots or the exclusion rule regressed" % (scanned, MIN_MEMORY_COMMENT_FILES))
     return failures
 
 
@@ -1413,6 +1422,7 @@ def self_test():
             "AlpacaCore/src/bad.cpp": "// See docs/failures/0002-missing.md\n",
             "scripts/build_deb.sh": "# See docs/failures/0003-missing.md\n",
             "AlpacaHTTP/src/code.cpp": 'std::string s = "docs/failures/0004-missing.md";\n',
+            "AlpacaHTTP/src/plain.cpp": "// no memory reference here\n",
             "AlpacaCore/build/gen.cpp": "// See docs/failures/0005-missing.md\n",
             "AlpacaCore/external/sdk.h": "// See docs/failures/0006-missing.md\n",
             "AlpacaCore/src/notes.txt": "// See docs/failures/0007-missing.md\n",
@@ -1434,6 +1444,10 @@ def self_test():
         check("memory comment check: only first-party source extensions are scanned",
               not any("notes.txt" in f for f in found))
         check("memory comment check: exactly the two expected findings", len(found) == 2)
+        empty = Path(tmp) / "empty"
+        empty.mkdir()
+        check("memory comment check: a root with no first-party files trips the floor",
+              any("floor" in f for f in check_memory_comment_paths_exist(empty)))
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
