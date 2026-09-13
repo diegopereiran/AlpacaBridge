@@ -407,10 +407,16 @@ public:
     DeviceType get_device_type() const override { return DeviceType::Camera; }
 
     std::string get_unique_id() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_info_valid_ && !camera_info_.port.empty()) {
-            return "GPHOTO_" + camera_info_.port;
-        }
+        // Review PR #485 round 4: camera_info_.port (the libgphoto2 USB bus
+        // path, e.g. "usb:001,005") is not a stable identity -- it changes
+        // across an unplug/replug (the bus device number increments) and
+        // even across a power-off/power-on within the same session, since a
+        // DSLR that was off at Connect-preload time and powered on later
+        // re-enumerates with a new port. Unlike the other camera vendors
+        // here, libgphoto2/PTP exposes no serial number to key on instead,
+        // so device_number_ -- the stable, config-assigned Alpaca device
+        // slot -- is the only identifier that doesn't change under the
+        // camera's own power state.
         return "GPHOTO_" + std::to_string(device_number_);
     }
 

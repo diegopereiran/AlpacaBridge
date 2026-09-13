@@ -2963,6 +2963,15 @@ SDK cleanup checklist does not apply here).
   everywhere else in this class — lifecycle mutex first, then `mutex_`) before its `with_handle()`
   call, so it blocks until any in-flight `exposure_thread_` has actually been joined. Any future
   SDK-touching setter needs the same `exposure_lifecycle_mutex_` guard, not just `with_handle()`.
+- **`get_unique_id()` keys on `device_number_`, not the libgphoto2 USB port string** (review PR
+  #485 round 4) — `camera_info_.port` (e.g. `usb:001,005`) looks like a natural per-camera
+  identity, but it isn't stable: it changes across every unplug/replug (the bus device number
+  increments) and even within one session, since a DSLR that was powered off when
+  `preload_camera_info_locked()` ran and switched on later re-enumerates with a new port. Unlike
+  every other camera vendor here, libgphoto2/PTP exposes no serial number to fall back to, so
+  `device_number_` (the config-assigned Alpaca device slot, fixed for the life of the process) is
+  the only identifier that doesn't move under the camera's own power state — use it unconditionally
+  rather than preferring the port string when camera info happens to be cached.
 - **`PixelSizeX`/`PixelSizeY` come from a static per-model lookup table** — libgphoto2 exposes no
   pixel-pitch query, and unlike sensor geometry above, pixel pitch in microns isn't recoverable
   from decoding a RAW frame either (libraw doesn't expose it), so this is the one geometry-like
