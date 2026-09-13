@@ -2080,6 +2080,40 @@ int main() {
         remove_device(router, "ioptron", "focuser", 9622);
     }
     {
+        // qhy / focuser (Q-Focuser) — serial mode persists portPath (no
+        // baudRate: fixed 9600) plus every connect-time setting through
+        // sanitize_device_config; an unknown key is dropped.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "qhy"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9624},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyACM3"},
+                                           {"focuserIndex", 1},
+                                           {"maxStep", 30000},
+                                           {"reverse", true},
+                                           {"speed", 4},
+                                           {"holdForce", true},
+                                           {"holdIhold", 6},
+                                           {"holdIrun", 12},
+                                           {"temperatureSource", "chip"},
+                                           {"cameraIndex", 7}},
+                                          "Focuser", 9624);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM3");
+        EXPECT(cfg.value("focuserIndex", -1) == 1);
+        EXPECT(cfg.value("maxStep", -1) == 30000);
+        EXPECT(cfg.value("reverse", false) == true);
+        EXPECT(cfg.value("speed", -1) == 4);
+        EXPECT(cfg.value("holdForce", false) == true);
+        EXPECT(cfg.value("holdIhold", -1) == 6);
+        EXPECT(cfg.value("holdIrun", -1) == 12);
+        EXPECT(cfg.value("temperatureSource", "") == "chip");
+        EXPECT(!cfg.contains("cameraIndex"));
+        remove_device(router, "qhy", "focuser", 9624);
+    }
+    {
         // ioptron / filterwheel (iEFW) — serial mode persists portPath (no
         // baudRate: fixed 115200), auto mode persists filterwheelIndex, and
         // filterNames survive sanitize_device_config.

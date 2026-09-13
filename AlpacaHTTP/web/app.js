@@ -333,6 +333,7 @@ const INDEX_FIELDS = [
     { fieldId: 'rotator-index', vendor: 'zwo', deviceType: 'rotator', configKey: 'rotatorIndex', idFieldId: 'rotator-id' },
     { fieldId: 'qhy-camera-index', vendor: 'qhy', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'qhy-cfw-camera-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'cameraIndex', idFieldId: 'qhy-cfw-camera-id' },
+    { fieldId: 'qhy-focuser-index', vendor: 'qhy', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'gphoto-camera-index', vendor: 'gphoto', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
@@ -923,6 +924,29 @@ function startEditDevice(device) {
         if (zwoMountConnectionTypeEl) {
             zwoMountConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'qhy' && deviceType === 'focuser') {
+        // Q-Focuser: USB-serial only, fixed 9600 baud.
+        const qfConnectionType = config.connectionType || 'auto';
+        setFormValue('qhy-focuser-connection-type', qfConnectionType);
+        if (qfConnectionType === 'serial') {
+            setFormValue('qhy-focuser-port-path', config.portPath);
+        } else if (config.focuserIndex !== undefined && config.focuserIndex !== null) {
+            setFormValue('qhy-focuser-index', config.focuserIndex);
+        }
+        setFormValue('qhy-focuser-max-step', config.maxStep !== undefined ? config.maxStep : 64000);
+        setFormValue('qhy-focuser-speed', config.speed !== undefined ? String(config.speed) : '1');
+        setFormValue('qhy-focuser-temperature-source', config.temperatureSource || 'external');
+        setFormValue('qhy-focuser-hold-ihold', config.holdIhold !== undefined ? config.holdIhold : 4);
+        setFormValue('qhy-focuser-hold-irun', config.holdIrun !== undefined ? config.holdIrun : 8);
+        const qfReverse = document.getElementById('qhy-focuser-reverse');
+        if (qfReverse) qfReverse.checked = config.reverse === true;
+        const qfHoldForce = document.getElementById('qhy-focuser-hold-force');
+        if (qfHoldForce) qfHoldForce.checked = config.holdForce === true;
+        const qfConnectionTypeEl = document.getElementById('qhy-focuser-connection-type');
+        if (qfConnectionTypeEl) {
+            qfConnectionTypeEl.dispatchEvent(new Event('change'));
+        }
+        updateQhyConfigFields();
     } else if (vendor === 'qhy' && deviceType === 'filterwheel') {
         // Integrated CFW: bound to the same camera index/id as the paired
         // QHY camera device, but stored under its own field names.
@@ -2271,9 +2295,9 @@ function updateVendorOptions() {
     }
     const qhyOption = vendorSelect.querySelector('option[value="qhy"]');
     if (qhyOption) {
-        // QHY provides cameras and, on models like the miniCam8M, an
-        // integrated CFW (filter wheel) sharing the camera's SDK handle.
-        const qhyAllowed = isCamera || isFilterWheel;
+        // QHY provides cameras, an integrated CFW (filter wheel) on models
+        // like the miniCam8M, and the Q-Focuser (serial, no SDK).
+        const qhyAllowed = isCamera || isFilterWheel || isFocuser;
         qhyOption.disabled = !qhyAllowed;
         qhyOption.hidden = !qhyAllowed;
     }
@@ -2352,7 +2376,7 @@ function updateVendorOptions() {
         vendorSelect.value === 'zwo') {
         vendorSelect.value = '';
     }
-    if (!isCamera && !isFilterWheel && vendorSelect.value === 'qhy') {
+    if (!isCamera && !isFilterWheel && !isFocuser && vendorSelect.value === 'qhy') {
         vendorSelect.value = '';
     }
     if (!isCamera && vendorSelect.value === 'svbony') {
@@ -2571,6 +2595,15 @@ if (ioptronFilterwheelConnectionType) {
         const type = this.value;
         document.getElementById('ioptron-filterwheel-auto-config').style.display = type === 'serial' ? 'none' : 'block';
         document.getElementById('ioptron-filterwheel-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const qhyFocuserConnectionType = document.getElementById('qhy-focuser-connection-type');
+if (qhyFocuserConnectionType) {
+    qhyFocuserConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('qhy-focuser-auto-config').style.display = type === 'serial' ? 'none' : 'block';
+        document.getElementById('qhy-focuser-serial-config').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -3216,9 +3249,11 @@ function updateQhyConfigFields() {
     }
     const cameraFields = document.getElementById('qhy-camera-fields');
     const filterwheelFields = document.getElementById('qhy-filterwheel-fields');
+    const focuserFields = document.getElementById('qhy-focuser-fields');
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
     const isCamera = deviceType === 'camera';
     const isFilterWheel = deviceType === 'filterwheel';
+    const isFocuser = deviceType === 'focuser';
     if (cameraFields) {
         cameraFields.style.display = isCamera ? 'block' : 'none';
         setFieldGroupEnabled(cameraFields, isCamera);
@@ -3226,6 +3261,10 @@ function updateQhyConfigFields() {
     if (filterwheelFields) {
         filterwheelFields.style.display = isFilterWheel ? 'block' : 'none';
         setFieldGroupEnabled(filterwheelFields, isFilterWheel);
+    }
+    if (focuserFields) {
+        focuserFields.style.display = isFocuser ? 'block' : 'none';
+        setFieldGroupEnabled(focuserFields, isFocuser);
     }
 }
 
@@ -3634,6 +3673,25 @@ document.getElementById('device-form').addEventListener('submit', async function
                 }
             }
         }
+    } else if (deviceData.vendor === 'qhy' && normalizeDeviceType(deviceData.deviceType) === 'focuser') {
+        // Q-Focuser: USB-serial only, fixed baud — no baudRate/network fields.
+        // Vendor-prefixed names so the hidden ZWO focuserIndex block does not
+        // win the FormData collision.
+        deviceData.connectionType = formData.get('qhyFocuserConnectionType') || 'auto';
+        if (deviceData.connectionType === 'serial') {
+            deviceData.portPath = formData.get('qhyFocuserPortPath');
+        } else {
+            deviceData.focuserIndex = parseInt(formData.get('qhyFocuserIndex')) || 0;
+        }
+        deviceData.maxStep = parseInt(formData.get('qhyFocuserMaxStep')) || 64000;
+        deviceData.speed = parseInt(formData.get('qhyFocuserSpeed')) || 1;
+        deviceData.reverse = formData.get('qhyFocuserReverse') === 'on';
+        deviceData.temperatureSource = formData.get('qhyFocuserTemperatureSource') || 'external';
+        deviceData.holdForce = formData.get('qhyFocuserHoldForce') === 'on';
+        const qfIhold = readOptionalNumber(formData, 'qhyFocuserHoldIhold');
+        const qfIrun = readOptionalNumber(formData, 'qhyFocuserHoldIrun');
+        deviceData.holdIhold = qfIhold !== null ? qfIhold : 4;
+        deviceData.holdIrun = qfIrun !== null ? qfIrun : 8;
     } else if (deviceData.vendor === 'qhy' && normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
         // Integrated CFW (e.g. miniCam8M): unique field names so hidden
         // fields don't collide with the QHY camera device's own cameraId/

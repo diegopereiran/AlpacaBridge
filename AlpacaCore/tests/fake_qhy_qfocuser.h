@@ -1,0 +1,185 @@
+// AlpacaCore
+// Copyright (c) 2025-2026 Joey Troy and contributors
+//
+// This file is part of AlpacaCore.
+//
+// AlpacaCore is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
+
+#pragma once
+
+// Hardware-free QHY Q-Focuser firmware behind a pseudo-terminal. The driver
+// opens the pty slave exactly like the focuser's GD32 CDC-ACM port; this
+// fake answers on the master with the JSON request/response pairs the
+// protocol wrapper sends (replies copied from a real unit, firmware
+// 20231207):
+//
+//   {"cmd_id":1}            -> {"idx":1,"id":"...","version":20231207,"bv":208}
+//   {"cmd_id":5}            -> {"idx":5,"pos":<position>}
+//   {"cmd_id":4}            -> {"idx":4,"temp":..,"c_t":..,"c_r":..,"o_t":..,"sg":0}
+//   {"cmd_id":6,"tar":N}    -> {"idx":6}   (position steps toward N on each poll)
+//   {"cmd_id":3}            -> {"idx":3}   (stops at the current position)
+//   7 / 11 / 12 / 13 / 16   -> {"idx":<same>}
+//
+// Motion is simulated as `steps_per_poll` steps per position query, so a
+// test can watch IsMoving flip without real time passing.
+
+#include <poll.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "fake_pty_write.h"
+
+namespace alpacacore::test {
+
+class FakeQhyQFocuser {
+public:
+    FakeQhyQFocuser() : pty_("FakeQhyQFocuser") {
+        reader_ = std::thread([this] { run(); });
+    }
+
+    ~FakeQhyQFocuser() {
+        stop_.store(true);
+        if (reader_.joinable()) reader_.join();
+    }
+
+    FakeQhyQFocuser(const FakeQhyQFocuser&) = delete;
+    FakeQhyQFocuser& operator=(const FakeQhyQFocuser&) = delete;
+
+    std::string slave_path() const { return pty_.slave_path(); }
+
+    /// Every command received so far, in wire order.
+    std::vector<std::string> commands() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return commands_;
+    }
+
+    /// Number of received commands containing `needle` (e.g. "\"cmd_id\":6").
+    int count(const std::string& needle) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        int n = 0;
+        for (const auto& c : commands_) {
+            if (c.find(needle) != std::string::npos) ++n;
+        }
+        return n;
+    }
+
+    /// Handshakes that reached the wire: one per connect.
+    int connects() const { return count("\"cmd_id\":1}"); }
+
+    int position() const { return position_.load(); }
+    void set_position(int p) { position_.store(p); }
+    /// Steps moved toward the target per position poll (0 = a stalled motor).
+    void set_steps_per_poll(int n) { steps_per_poll_.store(n); }
+    /// Supply voltage reported in c_r (tenths of a volt): 125 = 12.5 V.
+    void set_voltage_tenths(int v) { voltage_tenths_.store(v); }
+
+private:
+    void run() {
+        std::string pending;
+        char buf[128];
+        while (!stop_.load()) {
+            struct pollfd pfd {};
+            pfd.fd = pty_.master_fd();
+            pfd.events = POLLIN;
+            if (poll(&pfd, 1, 20) <= 0) continue;
+            const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
+            if (n <= 0) continue;
+            for (ssize_t i = 0; i < n; ++i) {
+                if (pending.empty() && buf[i] != '{') continue;
+                pending += buf[i];
+                if (buf[i] == '}') {
+                    handle(pending);
+                    pending.clear();
+                }
+            }
+        }
+    }
+
+    static int field(const std::string& cmd, const char* key) {
+        const std::string k = std::string("\"") + key + "\":";
+        const auto at = cmd.find(k);
+        if (at == std::string::npos) return -1;
+        return std::atoi(cmd.c_str() + at + k.size());
+    }
+
+    void handle(const std::string& cmd) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            commands_.push_back(cmd);
+        }
+        const int id = field(cmd, "cmd_id");
+        std::string reply;
+        switch (id) {
+            case 1:
+                reply = "{\"idx\":1,\"id\":\"\\u001f@SL3KG\\u0018TH2C\",\"version\":20231207,\"bv\":208}";
+                break;
+            case 5: {
+                int pos = position_.load();
+                if (moving_.load()) {
+                    const int tar = target_.load();
+                    const int step = steps_per_poll_.load();
+                    if (pos < tar)
+                        pos = (tar - pos <= step) ? tar : pos + step;
+                    else if (pos > tar)
+                        pos = (pos - tar <= step) ? tar : pos - step;
+                    position_.store(pos);
+                    if (pos == tar) moving_.store(false);
+                }
+                reply = "{\"idx\":5,\"pos\":" + std::to_string(pos) + "}";
+                break;
+            }
+            case 4:
+                reply = "{\"idx\":4,\"temp\":120683,\"c_t\":18727,\"c_r\":" + std::to_string(voltage_tenths_.load()) +
+                        ",\"o_t\":23881,\"sg\":0}";
+                break;
+            case 6:
+                target_.store(field(cmd, "tar"));
+                moving_.store(true);
+                reply = "{\"idx\":6}";
+                break;
+            case 3:
+                moving_.store(false);
+                reply = "{\"idx\":3}";
+                break;
+            case 11:
+                position_.store(field(cmd, "init_val"));
+                reply = "{\"idx\":11}";
+                break;
+            case 7:
+            case 12:
+            case 13:
+            case 16:
+                reply = "{\"idx\":" + std::to_string(id) + "}";
+                break;
+            default:
+                return;  // unknown command: the firmware stays silent
+        }
+        pty_write_bounded(pty_.master_fd(), reply, stop_);
+    }
+
+    PtyPair pty_;
+    std::thread reader_;
+    std::atomic<bool> stop_{false};
+
+    mutable std::mutex mutex_;
+    std::vector<std::string> commands_;
+
+    std::atomic<int> position_{1000};
+    std::atomic<int> target_{1000};
+    std::atomic<bool> moving_{false};
+    std::atomic<int> steps_per_poll_{100000};  // default: moves complete on the first poll
+    std::atomic<int> voltage_tenths_{125};
+};
+
+}  // namespace alpacacore::test

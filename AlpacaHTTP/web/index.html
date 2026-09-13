@@ -952,6 +952,84 @@
                         </details>
                     </div>
 
+                    <!-- Q-Focuser: USB CDC-ACM serial JSON protocol, no SDK. -->
+                    <div id="qhy-focuser-fields" style="display: none;">
+                        <small style="color: #666;">Q-Focuser (High Precision and standard). USB serial at a fixed 9600 baud. Auto-detect scans for the focuser's GigaDevice USB interface and verifies it with the device handshake.</small>
+
+                        <div class="form-group">
+                            <label for="qhy-focuser-connection-type">Connection Type:</label>
+                            <select id="qhy-focuser-connection-type" name="qhyFocuserConnectionType">
+                                <option value="auto">Auto-Detect (Recommended)</option>
+                                <option value="serial">Serial Port</option>
+                            </select>
+                        </div>
+
+                        <div id="qhy-focuser-auto-config" class="connection-config">
+                            <div class="form-group">
+                                <label for="qhy-focuser-index">Focuser Index:</label>
+                                <input type="number" id="qhy-focuser-index" name="qhyFocuserIndex" value="0" min="0">
+                                <small>0-based index when more than one Q-Focuser is detected</small>
+                            </div>
+                        </div>
+
+                        <div id="qhy-focuser-serial-config" class="connection-config" style="display: none;">
+                            <div class="form-group">
+                                <label for="qhy-focuser-port-path">Serial Port:</label>
+                                <input type="text" id="qhy-focuser-port-path" name="qhyFocuserPortPath" placeholder="/dev/ttyACM0">
+                                <small>Leave blank to auto-detect</small>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="qhy-focuser-max-step">Max Step:</label>
+                            <input type="number" id="qhy-focuser-max-step" name="qhyFocuserMaxStep" value="64000" min="1" max="2000000">
+                            <small>Upper travel limit reported to clients (MaxStep). The firmware itself allows up to 64000 by default.</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="qhy-focuser-speed">Motor Speed:</label>
+                            <select id="qhy-focuser-speed" name="qhyFocuserSpeed">
+                                <option value="1">1 (fastest)</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                                <option value="5">5</option>
+                                <option value="6">6</option>
+                                <option value="7">7</option>
+                                <option value="8">8 (slowest)</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label><input type="checkbox" id="qhy-focuser-reverse" name="qhyFocuserReverse"> Reverse motor direction</label>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="qhy-focuser-temperature-source">Temperature Source:</label>
+                            <select id="qhy-focuser-temperature-source" name="qhyFocuserTemperatureSource">
+                                <option value="external">External probe</option>
+                                <option value="chip">Controller board sensor</option>
+                            </select>
+                            <small>Which sensor the ASCOM Temperature property reports.</small>
+                        </div>
+
+                        <details>
+                            <summary>Advanced: 12 V hold torque</summary>
+                            <small style="color: #666;">Only applied when the focuser reports a supply above 11.5 V. USB-powered units ignore these.</small>
+                            <div class="form-group">
+                                <label><input type="checkbox" id="qhy-focuser-hold-force" name="qhyFocuserHoldForce"> Enable hold force</label>
+                            </div>
+                            <div class="form-group">
+                                <label for="qhy-focuser-hold-ihold">Hold current (IHOLD, 0-16):</label>
+                                <input type="number" id="qhy-focuser-hold-ihold" name="qhyFocuserHoldIhold" value="4" min="0" max="16">
+                            </div>
+                            <div class="form-group">
+                                <label for="qhy-focuser-hold-irun">Run current (IRUN, 0-30):</label>
+                                <input type="number" id="qhy-focuser-hold-irun" name="qhyFocuserHoldIrun" value="8" min="0" max="30">
+                            </div>
+                        </details>
+                    </div>
+
                 </div>
 
                 <!-- SVBONY Camera Configuration -->

@@ -434,6 +434,25 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
+### QHY
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Q-Focuser (High Precision and standard) | USB/Serial | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/Q-Focuser/) |
+
+<details>
+<summary><strong>QHY Focuser Driver Notes</strong></summary>
+
+- **Protocol**: Q-Focuser JSON serial protocol (`{"cmd_id":N,...}` / `{"idx":N,...}`), no SDK required. The QHY camera SDK is not involved; the driver only shares the `qhy` vendor group.
+- **Connection**: USB CDC-ACM via the focuser's GigaDevice GD32 MCU (`28e9:018a`, `/dev/ttyACMn`), fixed 9600 baud. Auto-detection supported.
+- **Auto-detection**: Scans `/dev/serial/by-id/` for the GigaDevice interface and falls back to `/dev/ttyACM0`-`/dev/ttyACM9` filtered by USB descriptor, probing with the version handshake.
+- **Configuration**: `maxStep` (default 64000), `reverse`, `speed` (1 fastest to 8 slowest), `temperatureSource` (external probe or controller board), and the 12 V hold settings `holdForce`, `holdIhold` (0-16), `holdIrun` (0-30). All are pushed to the firmware at connect; the hold settings are only sent when the focuser reports a supply above 11.5 V.
+- **Tested model**: Q-Focuser High Precision (firmware 20231207, board 208) on Linux arm64, ConformU 4.5.1: 0 errors, 0 issues, all members within timing targets
+- **Not supported**: `StepSize` (hardware does not expose microns), temperature compensation
+- **Protocol quirks**: no moving flag, so `IsMoving` is derived from position versus target with a 1.5 s stall grace; position and telemetry are served from short caches (100 ms / 1 s) so `DeviceState` costs one serial round trip.
+
+</details>
+
 ### ToupTek
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
