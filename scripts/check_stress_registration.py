@@ -795,6 +795,13 @@ def self_test():
           "/driver-build Step 7b" in missing and "test_fakevendor_concurrency_stress.cpp" in missing)
     check("MISSING message says the ALLOWLIST must not grow",
           "ALLOWLIST" in missing and "must not grow" in missing)
+    # The property rule 3 cares about: the list is never offered as a way
+    # out. Everything the message says about ALLOWLIST must come after the
+    # instruction to register, and none of it may read as "add ... to".
+    after = missing.split("ALLOWLIST", 1)[1]
+    check("MISSING message never offers ALLOWLIST as an alternative",
+          missing.index("Register it in") < missing.index("ALLOWLIST")
+          and "add" not in after.lower().replace("predate", ""))
 
     # A DeviceType:: mention earlier in the file (a comment, here) must not
     # be picked up ahead of the actual override.
