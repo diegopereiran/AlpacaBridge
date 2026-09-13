@@ -4,6 +4,11 @@ applyTo: "AlpacaCore/src/vendors/touptek/**,AlpacaCore/include/alpacacore/vendor
 
 ### ToupTek
 
+Related decisions and failures — read when changing the behavior they explain:
+
+- [Thermal-poller reconnect race](../../docs/failures/0002-touptek-thermal-poller-race.md)
+
+
 Devices: Camera, Focuser (AAF — Astro Auto Focuser), FilterWheel (AFW — Astro Filter Wheel, AFW-M 5/7-slot), Switch (two backends: cooled-camera **Thermal** — dew heater + fan; and the **StellaVita PowerBox** — GPIO).
 
 - **Rebadge note**: the camera sold as **SVBONY SC715C** is this same G3M715C hardware and enumerates via this driver's SDK under the name `G3M715C` — configure it with vendor `touptek`, not `svbony`. See [SVBONY](svbony.instructions.md).

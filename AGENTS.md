@@ -266,6 +266,8 @@ them collaborator/write access; the `safe-to-review` label stays the per-PR trus
 
 ### When fixing a review finding (avoid the regression treadmill)
 
+Related failure: [PR #99 sibling-fix misses](docs/failures/0003-review-sibling-fixes.md).
+
 Across our driver PRs, most review rounds were spent on **regressions introduced by
 the previous round's fix**, not new bugs. Before pushing any fix:
 
@@ -811,6 +813,8 @@ so a driver-building agent bumps correctly without them.
 
 ## Testing Requirements
 
+Related failure: [Release builds disabled HTTP assertions](docs/failures/0004-ndebug-disabled-http-assertions.md).
+
 - Non-trivial code must have unit tests under `AlpacaCore/tests/` or `AlpacaHTTP/tests/`.
 - Build driver targets and test targets together.
 - Tests should be runnable via `run_all_tests.sh`.
@@ -985,6 +989,8 @@ When adding a test file for a new vendor device:
 
 ## Continuous Integration and Pre-flight
 
+Related decision: [Documentation drift gates](docs/decisions/0003-docs-drift-gates.md).
+
 - CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
 - **Every job in every workflow carries a `timeout-minutes` bound** (issue #363). The numbers are sized from the observed healthy runtime of recent green runs with wide headroom (`sanitizers-tsan` 30 min against a healthy max of 5, `build-vendors`/`sanitizers` 25, `build-test` 20, `clang-tidy` 25 -- it does the all-vendors build `build-vendors` does plus libgpiod from source and `clang-tidy-diff` over every changed line, so it gets that job's bound rather than a smaller one -- `cppcheck` 20 -- its dominant cost is building cppcheck 2.17 from source on the runner with no cache, so it gets the same bound as the build jobs rather than a text-scan-sized one -- the text scans 10; `release` 10, `codeql` 30, `claude-review` 45). They exist because the `[stress]` suite is the one place a regression can *hang* rather than fail, and GitHub's 6-hour default turned that into six hours of runner time before any signal. **When you add a job, give it a bound**, and when a job legitimately outgrows its bound raise the number rather than trimming the work to fit -- these are a backstop against a wedge, not a performance target. Note the deliberate gap on `claude-review`: its 45 min bound is longer than `/pr-checker`'s 30 min verdict-poll budget, so a review running past 30 min times the skill out while CI still lets the job finish. That is the intended precedence (the bound exists to catch a wedged job, not to pace the reviewer); a poll timeout is a re-poll, not a broken workflow.
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
@@ -1029,6 +1035,8 @@ sections above. If a rule would apply to a second vendor, it belongs up there, n
 Vendor-specific guidance lives in `.github/instructions/<vendor>.instructions.md`, scoped to each vendor’s implementation and tests. Rules shared by multiple vendors belong in this file; do not duplicate them in vendor instructions. AlpacaHTTP protocol guidance lives in `.github/instructions/alpaca-http-conformance.instructions.md`.
 
 ## General Notes
+
+Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.md). Read it as a historical snapshot, not current unresolved findings.
 
 - On Linux, ensure udev rules in `AlpacaCore/external/**/*.rules` are installed. Some vendor SDKs (e.g. QHY) ship multiple copies of the same rules file under different subdirectories — deduplicate by basename when installing so only one copy lands in `/etc/udev/rules.d/`. Keep `build_and_run.sh` and `install_alpaca_service.sh` in sync; both contain the udev/firmware install logic.
 - ConformU logs live under `AlpacaCore/conformu/`.

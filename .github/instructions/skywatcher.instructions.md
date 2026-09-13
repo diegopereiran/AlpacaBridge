@@ -4,6 +4,14 @@ applyTo: "AlpacaCore/src/vendors/skywatcher/**,AlpacaCore/include/alpacacore/ven
 
 ### SkyWatcher (Wave / direct motor controller)
 
+Related decisions and failures — read when changing the behavior they explain:
+
+- [Pointing-clock decision](../../docs/decisions/0001-skywatcher-pointing-clock.md)
+- [EQMOD board-detection failures](../../docs/failures/0006-eqmod-board-detection.md)
+- [EQMOD pointing-validation failures](../../docs/failures/0007-eqmod-pointing-validation.md)
+- [EQMOD cross-axis motion failures](../../docs/failures/0008-eqmod-cross-axis-motion.md)
+
+
 Devices: Telescope. Vendor key `skywatcher` — distinct from `synscan`, which speaks the
 hand-controller protocol. This driver speaks the **Sky-Watcher motor controller command
 set** (the `:` command / `=`|`!` reply protocol) directly to the mount's motor board.

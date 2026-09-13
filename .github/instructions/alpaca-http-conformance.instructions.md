@@ -4,6 +4,13 @@ applyTo: "AlpacaHTTP/**"
 
 ## Alpaca Protocol Conformance (AlpacaHTTP)
 
+Related decisions and failures — read when changing the behavior they explain:
+
+- [Server-thread ownership decision](../../docs/decisions/0002-server-thread-ownership.md)
+- [Failed-bind thread failure](../../docs/failures/0005-server-failed-bind-thread.md)
+- [Release-build assertion failure](../../docs/failures/0004-ndebug-disabled-http-assertions.md)
+
+
 These rules come straight from the ASCOM Alpaca API definition (https://ascom-standards.org/api/) and are enforced by ConformU. Do not regress them:
 
 - **Parameter names are case-insensitive.** The spec: "Parameter names are not case sensitive, so clients and drivers should be prepared for parameter names to be supplied ... with any casing." This applies to **both** GET query params and PUT form-body params. `Request::get_query_param`/`has_query_param` and the router's `get_form_value` all match case-insensitively. Never special-case behavior on `User-Agent` (e.g. a "strict only for ConformU" path) — test behavior must equal production behavior.

@@ -51,6 +51,8 @@ deltas only; a rule affecting a second vendor belongs in `AGENTS.md`.
 
 Read the relevant records before changing the behavior they explain. Historical
 snapshots are evidence, not overrides of current rules or current implementation.
-When documenting new lessons, update the applicable owner and index rather than
+When documenting new lessons, link each record directly from its owning vendor
+instruction file or shared-rule section in `AGENTS.md`, as well as the memory index.
+Update the applicable owner and index rather than
 copying rules into multiple places. See [instruction validation](instruction-validation.md)
 for the automated checks and their limits.

@@ -4,6 +4,11 @@ applyTo: "AlpacaCore/src/vendors/qhy/**,AlpacaCore/include/alpacacore/vendor/qhy
 
 ### QHY
 
+Related decisions and failures — read when changing the behavior they explain:
+
+- [Filter-wheel position-cache failure](../../docs/failures/0001-qhy-filterwheel-position-cache.md)
+
+
 Devices: Camera, FilterWheel (integrated CFW on cameras like the miniCam8M).
 
 SDK location: `AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04/`.
