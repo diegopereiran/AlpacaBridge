@@ -609,8 +609,12 @@ TEST_CASE("SkyWatcher pointing - AutoHome resets the remembered branch to the po
     REQUIRE(f.side_of_pier == 1);
     REQUIRE(f.a2 < -1.0);
 
+    // Tracking off, as the FindHome fixture in test_skywatcher_async.cpp does;
+    // the hunt starts 40 degrees from the index, so it takes longer than the
+    // from-home run there.
+    driver->set_tracking(false);
     driver->find_home();
-    REQUIRE(wait_until([&] { return driver->get_at_home(); }, 60000));
+    REQUIRE(wait_until([&] { return driver->get_at_home(); }, 180000));
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
 
     INFO("after AutoHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
