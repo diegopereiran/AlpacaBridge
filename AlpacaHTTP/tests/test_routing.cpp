@@ -2288,6 +2288,53 @@ int main() {
             EXPECT(std::fabs(persisted_file_entry(9640).value("siteElevation", 0.0) - 59.0) < 1e-9);
             put_ok(base + "/siteelevation", "SiteElevation=58&ClientID=1&ClientTransactionID=6");
         }
+        // The three site PUTs rewrite persisted configuration, so they carry
+        // the cross-origin guard configuredevice and UTCDate (#401) carry: a
+        // foreign Origin is refused with 403 before the value is parsed, the
+        // driver or the file is touched; a same-origin write and one with no
+        // Origin (native clients) go through. Same three-case shape as the
+        // UTCDate block.
+        {
+            const auto send = [&](const std::string& member, const std::string& body, const std::string& origin) {
+                std::ostringstream raw;
+                raw << "PUT " << base << "/" << member << " HTTP/1.1\r\n"
+                    << "Host: localhost\r\n";
+                if (!origin.empty()) {
+                    raw << "Origin: " << origin << "\r\n";
+                }
+                raw << "Content-Type: application/x-www-form-urlencoded\r\n"
+                    << "Content-Length: " << body.size() << "\r\n\r\n"
+                    << body;
+                alpacahttp::Request request;
+                EXPECT(request.parse(raw.str()));
+                return router.route(request, 1);
+            };
+            const auto driver_value = [&](const std::string& member) {
+                const auto json =
+                    nlohmann::json::parse(route_request(router, "GET", base + "/" + member).body(), nullptr, false);
+                return json.is_discarded() ? -1e9 : json.value("Value", -1e9);
+            };
+            EXPECT(send("sitelatitude", "SiteLatitude=10&ClientID=1", "http://evil.example").status_code() == 403);
+            EXPECT(send("sitelongitude", "SiteLongitude=20&ClientID=1", "http://evil.example").status_code() == 403);
+            EXPECT(send("siteelevation", "SiteElevation=30&ClientID=1", "http://evil.example").status_code() == 403);
+            // Refused ahead of the parser too: a body that would fail
+            // parse_double still gets the 403, not an InvalidValue.
+            EXPECT(send("sitelatitude", "SiteLatitude=abc&ClientID=1", "http://evil.example").status_code() == 403);
+            EXPECT(std::fabs(driver_value("sitelatitude") - (-33.87)) < 1e-9);
+            EXPECT(std::fabs(driver_value("sitelongitude") - 151.21) < 1e-9);
+            EXPECT(std::fabs(driver_value("siteelevation") - 58.0) < 1e-9);
+            {
+                const auto on_disk = persisted_file_entry(9640);
+                EXPECT(on_disk.is_object() && std::fabs(on_disk.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
+                EXPECT(std::fabs(on_disk.value("siteLongitude", 0.0) - 151.21) < 1e-9);
+                EXPECT(std::fabs(on_disk.value("siteElevation", 0.0) - 58.0) < 1e-9);
+            }
+            EXPECT(send("siteelevation", "SiteElevation=61&ClientID=1", "http://localhost").status_code() != 403);
+            EXPECT(std::fabs(driver_value("siteelevation") - 61.0) < 1e-9);
+            EXPECT(send("siteelevation", "SiteElevation=58&ClientID=1", "").status_code() != 403);
+            EXPECT(std::fabs(driver_value("siteelevation") - 58.0) < 1e-9);
+            EXPECT(std::fabs(persisted_file_entry(9640).value("siteElevation", 0.0) - 58.0) < 1e-9);
+        }
         // A value the driver refuses is not persisted either: the hook runs
         // after the setter, so the throw never reaches it.
         {
