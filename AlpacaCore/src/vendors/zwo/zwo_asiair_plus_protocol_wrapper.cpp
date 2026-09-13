@@ -209,11 +209,12 @@ public:
     }
 
     // Lock-free on purpose (issue #382): the driver answers get_connected()
-    // with this, and AGENTS.md wants that getter cheap. open() and close()
-    // hold mutex_ for their whole sequence, so a locked read here waited
-    // for them. open_ is written only inside those critical sections and
-    // published as an atomic; the snapshot is momentary, which is what a
-    // connected-state read is anyway.
+    // with this, and AGENTS.md wants that getter cheap. open() holds mutex_
+    // for its whole sequence and close() holds it for its locked phases
+    // (it drops the lock to join the PWM workers), so a locked read here
+    // waited behind whichever phase was running. open_ is written only
+    // inside those critical sections and published as an atomic; the
+    // snapshot is momentary, which is what a connected-state read is anyway.
     bool is_open() const { return open_.load(std::memory_order_acquire); }
 
     std::size_t port_count() const { return ports_.size(); }
