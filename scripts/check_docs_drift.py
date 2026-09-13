@@ -233,12 +233,13 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 
 # Driver file basename -> the name the async_connectable.h comment uses for it.
 # Only the drivers that CAN be classified as blocking need an entry; the
-# The four wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek
-# StellaVita, ASIAIR, ASIAIR Plus) keep their entries although they answer
-# get_connected() lock-free since #382: the entry is what lets the gate report
-# MISSING FROM THE BLOCKING LIST if one of their wrappers ever re-locks
-# is_open(), so do not remove them on the STALE BLOCKING-LIST ENTRY advice.
-# lock-free majority is not named anywhere, by design.
+# lock-free majority is not named anywhere, by design. The four
+# wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita,
+# ASIAIR, ASIAIR Plus) are the exception: they keep their entries although
+# they answer get_connected() lock-free since #382, because the entry is what
+# lets the gate report MISSING FROM THE BLOCKING LIST if one of their wrappers
+# ever re-locks is_open(). Do not remove them on the STALE BLOCKING-LIST ENTRY
+# advice.
 # The value is (prose name, which list it belongs to). The list matters: the
 # header names these in TWO sentences, and one name is a prefix of another
 # across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
@@ -356,6 +357,11 @@ def _vendor_is_open_locks(vendor_dir):
     A pimpl forward (`return impl_->is_open();`) does not count; the Impl's
     own body does. No is_open() at all also counts as locking: an unknown
     shape must classify as blocking, never silently as lock-free.
+
+    Same limitation as classify_get_connected_bodies(): only the three RAII
+    lock types are recognised. A body that re-locks through mutex_.lock(),
+    std::shared_lock, or a locking helper it calls would still classify as
+    lock-free, so this pin fails open for those shapes.
     """
     found = False
     for path in sorted(vendor_dir.glob("*wrapper*.cpp")):
