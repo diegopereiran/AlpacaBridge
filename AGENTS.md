@@ -479,6 +479,18 @@ it at disconnect (both under `firmware_mutex_`), and read only it from the gette
 a `firmware_mutex_`). Do NOT consult `connected_` in the getter — rely on the
 cache being empty while disconnected, so there is no atomic-vs-mutex ordering bug.
 
+### Sky-Watcher serial recovery tests (PR #522)
+
+Each direct-driver instance owns its protocol wrapper; never use the legacy singleton
+from a driver operation or worker. A second configured mount must not replace the first
+mount's transport. Both HTTP disconnect endpoints deliver last-client cleanup even when
+`get_connected()` is already false: link health is not proof that runtime state was reset.
+A cable-pull followed by an HTTP connect tests the first relink branch because the router
+probes link health first. The late-loss branch needs a deterministic probe seam and an
+outstanding fake-board task; assert that the old task never sends commands to the new link.
+Zero-byte reads are not themselves proof of removal; back off within the response deadline
+so a hung-up-but-present tty cannot busy-spin, while retaining the quiet-board timeout policy.
+
 ### Cache-backed reads must track link health (issue #237)
 
 A driver whose reads are served from a cache that a background reader fills (streamed status
@@ -511,6 +523,19 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
   threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
   and the next frame restores service.
+- **Exception: a removed device node is a lost connection, not a fault (issue #445,
+  Sky-Watcher direct driver).** A quiet link can come back on the same fd; a node that is gone
+  cannot (the fd's link count is 0, writes fail `EIO`, and the held fd keeps the kernel from
+  reusing `/dev/ttyUSB0`, so the replugged adapter enumerates as `ttyUSB1`). There
+  `get_connected()` asks `SkyWatcherProtocolWrapper::link_alive()`, which compares the
+  configured path's `stat()` with the node opened at connect (no I/O, never waits on an
+  exchange) and closes the dead fd when it can; operations throw `NotConnected`; and a
+  `Connected=true` against the lost link reconnects instead of hitting the idempotency return.
+  `EIO`, `ENXIO`, `ENODEV` or `EBADF` from a write or read on the link's fd also counts as loss,
+  even before the node lookup reflects it: a tty returns those only when its device is gone or
+  the fd is unusable. Silence with the node still present keeps the rules above. The #237 drivers still treat a
+  removed node as a fault; that has not been changed. Tests: `sever_link()` on
+  `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
 
 ### Reconnect must not self-deadlock: `disconnect_locked()`
 

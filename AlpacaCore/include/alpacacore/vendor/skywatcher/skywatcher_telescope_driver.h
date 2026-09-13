@@ -40,7 +40,7 @@ namespace detail {
 // this probe instead of calling HostClock::kernel_is_synchronized() directly,
 // so a test can drive both branches of the #301 rule on any build host. The
 // default is the real adjtimex read; a test installs a lambda and restores
-// the default afterwards. Process-wide, like the protocol wrapper singleton.
+// the default afterwards. Process-wide; tests restore it after use.
 void set_host_synchronized_probe(std::function<bool()> probe);
 bool host_synchronized_probe();
 // open-astro#405: how often the pointing path re-samples discipline while a
@@ -82,7 +82,8 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
                                                              std::optional<double> site_latitude_deg = std::nullopt,
                                                              std::optional<double> site_longitude_deg = std::nullopt,
-                                                             std::optional<double> site_elevation_m = std::nullopt);
+                                                             std::optional<double> site_elevation_m = std::nullopt,
+                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {});
 
 // Auto-detect: scan serial ports first, then Wi-Fi discovery (UDP 11880).
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
