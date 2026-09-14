@@ -206,8 +206,12 @@ public:
 
     void halt() override {
         ensure_connected();
-        protocol_.halt();
+        // Hold status_mutex_ across the wire command so the command and the
+        // target_ update are atomic against a concurrent move()/halt() (Alpaca
+        // does not serialize device methods). Lock order is status_mutex_ ->
+        // wrapper mutex, matching sample_position(), so no deadlock.
         std::lock_guard<std::mutex> lock(status_mutex_);
+        protocol_.halt();
         target_.reset();  // no target => not moving, whatever position the motor stopped at
         position_cache_.reset();
     }
@@ -217,8 +221,11 @@ public:
         if (position < 0 || position > settings_.max_step) {
             throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
         }
-        protocol_.move_to(position);
+        // Hold status_mutex_ across move_to() so two concurrent moves cannot
+        // reach the device in one order while target_ records the other (see
+        // halt() for the lock-order note).
         std::lock_guard<std::mutex> lock(status_mutex_);
+        protocol_.move_to(position);
         target_ = position;
         last_change_ = std::chrono::steady_clock::now();
         position_cache_.reset();

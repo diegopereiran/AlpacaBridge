@@ -175,10 +175,6 @@ private:
                 moving_.store(false);
                 reply = "{\"idx\":3}";
                 break;
-            case 11:
-                position_.store(field(cmd, "init_val"));
-                reply = "{\"idx\":11}";
-                break;
             case 7:
             case 12:
             case 13:

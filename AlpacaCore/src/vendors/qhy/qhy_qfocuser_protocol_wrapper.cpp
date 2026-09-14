@@ -72,7 +72,6 @@ constexpr int kCmdTelemetry = 4;
 constexpr int kCmdPosition = 5;
 constexpr int kCmdAbsoluteMove = 6;
 constexpr int kCmdReverse = 7;
-constexpr int kCmdSyncPosition = 11;
 constexpr int kCmdHoldForce = 12;
 constexpr int kCmdSpeed = 13;
 constexpr int kCmdHoldCurrent = 16;
@@ -142,10 +141,9 @@ bool configure_tty(int fd) {
     return util::clear_nonblocking(fd);
 }
 
-// Read one {...} reply. Anything before the opening brace (a stale partial
-// reply, a reboot notice fragment) is discarded. Returns the object text
-// including braces, or an empty string on timeout.
-// Reads one {...} object within timeout_ms. Sets link_dead = true (and returns
+// Reads one {...} object within timeout_ms. Anything before the opening brace
+// (a stale partial reply, a reboot-notice fragment) is discarded. Sets
+// link_dead = true (and returns
 // empty at once) when the port has gone away -- POLLHUP/POLLERR/POLLNVAL, EOF,
 // or a hard errno (EIO/ENXIO/ENODEV/EBADF) -- so the caller can fail the
 // transaction immediately instead of re-kicking at 100% CPU until the deadline
@@ -489,13 +487,6 @@ public:
                         config_.serial_timeout_ms);
     }
 
-    void sync_position(std::int32_t position) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected_locked();
-        transact_locked("{\"cmd_id\":11,\"init_val\":" + std::to_string(position) + "}", kCmdSyncPosition,
-                        config_.serial_timeout_ms);
-    }
-
     void set_speed(int speed) {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
@@ -596,7 +587,12 @@ private:
             const std::string reply = read_json_object(serial_fd_, kKickSliceMs, link_dead);
             if (link_dead) {
                 // The port is gone (unplug / re-enumeration). Fail now rather
-                // than re-kicking at 100% CPU until the deadline.
+                // than re-kicking at 100% CPU until the deadline. NotConnected
+                // (not DriverException) is the deliberate choice: this is a
+                // request/response driver with no background reader, so
+                // get_connected() cannot cheaply consult link health without
+                // adding a round trip to a FAST-timing property -- it reports
+                // last-known state, and the live read is what surfaces the loss.
                 throw AlpacaException("Q-Focuser link lost on " + config_.serial_port, AlpacaError::NotConnected);
             }
             if (reply.empty()) {
@@ -660,7 +656,6 @@ QFocuserTelemetry QFocuserProtocolWrapper::get_telemetry() { return impl_->get_t
 void QFocuserProtocolWrapper::move_to(std::int32_t position) { impl_->move_to(position); }
 void QFocuserProtocolWrapper::halt() { impl_->halt(); }
 void QFocuserProtocolWrapper::set_reverse(bool reversed) { impl_->set_reverse(reversed); }
-void QFocuserProtocolWrapper::sync_position(std::int32_t position) { impl_->sync_position(position); }
 void QFocuserProtocolWrapper::set_speed(int speed) { impl_->set_speed(speed); }
 void QFocuserProtocolWrapper::set_hold_force(bool enabled) { impl_->set_hold_force(enabled); }
 void QFocuserProtocolWrapper::set_hold_current(int ihold, int irun) { impl_->set_hold_current(ihold, irun); }

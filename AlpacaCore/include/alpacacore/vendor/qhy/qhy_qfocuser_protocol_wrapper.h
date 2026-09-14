@@ -128,9 +128,6 @@ public:
     /** @brief {"cmd_id":7,"rev":0|1} motor direction. */
     void set_reverse(bool reversed);
 
-    /** @brief {"cmd_id":11,"init_val":N} redefine the current position. */
-    void sync_position(std::int32_t position);
-
     /** @brief {"cmd_id":13,"speed":N} with 1 = fastest .. 8 = slowest (INDIGO encoding). */
     void set_speed(int speed);
 
