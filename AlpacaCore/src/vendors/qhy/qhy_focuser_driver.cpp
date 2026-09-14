@@ -93,6 +93,16 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Serialize whole transitions against each other, matching the sibling
+        // serial drivers (Gemini focuser open-astro#333, WandererAstro). The
+        // router serializes connection ops per device, but the [stress] harness
+        // calls set_connected() concurrently from lifecycle threads; without
+        // this, two interleaved transitions can leave the wrapper open while
+        // the driver reports disconnected, after which every reconnect throws
+        // InvalidOperation "already connected". Deliberately NOT the base's
+        // connection mutex and not firmware_mutex_ — it guards set_connected()
+        // against set_connected() only and leaves the getters free.
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) return;
         if (connected && consume_pending_disconnect(connected_.load())) return;
         if (connected == connected_.load()) return;
@@ -119,12 +129,18 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO(kLogTag, "Q-Focuser connected (firmware " + std::to_string(info.firmware) + ")");
         } else {
-            protocol_.disconnect();
+            // Driver state first, port close second (AGENTS.md, issue #387): a
+            // throwing close must not leave the driver reporting connected on a
+            // closed port. disconnect() cannot throw today; the order is the
+            // contract, not the current wrapper's behaviour. Clear firmware
+            // first so the store(false) is never observable beside a stale
+            // firmware string.
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
             connected_.store(false);
+            protocol_.disconnect();
             invalidate_caches();
             ALPACA_LOG_INFO(kLogTag, "Q-Focuser disconnected");
         }
@@ -285,6 +301,9 @@ private:
     std::atomic<bool> connected_;
     QFocuserProtocolWrapper protocol_;
 
+    // Serializes whole connect/disconnect transitions; see set_connected().
+    // Separate from firmware_mutex_/status_mutex_ and the base connection mutex.
+    std::mutex transition_mutex_;
     mutable std::mutex firmware_mutex_;
     std::string firmware_;
 

@@ -58,6 +58,11 @@ public:
 
     std::string slave_path() const { return pty_.slave_path(); }
 
+    /// Close both pty ends now, so the driver's next read sees the port vanish
+    /// (POLLHUP / EOF / EIO) exactly like a mid-session USB unplug. Used to test
+    /// that transact_locked() fails fast instead of busy-spinning to timeout.
+    void sever() { pty_.sever(); }
+
     /// Every command received so far, in wire order.
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -262,3 +262,24 @@ TEST_CASE("QHY Q-Focuser Driver - one-behind firmware requires the kick", "[qhy]
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
 }
+
+// A mid-session link loss (USB unplug / CDC-ACM re-enumeration) must fail a
+// transaction promptly, not spin a core until the serial timeout. Severing the
+// pty makes the driver's next read see POLLHUP/EOF; transact_locked() maps that
+// to NotConnected at once. The timing bound is the regression guard: a busy-spin
+// would take the full ~3 s serial timeout.
+TEST_CASE("QHY Q-Focuser Driver - dead link fails fast, no busy-spin", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    fake.sever();
+
+    const auto start = std::chrono::steady_clock::now();
+    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    CHECK(elapsed < 1000);  // « the 3 s serial timeout a busy-spin would burn
+
+    driver->set_connected(false);
+}

@@ -145,7 +145,14 @@ bool configure_tty(int fd) {
 // Read one {...} reply. Anything before the opening brace (a stale partial
 // reply, a reboot notice fragment) is discarded. Returns the object text
 // including braces, or an empty string on timeout.
-std::string read_json_object(int fd, int timeout_ms) {
+// Reads one {...} object within timeout_ms. Sets link_dead = true (and returns
+// empty at once) when the port has gone away -- POLLHUP/POLLERR/POLLNVAL, EOF,
+// or a hard errno (EIO/ENXIO/ENODEV/EBADF) -- so the caller can fail the
+// transaction immediately instead of re-kicking at 100% CPU until the deadline
+// (a bare "return {}" on those looks like an ordinary silent slice). An
+// ordinary empty/timeout leaves link_dead false.
+std::string read_json_object(int fd, int timeout_ms, bool& link_dead) {
+    link_dead = false;
     std::string buf;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -158,10 +165,21 @@ std::string read_json_object(int fd, int timeout_ms) {
             return {};
         }
         if (r == 0) continue;
+        if ((pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0 && (pfd.revents & POLLIN) == 0) {
+            link_dead = true;  // peer hung up / node removed, with nothing left to read
+            return {};
+        }
         char ch = 0;
         const ssize_t n = read(fd, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-        if (n <= 0) {
-            if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+        if (n == 0) {
+            link_dead = true;  // EOF: the tty/node is gone
+            return {};
+        }
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) continue;
+            if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF) {
+                link_dead = true;
+            }
             return {};
         }
         if (buf.empty()) {
@@ -265,7 +283,9 @@ static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
         tcdrain(fd);
         static const char kick = '\n';
         (void)util::write_all(fd, &kick, 1);
-        const std::string reply = read_json_object(fd, kProbeTimeoutMs);
+        bool link_dead = false;
+        const std::string reply = read_json_object(fd, kProbeTimeoutMs, link_dead);
+        if (link_dead) break;  // node vanished mid-probe; not our device
         if (reply.empty()) continue;
         QFocuserDeviceInfo parsed;
         if (parse_device_info(parse_qfocuser_reply(reply), parsed)) {
@@ -572,7 +592,13 @@ private:
         (void)util::write_all(serial_fd_, &kick, 1);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         while (std::chrono::steady_clock::now() < deadline) {
-            const std::string reply = read_json_object(serial_fd_, kKickSliceMs);
+            bool link_dead = false;
+            const std::string reply = read_json_object(serial_fd_, kKickSliceMs, link_dead);
+            if (link_dead) {
+                // The port is gone (unplug / re-enumeration). Fail now rather
+                // than re-kicking at 100% CPU until the deadline.
+                throw AlpacaException("Q-Focuser link lost on " + config_.serial_port, AlpacaError::NotConnected);
+            }
             if (reply.empty()) {
                 // Fallback: the proactive kick did not clock the reply out
                 // (should not happen once the command packet is drained), so

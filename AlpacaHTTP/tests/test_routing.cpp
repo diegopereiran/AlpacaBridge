@@ -470,7 +470,7 @@ void put_connected(alpacahttp::Router& router, const std::string& path_base, con
     EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
 }
 
-}  // namespace
+} // namespace
 
 int main() {
     // open-astro#354: host_time_zone() resolution table, through the seam
@@ -623,22 +623,37 @@ int main() {
 #ifdef ALPACACORE_ENABLE_ZWO
     // Ensure idempotent behavior across repeated test runs.
     {
-        nlohmann::json remove_body = {{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9101}};
+        nlohmann::json remove_body = {
+            {"vendor", "zwo"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9101}
+        };
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
-        nlohmann::json configure_body = {{"vendor", "zwo"},           {"deviceType", "telescope"},
-                                         {"deviceNumber", 9101},      {"connectionType", "serial"},
-                                         {"portPath", "/dev/null"},   {"baudRate", 9600},
-                                         {"responseTimeoutMs", 2500}, {"apertureDiameter", 0.1},
-                                         {"focalLength", 0.8},        {"siteLatitude", 34.5},
-                                         {"siteLongitude", -117.2},   {"siteElevation", 450.0},
-                                         {"syncTimeOnConnect", false}};
+        nlohmann::json configure_body = {
+            {"vendor", "zwo"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9101},
+            {"connectionType", "serial"},
+            {"portPath", "/dev/null"},
+            {"baudRate", 9600},
+            {"responseTimeoutMs", 2500},
+            {"apertureDiameter", 0.1},
+            {"focalLength", 0.8},
+            {"siteLatitude", 34.5},
+            {"siteLongitude", -117.2},
+            {"siteElevation", 450.0},
+            {"syncTimeOnConnect", false}
+        };
 
-        const auto configure_response =
-            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_ZWO
@@ -652,7 +667,8 @@ int main() {
 
         bool found_device = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9101) {
+            if (entry.value("DeviceType", "") == "Telescope" &&
+                entry.value("DeviceNumber", -1) == 9101) {
                 EXPECT(entry.value("Vendor", "") == "zwo");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -684,8 +700,16 @@ int main() {
         EXPECT(actions_json.contains("Value"));
         EXPECT(actions_json["Value"].is_array());
 
-        nlohmann::json remove_body = {{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9101}};
-        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        nlohmann::json remove_body = {
+            {"vendor", "zwo"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9101}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 #else
@@ -821,21 +845,37 @@ int main() {
     // --- Celestron telescope routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_CELESTRON
     {
-        nlohmann::json remove_body = {{"vendor", "celestron"}, {"deviceType", "telescope"}, {"deviceNumber", 9102}};
+        nlohmann::json remove_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9102}
+        };
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
         nlohmann::json configure_body = {
-            {"vendor", "celestron"},      {"deviceType", "telescope"}, {"deviceNumber", 9102},
-            {"connectionType", "serial"}, {"portPath", "/dev/null"},   {"baudRate", 9600},
-            {"responseTimeoutMs", 5000},  {"apertureDiameter", 0.28},  {"focalLength", 2.8},
-            {"siteLatitude", 33.85},      {"siteLongitude", -118.34},  {"siteElevation", 100.0},
-            {"syncTimeOnConnect", true}};
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9102},
+            {"connectionType", "serial"},
+            {"portPath", "/dev/null"},
+            {"baudRate", 9600},
+            {"responseTimeoutMs", 5000},
+            {"apertureDiameter", 0.28},
+            {"focalLength", 2.8},
+            {"siteLatitude", 33.85},
+            {"siteLongitude", -118.34},
+            {"siteElevation", 100.0},
+            {"syncTimeOnConnect", true}
+        };
 
-        const auto configure_response =
-            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -849,7 +889,8 @@ int main() {
 
         bool found_celestron = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Telescope" && entry.value("DeviceNumber", -1) == 9102) {
+            if (entry.value("DeviceType", "") == "Telescope" &&
+                entry.value("DeviceNumber", -1) == 9102) {
                 EXPECT(entry.value("Vendor", "") == "celestron");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -872,12 +913,20 @@ int main() {
         EXPECT(found_celestron);
 
         // Test network connection type sanitization
-        nlohmann::json net_configure_body = {{"vendor", "celestron"},   {"deviceType", "telescope"},
-                                             {"deviceNumber", 9103},    {"connectionType", "network"},
-                                             {"host", "192.168.1.100"}, {"tcpPort", 2000}};
+        nlohmann::json net_configure_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9103},
+            {"connectionType", "network"},
+            {"host", "192.168.1.100"},
+            {"tcpPort", 2000}
+        };
 
-        const auto net_response =
-            route_request(router, "POST", "/management/v1/configuredevice", net_configure_body.dump());
+        const auto net_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            net_configure_body.dump());
         const auto net_json = nlohmann::json::parse(net_response.body());
         EXPECT(net_json.value("ErrorNumber", -1) == 0);
 
@@ -897,12 +946,24 @@ int main() {
         EXPECT(found_net_celestron);
 
         // Cleanup
-        nlohmann::json remove_body = {{"vendor", "celestron"}, {"deviceType", "telescope"}, {"deviceNumber", 9102}};
-        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        nlohmann::json remove_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9102}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 
-        nlohmann::json remove_net_body = {{"vendor", "celestron"}, {"deviceType", "telescope"}, {"deviceNumber", 9103}};
+        nlohmann::json remove_net_body = {
+            {"vendor", "celestron"},
+            {"deviceType", "telescope"},
+            {"deviceNumber", 9103}
+        };
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_net_body.dump());
 #else
         EXPECT(configure_json.value("ErrorNumber", 0) != 0);
@@ -912,17 +973,28 @@ int main() {
     // --- ToupTek camera routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_TOUPTEK
     {
-        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "camera"}, {"deviceNumber", 9201}};
+        nlohmann::json remove_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "camera"},
+            {"deviceNumber", 9201}
+        };
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
         nlohmann::json configure_body = {
-            {"vendor", "touptek"}, {"deviceType", "camera"}, {"deviceNumber", 9201}, {"cameraIndex", 2}};
+            {"vendor", "touptek"},
+            {"deviceType", "camera"},
+            {"deviceNumber", 9201},
+            {"cameraIndex", 2}
+        };
 
-        const auto configure_response =
-            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK
@@ -936,7 +1008,8 @@ int main() {
 
         bool found_touptek = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Camera" && entry.value("DeviceNumber", -1) == 9201) {
+            if (entry.value("DeviceType", "") == "Camera" &&
+                entry.value("DeviceNumber", -1) == 9201) {
                 EXPECT(entry.value("Vendor", "") == "touptek");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -949,8 +1022,16 @@ int main() {
         }
         EXPECT(found_touptek);
 
-        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "camera"}, {"deviceNumber", 9201}};
-        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        nlohmann::json remove_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "camera"},
+            {"deviceNumber", 9201}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 #else
@@ -961,20 +1042,29 @@ int main() {
     // --- ToupTek AAF focuser routing/config persistence test ---
 #ifdef ALPACACORE_ENABLE_TOUPTEK
     {
-        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "focuser"}, {"deviceNumber", 9202}};
+        nlohmann::json remove_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "focuser"},
+            {"deviceNumber", 9202}
+        };
         (void)route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
     }
 #endif
 
     {
-        nlohmann::json configure_body = {{"vendor", "touptek"},
-                                         {"deviceType", "focuser"},
-                                         {"deviceNumber", 9202},
-                                         {"focuserIndex", 0},
-                                         {"focuserId", "tp-aaf-routing-test"}};
+        nlohmann::json configure_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "focuser"},
+            {"deviceNumber", 9202},
+            {"focuserIndex", 0},
+            {"focuserId", "tp-aaf-routing-test"}
+        };
 
-        const auto configure_response =
-            route_request(router, "POST", "/management/v1/configuredevice", configure_body.dump());
+        const auto configure_response = route_request(
+            router,
+            "POST",
+            "/management/v1/configuredevice",
+            configure_body.dump());
         const auto configure_json = nlohmann::json::parse(configure_response.body());
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK
@@ -988,7 +1078,8 @@ int main() {
 
         bool found_touptek_focuser = false;
         for (const auto& entry : configured_json["Value"]) {
-            if (entry.value("DeviceType", "") == "Focuser" && entry.value("DeviceNumber", -1) == 9202) {
+            if (entry.value("DeviceType", "") == "Focuser" &&
+                entry.value("DeviceNumber", -1) == 9202) {
                 EXPECT(entry.value("Vendor", "") == "touptek");
                 EXPECT(entry.contains("Config"));
                 const auto& cfg = entry["Config"];
@@ -1001,8 +1092,16 @@ int main() {
         }
         EXPECT(found_touptek_focuser);
 
-        nlohmann::json remove_body = {{"vendor", "touptek"}, {"deviceType", "focuser"}, {"deviceNumber", 9202}};
-        const auto remove_response = route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        nlohmann::json remove_body = {
+            {"vendor", "touptek"},
+            {"deviceType", "focuser"},
+            {"deviceNumber", 9202}
+        };
+        const auto remove_response = route_request(
+            router,
+            "POST",
+            "/management/v1/removedevice",
+            remove_body.dump());
         const auto remove_json = nlohmann::json::parse(remove_response.body());
         EXPECT(remove_json.value("ErrorNumber", -1) == 0);
 #else
@@ -1988,7 +2087,7 @@ int main() {
         const auto cfg = roundtrip_config(router,
                                           {{"vendor", "qhy"},
                                            {"deviceType", "focuser"},
-                                           {"deviceNumber", 9624},
+                                           {"deviceNumber", 9640},
                                            {"connectionType", "serial"},
                                            {"portPath", "/dev/ttyACM3"},
                                            {"focuserIndex", 1},
@@ -2000,7 +2099,7 @@ int main() {
                                            {"holdIrun", 12},
                                            {"temperatureSource", "chip"},
                                            {"cameraIndex", 7}},
-                                          "Focuser", 9624);
+                                          "Focuser", 9640);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("connectionType", "") == "serial");
         EXPECT(cfg.value("portPath", "") == "/dev/ttyACM3");
@@ -2013,7 +2112,7 @@ int main() {
         EXPECT(cfg.value("holdIrun", -1) == 12);
         EXPECT(cfg.value("temperatureSource", "") == "chip");
         EXPECT(!cfg.contains("cameraIndex"));
-        remove_device(router, "qhy", "focuser", 9624);
+        remove_device(router, "qhy", "focuser", 9640);
     }
     {
         // qhy / focuser (Q-Focuser) — the router rejects out-of-range settings
@@ -2021,7 +2120,7 @@ int main() {
         // nothing. Covers the validation branch the valid round trip skips.
         const nlohmann::json bad = {{"vendor", "qhy"},
                                     {"deviceType", "focuser"},
-                                    {"deviceNumber", 9625},
+                                    {"deviceNumber", 9641},
                                     {"connectionType", "serial"},
                                     {"portPath", "/dev/ttyACM4"},
                                     {"speed", 9}};
@@ -2029,13 +2128,13 @@ int main() {
         const auto json = nlohmann::json::parse(response.body(), nullptr, false);
         EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         EXPECT(json.value("ErrorMessage", "").find("speed") != std::string::npos);
-        // Nothing should have been registered at 9625.
+        // Nothing should have been registered at 9641.
         const auto listed = route_request(router, "GET", "/management/v1/configureddevices");
         const auto listed_json = nlohmann::json::parse(listed.body(), nullptr, false);
         bool present = false;
         if (!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array()) {
             for (const auto& entry : listed_json["Value"]) {
-                if (entry.value("DeviceType", "") == "Focuser" && entry.value("DeviceNumber", -1) == 9625)
+                if (entry.value("DeviceType", "") == "Focuser" && entry.value("DeviceNumber", -1) == 9641)
                     present = true;
             }
         }
