@@ -580,6 +580,16 @@ private:
                 ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply without idx ignored: " + printable(reply));
                 continue;
             }
+            // Return on the first matching idx. Known bounded staleness: when
+            // two consecutive commands share an idx (e.g. back-to-back
+            // {"cmd_id":5} position polls), the command's own OUT first
+            // re-transmits the PREVIOUS reply -- same idx -- and this returns
+            // it, so the value lags by exactly one poll while the kick's fresh
+            // reply is dropped by the next command's tcflush. Harmless in
+            // practice (a one-poll lag in Position/IsMoving during a move,
+            // ConformU-clean) because distinct-idx commands never collide and
+            // the caches above already coalesce rapid reads; revisit if the
+            // cache TTL or poll cadence changes.
             if (idx == expected_idx || idx == alt_idx) return fields;
             ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply idx " + std::to_string(idx) + " while waiting for " +
                                           std::to_string(expected_idx) + "; skipping");
