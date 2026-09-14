@@ -345,8 +345,10 @@ std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
         }
     }
 
-    // Raw /dev/ttyACM* fallback for boxes without a populated by-id
-    // directory (minimal udev images), filtered by USB descriptor.
+    // Raw /dev/ttyACM* pass, run unconditionally (not only when by-id is
+    // empty): two identical GigaDevice adapters collide on their by-id name
+    // and only one gets a symlink, so the other is visible only here. It is
+    // filtered by USB descriptor and deduped against the by-id pass above.
     for (int i = 0; i < 10; ++i) {
         std::string port = "/dev/ttyACM" + std::to_string(i);
         if (!alpacacore::util::path_exists(port)) continue;
