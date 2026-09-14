@@ -89,7 +89,7 @@ All interfaces inherit from `AlpacaDriver` which provides device information, co
 - Isolates SDK dependencies from core code
 - Only place where vendor SDK headers are included
 
-Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch). ZWO and ToupTek therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" (libgphoto2/libraw) is an open-source system package rather than a vendored proprietary library — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
+Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch; QHY for the Q-Focuser). ZWO, ToupTek and QHY therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" (libgphoto2/libraw) is an open-source system package rather than a vendored proprietary library — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
 
 #### Layer 3: Vendor implementation
 
@@ -106,7 +106,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | Vendor | Device Types | Wrapper Type | Status |
 |--------|-------------|--------------|--------|
 | ZWO | Camera, Focuser (EAF), Rotator (CAA), FilterWheel (EFW), Switch (dew heater, ASIAIR power), Telescope (AM mount) | SDK + protocol wrapper | Production |
-| QHY | Camera, FilterWheel (integrated CFW, e.g. miniCam8M) | SDK wrapper | Production |
+| QHY | Camera, FilterWheel (integrated CFW, e.g. miniCam8M), Focuser (Q-Focuser, serial) | SDK + protocol wrapper | Production |
 | Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
 | ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |
