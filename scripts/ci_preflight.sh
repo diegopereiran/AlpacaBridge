@@ -65,6 +65,11 @@ if command -v ccache >/dev/null 2>&1; then
   # lifetime total shared with build_and_run.sh.
   ccache --zero-stats >/dev/null 2>&1 || true
   CCACHE_ACTIVE=1
+else
+  # Explicitly clear the launcher so a reused build-tsan/ configured while
+  # ccache WAS installed does not keep "ccache" cached and fail with
+  # "ccache: command not found" after it is removed.
+  CCACHE_CMAKE_ARGS=(-DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_CXX_COMPILER_LAUNCHER=)
 fi
 
 # --- result tracking -------------------------------------------------------
@@ -299,6 +304,10 @@ elif ensure_tool clang-tidy clang-tidy; then
   # Compile DB covering both trees (AlpacaHTTP pulls AlpacaCore in as a subdir).
   # Vendors ON so vendor sources get real compile commands (mirrors CI; with
   # vendors OFF clang-tidy interpolates commands missing the SDK include dirs).
+  # The ccache launcher exported above does NOT reach compile_commands.json:
+  # CMake writes the bare compiler there (verified on CMake 3.31.6 with
+  # CMAKE_CXX_COMPILER_LAUNCHER=ccache: "command": "/usr/bin/c++ ..."), and
+  # clang-tidy 19 ran clean against such a tree, so nothing to strip here.
   cmake -S AlpacaHTTP -B AlpacaHTTP/build \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DALPACAHTTP_BUILD_TESTS=ON \
