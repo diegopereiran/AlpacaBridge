@@ -83,6 +83,12 @@ public:
     void set_steps_per_poll(int n) { steps_per_poll_.store(n); }
     /// Supply voltage reported in c_r (tenths of a volt): 125 = 12.5 V.
     void set_voltage_tenths(int v) { voltage_tenths_.store(v); }
+    /// Model the real GD32 firmware's one-reply-behind USB behaviour: each
+    /// reply is held until the next OUT packet (command or newline kick). With
+    /// this on, a driver that does not tcdrain-then-kick hangs, so a connect
+    /// test in this mode fails if the driver's fix is removed. Off by default
+    /// so the other tests keep deterministic (non-lagged) reads.
+    void set_one_behind(bool on) { one_behind_.store(on); }
 
 private:
     void run() {
@@ -96,7 +102,17 @@ private:
             const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
             if (n <= 0) continue;
             for (ssize_t i = 0; i < n; ++i) {
-                if (pending.empty() && buf[i] != '{') continue;
+                if (pending.empty() && buf[i] != '{') {
+                    // In one-behind mode a newline "kick" (which the driver
+                    // sends after tcdrain-ing the command out) clocks out the
+                    // held reply, exactly as the real GD32 firmware does on the
+                    // next OUT packet. Outside that mode it is ignored, as
+                    // before.
+                    if (one_behind_.load() && buf[i] == '\n' && !held_reply_.empty()) {
+                        pty_write_bounded(pty_.master_fd(), held_reply_, stop_);
+                    }
+                    continue;
+                }
                 pending += buf[i];
                 if (buf[i] == '}') {
                     handle(pending);
@@ -165,6 +181,18 @@ private:
             default:
                 return;  // unknown command: the firmware stays silent
         }
+        if (one_behind_.load()) {
+            // Model the real firmware: this command's OUT transmits the
+            // PREVIOUS reply, and the freshly computed one is held until the
+            // next OUT (a later command, or the driver's newline kick above).
+            // A driver that writes a command and reads without kicking sees
+            // only the stale reply and never this one -- which is the failure
+            // the driver's tcdrain+kick sequence exists to fix, so a test in
+            // this mode fails if that sequence is removed.
+            if (!held_reply_.empty()) pty_write_bounded(pty_.master_fd(), held_reply_, stop_);
+            held_reply_ = reply;
+            return;
+        }
         pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
@@ -180,6 +208,12 @@ private:
     std::atomic<bool> moving_{false};
     std::atomic<int> steps_per_poll_{100000};  // default: moves complete on the first poll
     std::atomic<int> voltage_tenths_{125};
+
+    // one_behind_ is set before the driver connects and only read on the
+    // reader thread thereafter; held_reply_ is touched solely on that thread
+    // (run() and the handle() it calls), so it needs no lock.
+    std::atomic<bool> one_behind_{false};
+    std::string held_reply_;
 };
 
 }  // namespace alpacacore::test

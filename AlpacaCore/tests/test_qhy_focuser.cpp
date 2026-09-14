@@ -226,3 +226,28 @@ TEST_CASE("QHY Q-Focuser Driver - Absent port fails connect with NotConnected", 
     require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_connected() == false);
 }
+
+// Regression guard for the one-reply-behind USB behaviour of the real GD32
+// firmware (PR #526 review). With the fake in one-behind mode, a reply is held
+// until the next OUT packet, so the driver's connect and reads only succeed
+// because transact_locked() drains the command out as its own packet and sends
+// a newline kick. Deleting the tcdrain or the kicks in
+// qhy_qfocuser_protocol_wrapper.cpp makes this case hang and fail, which the
+// instant-answer default fake could not catch.
+TEST_CASE("QHY Q-Focuser Driver - one-behind firmware needs the tcdrain+kick", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    fake.set_one_behind(true);
+    fake.set_position(1500);
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(fake.connects() >= 1);
+    // Reads must reach the awaited reply despite every reply arriving one OUT
+    // packet late; the kick is what clocks each one out.
+    CHECK(driver->get_position() == 1500);
+    CHECK(driver->get_is_moving() == false);
+    CHECK(driver->get_temperature() == Catch::Approx(23.881));
+
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}

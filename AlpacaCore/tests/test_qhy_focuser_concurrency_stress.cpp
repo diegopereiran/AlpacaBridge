@@ -52,7 +52,12 @@ TEST_CASE("QHY Q-Focuser - concurrent connect/disconnect/operate stress", "[qhy]
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     CHECK_NOTHROW(driver->set_connected(false));
 
-    alpacacore::test::StressCallGuard guard;
+    // This registration genuinely connects over the pty fake, so state the
+    // expected set explicitly rather than leaning on the default: every call
+    // in focuser_operate answers when connected and throws only NotConnected
+    // when it loses the race with a disconnect. A future call with a different
+    // contract (e.g. get_step_size() -> PropertyNotImplemented) must widen this.
+    alpacacore::test::StressCallGuard guard({alpacacore::AlpacaError::NotConnected});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { focuser_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));

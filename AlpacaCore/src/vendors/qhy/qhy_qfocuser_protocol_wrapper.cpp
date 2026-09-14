@@ -257,6 +257,14 @@ static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
         tcflush(fd, TCIOFLUSH);
         const std::string cmd = "{\"cmd_id\":1}";
         if (!util::write_all(fd, cmd.c_str(), cmd.size())) continue;
+        // Same one-behind handling as transact_locked(): drain the command out
+        // as its own packet and kick so the reply is clocked out on this
+        // attempt rather than only on the next one. Without it the probe burns
+        // the full kProbeTimeoutMs on attempt 0 on real hardware (~2 s per
+        // candidate port); the kick brings it back to the handshake latency.
+        tcdrain(fd);
+        static const char kick = '\n';
+        (void)util::write_all(fd, &kick, 1);
         const std::string reply = read_json_object(fd, kProbeTimeoutMs);
         if (reply.empty()) continue;
         QFocuserDeviceInfo parsed;

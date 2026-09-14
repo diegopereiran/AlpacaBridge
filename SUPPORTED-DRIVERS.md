@@ -451,7 +451,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Configuration**: `maxStep` (default 64000), `reverse`, `speed` (1 fastest to 8 slowest), `temperatureSource` (external probe or controller board), and the 12 V hold settings `holdForce`, `holdIhold` (0-16), `holdIrun` (0-30). All are pushed to the firmware at connect; the hold settings are only sent when the focuser reports a supply above 11.5 V.
 - **Tested model**: Q-Focuser High Precision (firmware 20231207, board 208) on Linux arm64, ConformU 4.5.1: 0 errors, 0 issues, all members within timing targets
 - **Not supported**: `StepSize` (hardware does not expose microns), temperature compensation
-- **Protocol quirks**: no moving flag, so `IsMoving` is derived from position versus target with a 1.5 s stall grace; position and telemetry are served from short caches (100 ms / 1 s) so `DeviceState` costs one serial round trip.
+- **Protocol quirks**: no moving flag, so `IsMoving` is derived from position versus target with a 1.5 s stall grace; position and telemetry are served from short caches (100 ms / 1 s) so `DeviceState` costs at most two serial round trips (one for position/is-moving, one more for temperature when the 1 s cache is cold).
 
 </details>
 
