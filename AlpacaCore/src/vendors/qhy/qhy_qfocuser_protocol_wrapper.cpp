@@ -21,6 +21,7 @@
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
 
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -62,6 +63,11 @@ constexpr int kHandshakeTimeoutMs = 3000;  // full runtime budget for the first 
 // last one; alignment is therefore done per command and never by draining in
 // a loop (which would re-read the same reply forever).
 constexpr int kKickSliceMs = 200;  // fallback read window before sending another kick
+// Floor on the gap between fallback kicks. read_json_object() returns early
+// (not just at the slice deadline) on a poll() error or an overlong reply
+// with no closing brace; without a floor those paths re-kick in a tight loop
+// until the transaction deadline (issue #527).
+constexpr int kEmptyReplyPauseMs = 50;
 constexpr int kProbeTimeoutMs = 1500;
 constexpr int kReadPollMs = 10;
 
@@ -160,6 +166,7 @@ std::string read_json_object(int fd, int timeout_ms, bool& link_dead) {
         const int r = poll(&pfd, 1, kReadPollMs);
         if (r < 0) {
             if (errno == EINTR) continue;
+            if (errno == EBADF) link_dead = true;  // fd closed underneath us
             return {};
         }
         if (r == 0) continue;
@@ -399,6 +406,7 @@ public:
             throw AlpacaException("Q-Focuser already connected", AlpacaError::InvalidOperation);
         }
         config_ = config;
+        link_lost_.store(false);
         open_port_locked();
 
         QFocuserDeviceInfo info;
@@ -440,6 +448,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
     }
+
+    // Lock-free on purpose: the driver's get_connected() is a FAST-timing
+    // property and must not queue behind an in-flight transaction.
+    bool link_alive() const noexcept { return !link_lost_.load(); }
 
     std::int32_t get_position() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -568,6 +580,11 @@ private:
     std::map<std::string, std::string> transact_locked(const std::string& cmd, int expected_idx, int timeout_ms,
                                                        int alt_idx = -2) {
 #ifndef _WIN32
+        if (serial_fd_ < 0) {
+            // The port was released by an earlier link-loss detection (below)
+            // and nothing has reconnected since.
+            throw AlpacaException("Q-Focuser link lost on " + config_.serial_port, AlpacaError::NotConnected);
+        }
         ALPACA_LOG_TRACE(kLogTag, "Q-Focuser command: " + cmd);
         tcflush(serial_fd_, TCIOFLUSH);
         if (!util::write_all(serial_fd_, cmd.c_str(), cmd.size())) {
@@ -586,22 +603,35 @@ private:
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         while (std::chrono::steady_clock::now() < deadline) {
             bool link_dead = false;
+            const auto slice_start = std::chrono::steady_clock::now();
             const std::string reply = read_json_object(serial_fd_, kKickSliceMs, link_dead);
             if (link_dead) {
-                // The port is gone (unplug / re-enumeration). Fail now rather
-                // than re-kicking at 100% CPU until the deadline. NotConnected
-                // (not DriverException) is the deliberate choice: this is a
-                // request/response driver with no background reader, so
-                // get_connected() cannot cheaply consult link health without
-                // adding a round trip to a FAST-timing property -- it reports
-                // last-known state, and the live read is what surfaces the loss.
+                // The port is gone (unplug / re-enumeration): the #445 shape.
+                // A removed node never comes back on this fd, and holding it
+                // keeps the kernel from reusing the name when the focuser is
+                // replugged, so release it now, latch link_lost_ (a lock-free
+                // flag the driver's Connected getter reads, since this is a
+                // request/response wrapper with no background reader to keep
+                // link health current), and fail this call with NotConnected.
+                // Only a new connect() clears the latch.
+                ALPACA_LOG_ERROR(kLogTag, "Q-Focuser link lost on " + config_.serial_port + " (port released)");
+                link_lost_.store(true);
+                connected_ = false;
+                close_port_locked();
                 throw AlpacaException("Q-Focuser link lost on " + config_.serial_port, AlpacaError::NotConnected);
             }
             if (reply.empty()) {
                 // Fallback: the proactive kick did not clock the reply out
                 // (should not happen once the command packet is drained), so
                 // send another. A newline is ignored by the firmware parser
-                // but its OUT packet transmits the pending reply.
+                // but its OUT packet transmits the pending reply. If the read
+                // came back before its slice elapsed (poll error, or a stream
+                // of garbage with no closing brace), pace the re-kick so a
+                // present-but-babbling tty cannot spin a core to the deadline.
+                const auto slice_elapsed = std::chrono::steady_clock::now() - slice_start;
+                if (slice_elapsed < std::chrono::milliseconds(kEmptyReplyPauseMs)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kEmptyReplyPauseMs) - slice_elapsed);
+                }
                 (void)util::write_all(serial_fd_, &kick, 1);
                 continue;
             }
@@ -639,6 +669,9 @@ private:
     mutable std::mutex mutex_;
     QFocuserConnectionConfig config_;
     bool connected_ = false;
+    // Latched by transact_locked() when the port dies mid-session; cleared by
+    // connect(). Atomic so link_alive() never takes mutex_ (issue #527).
+    std::atomic<bool> link_lost_{false};
 #ifndef _WIN32
     int serial_fd_ = -1;
     std::string opened_port_;  // canonical path registered in the serial-port registry
@@ -653,6 +686,7 @@ QFocuserDeviceInfo QFocuserProtocolWrapper::connect(const QFocuserConnectionConf
 }
 void QFocuserProtocolWrapper::disconnect() { impl_->disconnect(); }
 bool QFocuserProtocolWrapper::is_connected() const { return impl_->is_connected(); }
+bool QFocuserProtocolWrapper::link_alive() const noexcept { return impl_->link_alive(); }
 std::int32_t QFocuserProtocolWrapper::get_position() { return impl_->get_position(); }
 QFocuserTelemetry QFocuserProtocolWrapper::get_telemetry() { return impl_->get_telemetry(); }
 void QFocuserProtocolWrapper::move_to(std::int32_t position) { impl_->move_to(position); }

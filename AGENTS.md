@@ -120,7 +120,12 @@ vendor-agnostic; do them in the driver from the start.
   after taking the driver mutex, before the idempotency early-return. A driver
   with an extra sync-connect window the base can't see (e.g. the AFW's
   mutex-released homing poll) records it itself via
-  `record_pending_disconnect()`.
+  `record_pending_disconnect()`. **A driver whose `set_connected(true)` is itself slow
+  (a serial handshake, an HTTP fetch, a GPIO request) must also hold a driver-level
+  `transition_mutex_` across the whole of `set_connected()`** (issue #528): the base gates
+  only see an *async* connect, so a sync disconnect landing inside a sync connect saw
+  "not connected" twice and returned as a no-op while the connect stored true. Guard
+  `set_connected()` against `set_connected()` only; never take it in a getter.
 - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
   writes a member (e.g. a pulse-guide flag) is the classic trap: if the object dies
   mid-sleep the wakeup writes freed memory (UB). Make it a joinable member thread
@@ -539,7 +544,9 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   `Connected=true` against the lost link reconnects instead of hitting the idempotency return.
   `EIO`, `ENXIO`, `ENODEV` or `EBADF` from a write or read on the link's fd also counts as loss,
   even before the node lookup reflects it: a tty returns those only when its device is gone or
-  the fd is unusable. Silence with the node still present keeps the rules above. The #237 drivers still treat a
+  the fd is unusable. Silence with the node still present keeps the rules above. The QHY Q-Focuser follows the same
+  shape since #527, detected on its next transaction (request/response, no reader thread) with a
+  lock-free `link_lost_` latch the getter reads. The #237 drivers still treat a
   removed node as a fault; that has not been changed. Tests: `sever_link()` on
   `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
 

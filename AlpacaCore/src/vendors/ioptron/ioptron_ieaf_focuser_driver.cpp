@@ -106,6 +106,14 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Serialize whole transitions against each other (issue #528): the
+        // base's record/consume gates only see an ASYNC connect. With a sync
+        // connect in flight on thread A, a sync disconnect on thread B saw
+        // "not connected" twice (nothing in flight, idempotent) and returned
+        // as a no-op while A went on to store true -- the client was told
+        // the disconnect succeeded and the device ended up Connected. Held
+        // only for set_connected() against set_connected(); getters stay free.
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent and would be silently dropped
         // without the record; a connect must honor a newer pending disconnect.
@@ -270,6 +278,8 @@ private:
     static std::string model_name_for(const std::string& model) { return model == "iafs2" ? "iAFS2/3" : "iEAF"; }
 
     mutable std::mutex firmware_mutex_;
+    // Guards set_connected() against a concurrent set_connected() only (#528).
+    std::mutex transition_mutex_;
     std::string firmware_;    // captured at connect; web-UI only (guarded by firmware_mutex_)
     std::string model_name_;  // "iEAF" / "iAFS2/3" from config; fixed after construction
     mutable std::mutex status_mutex_;

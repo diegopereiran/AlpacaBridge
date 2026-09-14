@@ -283,3 +283,78 @@ TEST_CASE("QHY Q-Focuser Driver - dead link fails fast, no busy-spin", "[qhy][fo
 
     driver->set_connected(false);
 }
+
+// Issue #527: once the link is gone, Connected must read false without a
+// reconnect (the #445 shape), every operation must throw NotConnected, and
+// Connected=true must reconnect rather than take the idempotency early return.
+TEST_CASE("QHY Q-Focuser Driver - lost link drops Connected and reconnects", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(fake.connects() == 1);
+
+    fake.sever();
+    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_connected() == false);
+    require_alpaca_error([&]() { driver->get_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->move(1200); }, alpacacore::AlpacaError::NotConnected);
+    // Static metadata keeps answering.
+    CHECK(driver->get_max_step() > 0);
+
+    // Connected=true against the dead link is a reconnect attempt, not a
+    // no-op: the severed pty path is empty, so the open fails and throws.
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_connected() == false);
+
+    // Connected=false still tears down cleanly.
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}
+
+// Issue #527: a present tty that answers with brace-less garbage makes the
+// reader return early on every slice. Without a pause between fallback kicks
+// that path re-kicked in a tight loop (thousands of kicks per second) until
+// the 3 s deadline; the kick count bounds the rate.
+TEST_CASE("QHY Q-Focuser Driver - garbage replies do not busy-spin the kick loop", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    fake.set_garbage(true);
+    const int before = fake.kicks();
+    const auto start = std::chrono::steady_clock::now();
+    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::DriverException);
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    const int kicks = fake.kicks() - before;
+    INFO("kicks=" << kicks << " elapsed_ms=" << elapsed_ms);
+    // 3 s deadline / 50 ms floor = 60 kicks at most, plus the proactive one.
+    CHECK(kicks <= 70);
+    CHECK(kicks >= 1);
+
+    fake.set_garbage(false);
+    driver->set_connected(false);
+}
+
+// Issue #528: a synchronous disconnect that lands while a synchronous connect
+// is inside the wrapper's handshake (which sleeps 100 ms before the first
+// exchange) must not be dropped. Without transition_mutex_ thread B saw
+// "not connected" twice and returned as a no-op while A stored true.
+TEST_CASE("QHY Q-Focuser Driver - sync disconnect during sync connect is not dropped", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+
+    std::thread a([&] {
+        try {
+            driver->set_connected(true);
+        } catch (const std::exception&) {
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));  // inside A's pre-handshake sleep
+    driver->set_connected(false);
+    a.join();
+
+    CHECK(driver->get_connected() == false);
+    CHECK(fake.connects() == 1);
+    driver->set_connected(false);
+}
