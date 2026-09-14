@@ -96,7 +96,7 @@ std::optional<std::string> pick_raw_format_choice(const std::vector<std::string>
 
 // Sensor geometry (width/height/Bayer phase/max ADU) is not knowable from
 // libgphoto2 metadata -- it only comes from decoding a real captured RAW
-// frame with libraw (see AGENTS.md gphoto section). That is identical for
+// frame with libraw (see .github/instructions/gphoto.instructions.md). That is identical for
 // every camera of the same model, so once it has been learned for a given
 // model on this rig it is cached to disk (keyed by the model string, not
 // the individual device) and never needs a priming capture again -- not on
@@ -621,7 +621,7 @@ public:
     // that depends on geometry throws InvalidOperation ("not yet known") only
     // in the rare case that both of those failed (e.g. priming capture error)
     // -- it then falls back to the caller's own first real exposure, same as
-    // other RAW-over-gphoto2 ASCOM drivers (e.g. ASCOM.DSLR). See AGENTS.md
+    // other RAW-over-gphoto2 ASCOM drivers (e.g. ASCOM.DSLR). See .github/instructions/gphoto.instructions.md
     // for the history of this tradeoff.
 
     int get_bayer_offset_x() const override {

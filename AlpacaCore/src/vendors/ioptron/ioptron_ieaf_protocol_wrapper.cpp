@@ -490,7 +490,7 @@ private:
 
     // Flush stale input before every command: a previous blind command or a
     // half-read reply must not shift the fixed-width field parse of the next
-    // response (same leaked-byte hazard the mount driver hit — see AGENTS.md).
+    // response (same leaked-byte hazard the mount driver hit — see .github/instructions/ioptron.instructions.md).
     std::string send_command_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("iOptron", "iEAF command: " + cmd);
         tcflush_port();

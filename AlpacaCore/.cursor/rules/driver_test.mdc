@@ -19,6 +19,11 @@ This comprehensive guide shows you how to test vendor-specific drivers using Cat
 
 ---
 
+Before working, read the repository-root `AGENTS.md` in full and follow
+`docs/agent-instructions.md` (both one level above this component). Load the
+relevant scoped files even when working only on tests or shared configuration.
+
+
 ## Overview
 
 AlpacaCore uses **Catch2** as its testing framework. Tests are located in `tests/` and automatically discovered by CMake using `catch_discover_tests`.

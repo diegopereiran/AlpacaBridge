@@ -316,7 +316,7 @@ AlpacaBridge drivers follow a **three-layer architecture**:
 
 SDK-based drivers (ZWO, QHY, Player One, SVBONY, ToupTek) use an **SDK wrapper**. Protocol-based drivers (iOptron, SynScan, Celestron, Gemini) use a **protocol wrapper**.
 
-Use the [`/driver-build` skill](#driver-build--guided-driver-implementation) for the full interactive workflow — it walks through every step from SDK placement through ConformU validation. See [AGENTS.md](../AGENTS.md) for architecture rules and vendor-specific lessons learned.
+Use the [`/driver-build` skill](#driver-build--guided-driver-implementation) for the full interactive workflow — it walks through every step from SDK placement through ConformU validation. See [AGENTS.md](../AGENTS.md) for architecture rules and the [instruction index](agent-instructions.md) for vendor-specific lessons learned.
 
 ## Installing a source build as a service
 
@@ -365,7 +365,7 @@ Testers who need an unreleased build still build from source or use `/deploy-rem
 
 - [Architecture](architecture.md) — system design, three-layer pattern, component overview
 - [Troubleshooting](troubleshooting.md) — common build and runtime issues
-- [AGENTS.md](../AGENTS.md) — AI driver development guide and vendor-specific notes
+- [AGENTS.md](../AGENTS.md) — AI driver development guide; vendor-specific notes are indexed in [agent-instructions.md](agent-instructions.md)
 - [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) — ConformU-validated driver matrix
 - [ASCOM Alpaca API Specification](https://ascom-standards.org/api/)
 - [ConformU](https://github.com/ASCOMInitiative/ConformU) — official conformance testing

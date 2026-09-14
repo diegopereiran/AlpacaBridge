@@ -423,7 +423,7 @@ private:
         // DISABLE). The kernel module symbol table confirms it uses standard
         // gpiod_* APIs (devm_gpio_request_one, gpiod_direction_output_raw,
         // gpiod_set_raw_value, hrtimer_*, pinctrl_select_state) — see
-        // AGENTS.md for the full forensic write-up.
+        // .github/instructions/zwo.instructions.md for the full forensic write-up.
 
         // Every port — including PWM-configured ports — currently uses the
         // boolean GPIO path. The kernel module's PWM mode is broken

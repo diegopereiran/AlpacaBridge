@@ -22,7 +22,8 @@
 // MoveAxis stop tasks) run end-to-end through the REAL protocol wrapper and
 // UDP transport with no hardware and no production-code seams (issue #213).
 //
-// Simulated geometry matches the Wave 100i values captured in AGENTS.md:
+// Simulated geometry matches the Wave 100i values captured in
+// .github/instructions/skywatcher.instructions.md:
 // CPR 4147200, timer 14 MHz, high-speed ratio 1, firmware reply "=033A44",
 // feature register 0x100C (home indexers present on both axes).
 
@@ -56,7 +57,7 @@ struct FakeMountProfile {
     uint32_t features = 0x100C;  // ":q" 0x000001: POLAR_LED | IS_AZEQ | HOME_INDEXER
     uint32_t steps_per_worm = 0;
 
-    // Wave 100i, MC firmware 3.58, mount code 0x44 (AGENTS.md capture).
+    // Wave 100i, MC firmware 3.58, mount code 0x44 (.github/instructions/skywatcher.instructions.md capture).
     static FakeMountProfile wave_100i() { return FakeMountProfile{}; }
 
     // Sky-Watcher EQM-35 Pro, MC firmware 3.39, mount code 0x32. Captured over
