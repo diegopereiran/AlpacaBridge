@@ -52,7 +52,11 @@ fi
 # normal builds, but successive runs of each still hit; that build dir is
 # reused across runs and the launcher is only a cache-variable DEFAULT, so it
 # is also passed explicitly there (CCACHE_CMAKE_ARGS) or an older build-tsan/
-# would never pick it up. The scan-build gate must NOT use the launcher: a
+# would never pick it up. Invariant: every OTHER build dir is deleted before
+# it is configured (run_all_tests.sh rm -rf's build/ and AlpacaHTTP/build/),
+# which is the only reason the env var alone is enough there; a future gate
+# that reuses a build tree needs "${CCACHE_CMAKE_ARGS[@]}" on its configure
+# too. The scan-build gate must NOT use the launcher: a
 # ccache hit returns the cached object without running c++-analyzer, so the
 # second run analyzes nothing and reports 0 findings (see that gate).
 CCACHE_ACTIVE=0
@@ -568,7 +572,7 @@ if [ "${RUN_SCAN_BUILD:-0}" = "1" ]; then
          cmake -S AlpacaHTTP -B "${SCAN_DIR}" \
          -DALPACAHTTP_BUILD_TESTS=ON -DALPACACORE_ENABLE_ALL_VENDORS=ON > "${SCAN_LOG}" 2>&1 \
        && grep -q "CMAKE_CXX_COMPILER:FILEPATH=.*analyzer" "${SCAN_DIR}/CMakeCache.txt" \
-       && ! grep -q "COMPILER_LAUNCHER:.*=ccache" "${SCAN_DIR}/CMakeCache.txt" \
+       && ! grep -q "COMPILER_LAUNCHER:.*=.*ccache" "${SCAN_DIR}/CMakeCache.txt" \
        && "${SCAN_BIN}" -disable-checker unix.BlockInCriticalSection -o "${SCAN_OUT}" \
          cmake --build "${SCAN_DIR}" --parallel "${PARALLEL}" >> "${SCAN_LOG}" 2>&1; then
       bugs="$(find "${SCAN_OUT}" -name 'report-*.html' 2>/dev/null | wc -l | tr -d ' ')"
@@ -594,7 +598,7 @@ if [ "${CCACHE_ACTIVE}" = "1" ]; then
   # rate (counters zeroed at the top) so a cold vs warm cache is visible when
   # comparing pre-flight run times (issue #529).
   echo
-  ccache -s 2>/dev/null | grep -iE 'hits|misses|hit rate' | sed 's/^/  ccache: /' || true
+  ccache -s 2>/dev/null | grep -iE 'hit|miss' | sed 's/^/  ccache: /' || true
 fi
 
 echo
