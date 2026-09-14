@@ -54,6 +54,10 @@ if(TARGET alpacacore_qhy)
     # is what lets the two files above reach the connect path at all -- the
     # real SDK's libusb hotplug init crashes on a USB-less runner.
     list(APPEND TEST_SOURCES test_qhy_fake_sdk.cpp)
+    # Q-Focuser: serial JSON protocol, no SDK; the pty fake gives it a real
+    # connect path, so it carries its own [stress] registration.
+    list(APPEND TEST_SOURCES test_qhy_focuser.cpp)
+    list(APPEND TEST_SOURCES test_qhy_focuser_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)

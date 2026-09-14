@@ -79,6 +79,7 @@
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
+#include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_WEEWX
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
@@ -8629,6 +8630,59 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
+    if (vendor == "qhy" && device_type_str == "focuser") {
+#ifdef ALPACACORE_ENABLE_QHY
+        // Q-Focuser: USB CDC-ACM serial at a fixed 9600 baud, no SDK. The
+        // motion/hold settings are pushed to the firmware at every connect.
+        std::string conn_type = config_get(config, "connectionType", "auto");
+        alpacacore::vendor::qhy::QFocuserSettings settings;
+        settings.max_step = config_get(config, "maxStep", settings.max_step);
+        settings.reverse = config_get(config, "reverse", settings.reverse);
+        settings.speed = config_get(config, "speed", settings.speed);
+        settings.hold_force = config_get(config, "holdForce", settings.hold_force);
+        settings.hold_ihold = config_get(config, "holdIhold", settings.hold_ihold);
+        settings.hold_irun = config_get(config, "holdIrun", settings.hold_irun);
+        settings.temperature_source = config_get(config, "temperatureSource", settings.temperature_source);
+        if (settings.max_step < 1 || settings.max_step > 2000000) {
+            error_message = "QHY Q-Focuser maxStep must be between 1 and 2000000";
+            return false;
+        }
+        if (settings.speed < 1 || settings.speed > 8) {
+            error_message = "QHY Q-Focuser speed must be between 1 (fastest) and 8 (slowest)";
+            return false;
+        }
+        if (settings.hold_ihold < 0 || settings.hold_ihold > 16 || settings.hold_irun < 0 || settings.hold_irun > 30) {
+            error_message = "QHY Q-Focuser holdIhold must be 0-16 and holdIrun 0-30";
+            return false;
+        }
+        if (settings.temperature_source != "external" && settings.temperature_source != "chip") {
+            error_message = "QHY Q-Focuser temperatureSource must be \"external\" or \"chip\"";
+            return false;
+        }
+
+        std::unique_ptr<alpacacore::FocuserDriver> focuser;
+        std::string port_path = conn_type == "serial" ? config_get(config, "portPath", "") : std::string();
+        if (!port_path.empty()) {
+            focuser = alpacacore::vendor::qhy::create_qhy_focuser(device_number, port_path, settings);
+        } else {
+            // "auto", or serial mode with no port given — auto-detect.
+            int focuser_index = config_get(config, "focuserIndex", 0);
+            focuser = alpacacore::vendor::qhy::create_qhy_focuser_by_index(device_number, focuser_index, settings);
+        }
+
+        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
+            util::log_info("Registered QHY Q-Focuser");
+            return true;
+        }
+
+        error_message = "Failed to register device. Device may already exist.";
+        return false;
+#else
+        error_message = "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON";
+        return false;
+#endif
+    }
+
     if (vendor == "svbony" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_SVBONY
         int camera_index = config_get(config, "cameraIndex", 0);
@@ -9381,6 +9435,21 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("focuserId");
         copy_if_present("rotatorIndex");
         copy_if_present("rotatorId");
+    } else if (vendor == "qhy" && device_type == "focuser") {
+        // Q-Focuser: USB-serial only, fixed baud — no baudRate/network fields.
+        copy_if_present("connectionType");
+        copy_if_present("focuserIndex");
+        copy_if_present("maxStep");
+        copy_if_present("reverse");
+        copy_if_present("speed");
+        copy_if_present("holdForce");
+        copy_if_present("holdIhold");
+        copy_if_present("holdIrun");
+        copy_if_present("temperatureSource");
+        std::string connection_type = config_get(config, "connectionType", "");
+        if (connection_type == "serial") {
+            copy_if_present("portPath");
+        }
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");

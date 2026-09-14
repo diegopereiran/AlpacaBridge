@@ -2104,6 +2104,69 @@ int main() {
     }
 #endif
 
+#ifdef ALPACACORE_ENABLE_QHY
+    {
+        // qhy / focuser (Q-Focuser) — serial mode persists portPath (no
+        // baudRate: fixed 9600) plus every connect-time setting through
+        // sanitize_device_config; an unknown key is dropped.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "qhy"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9640},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyACM3"},
+                                           {"focuserIndex", 1},
+                                           {"maxStep", 30000},
+                                           {"reverse", true},
+                                           {"speed", 4},
+                                           {"holdForce", true},
+                                           {"holdIhold", 6},
+                                           {"holdIrun", 12},
+                                           {"temperatureSource", "chip"},
+                                           {"cameraIndex", 7}},
+                                          "Focuser", 9640);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyACM3");
+        EXPECT(cfg.value("focuserIndex", -1) == 1);
+        EXPECT(cfg.value("maxStep", -1) == 30000);
+        EXPECT(cfg.value("reverse", false) == true);
+        EXPECT(cfg.value("speed", -1) == 4);
+        EXPECT(cfg.value("holdForce", false) == true);
+        EXPECT(cfg.value("holdIhold", -1) == 6);
+        EXPECT(cfg.value("holdIrun", -1) == 12);
+        EXPECT(cfg.value("temperatureSource", "") == "chip");
+        EXPECT(!cfg.contains("cameraIndex"));
+        remove_device(router, "qhy", "focuser", 9640);
+    }
+    {
+        // qhy / focuser (Q-Focuser) — the router rejects out-of-range settings
+        // with a specific message and a non-zero ErrorNumber, and registers
+        // nothing. Covers the validation branch the valid round trip skips.
+        const nlohmann::json bad = {{"vendor", "qhy"},
+                                    {"deviceType", "focuser"},
+                                    {"deviceNumber", 9641},
+                                    {"connectionType", "serial"},
+                                    {"portPath", "/dev/ttyACM4"},
+                                    {"speed", 9}};
+        const auto response = route_request(router, "POST", "/management/v1/configuredevice", bad.dump());
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        EXPECT(json.value("ErrorMessage", "").find("speed") != std::string::npos);
+        // Nothing should have been registered at 9641.
+        const auto listed = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto listed_json = nlohmann::json::parse(listed.body(), nullptr, false);
+        bool present = false;
+        if (!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array()) {
+            for (const auto& entry : listed_json["Value"]) {
+                if (entry.value("DeviceType", "") == "Focuser" && entry.value("DeviceNumber", -1) == 9641)
+                    present = true;
+            }
+        }
+        EXPECT(!present);
+    }
+#endif
+
 #ifdef ALPACACORE_ENABLE_SYNSCAN
     {
         // synscan / telescope — same mountIndex gap as ioptron; also the

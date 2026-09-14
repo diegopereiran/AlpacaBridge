@@ -20,7 +20,7 @@ repository root.
 | Task or affected hardware | Read |
 | --- | --- |
 | ZWO, ASI cameras, EAF, EFW, CAA, AM mounts, ASIAIR power ports | [ZWO](../.github/instructions/zwo.instructions.md) |
-| QHY cameras or integrated CFW | [QHY](../.github/instructions/qhy.instructions.md) |
+| QHY cameras, integrated CFW, or the Q-Focuser | [QHY](../.github/instructions/qhy.instructions.md) |
 | SVBONY cameras | [SVBONY](../.github/instructions/svbony.instructions.md) |
 | ToupTek cameras, AFW, AAF, StellaVita, or SC715C rebadge | [ToupTek](../.github/instructions/touptek.instructions.md) |
 | Player One cameras, Phoenix wheels, thermal switch, iCAM camera backend | [Player One](../.github/instructions/playerone.instructions.md) |
