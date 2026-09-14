@@ -83,11 +83,13 @@ public:
     void set_steps_per_poll(int n) { steps_per_poll_.store(n); }
     /// Supply voltage reported in c_r (tenths of a volt): 125 = 12.5 V.
     void set_voltage_tenths(int v) { voltage_tenths_.store(v); }
-    /// Model the real GD32 firmware's one-reply-behind USB behaviour: each
-    /// reply is held until the next OUT packet (command or newline kick). With
-    /// this on, a driver that does not tcdrain-then-kick hangs, so a connect
-    /// test in this mode fails if the driver's fix is removed. Off by default
-    /// so the other tests keep deterministic (non-lagged) reads.
+    /// Model the real GD32 firmware's one-reply-behind behaviour: each reply is
+    /// held until a later inbound OUT (a command or the driver's newline kick)
+    /// clocks it out. With this on, a driver that never kicks gets no reply and
+    /// times out. Note a pty has no USB OUT-packet boundary, so this does NOT
+    /// reproduce the coalescing that makes tcdrain matter, nor the proactive-
+    /// vs-fallback kick timing — those are validated on hardware. Off by
+    /// default so the other tests keep deterministic (non-lagged) reads.
     void set_one_behind(bool on) { one_behind_.store(on); }
 
 private:
