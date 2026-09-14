@@ -38,6 +38,25 @@ else
   PARALLEL="4"
 fi
 
+# --- ccache (issue #529) ---------------------------------------------------
+#
+# run_all_tests.sh does `rm -rf build` and a full clean rebuild, and this
+# script runs it twice (vendors OFF, then ON) plus a third clean build for the
+# TSan pass, so every pre-flight recompiles the whole tree 2-3 times from
+# scratch. Route those compiles through ccache when it is available: CMake reads
+# CMAKE_{C,CXX}_COMPILER_LAUNCHER at configure time, so exporting them here
+# covers run_all_tests.sh's configures, the TSan build, and scan-build without
+# editing each cmake line. Guarded on ccache being present so this is a no-op
+# where it is absent, leaving CI parity unchanged. The TSan build's
+# -fsanitize=thread objects have distinct cache keys and won't share with the
+# normal builds, but successive runs of each still hit.
+CCACHE_ACTIVE=0
+if command -v ccache >/dev/null 2>&1; then
+  export CMAKE_C_COMPILER_LAUNCHER=ccache
+  export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+  CCACHE_ACTIVE=1
+fi
+
 # --- result tracking -------------------------------------------------------
 
 OVERALL=0
@@ -538,6 +557,13 @@ section "Pre-flight summary"
 for entry in "${RESULTS[@]}"; do
   printf '  [%-4s] %s\n' "${entry%%|*}" "${entry#*|}"
 done
+
+if [ "${CCACHE_ACTIVE}" = "1" ]; then
+  # Advisory only (never affects OVERALL): show the compiler-cache hit rate so a
+  # cold vs warm cache is visible when comparing pre-flight run times (issue #529).
+  echo
+  ccache -s 2>/dev/null | grep -iE 'hits|misses|hit rate' | sed 's/^/  ccache: /' || true
+fi
 
 echo
 if [ "${OVERALL}" -eq 0 ]; then
