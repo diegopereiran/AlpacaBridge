@@ -23,7 +23,7 @@
 //   {"cmd_id":4}            -> {"idx":4,"temp":..,"c_t":..,"c_r":..,"o_t":..,"sg":0}
 //   {"cmd_id":6,"tar":N}    -> {"idx":6}   (position steps toward N on each poll)
 //   {"cmd_id":3}            -> {"idx":3}   (stops at the current position)
-//   7 / 11 / 12 / 13 / 16   -> {"idx":<same>}
+//   7 / 12 / 13 / 16        -> {"idx":<same>}
 //
 // Motion is simulated as `steps_per_poll` steps per position query, so a
 // test can watch IsMoving flip without real time passing.
