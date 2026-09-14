@@ -38,6 +38,44 @@ else
   PARALLEL="4"
 fi
 
+# --- ccache (issue #529) ---------------------------------------------------
+#
+# run_all_tests.sh does `rm -rf build` and a full clean rebuild, and this
+# script runs it twice (vendors OFF, then ON) plus a third clean build for the
+# TSan pass, so every pre-flight recompiles the whole tree 2-3 times from
+# scratch. Route those compiles through ccache when it is available: CMake reads
+# CMAKE_{C,CXX}_COMPILER_LAUNCHER at configure time, so exporting them here
+# covers run_all_tests.sh's configures and the clang-tidy compile DB without
+# editing each cmake line. Guarded on ccache being present so this is a no-op
+# where it is absent, leaving CI parity unchanged. The TSan build's
+# -fsanitize=thread objects have distinct cache keys and won't share with the
+# normal builds, but successive runs of each still hit; that build dir is
+# reused across runs and the launcher is only a cache-variable DEFAULT, so it
+# is also passed explicitly there (CCACHE_CMAKE_ARGS) or an older build-tsan/
+# would never pick it up. Invariant: every OTHER build dir is deleted before
+# it is configured (run_all_tests.sh rm -rf's build/ and AlpacaHTTP/build/),
+# which is the only reason the env var alone is enough there; a future gate
+# that reuses a build tree needs "${CCACHE_CMAKE_ARGS[@]}" on its configure
+# too. The scan-build gate must NOT use the launcher: a
+# ccache hit returns the cached object without running c++-analyzer, so the
+# second run analyzes nothing and reports 0 findings (see that gate).
+CCACHE_ACTIVE=0
+declare -a CCACHE_CMAKE_ARGS=()
+if command -v ccache >/dev/null 2>&1; then
+  export CMAKE_C_COMPILER_LAUNCHER=ccache
+  export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+  CCACHE_CMAKE_ARGS=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+  # Zero the counters so the summary's hit rate is THIS run's, not the
+  # lifetime total shared with build_and_run.sh.
+  ccache --zero-stats >/dev/null 2>&1 || true
+  CCACHE_ACTIVE=1
+else
+  # Explicitly clear the launcher so a reused build-tsan/ configured while
+  # ccache WAS installed does not keep "ccache" cached and fail with
+  # "ccache: command not found" after it is removed.
+  CCACHE_CMAKE_ARGS=(-DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_CXX_COMPILER_LAUNCHER=)
+fi
+
 # --- result tracking -------------------------------------------------------
 
 OVERALL=0
@@ -270,6 +308,10 @@ elif ensure_tool clang-tidy clang-tidy; then
   # Compile DB covering both trees (AlpacaHTTP pulls AlpacaCore in as a subdir).
   # Vendors ON so vendor sources get real compile commands (mirrors CI; with
   # vendors OFF clang-tidy interpolates commands missing the SDK include dirs).
+  # The ccache launcher exported above does NOT reach compile_commands.json:
+  # CMake writes the bare compiler there (verified on CMake 3.31.6 with
+  # CMAKE_CXX_COMPILER_LAUNCHER=ccache: "command": "/usr/bin/c++ ..."), and
+  # clang-tidy 19 ran clean against such a tree, so nothing to strip here.
   cmake -S AlpacaHTTP -B AlpacaHTTP/build \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DALPACAHTTP_BUILD_TESTS=ON \
@@ -469,6 +511,7 @@ if [ "${RUN_TSAN:-0}" = "1" ]; then
   if cmake -S AlpacaCore -B "${TSAN_BUILD_DIR}" \
        -DALPACACORE_BUILD_TESTS=ON \
        -DALPACACORE_ENABLE_ALL_VENDORS=ON \
+       "${CCACHE_CMAKE_ARGS[@]}" \
        -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -O1 -g" \
        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
      && cmake --build "${TSAN_BUILD_DIR}" --parallel "$(nproc)" \
@@ -515,10 +558,21 @@ if [ "${RUN_SCAN_BUILD:-0}" = "1" ]; then
     # configure caches c++-analyzer in CMakeCache.txt, unwrapped caches
     # /usr/bin/c++). The grep guard turns that silent false-negative into a
     # loud failure if a future refactor drops the wrapper.
-    if "${SCAN_BIN}" -disable-checker unix.BlockInCriticalSection -o "${SCAN_OUT}" \
+    #
+    # The configure runs with the ccache launcher variables UNSET (env -u):
+    # ccache keys on (compiler binary, args, preprocessed source), all stable
+    # between pre-flights, so with the launcher in place the second run would
+    # be served cached objects and c++-analyzer would never execute -- 0
+    # reports, PASS, nothing analyzed (probed: a one-file scan-build reported
+    # 1 finding on the first run and 0 on the second with ccache in the loop).
+    # The launcher is only read at configure time, so unsetting it there is
+    # enough; the second grep guards against a refactor that re-adds it.
+    if env -u CMAKE_C_COMPILER_LAUNCHER -u CMAKE_CXX_COMPILER_LAUNCHER \
+         "${SCAN_BIN}" -disable-checker unix.BlockInCriticalSection -o "${SCAN_OUT}" \
          cmake -S AlpacaHTTP -B "${SCAN_DIR}" \
          -DALPACAHTTP_BUILD_TESTS=ON -DALPACACORE_ENABLE_ALL_VENDORS=ON > "${SCAN_LOG}" 2>&1 \
        && grep -q "CMAKE_CXX_COMPILER:FILEPATH=.*analyzer" "${SCAN_DIR}/CMakeCache.txt" \
+       && ! grep -q "COMPILER_LAUNCHER:.*=.*ccache" "${SCAN_DIR}/CMakeCache.txt" \
        && "${SCAN_BIN}" -disable-checker unix.BlockInCriticalSection -o "${SCAN_OUT}" \
          cmake --build "${SCAN_DIR}" --parallel "${PARALLEL}" >> "${SCAN_LOG}" 2>&1; then
       bugs="$(find "${SCAN_OUT}" -name 'report-*.html' 2>/dev/null | wc -l | tr -d ' ')"
@@ -538,6 +592,14 @@ section "Pre-flight summary"
 for entry in "${RESULTS[@]}"; do
   printf '  [%-4s] %s\n' "${entry%%|*}" "${entry#*|}"
 done
+
+if [ "${CCACHE_ACTIVE}" = "1" ]; then
+  # Advisory only (never affects OVERALL): show this run's compiler-cache hit
+  # rate (counters zeroed at the top) so a cold vs warm cache is visible when
+  # comparing pre-flight run times (issue #529).
+  echo
+  ccache -s 2>/dev/null | grep -iE 'hit|miss' | sed 's/^/  ccache: /' || true
+fi
 
 echo
 if [ "${OVERALL}" -eq 0 ]; then
