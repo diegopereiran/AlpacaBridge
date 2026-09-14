@@ -173,8 +173,12 @@ TEST_CASE("QHY Q-Focuser Driver - Connect applies settings and reports motion", 
     require_alpaca_error([&]() { driver->set_temp_comp(true); }, alpacacore::AlpacaError::NotImplemented);
 
     driver->move(2000);
-    CHECK(driver->get_is_moving() == true);  // first poll: 1400 of 2000
-    CHECK(driver->get_position() == 1400);   // served from the same 100 ms sample
+    // 400 steps/poll from 1000 never reaches 2000 on the first poll, so this is
+    // deterministic. The exact intermediate position is not asserted: each read
+    // may or may not share the 100 ms cache window with the next on a loaded or
+    // ASan runner, so the fake could have advanced — the settle loop below
+    // proves arrival instead.
+    CHECK(driver->get_is_moving() == true);
     for (int i = 0; i < 20 && driver->get_is_moving(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
     }
