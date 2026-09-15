@@ -113,7 +113,12 @@ public:
         const bool live = connected_.load() && protocol_.link_alive();
         if (!connected && record_disconnect_if_connect_in_flight(live)) return;
         if (connected && consume_pending_disconnect(live)) return;
-        if (connected == live) return;
+        // Idempotency is direction-specific: a connect is a no-op only while
+        // the link is live, but a disconnect is a no-op only when nothing was
+        // ever connected. A lost link leaves connected_ true with the
+        // firmware cache populated (the management endpoint renders it
+        // without a Connected check), so Connected=false must still tear down.
+        if (connected ? live : !connected_.load()) return;
 
         if (connected) {
             if (connected_.load()) {

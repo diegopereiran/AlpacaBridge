@@ -358,3 +358,25 @@ TEST_CASE("QHY Q-Focuser Driver - sync disconnect during sync connect is not dro
     CHECK(fake.connects() == 1);
     driver->set_connected(false);
 }
+
+// Issue #527 review (PR #531): an explicit Connected=false straight after the
+// link loss, with no reconnect attempt in between, must still run the full
+// teardown. The link-aware idempotency check saw false == false and returned
+// early, leaving connected_ true and the firmware cache populated, which the
+// management endpoint renders without a Connected check.
+TEST_CASE("QHY Q-Focuser Driver - explicit disconnect after lost link clears state", "[qhy][focuser][unit]") {
+    alpacacore::test::FakeQhyQFocuser fake;
+    auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_device_firmware().has_value());
+
+    fake.sever();
+    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(driver->get_connected() == false);
+
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+    CHECK(driver->get_device_firmware().has_value() == false);
+    // And a later Connected=true is a plain connect, not a stale-link reconnect.
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+}
