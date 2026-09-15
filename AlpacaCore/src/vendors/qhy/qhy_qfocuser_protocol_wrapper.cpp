@@ -411,6 +411,7 @@ public:
 
         QFocuserDeviceInfo info;
         bool success = false;
+        in_connect_ = true;
         for (int attempt = 0; attempt < kHandshakeRetries && !success; ++attempt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(attempt == 0 ? 100 : 500));
             try {
@@ -424,6 +425,7 @@ public:
                                 "Q-Focuser handshake attempt " + std::to_string(attempt + 1) + " failed: " + e.what());
             }
         }
+        in_connect_ = false;
         if (!success) {
             close_port_locked();
             throw AlpacaException("Q-Focuser handshake failed after " + std::to_string(kHandshakeRetries) +
@@ -577,6 +579,27 @@ private:
     // `expected_idx` (or `alt_idx`). Replies with any other idx (a stale
     // answer the kick shook loose first, or a {"idx":-1} reboot notice) are
     // skipped until the deadline.
+    // The port is gone (unplug / re-enumeration): the #445 shape. A removed
+    // node never comes back on this fd, and holding it keeps the kernel from
+    // reusing the name when the focuser is replugged, so release it now,
+    // latch link_lost_ (a lock-free flag the driver's Connected getter reads,
+    // since this is a request/response wrapper with no background reader to
+    // keep link health current), and fail the call with NotConnected. Only a
+    // new connect() clears the latch. While connect() itself is still inside
+    // its handshake loop the port is NOT released and nothing is latched: a
+    // half-enumerated CDC-ACM node can POLLHUP once at open time, and the
+    // retry loop exists to absorb exactly that; connect() closes the port
+    // itself if every attempt fails. Caller holds mutex_. Always throws.
+    [[noreturn]] void fail_link_locked() {
+        if (!in_connect_) {
+            ALPACA_LOG_ERROR(kLogTag, "Q-Focuser link lost on " + config_.serial_port + " (port released)");
+            link_lost_.store(true);
+            connected_ = false;
+            close_port_locked();
+        }
+        throw AlpacaException("Q-Focuser link lost on " + config_.serial_port, AlpacaError::NotConnected);
+    }
+
     std::map<std::string, std::string> transact_locked(const std::string& cmd, int expected_idx, int timeout_ms,
                                                        int alt_idx = -2) {
 #ifndef _WIN32
@@ -588,7 +611,11 @@ private:
         ALPACA_LOG_TRACE(kLogTag, "Q-Focuser command: " + cmd);
         tcflush(serial_fd_, TCIOFLUSH);
         if (!util::write_all(serial_fd_, cmd.c_str(), cmd.size())) {
-            throw AlpacaException("Q-Focuser write failed: " + util::errno_string(errno), AlpacaError::DriverException);
+            const int err = errno;
+            // A write is as good a witness of a removed node as a read
+            // (AGENTS.md #445: EIO/ENXIO/ENODEV/EBADF from either side).
+            if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
+            throw AlpacaException("Q-Focuser write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
         // tcdrain forces the command out as its OWN USB OUT packet before the
         // kick is written; without it the kernel coalesces the command and
@@ -605,21 +632,7 @@ private:
             bool link_dead = false;
             const auto slice_start = std::chrono::steady_clock::now();
             const std::string reply = read_json_object(serial_fd_, kKickSliceMs, link_dead);
-            if (link_dead) {
-                // The port is gone (unplug / re-enumeration): the #445 shape.
-                // A removed node never comes back on this fd, and holding it
-                // keeps the kernel from reusing the name when the focuser is
-                // replugged, so release it now, latch link_lost_ (a lock-free
-                // flag the driver's Connected getter reads, since this is a
-                // request/response wrapper with no background reader to keep
-                // link health current), and fail this call with NotConnected.
-                // Only a new connect() clears the latch.
-                ALPACA_LOG_ERROR(kLogTag, "Q-Focuser link lost on " + config_.serial_port + " (port released)");
-                link_lost_.store(true);
-                connected_ = false;
-                close_port_locked();
-                throw AlpacaException("Q-Focuser link lost on " + config_.serial_port, AlpacaError::NotConnected);
-            }
+            if (link_dead) fail_link_locked();
             if (reply.empty()) {
                 // Fallback: the proactive kick did not clock the reply out
                 // (should not happen once the command packet is drained), so
@@ -672,6 +685,7 @@ private:
     // Latched by transact_locked() when the port dies mid-session; cleared by
     // connect(). Atomic so link_alive() never takes mutex_ (issue #527).
     std::atomic<bool> link_lost_{false};
+    bool in_connect_ = false;  // guarded by mutex_; see fail_link_locked()
 #ifndef _WIN32
     int serial_fd_ = -1;
     std::string opened_port_;  // canonical path registered in the serial-port registry

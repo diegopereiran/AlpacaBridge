@@ -111,7 +111,12 @@ public:
         // a dead port must reconnect instead of taking the idempotency return
         // (issue #527), and Connected=false must still tear the driver down.
         const bool live = connected_.load() && protocol_.link_alive();
-        if (!connected && record_disconnect_if_connect_in_flight(live)) return;
+        // The disconnect gate takes the raw connected_: a lost link with an
+        // async connect in flight must still run the teardown below rather
+        // than be recorded as pending and skipped (review of #531). The
+        // connect gate takes the link-aware value, so a stale connection is
+        // treated as down and reconnects.
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) return;
         if (connected && consume_pending_disconnect(live)) return;
         // Idempotency is direction-specific: a connect is a no-op only while
         // the link is live, but a disconnect is a no-op only when nothing was
