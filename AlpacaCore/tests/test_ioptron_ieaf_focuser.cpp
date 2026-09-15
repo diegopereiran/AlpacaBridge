@@ -16,8 +16,11 @@
 #include <alpacacore/version.h>
 
 #include <functional>
+#include <thread>
 
 #include "catch2_compat.h"
+#include "concurrency_stress.h"
+#include "fake_ioptron_ieaf.h"
 
 namespace {
 
@@ -166,4 +169,43 @@ TEST_CASE("iOptron iEAF Focuser Driver - Model names", "[ioptron][focuser][unit]
     CHECK(ieaf->get_name() == "iOptron iEAF");
     // Unique IDs stay model-independent so a persisted device keeps its identity.
     CHECK(iafs2->get_unique_id() == "IOPTRON_IEAF_1");
+}
+
+// Hardware-free connect over the pty fake: the handshake, status read and
+// move round-trip, so the lifecycle tests below exercise a real connect.
+TEST_CASE("iOptron iEAF Focuser Driver - connects and moves over the fake", "[ioptron][focuser][unit]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(fake.connects() == 1);
+    CHECK(driver->get_position() == 1000);
+    driver->move(1500);
+    CHECK(fake.count(":FM") == 1);
+    driver->set_connected(false);
+    CHECK(driver->get_connected() == false);
+}
+
+// Issue #528: a synchronous disconnect that lands while a synchronous connect
+// is inside the wrapper's handshake (which sleeps 100 ms before the first
+// exchange) must not be dropped. Without transition_mutex_ thread B saw
+// "not connected" twice (nothing async in flight, idempotent) and returned as
+// a no-op while A went on to store true.
+TEST_CASE("iOptron iEAF Focuser Driver - sync disconnect during sync connect is not dropped",
+          "[ioptron][focuser][unit]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+
+    std::thread a([&] {
+        try {
+            driver->set_connected(true);
+        } catch (const std::exception&) {
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));  // inside A's pre-handshake sleep
+    driver->set_connected(false);
+    a.join();
+
+    CHECK(driver->get_connected() == false);
+    CHECK(fake.connects() == 1);
+    driver->set_connected(false);
 }

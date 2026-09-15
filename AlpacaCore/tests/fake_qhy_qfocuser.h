@@ -97,6 +97,15 @@ public:
     /// default so the other tests keep deterministic (non-lagged) reads.
     void set_one_behind(bool on) { one_behind_.store(on); }
 
+    /// Answer every command AND every newline kick with an overlong brace-less
+    /// blob (longer than the wrapper's kMaxReplyLen, no closing '}'), the shape
+    /// of a babbling-but-present tty. The wrapper's reader gives up on such a
+    /// reply at once instead of at its slice deadline, which is the path that
+    /// used to re-kick in a tight loop (issue #527). kicks() counts the
+    /// newlines received so a test can bound the re-kick rate.
+    void set_garbage(bool on) { garbage_.store(on); }
+    int kicks() const { return kicks_.load(); }
+
 private:
     void run() {
         std::string pending;
@@ -110,6 +119,13 @@ private:
             if (n <= 0) continue;
             for (ssize_t i = 0; i < n; ++i) {
                 if (pending.empty() && buf[i] != '{') {
+                    if (buf[i] == '\n') {
+                        kicks_.fetch_add(1);
+                        if (garbage_.load()) {
+                            pty_write_bounded(pty_.master_fd(), std::string(300, '{'), stop_);
+                            continue;
+                        }
+                    }
                     // In one-behind mode a newline "kick" (which the driver
                     // sends after tcdrain-ing the command out) clocks out the
                     // held reply, exactly as the real GD32 firmware does on the
@@ -184,6 +200,10 @@ private:
             default:
                 return;  // unknown command: the firmware stays silent
         }
+        if (garbage_.load()) {
+            pty_write_bounded(pty_.master_fd(), std::string(300, '{'), stop_);
+            return;
+        }
         if (one_behind_.load()) {
             // Model the real firmware: this command's OUT transmits the
             // PREVIOUS reply, and the freshly computed one is held until the
@@ -217,6 +237,8 @@ private:
     // (run() and the handle() it calls), so it needs no lock.
     std::atomic<bool> one_behind_{false};
     std::string held_reply_;
+    std::atomic<bool> garbage_{false};
+    std::atomic<int> kicks_{0};
 };
 
 }  // namespace alpacacore::test

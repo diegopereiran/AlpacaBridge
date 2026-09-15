@@ -80,7 +80,11 @@ public:
         return firmware_;
     }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Connected follows the serial link (AGENTS.md, issue #445 shape; #527):
+    // once a transaction has seen the port die the wrapper latches link_lost_
+    // and releases the fd, so this reads false without a reconnect. Both
+    // reads are lock-free; this stays a FAST-timing getter.
+    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
     void connect() override { start_connection_task(true); }
     void disconnect() override {
         stop_connection_thread();
@@ -103,11 +107,30 @@ public:
         // connection mutex and not firmware_mutex_ — it guards set_connected()
         // against set_connected() only and leaves the getters free.
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        // A lost link counts as disconnected here too: Connected=true against
+        // a dead port must reconnect instead of taking the idempotency return
+        // (issue #527), and Connected=false must still tear the driver down.
+        const bool live = connected_.load() && protocol_.link_alive();
+        // The disconnect gate takes the raw connected_: a lost link with an
+        // async connect in flight must still run the teardown below rather
+        // than be recorded as pending and skipped (review of #531). The
+        // connect gate takes the link-aware value, so a stale connection is
+        // treated as down and reconnects.
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) return;
-        if (connected && consume_pending_disconnect(connected_.load())) return;
-        if (connected == connected_.load()) return;
+        if (connected && consume_pending_disconnect(live)) return;
+        // Idempotency is direction-specific: a connect is a no-op only while
+        // the link is live, but a disconnect is a no-op only when nothing was
+        // ever connected. A lost link leaves connected_ true with the
+        // firmware cache populated (the management endpoint renders it
+        // without a Connected check), so Connected=false must still tear down.
+        if (connected ? live : !connected_.load()) return;
 
         if (connected) {
+            if (connected_.load()) {
+                // Stale connection over a lost link: drop the old state first
+                // so the reconnect below starts from a clean driver.
+                teardown_locked();
+            }
             QFocuserDeviceInfo info = protocol_.connect(config_);
             try {
                 apply_settings();
@@ -135,15 +158,21 @@ public:
             // contract, not the current wrapper's behaviour. Clear firmware
             // first so the store(false) is never observable beside a stale
             // firmware string.
-            {
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_.clear();
-            }
-            connected_.store(false);
-            protocol_.disconnect();
-            invalidate_caches();
+            teardown_locked();
             ALPACA_LOG_INFO(kLogTag, "Q-Focuser disconnected");
         }
+    }
+
+    // Disconnect body shared by the explicit disconnect and the stale-link
+    // reconnect. Caller holds transition_mutex_.
+    void teardown_locked() {
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
+        }
+        connected_.store(false);
+        protocol_.disconnect();
+        invalidate_caches();
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }
@@ -299,6 +328,10 @@ private:
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+        }
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
+                                  AlpacaError::NotConnected);
         }
     }
 

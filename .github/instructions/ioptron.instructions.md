@@ -43,6 +43,7 @@ The iEAF electronic focuser (and the iAFS2/3 automatic focuser, which speaks the
 - **Diagnosing "server slow?" from a remote browser shell**: `curl -s -o /dev/null -w "%{time_total}"` loops for the exact member sequence, then `tcpdump -i lo -w /tmp/x.pcap port 6800` (capture to file; `-A` to a browser shell is unusable) read back with `-r ... -A | grep -E "Flags \[S\]|GET /api|^HTTP/1.1 200"`. The tcpdump is what exposed the IPv6-first connects.
 - **Range**: 0..99999 steps (INDI's FocusAbsPos max; the 7-digit move field could carry more but the hardware range is 5 digits). Step size in microns is not exposed — connected, `StepSize` throws `PropertyNotImplemented`; disconnected it is `NotConnected` (#309). No temperature compensation in hardware.
 - ConformU 4.5.0 validated 2026-08-23 on iEAF hardware (model code 2, firmware 100), Raspberry Pi arm64: 0 errors, 0 issues, all timing targets met.
+- **`set_connected()` holds a driver `transition_mutex_`** (issue #528): the base's record/consume gates only see an async connect, and the sync connect sleeps 100 ms before its first `:DeviceInfo#`, so a sync disconnect inside that window used to return as a no-op while the connect went on to store true. Same fix on the iMate PowerBox switch. Hardware-free coverage over `tests/fake_ioptron_ieaf.h`, a pty fake answering `:DeviceInfo#`, `:FI#` and `:FM`/`:FQ`/`:FZ` with sign-and-zero-padded fields (the wrapper's fixed-width `sscanf` over-reads space padding).
 
 #### iEFW (FilterWheel)
 
