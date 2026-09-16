@@ -499,10 +499,6 @@ against its checklist, 2026-09-06:
   profile without hardware to source it from would misrepresent guessed values as measured
   ones. HEQ5 PRO and EQ6 hardware is on hand via the `synscan` (hand-controller) driver
   validation (#7, #29); capture an actual reading from it over an EQDIR cable when available.
-- [x] EQM-35 Pro listed as supported in `SUPPORTED-DRIVERS.md` and the `docs/architecture.md`
-  vendor table, and the `SUPPORTED-DRIVERS.md` section renamed from "Sky-Watcher Wave" to
-  "Sky-Watcher Direct Motor Controller" (issue #497) — done once the EQM-35 Pro's ConformU
-  4.5.1 pass (0 errors, 0 issues, 0 timing violations) landed.
 #### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
 
 Found on an EQM-35 Pro 2026-09-06, but **not hemisphere- or model-specific — the Wave
