@@ -1405,7 +1405,13 @@ public:
     }
 
     bool get_can_move_axis(int axis) const override {
-        return axis == 0 || axis == 1;
+        if (axis == 0 || axis == 1) {
+            return true;
+        }
+        if (axis == 2) {
+            return false;
+        }
+        throw AlpacaException("Axis must be 0, 1, or 2", AlpacaError::InvalidValue);
     }
 
     void move_axis(int axis, double rate) override {

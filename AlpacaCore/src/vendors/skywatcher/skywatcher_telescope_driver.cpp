@@ -1813,7 +1813,12 @@ public:
         parked_ = false;
     }
 
-    bool get_can_move_axis(int axis) const override { return axis == 0 || axis == 1; }
+    bool get_can_move_axis(int axis) const override {
+        if (axis != 0 && axis != 1 && axis != 2) {
+            throw AlpacaException("Axis must be 0, 1 or 2", AlpacaError::InvalidValue);
+        }
+        return axis == 0 || axis == 1;
+    }
 
     void move_axis(int axis, double rate) override {
         reap_pulse_task();

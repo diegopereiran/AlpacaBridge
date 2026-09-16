@@ -1589,6 +1589,9 @@ public:
     }
 
     bool get_can_move_axis(int axis) const override {
+        if (axis < 0 || axis > 2) {
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
+        }
         return axis == 0 || axis == 1;
     }
 
