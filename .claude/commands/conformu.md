@@ -505,14 +505,29 @@ After the table, find the `### <Vendor> Driver Notes` (or `### <Vendor> <DeviceT
 - **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and pass counts for that model.
 ```
 
-Per-model `Tested model`/`ConformU` lines are the old format #478 removed (issue #466) — do not
-add or extend one. The table row added in Step 7a is what records a newly validated model; the
-linked report carries that model's version, date and counts. If the notes already exist and
-already carry the `Validated models` pointer line, leave them as-is — nothing to append. If they
-predate #478 and still carry per-model `Tested model`/`ConformU` lines, replace those lines with
-the single `Validated models` pointer line above rather than adding to them. Ask the user for
-SDK/protocol version details only if the notes are being created for the first time and you don't
-already have them from the session.
+#478 (issue #466) removed one specific per-model `Tested model`/`ConformU` line — the ZWO camera's,
+which only re-enumerated two of the table's nine already-validated model names and added no
+information beyond the table plus its linked report. That narrow case is what to avoid repeating:
+do not add a new per-model line whose only content is model names, a version number, and pass
+counts already covered by the table row and its linked report.
+
+A per-model `Tested model`/`ConformU` line that carries provenance the table and linked report
+don't — firmware/board revision, cable/adapter/chipset details, baud rate, clock discipline, which
+host ConformU ran on, mount/model codes, or other rig specifics — is not the thing #478 removed.
+Those lines are legitimate, may be extended when a new run adds to that provenance, and a brand
+new one may be added when a validation surfaces this kind of detail (see the Sky-Watcher
+`Tested model (EQ class)` and `ConformU` lines in the Sky-Watcher Driver Notes for the shape).
+Read what an existing line actually says before touching it — its presence alone doesn't mark it
+for removal.
+
+Do not perform a blanket conversion of existing per-model lines to the `Validated models` pointer.
+Converting a line that carries provenance loses that information permanently, which is a human
+decision, not something to do automatically while updating a table row. If a vendor's notes
+predate #478 and their only per-model content is redundant with the table (the #466 shape), replace
+it with the `Validated models` pointer; otherwise leave the existing lines alone. The template
+above (single `Validated models` line, no per-model lines) is for a Driver Notes section being
+created for the first time, where there is no existing provenance to preserve — ask the user for
+SDK/protocol version details in that case if you don't already have them from the session.
 
 ### 7c. Updated date
 

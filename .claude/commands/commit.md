@@ -101,10 +101,17 @@ If the changes include **driver code**, **ConformU results**, or **new device su
 3. If **ConformU results** are being committed for an existing driver, update:
    - Platform checkmark (✓) for arm64
    - The ConformU validation link if a new report directory was added
-   - Driver Notes only if firmware/protocol details actually changed — do NOT add or extend a
-     per-model `Tested model`/`ConformU` line (that format was removed by #478, issue #466); the
-     table row already added/updated above, and its linked report, are what record a newly
-     validated model
+   - Driver Notes only if firmware/protocol details actually changed. #478 (issue #466) removed one
+     specific per-model `Tested model`/`ConformU` line — the ZWO camera's, which only re-enumerated
+     model names already in the table and added nothing beyond the table row plus its linked
+     report. Do not add a new per-model line of that shape: the table row already added/updated
+     above, and its linked report, are what record a newly validated model. But a per-model line
+     that carries provenance the table and report don't (firmware/board revision, cable/adapter/
+     chipset details, baud rate, clock discipline, which host ConformU ran on, mount/model codes,
+     rig specifics) is not what #478 removed — it may be added or extended (see the Sky-Watcher
+     `Tested model (EQ class)`/`ConformU` lines for the shape). Never blanket-convert an existing
+     provenance-carrying line to the `Validated models` pointer; that loses information and needs a
+     human decision, not an automatic edit during a commit.
 4. Update the `## Updated YYYY-MM-DD` date at the top to today's date
 
 ### SUPPORTED-DRIVERS.md format reference
