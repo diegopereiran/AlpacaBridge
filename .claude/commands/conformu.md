@@ -502,11 +502,17 @@ After the table, find the `### <Vendor> Driver Notes` (or `### <Vendor> <DeviceT
 
 - **SDK**: <SDK name + version> (or **Protocol**: <spec version> for non-SDK devices)
 - **Connection**: <Transport> (<details, e.g. baud rate, default IP>)
-- **Tested model**: <Model> on Linux arm64
-- **ConformU**: <version> — 0 errors, 0 issues, 0 timing issues
+- **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and pass counts for that model.
 ```
 
-If the notes already exist, append a new tested-model line or update the existing one — do not duplicate. Ask the user for SDK/protocol version details if you don't already have them from the session.
+Per-model `Tested model`/`ConformU` lines are the old format #478 removed (issue #466) — do not
+add or extend one. The table row added in Step 7a is what records a newly validated model; the
+linked report carries that model's version, date and counts. If the notes already exist and
+already carry the `Validated models` pointer line, leave them as-is — nothing to append. If they
+predate #478 and still carry per-model `Tested model`/`ConformU` lines, replace those lines with
+the single `Validated models` pointer line above rather than adding to them. Ask the user for
+SDK/protocol version details only if the notes are being created for the first time and you don't
+already have them from the session.
 
 ### 7c. Updated date
 

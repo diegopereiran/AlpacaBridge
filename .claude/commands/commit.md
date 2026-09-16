@@ -101,7 +101,10 @@ If the changes include **driver code**, **ConformU results**, or **new device su
 3. If **ConformU results** are being committed for an existing driver, update:
    - Platform checkmark (✓) for arm64
    - The ConformU validation link if a new report directory was added
-   - Driver Notes with any new firmware or validation details
+   - Driver Notes only if firmware/protocol details actually changed — do NOT add or extend a
+     per-model `Tested model`/`ConformU` line (that format was removed by #478, issue #466); the
+     table row already added/updated above, and its linked report, are what record a newly
+     validated model
 4. Update the `## Updated YYYY-MM-DD` date at the top to today's date
 
 ### SUPPORTED-DRIVERS.md format reference
@@ -117,7 +120,8 @@ Driver Notes format:
 
 - **SDK**: Vendor SDK vX.Y.Z (build target)
 - **Connection**: USB / Wi-Fi / Serial (details)
-- **Tested model**: Model on Linux arm64
+- **Validated models**: the table above is the list; every validated row links to its own
+  ConformU report, which carries the ConformU version and pass counts for that model.
 ```
 
 ## Step 4b — Also update docs/architecture.md (vendor / SDK table)
