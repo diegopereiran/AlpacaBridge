@@ -173,7 +173,7 @@ jobs:
             not /tmp). Do not post it yourself; a workflow step posts the file.
             If the file is missing, the run fails.
           claude_args: |
-            --model opus
+            --model sonnet
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
 
       # Posting is a deterministic step: the agent only writes the file.
