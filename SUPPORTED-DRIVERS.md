@@ -726,7 +726,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
-### Sky-Watcher Wave (Direct Motor Controller)
+### Sky-Watcher Direct Motor Controller
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
@@ -734,7 +734,7 @@ This document lists all hardware vendors and device types that are verified to w
 | EQM-35 Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SkyWatcher/EQM-35%20Pro/) |
 
 <details>
-<summary><strong>Sky-Watcher Wave Driver Notes</strong></summary>
+<summary><strong>Sky-Watcher Direct Motor Controller Driver Notes</strong></summary>
 
 - **Protocol**: Sky-Watcher Motor Controller Command Set (see `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md`) — talks directly to the mount's motor board, no hand controller or SynScan app required. Distinct from the `synscan` hand-controller driver.
 - **Connection**: USB (the mount's own USB port, an STM32 CDC-ACM virtual COM port at `/dev/ttyACM*`) or the mount's built-in Wi-Fi (UDP port 11880, AP address 192.168.4.1). `connectionType: "auto"` scans serial ports first (including `/dev/ttyACM0`–`9`), then runs Wi-Fi discovery (AP probe + UDP broadcast). Each candidate port is probed at 9600 and then 115200 (an EQ board's built-in USB port answers only at 115200), so a Prolific/FTDI/CH340-class port with nothing Sky-Watcher on it costs about 3.3 s per scan (up to roughly 4.4 s, since the read loops check their deadline only between reads); budget several seconds per such adapter before Wi-Fi discovery even starts.
@@ -744,7 +744,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested model (EQ class)**: EQM-35 Pro, motor board firmware 3.39 (mount code 0x32), over the mount's built-in USB port (soldered Prolific PL2303, 115200 baud), on Linux arm64 (Raspberry Pi 3 Model B, ConformU run on the Pi against localhost, chrony-disciplined clock). ConformU 4.5.1 (2026-09-13): 0 errors, 0 issues, 0 timing violations on the full suite including the physically measured pulse-guide, rate-offset, sync and slew checks. Site coordinates in the report are rounded to whole degrees. Goto landing and the post-slew tracking restart are verified against the controller (stopped AND stationary; restart rate-checked, except where the sample window cannot resolve the expected rate, which is logged) and the goto aim-ahead uses per-session measured goto overhead and restart latency, seeded from the Wave constants.
 - **AutoHome**: FindHome runs the SynScan-style AutoHome procedure using the mount's home index sensors, re-anchoring the position counters to the physical home mark regardless of the power-on position. Requires the home-index feature bit (Wave 100i reports it on both axes).
 - **Tracking**: Sidereal, Lunar, and Solar drive rates, plus RA/Dec tracking rate offsets (comet/satellite tracking) at the Sidereal drive rate. Declination rates below the motor controller's ~0.26 arcsec/s slow-mode floor are produced by duty-cycling. The measured rate-offset tests are in the EQM-35 Pro report (ConformU 4.5.1); the linked Wave 100i reports predate the feature and are tracked for refresh in [#504](https://github.com/open-astro/AlpacaBridge/issues/504).
-- **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. The RA/Dec tracking-rate offsets were validated afterwards on the Wave 100i over USB (ConformU 4.5.0, 2026-08-25): 0 errors, 0 issues, all 32 measured offset-rate checks within tolerance; that run's only marks were two 0.10x s FAST readings on constant `Can*` getters caused by the dev-VM network path (ConformU now runs on the SBC over localhost, see `/conformu`), so the linked logs remain the earlier full-suite reports. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
+- **ConformU**: Wave 100i: 4.5.0 — 0 errors, 0 issues, 0 timing violations on BOTH transports (USB serial and Wi-Fi UDP; Raspberry Pi CM4, mount AP) on the same final build, including the physically measured pulse-guide, sync-return, and slew-accuracy checks. The RA/Dec tracking-rate offsets were validated afterwards on the Wave 100i over USB (ConformU 4.5.0, 2026-08-25): 0 errors, 0 issues, all 32 measured offset-rate checks within tolerance; that run's only marks were two 0.10x s FAST readings on constant `Can*` getters caused by the dev-VM network path (ConformU now runs on the SBC over localhost, see `/conformu`), so the linked logs remain the earlier full-suite reports. When connecting over the mount's Wi-Fi AP from a single-radio SBC, disable any hotspot sharing that radio (dual-role AP+client causes link flapping and UDP loss).
 
 </details>
 
