@@ -2216,6 +2216,27 @@ int main() {
         }
         EXPECT(!present);
     }
+    {
+        // qhy / filterwheel, wheelType "cfw3-usb" — the connectionType
+        // rejection is the sibling of the wheelType one above.
+        const nlohmann::json bad = {
+            {"vendor", "qhy"},         {"deviceType", "filterwheel"}, {"deviceNumber", 9644},
+            {"wheelType", "cfw3-usb"}, {"connectionType", "network"}, {"portPath", "/dev/ttyUSB9"}};
+        const auto response = route_request(router, "POST", "/management/v1/configuredevice", bad.dump());
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        EXPECT(json.value("ErrorMessage", "").find("connectionType") != std::string::npos);
+        const auto listed = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto listed_json = nlohmann::json::parse(listed.body(), nullptr, false);
+        bool present = false;
+        if (!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array()) {
+            for (const auto& entry : listed_json["Value"]) {
+                if (entry.value("DeviceType", "") == "FilterWheel" && entry.value("DeviceNumber", -1) == 9644)
+                    present = true;
+            }
+        }
+        EXPECT(!present);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN

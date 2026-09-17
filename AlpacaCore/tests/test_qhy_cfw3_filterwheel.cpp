@@ -461,3 +461,36 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outli
         }
     }
 }
+
+TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect mid-move waits out the arrival byte",
+          "[qhy][filterwheel][cfw3][unit]") {
+    // PR #536 review Note: with the port held open, a reconnect that lands
+    // while the wheel is still turning must not read the arrival byte as the
+    // MXP or NOW answer. The fake is silent during travel like the real wheel
+    // and emits the slot on arrival; the handshake drains until idle first,
+    // and a count below the position is refused outright.
+    FakeQhyCfw3 fake(7);
+    fake.set_travel_ms(120);
+    auto driver = make_driver(fake);
+    driver->set_connected(true);
+    driver->set_position(5);
+    CHECK(driver->get_position() == -1);
+    driver->set_connected(false);  // cancels the wait; the fake keeps turning
+    // Reconnect at once: the arrival '5' is still to come.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+    bool connected = false;
+    while (!connected && std::chrono::steady_clock::now() < deadline) {
+        try {
+            driver->set_connected(true);
+            connected = driver->get_connected();
+        } catch (const alpacacore::AlpacaException&) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(connected);
+    // Whatever the timing, the wheel's real geometry survived the reconnect.
+    CHECK(driver->get_names().size() == 7);
+    CHECK(driver->get_position() == 5);
+    REQUIRE_NOTHROW(driver->set_position(6));
+    CHECK(settle_position(*driver) == 6);
+}

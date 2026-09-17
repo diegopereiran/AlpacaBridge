@@ -53,6 +53,9 @@ constexpr int kReadPollMs = 10;
 constexpr int kReplyIdleMs = 50;
 // The goto wait is sliced so the cancel flag is polled while the wheel turns.
 constexpr int kMoveSliceMs = 100;
+// Held-port reconnect: how long the line must stay quiet before the handshake
+// (a late arrival byte is ~1 ms long; this is generous, not a boot wait).
+constexpr int kReconnectSettleMs = 300;
 constexpr int kMaxSlot = 15;  // 'F'
 
 std::string printable(const std::string& raw) {
@@ -345,9 +348,21 @@ public:
         try {
 #ifndef _WIN32
             if (held) {
-                tcflush(serial_fd_, TCIOFLUSH);  // a stale arrival reply from the last session
+                // A reconnect can land while the wheel is still finishing the
+                // move the last session cancelled its wait on (PR #536 review).
+                // The wheel is silent until it arrives, then emits one byte; a
+                // flush alone leaves that byte free to land mid-handshake and
+                // be read as the MXP or NOW answer. Drain until the line has
+                // been idle for kReconnectSettleMs, so an arrival that is
+                // already due is consumed here, and let the slot-count sanity
+                // check below catch one that lands later.
+                tcflush(serial_fd_, TCIOFLUSH);
+                bool link_dead = false;
+                const std::string stale = read_reply(serial_fd_, kReconnectSettleMs, 64, link_dead);
+                if (link_dead) fail_link_locked();
                 ALPACA_LOG_DEBUG(kLogTag, "QHYCFW3 port " + config_.serial_port +
-                                              " held open since the last session; no reset, no boot wait");
+                                              " held open since the last session; no reset, no boot wait" +
+                                              (stale.empty() ? "" : "; drained " + printable(stale)));
             } else {
                 bool link_dead = false;
                 const auto boot = wait_for_boot_byte(serial_fd_, config_.boot_timeout_ms, link_dead);
@@ -383,8 +398,16 @@ public:
                         "that the port is the wheel's CP2102 bridge",
                     AlpacaError::NotConnected);
             }
-            if (*slots <= 0) {
-                throw AlpacaException("QHYCFW3 reported an invalid slot count", AlpacaError::DriverException);
+            // The current slot must exist on the wheel. A count below the
+            // position is what an arrival byte read as the MXP answer looks
+            // like (a 7-slot wheel answering '2'); refuse rather than run with
+            // a wheel that rejects most of its slots. The fd is released by the
+            // catch below, so the next connect re-opens and re-homes.
+            if (*slots <= 0 || *pos >= *slots) {
+                throw AlpacaException("QHYCFW3 handshake is out of step (slot count " + std::to_string(*slots) +
+                                          ", position " + std::to_string(*pos + 1) +
+                                          "); the wheel may still have been moving. Try again in a few seconds",
+                                      AlpacaError::DriverException);
             }
             info.slot_count = *slots;
             info.position = *pos;
