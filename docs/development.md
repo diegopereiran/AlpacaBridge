@@ -353,11 +353,11 @@ To cut a release, run `/bump-release` (Claude Code skill, `.claude/commands/bump
 
 ```bash
 git checkout main && git pull
-git tag -a v4.0.0 -m "Release 4.0.0"
-git push origin v4.0.0
+git tag -a vX.Y.Z -m "Release X.Y.Z"
+git push origin vX.Y.Z
 ```
 
-The Release body is `docs/releases/X.Y.Z.md` with a link to the CHANGELOG section appended; when no notes file exists the CHANGELOG section itself is used. The workflow refuses a tag whose version does not match `VERSION`, or whose CHANGELOG section is still `UNRELEASED`, so a tag can never publish notes for an uncut release. Preview the CHANGELOG notes locally with `scripts/changelog_section.py 4.0.0`.
+The Release body is `docs/releases/X.Y.Z.md` with a link to the CHANGELOG section appended; when no notes file exists the CHANGELOG section itself is used. The workflow refuses a tag whose version does not match `VERSION`, or whose CHANGELOG section is still `UNRELEASED`, so a tag can never publish notes for an uncut release. Preview the CHANGELOG notes locally with `scripts/changelog_section.py X.Y.Z`.
 
 Testers who need an unreleased build still build from source or use `/deploy-remote-test`; commits between tags report the last released version.
 

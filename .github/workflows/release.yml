@@ -3,7 +3,7 @@
 # Binaries are NOT attached here. The install channel is the OpenAstro APT
 # repository (https://apt.openastro.net); a Release exists so a shipped build
 # has a name, a source archive (GitHub attaches the zip/tarball itself), and
-# its CHANGELOG section as notes. Nothing is compiled, so this runs in seconds.
+# its release notes. Nothing is compiled, so this runs in seconds.
 #
 # Flow: `/bump-release` cuts the release on a PR (VERSION, README badge,
 # dated CHANGELOG heading, plain-language notes in docs/releases/X.Y.Z.md),
@@ -58,6 +58,9 @@ jobs:
             # Plain-language notes written by /bump-release; the CHANGELOG
             # keeps the technical detail and is linked instead of pasted.
             cp "docs/releases/${version}.md" release-notes.md
+            # Force a newline-terminated body: without one the "---" below
+            # would render as a setext heading over the file's last line.
+            [ "$(tail -c1 release-notes.md)" = "" ] || echo "" >> release-notes.md
             {
               echo ""
               echo "---"
