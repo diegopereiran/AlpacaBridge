@@ -2217,6 +2217,19 @@ int main() {
         EXPECT(!present);
     }
     {
+        // qhy / filterwheel, wheelType "cfw3-usb" — serial mode with no port
+        // is refused rather than falling through to the CP210x probe.
+        const nlohmann::json bad = {{"vendor", "qhy"},
+                                    {"deviceType", "filterwheel"},
+                                    {"deviceNumber", 9645},
+                                    {"wheelType", "cfw3-usb"},
+                                    {"connectionType", "serial"}};
+        const auto response = route_request(router, "POST", "/management/v1/configuredevice", bad.dump());
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        EXPECT(json.value("ErrorMessage", "").find("portPath") != std::string::npos);
+    }
+    {
         // qhy / filterwheel, wheelType "cfw3-usb" — the connectionType
         // rejection is the sibling of the wheelType one above.
         const nlohmann::json bad = {

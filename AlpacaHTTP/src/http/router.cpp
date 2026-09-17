@@ -8609,11 +8609,17 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 return false;
             }
             const std::string port_path = conn_type == "serial" ? config_get(config, "portPath", "") : std::string();
+            if (conn_type == "serial" && port_path.empty()) {
+                // Do not fall through to the probe: it opens (and DTR-resets)
+                // every CP210x on the box, which is not what "serial port" asked for.
+                error_message = "QHY CFW3 connectionType \"serial\" requires portPath";
+                return false;
+            }
             if (!port_path.empty()) {
                 wheel = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(device_number, port_path);
             } else {
-                // "auto", or serial mode with no port given -- probe the
-                // CP210x bridges (each probe resets the device behind it).
+                // "auto": probe the CP210x bridges (each probe resets the
+                // device behind it).
                 const int wheel_index = config_get(config, "filterwheelIndex", 0);
                 if (wheel_index < 0) {
                     error_message = "QHY CFW3 filterwheelIndex must be 0 or greater";

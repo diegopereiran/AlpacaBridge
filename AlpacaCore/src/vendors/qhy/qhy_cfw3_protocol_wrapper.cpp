@@ -483,10 +483,14 @@ public:
                 continue;
             }
             if (*arrived != slot) {
-                // Not seen on hardware; the firmware answers with the slot it
-                // stopped at, so report what it said rather than what we asked.
-                ALPACA_LOG_WARN(kLogTag, "QHYCFW3 reported arrival at slot " + std::to_string(*arrived + 1) +
-                                             " after a goto to slot " + std::to_string(slot + 1));
+                // A slot byte that is not ours is a late arrival from a move a
+                // previous session cancelled its wait on (PR #536 review): the
+                // wheel only ever reports the slot it was sent to, so keep
+                // waiting for that one rather than publishing a stale slot as
+                // this goto's result.
+                ALPACA_LOG_DEBUG(kLogTag, "QHYCFW3 ignoring arrival byte for slot " + std::to_string(*arrived + 1) +
+                                              " while waiting for slot " + std::to_string(slot + 1));
+                continue;
             }
             return *arrived;
         }
