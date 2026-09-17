@@ -847,7 +847,7 @@ vendor that ignores either ships a silently broken form:
   - `/usr/sbin/fxload` — QHY firmware loader.
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
-- To cut a release, bump the `VERSION` file and date the `## [X.Y.Z]` CHANGELOG.md heading — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
+- To cut a release, run `/bump-release` (`.claude/commands/bump-release.md`): it bumps the `VERSION` file, dates the `## [X.Y.Z]` CHANGELOG.md heading, updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
 
 ### Version bump policy (SemVer)
 

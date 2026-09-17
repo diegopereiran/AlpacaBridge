@@ -14,12 +14,12 @@ AlpacaBridge turns a single-board computer into a control server for your entire
 
 Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-#### [3.5.1] - 2026-08-16 &middot; [Changelog](CHANGELOG.md)
+#### [4.0.0] - 2026-09-17 &middot; [Changelog](CHANGELOG.md)
 
 ## Why AlpacaBridge
 
 - **Proven, not promised.** Every driver is [validated with ASCOM ConformU](SUPPORTED-DRIVERS.md), on the actual hardware it supports.
-- **50 drivers. Fourteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
+- **76 validated devices. Fifteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, Nikon DSLRs (via libgphoto2), OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
 - **Plug in and go.** Vendor SDKs and udev rules come bundled. USB and Wi-Fi devices are auto-detected. No port hunting.
 - **Manage it from a browser.** Configure every device from the built-in web UI, from any machine on your network.
 - **Set it and forget it.** Installs from the OpenAstro APT repository, runs as a systemd service, starts on boot, updates with `apt upgrade`.
