@@ -120,6 +120,9 @@ if(TARGET alpacacore_svbony)
 endif()
 if(TARGET alpacacore_gphoto)
     list(APPEND TEST_SOURCES test_gphoto_camera.cpp)
+    # Fault-injectable GPhotoSDK/RawDecoder seam (issue #489): connect,
+    # widget-fallback, ISO, and bulb-capture paths without hardware.
+    list(APPEND TEST_SOURCES test_gphoto_fake_sdk.cpp)
     # Camera lifecycle storm (issue #241); run under the sanitizers-tsan CI job.
     list(APPEND TEST_SOURCES test_gphoto_concurrency_stress.cpp)
 endif()

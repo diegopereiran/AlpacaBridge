@@ -377,8 +377,12 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    GPhotoCameraDriver(int device_number, int camera_index)
-        : AsyncConnectable("GPhoto"), device_number_(device_number), camera_index_(camera_index) {
+    GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder)
+        : AsyncConnectable("GPhoto"),
+          device_number_(device_number),
+          camera_index_(camera_index),
+          sdk_(sdk),
+          decoder_(decoder) {
         preload_camera_info_locked();
     }
 
@@ -425,7 +429,7 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = GPhotoSDKWrapper::instance().get_gphoto_version();
+        auto version = sdk_.get_gphoto_version();
         if (version.empty()) return std::nullopt;
         return "libgphoto2 " + version;
     }
@@ -468,7 +472,7 @@ public:
             return;  // Idempotent (ASCOM)
         }
 
-        auto& sdk = GPhotoSDKWrapper::instance();
+        auto& sdk = sdk_;
 
         if (connected) {
             if (connecting_priming_) {
@@ -767,7 +771,7 @@ public:
                 throw AlpacaException("Cannot change ISO during an exposure", AlpacaError::InvalidOperation);
             }
             const std::string& choice = iso_choices_[static_cast<std::size_t>(gain)];
-            GPhotoSDKWrapper::instance().set_choice_value(handle, "iso", choice);
+            sdk_.set_choice_value(handle, "iso", choice);
             current_iso_index_ = gain;
             return 0;
         });
@@ -1024,6 +1028,8 @@ private:
     int device_number_;
     int camera_index_;
     int handle_{-1};
+    GPhotoSDK& sdk_;
+    RawDecoder& decoder_;
 
     mutable std::mutex mutex_;
     std::atomic<bool> connected_{false};
@@ -1170,7 +1176,7 @@ private:
     void preload_camera_info_locked() {
         std::lock_guard<std::mutex> lock(mutex_);
         try {
-            auto cameras = GPhotoSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
@@ -1183,7 +1189,7 @@ private:
     void refresh_cached_camera_info_if_needed() {
         if (connected_.load()) return;
         try {
-            auto cameras = GPhotoSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             std::lock_guard<std::mutex> lock(mutex_);
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
@@ -1197,7 +1203,7 @@ private:
     // Reads widget capabilities from the freshly opened camera and caches
     // them for the rest of the session. Requires mutex_ held by the caller
     // (set_connected holds it for the whole connect sequence).
-    void configure_after_connect_locked(GPhotoSDKWrapper& sdk, int handle) {
+    void configure_after_connect_locked(GPhotoSDK& sdk, int handle) {
         iso_choices_.clear();
         current_iso_index_ = 0;
         if (sdk.has_widget(handle, "iso")) {
@@ -1295,7 +1301,7 @@ private:
     // on any failure, geometry simply stays unknown until the caller's own
     // first real exposure, exactly like before this existed.
     void prime_sensor_geometry_and_cache(int handle, const std::string& model) {
-        auto& sdk = GPhotoSDKWrapper::instance();
+        auto& sdk = sdk_;
         std::string shutter_choice;
         std::string widget_name;
         {
@@ -1312,7 +1318,7 @@ private:
         }
 
         GPhotoCaptureResult capture = sdk.capture_and_download(handle);
-        DecodedFrame decoded = decode_raw_frame(capture.data);
+        DecodedFrame decoded = decoder_.decode(capture.data);
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1325,7 +1331,7 @@ private:
 
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
                       bool use_bulb, double duration) {
-        auto& sdk = GPhotoSDKWrapper::instance();
+        auto& sdk = sdk_;
         try {
             if (!shutter_choice.empty() && !shutter_widget_name.empty()) {
                 sdk.set_choice_value(handle, shutter_widget_name, shutter_choice);
@@ -1344,7 +1350,7 @@ private:
                 return;
             }
 
-            DecodedFrame decoded = decode_raw_frame(capture.data);
+            DecodedFrame decoded = decoder_.decode(capture.data);
 
             std::lock_guard<std::mutex> lock(mutex_);
             apply_decoded_frame_locked(decoded);
@@ -1360,7 +1366,7 @@ private:
     // stop_exposure()/abort_exposure() can close the shutter well before the
     // full requested duration elapses.
     GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
-        auto& sdk = GPhotoSDKWrapper::instance();
+        auto& sdk = sdk_;
         sdk.set_toggle_value(handle, "bulb", true);
         constexpr double kSliceSeconds = 0.1;
         double remaining = duration_s;
@@ -1374,75 +1380,6 @@ private:
         }
         sdk.set_toggle_value(handle, "bulb", false);
         return sdk.wait_for_bulb_file_and_download(handle);
-    }
-
-    struct DecodedFrame {
-        std::vector<std::int32_t> pixels;
-        int width{};
-        int height{};
-        int bayer_offset_x{};
-        int bayer_offset_y{};
-        int max_adu{65535};
-        SensorType sensor_type{SensorType::RGGB};
-        std::optional<double> sensor_temperature;
-    };
-
-    DecodedFrame decode_raw_frame(const std::vector<std::uint8_t>& raw_bytes) {
-        LibRaw processor;
-        int rc = processor.open_buffer(raw_bytes.data(), raw_bytes.size());
-        if (rc != LIBRAW_SUCCESS) {
-            throw AlpacaException(std::string("libraw failed to open captured frame: ") + libraw_strerror(rc),
-                                  AlpacaError::DriverException);
-        }
-        rc = processor.unpack();
-        if (rc != LIBRAW_SUCCESS) {
-            throw AlpacaException(std::string("libraw failed to unpack captured frame: ") + libraw_strerror(rc),
-                                  AlpacaError::DriverException);
-        }
-
-        const auto& sizes = processor.imgdata.sizes;
-        const ushort* raw_image = processor.imgdata.rawdata.raw_image;
-        if (raw_image == nullptr || sizes.width == 0 || sizes.height == 0) {
-            throw AlpacaException("libraw produced no Bayer data for this frame", AlpacaError::DriverException);
-        }
-
-        DecodedFrame frame;
-        frame.width = sizes.width;
-        frame.height = sizes.height;
-        frame.pixels.resize(static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height));
-        for (int row = 0; row < frame.height; ++row) {
-            const ushort* src_row =
-                raw_image + static_cast<std::size_t>(row + sizes.top_margin) * sizes.raw_width + sizes.left_margin;
-            std::int32_t* dst_row = frame.pixels.data() + static_cast<std::size_t>(row) * frame.width;
-            for (int col = 0; col < frame.width; ++col) {
-                dst_row[col] = static_cast<std::int32_t>(src_row[col]);
-            }
-        }
-
-        // Bayer phase of the top-left 2x2 tile: find which cell libraw
-        // reports as the red channel.
-        const char* cdesc = processor.imgdata.idata.cdesc;
-        frame.bayer_offset_x = 0;
-        frame.bayer_offset_y = 0;
-        for (int y = 0; y < 2; ++y) {
-            for (int x = 0; x < 2; ++x) {
-                int color_index = processor.COLOR(y, x);
-                if (color_index >= 0 && color_index < 4 && cdesc[color_index] == 'R') {
-                    frame.bayer_offset_x = x;
-                    frame.bayer_offset_y = y;
-                }
-            }
-        }
-        frame.sensor_type = SensorType::RGGB;  // Nikon/Canon/Sony DSLR sensors are all standard Bayer RGGB variants
-
-        frame.max_adu = processor.imgdata.color.maximum > 0 ? static_cast<int>(processor.imgdata.color.maximum) : 65535;
-
-        float sensor_temp = processor.imgdata.makernotes.common.SensorTemperature;
-        if (sensor_temp > -273.15f) {
-            frame.sensor_temperature = static_cast<double>(sensor_temp);
-        }
-
-        return frame;
     }
 
     // Requires mutex_ held. Populates the geometry properties (CameraXSize/
@@ -1497,8 +1434,72 @@ private:
     }
 };
 
+DecodedFrame LibRawDecoder::decode(const std::vector<std::uint8_t>& raw_bytes) {
+    LibRaw processor;
+    int rc = processor.open_buffer(raw_bytes.data(), raw_bytes.size());
+    if (rc != LIBRAW_SUCCESS) {
+        throw AlpacaException(std::string("libraw failed to open captured frame: ") + libraw_strerror(rc),
+                              AlpacaError::DriverException);
+    }
+    rc = processor.unpack();
+    if (rc != LIBRAW_SUCCESS) {
+        throw AlpacaException(std::string("libraw failed to unpack captured frame: ") + libraw_strerror(rc),
+                              AlpacaError::DriverException);
+    }
+
+    const auto& sizes = processor.imgdata.sizes;
+    const ushort* raw_image = processor.imgdata.rawdata.raw_image;
+    if (raw_image == nullptr || sizes.width == 0 || sizes.height == 0) {
+        throw AlpacaException("libraw produced no Bayer data for this frame", AlpacaError::DriverException);
+    }
+
+    DecodedFrame frame;
+    frame.width = sizes.width;
+    frame.height = sizes.height;
+    frame.pixels.resize(static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height));
+    for (int row = 0; row < frame.height; ++row) {
+        const ushort* src_row =
+            raw_image + static_cast<std::size_t>(row + sizes.top_margin) * sizes.raw_width + sizes.left_margin;
+        std::int32_t* dst_row = frame.pixels.data() + static_cast<std::size_t>(row) * frame.width;
+        for (int col = 0; col < frame.width; ++col) {
+            dst_row[col] = static_cast<std::int32_t>(src_row[col]);
+        }
+    }
+
+    // Bayer phase of the top-left 2x2 tile: find which cell libraw
+    // reports as the red channel.
+    const char* cdesc = processor.imgdata.idata.cdesc;
+    frame.bayer_offset_x = 0;
+    frame.bayer_offset_y = 0;
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            int color_index = processor.COLOR(y, x);
+            if (color_index >= 0 && color_index < 4 && cdesc[color_index] == 'R') {
+                frame.bayer_offset_x = x;
+                frame.bayer_offset_y = y;
+            }
+        }
+    }
+    frame.sensor_type = SensorType::RGGB;  // Nikon/Canon/Sony DSLR sensors are all standard Bayer RGGB variants
+
+    frame.max_adu = processor.imgdata.color.maximum > 0 ? static_cast<int>(processor.imgdata.color.maximum) : 65535;
+
+    float sensor_temp = processor.imgdata.makernotes.common.SensorTemperature;
+    if (sensor_temp > -273.15f) {
+        frame.sensor_temperature = static_cast<double>(sensor_temp);
+    }
+
+    return frame;
+}
+
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index) {
-    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index);
+    static LibRawDecoder decoder;
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, GPhotoSDKWrapper::instance(), decoder);
+}
+
+std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, GPhotoSDK& sdk,
+                                                   RawDecoder& decoder) {
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, sdk, decoder);
 }
 
 }  // namespace alpacacore::vendor::gphoto
