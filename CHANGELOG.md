@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
-## [4.0.1] - UNRELEASED
+## [4.1.0] - UNRELEASED
 
 ### Fixed
 - **Telescope `CanMoveAxis`/`AxisRates`: a missing `Axis` parameter is `InvalidValue`, not a silent axis 0** (AlpacaHTTP, issue #515): both router handlers defaulted to `int axis = 0` and only parsed `Axis` when present, unlike every other required-parameter telescope method, which ConformU never caught because it always sends `Axis`. Both now go through the handler's existing `parse_int("Axis")` helper, which already throws `InvalidValue` for a missing/unparseable value on every other telescope setter.
