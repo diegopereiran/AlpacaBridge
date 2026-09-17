@@ -660,4 +660,143 @@ TEST_CASE("SkyWatcher serial - a board that merely went quiet resumes with its s
     driver->set_connected(false);
 }
 
+// ── open-astro#521: motion that outlived the link ───────────────────────────
+//
+// A Sky-Watcher axis keeps running until something tells it to stop, so a
+// cable pulled mid-slew leaves the mount moving with nothing driving it. On an
+// EQM-35 Pro (2026-09-17, bare mount): RA at 0.5 deg/s, cable pulled and
+// replaced, and after Connected=true the board reported ":f1" = "=111" (speed
+// mode, running, initialized) while the driver reported Slewing false and sent
+// no ":K" anywhere in the relink. Worse, MoveAxis(axis, 0) — the documented
+// way to stop a MoveAxis — returned success without putting a stop on the
+// wire at all, because the runtime-state reset had cleared the flag that call
+// consults. A client doing exactly the right thing could not stop its mount.
+
+namespace {
+
+// Relink under the same by-id style symlink, as udev does: sever the board,
+// stand up a replacement, repoint. Returns the replacement, which the caller
+// keeps alive. Ordering matters for devpts index reuse — see the #445 case.
+std::unique_ptr<FakeSkyWatcherSerialBoard> relink_board(std::unique_ptr<FakeSkyWatcherSerialBoard>& board,
+                                                        const PortLink& link, alpacacore::TelescopeDriver& driver) {
+    const std::string old_path = board->slave_path();
+    board->sever_link();
+    // Stand the replacement up BEFORE anything observes the loss: noticing it
+    // closes the driver's fd, and that fd is the only thing keeping devpts
+    // from recycling the severed board's index and handing back its own path
+    // (the #445 case documents the same ordering hazard). Do not reorder.
+    auto replugged = std::make_unique<FakeSkyWatcherSerialBoard>();
+    REQUIRE(replugged->slave_path() != old_path);
+    // Observing the loss is what stamps it, and the stamp is what the relink
+    // decision measures its outage from.
+    CHECK_FALSE(driver.get_connected());
+    link.repoint(replugged->slave_path());
+    return replugged;
+}
+
+struct RelinkWindowGuard {
+    explicit RelinkWindowGuard(std::chrono::milliseconds window) {
+        sw::detail::set_relink_motion_preserve_window(window);
+    }
+    ~RelinkWindowGuard() { sw::detail::set_relink_motion_preserve_window(std::chrono::seconds(5)); }
+};
+
+}  // namespace
+
+TEST_CASE("SkyWatcher serial - a brief outage preserves surviving motion, and MoveAxis(0) can still stop it",
+          "[skywatcher][serial][relink]") {
+    auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
+    PortLink link(board->slave_path());
+    auto driver = serial_driver(link.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    auto replugged = relink_board(board, link, *driver);
+    // The board kept turning across the outage, in SPEED mode: a MoveAxis or
+    // an energized tracking drive. This is the invisible case — the driver
+    // classifies speed-mode motion as not-slewing, so a test written only
+    // against GOTO mode proves nothing here.
+    replugged->set_axis_running(sw::kAxisRa, true, /*speed_mode=*/true);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Inside the window the motion is still wanted: aborting a long slew
+    // because a connector was jostled for a second is worse than the bug.
+    CHECK(replugged->axis_running(sw::kAxisRa));
+    CHECK(replugged->count_frames('K') == 0);
+    // The reconstructed session state is what makes the mount controllable
+    // again — and it is the flag a MoveAxis sets in normal operation, not a
+    // new meaning for Slewing.
+    CHECK(driver->get_slewing());
+
+    // The regression the hardware run found: this used to be a silent no-op.
+    driver->move_axis(0, 0.0);
+    CHECK(replugged->count_frames('K') >= 1);
+    CHECK_FALSE(replugged->axis_running(sw::kAxisRa));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - an outage past the window stops a surviving axis and confirms it at rest",
+          "[skywatcher][serial][relink]") {
+    RelinkWindowGuard window(std::chrono::milliseconds(0));  // every outage is "long"
+    auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
+    PortLink link(board->slave_path());
+    auto driver = serial_driver(link.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    auto replugged = relink_board(board, link, *driver);
+    replugged->set_axis_running(sw::kAxisRa, true, /*speed_mode=*/true);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Nobody has been in control of a moving mount: stop it, and prove it
+    // came to rest rather than that the command was merely accepted.
+    CHECK(replugged->count_frames('K') >= 1);
+    CHECK_FALSE(replugged->axis_running(sw::kAxisRa));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - a GOTO-mode axis that survived the outage is reported without a flag",
+          "[skywatcher][serial][relink]") {
+    auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
+    PortLink link(board->slave_path());
+    auto driver = serial_driver(link.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    auto replugged = relink_board(board, link, *driver);
+    replugged->set_axis_running(sw::kAxisDec, true, /*speed_mode=*/false);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(replugged->axis_running(sw::kAxisDec));
+    // GOTO-mode motion needs no reconstructed flag: Slewing is re-derived from
+    // the board on every read, which is why this half was already visible on
+    // hardware while the speed-mode half was not.
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - a relink onto a board at rest sends no stop", "[skywatcher][serial][relink]") {
+    // The negative control, with the window forced to zero so the stopping
+    // branch is the one under test: an idle board must not be commanded.
+    RelinkWindowGuard window(std::chrono::milliseconds(0));
+    auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
+    PortLink link(board->slave_path());
+    auto driver = serial_driver(link.path.string());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    auto replugged = relink_board(board, link, *driver);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(replugged->count_frames('K') == 0);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

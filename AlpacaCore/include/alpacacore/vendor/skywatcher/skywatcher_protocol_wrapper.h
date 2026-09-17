@@ -12,10 +12,12 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -146,6 +148,14 @@ public:
     // board that came back from a power cycle answers perfectly well while
     // reporting init_done false with its position registers reset.
     virtual std::uint64_t link_recovery_epoch();
+
+    // open-astro#521: when the link was last LOST, cleared as it is read. A
+    // relink needs the LENGTH of the outage: a Sky-Watcher axis keeps running
+    // with no further commands, so motion that survived a brief cable glitch
+    // is still wanted, while motion that survived a long one has had nobody in
+    // control of it. A client's own disconnect does not stamp this, so a fresh
+    // connect sees nullopt and takes the safe branch.
+    virtual std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
 
     // Low-level framed exchange: sends ":<cmd><axis><data>\r", returns the
     // payload of a "=" response (without the leading "=" or trailing CR).

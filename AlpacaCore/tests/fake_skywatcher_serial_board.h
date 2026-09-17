@@ -92,6 +92,22 @@ public:
         muted_ = muted;
     }
 
+    /// open-astro#521: start an axis in the running state, as a board whose
+    /// motion outlived the driver's link does. @p speed_mode true models a
+    /// MoveAxis or tracking drive — the case the driver classifies as NOT
+    /// slewing — and false a GOTO. ":K"/":L" clear it, so a driver-side
+    /// stop-and-confirm loop terminates against this fake instead of spinning.
+    void set_axis_running(int axis, bool running, bool speed_mode = true) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_[axis - 1] = running;
+        speed_mode_[axis - 1] = speed_mode;
+    }
+
+    bool axis_running(int axis) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return running_[axis - 1];
+    }
+
     /// open-astro#505: the board's ":F" initialization bit, per axis. A board
     /// that power-cycles mid-session comes back with this false and its
     /// position registers reset, while answering every frame normally.
