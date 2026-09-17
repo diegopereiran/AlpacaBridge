@@ -545,6 +545,12 @@ jobs:
         # stale twice, issue #455).
         run: python3 scripts/check_docs_drift.py
 
+      - name: Self-test the release-notes extractor
+        # release.yml runs this too, but only on a tag push; here a broken
+        # heading slug or section extractor fails the PR that caused it
+        # instead of blocking the release.
+        run: python3 scripts/changelog_section.py --self-test
+
   connect-error-hook:
     name: Connect-error hook
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent

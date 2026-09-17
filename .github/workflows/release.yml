@@ -3,10 +3,13 @@
 # Binaries are NOT attached here. The install channel is the OpenAstro APT
 # repository (https://apt.openastro.net); a Release exists so a shipped build
 # has a name, a source archive (GitHub attaches the zip/tarball itself), and
-# its CHANGELOG section as notes. Nothing is compiled, so this runs in seconds.
+# its release notes. Nothing is compiled, so this runs in seconds.
 #
-# Flow: cut the release on a PR (VERSION, README badge, dated CHANGELOG
-# heading), merge, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+# Flow: `/bump-release` cuts the release on a PR (VERSION, README badge,
+# dated CHANGELOG heading, plain-language notes in docs/releases/X.Y.Z.md),
+# merges it, tags the merge commit and pushes the tag. The notes file, when
+# present, becomes the Release body with a link to the CHANGELOG section;
+# otherwise the CHANGELOG section itself is used.
 
 name: Release
 
@@ -41,13 +44,37 @@ jobs:
           fi
           echo "Tag ${GITHUB_REF_NAME} matches VERSION ${file_version}."
 
-      - name: Extract CHANGELOG section
+      - name: Build release notes
         run: |
           set -euo pipefail
-          python3 scripts/changelog_section.py "${GITHUB_REF_NAME#v}" > release-notes.md
+          version="${GITHUB_REF_NAME#v}"
+          # Always run the extractor: it fails if the CHANGELOG section is
+          # missing or still UNRELEASED, so a tag can never publish an uncut
+          # version even when plain-language notes exist for it.
+          python3 scripts/changelog_section.py --self-test
+          python3 scripts/changelog_section.py "${version}" > /dev/null   # gate only: fails on a missing or UNRELEASED section
+          anchor="$(python3 scripts/changelog_section.py --anchor "${version}")"
+          if [ -f "docs/releases/${version}.md" ]; then
+            # Plain-language notes written by /bump-release; the CHANGELOG
+            # keeps the technical detail and is linked instead of pasted.
+            cp "docs/releases/${version}.md" release-notes.md
+            # Force a newline-terminated body: without one the "---" below
+            # would render as a setext heading over the file's last line.
+            [ "$(tail -c1 release-notes.md)" = "" ] || echo "" >> release-notes.md
+            {
+              echo ""
+              echo "---"
+              echo "Full technical changelog: https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md#${anchor}"
+            } >> release-notes.md
+          else
+            python3 scripts/changelog_section.py "${version}" > release-notes.md
+            {
+              echo ""
+              echo "---"
+            } >> release-notes.md
+          fi
           {
             echo ""
-            echo "---"
             echo "Install or upgrade via the OpenAstro APT repository: https://apt.openastro.net"
           } >> release-notes.md
           echo "::group::Release notes"
