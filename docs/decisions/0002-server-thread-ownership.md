@@ -6,7 +6,7 @@
 
 ## Decision
 
-`join_server_thread()` moves the thread under `server_thread_mutex_`, so exactly one caller owns the join. The join happens outside the mutex; other callers wait for its completion before returning to code that may destroy the server. A generation check keeps a waiter from adopting a newly started thread. The completion notification occurs while the mutex is held, before the last access to the condition variable. `stop()`, `wait()`, `start_async()`, and teardown use this ownership protocol.
+`join_server_thread()` moves the thread under `server_thread_mutex_`, so exactly one caller owns the join. The join happens outside the mutex; other callers wait for its completion before returning to code that may destroy the server. A generation check keeps a waiter from adopting a newly started thread. The completion notification occurs while the mutex is held, before the last access to the condition variable. `stop()`, `wait()`, `start_async()`, and teardown use this ownership protocol. Ownership is released on every exit path: a scope guard clears the in-flight flag and notifies whether the join returns or throws, and a `join()` that fails parks the thread with the orphans the destructor reaps rather than destroying it joinable.
 
 ## Alternatives rejected
 

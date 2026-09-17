@@ -26,6 +26,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace alpacahttp {
@@ -363,26 +364,58 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
         server_thread_joining_ = true;
     }
 
+    // Releases the join-in-flight flag on every exit from here down, whether
+    // this function returns normally or an exception propagates out of it.
+    // The flag is now set and server_thread_ is empty, so anything that let
+    // this function leave without clearing it would strand every waiter
+    // parked on server_thread_cv_ -- stop(), wait() and ~Server() included --
+    // on a join that no longer has an owner. Correctness must not depend on
+    // the code below staying throw-free.
+    struct ReleaseJoiningFlag {
+        Server* self;
+        ~ReleaseJoiningFlag() {
+            std::lock_guard<std::mutex> guard(self->server_thread_mutex_);
+            self->server_thread_joining_ = false;
+            // notify_all() INSIDE the lock, deliberately. A waiter only needs
+            // the mutex to re-check the predicate, so notifying after the
+            // unlock would let it return from stop() -- and the embedder run
+            // ~Server() -- while this thread is still about to touch
+            // server_thread_cv_. This is the last `this` access after the
+            // protocol's own "the thread is gone, you may destroy me now"
+            // signal, so it is the one that has to be inside. For the same
+            // reason this release lives ONLY here: a second release after the
+            // guard was declared would run before it and hand out that signal
+            // while the guard still had `this` to dereference.
+            self->server_thread_cv_.notify_all();
+        }
+    } release_joining_flag{this};
+
     if (owned.get_id() == current_id) {
         // Unreachable from stop() (run_server() never calls stop()); kept as
         // an orphan rather than a detach for the same reason as above.
         std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
         orphaned_threads_.push_back(std::move(owned));
     } else {
-        owned.join();
+        try {
+            owned.join();
+        } catch (const std::system_error& e) {
+            // pthread_join failed (EDEADLK/ESRCH/EINVAL): owned is still
+            // joinable, so letting it destruct here would call
+            // std::terminate(), and letting the exception escape would strand
+            // every waiter parked on the condition variable -- stop(), wait()
+            // and ~Server() included -- behind a server_thread_joining_ that
+            // the guard above would have cleared but that nothing would then
+            // be left to join. Park it exactly like the self-join branch
+            // above so ~Server() reaps it.
+            util::log_warning("join_server_thread: pthread_join failed (" + e.code().message() +
+                              "), parking thread for later reap");
+            std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+            orphaned_threads_.push_back(std::move(owned));
+        }
     }
 
-    {
-        std::lock_guard<std::mutex> guard(server_thread_mutex_);
-        server_thread_joining_ = false;
-        // notify_all() INSIDE the lock, deliberately. A waiter only needs the
-        // mutex to re-check the predicate, so notifying after the unlock would
-        // let it return from stop() -- and the embedder run ~Server() -- while
-        // this thread is still about to touch server_thread_cv_. This is the
-        // last `this` access after the protocol's own "the thread is gone, you
-        // may destroy me now" signal, so it is the one that has to be inside.
-        server_thread_cv_.notify_all();
-    }
+    // No explicit release here: ReleaseJoiningFlag's destructor does it, and
+    // must be the last thing that touches `this`.
 }
 
 // Destructor only, after every thread has been joined. The pipe is never
