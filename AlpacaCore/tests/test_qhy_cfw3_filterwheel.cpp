@@ -412,3 +412,52 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect on the same port skips the
     REQUIRE(driver->get_connected());
     CHECK(fake.count("MXP") == 2);  // the handshake still runs on every connect
 }
+
+TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outlives the cancel",
+          "[qhy][filterwheel][cfw3][unit]") {
+    // PR #536 review: cancel_and_join_move() used to store the cancel flag
+    // BEFORE taking the handle lock, and set_position() clears that flag
+    // under the lock before spawning its worker. A goto that slipped in
+    // between wiped the cancel, and the synchronous disconnect then sat out
+    // the entire move (40 s by default, against the ~5 s an ASCOM client
+    // gives Disconnect). Race the two from separate threads, many times, with
+    // a travel time long enough that a lost cancel is unmistakable.
+    FakeQhyCfw3 fake(7);
+    fake.set_travel_ms(1500);
+    alpacacore::vendor::qhy::Cfw3Settings settings = fast_settings();
+    settings.move_timeout_ms = 4000;
+    auto driver = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, fake.slave_path(), settings);
+
+    int gotos_seen = 0;
+    for (int round = 0; round < 25; ++round) {
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        const int target = 1 + (round % 6);
+        gotos_seen = fake.count(std::string(1, static_cast<char>('0' + target)));
+        std::thread mover([&] {
+            try {
+                driver->set_position(target);
+            } catch (const alpacacore::AlpacaException&) {
+                // NotConnected when the disconnect won: the expected outcome.
+            }
+        });
+        const auto start = std::chrono::steady_clock::now();
+        driver->set_connected(false);
+        const auto took = std::chrono::steady_clock::now() - start;
+        mover.join();
+        CHECK(took < std::chrono::milliseconds(800));
+        CHECK_FALSE(driver->get_connected());
+        // If the goto reached the wire the fake is mid-travel and, like the
+        // real wheel, silent until it arrives; a reconnect handshake during
+        // that window would time out. Wait for it to land first.
+        const std::string goto_char(1, static_cast<char>('0' + target));
+        if (fake.count(goto_char) > gotos_seen) {
+            gotos_seen = fake.count(goto_char);
+            const auto landed = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (fake.position() != target && std::chrono::steady_clock::now() < landed) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            REQUIRE(fake.position() == target);
+        }
+    }
+}

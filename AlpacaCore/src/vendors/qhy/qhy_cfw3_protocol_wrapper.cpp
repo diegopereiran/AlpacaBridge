@@ -206,7 +206,8 @@ static bool probe_port(const std::string& port_path, int boot_timeout_ms, Cfw3De
     if (!slots || !pos) return false;
     info.firmware = vrs.size() == kFirmwareReplyLen ? vrs : std::string();
     info.slot_count = *slots;
-    info.position = boot.value_or(*pos);
+    info.position = *pos;  // NOW is the fresher of the two; the boot byte only proves the reset happened
+    (void)boot;
     return true;
 #else
     (void)port_path;

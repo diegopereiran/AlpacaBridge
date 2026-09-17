@@ -40,9 +40,10 @@ constexpr const char* kLogTag = "QHY";
  * driver never polls the wire for Position. The settled slot is cached from
  * the connect handshake and from each goto's arrival reply; while a goto is
  * in flight Position reads -1 (the ASCOM moving sentinel) from memory. That
- * keeps every FAST-classified read (Position, DeviceState) off the serial
- * line entirely -- the one place the integrated CFW driver had to fight
- * ConformU's 0.1 s target.
+ * keeps the FAST-classified reads (Position, DeviceState) off the serial line
+ * in normal operation -- the one place the integrated CFW driver had to fight
+ * ConformU's 0.1 s target. The one exception is the read after a FAILED move,
+ * where the cache is empty and get_position() asks the wheel once.
  *
  * The goto's arrival wait (about 1 s per slot travelled) runs on a joinable
  * member thread so the Position PUT returns within the STANDARD budget;
@@ -200,6 +201,12 @@ public:
         // while holding mutex_ (the worker's publish path needs mutex_).
         std::lock_guard<std::mutex> handle_lock(move_thread_mutex_);
         std::lock_guard<std::mutex> lock(mutex_);
+        // Re-assert under the locks: teardown_locked() stores connected_ false
+        // BEFORE it takes the handle lock to cancel and join, so a goto that
+        // passed ensure_connected() a moment ago must not spawn a worker for a
+        // wheel that is being disconnected (it would report NotConnected from
+        // the worker, or worse, run a real move after a reconnect).
+        ensure_connected();
         if (!slot_count_valid_ || slot_count_ <= 0) {
             throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
         }
@@ -283,8 +290,12 @@ private:
     // Caller must NOT hold mutex_: the worker takes it to publish its result
     // on the way out, so a join under mutex_ would deadlock.
     void cancel_and_join_move() {
-        move_cancel_.store(true);
         std::lock_guard<std::mutex> handle_lock(move_thread_mutex_);
+        // Stored UNDER the handle lock (PR #536 review): set_position() clears
+        // this flag and spawns its worker under the same lock, so a store made
+        // before taking it could be wiped by a set_position() that slipped in
+        // between, and the join below would then sit out the whole move.
+        move_cancel_.store(true);
         if (move_thread_.joinable()) move_thread_.join();
     }
 

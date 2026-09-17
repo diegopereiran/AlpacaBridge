@@ -68,14 +68,15 @@ TEST_CASE("QHY CFW3 - concurrent connect/disconnect/operate stress", "[qhy][filt
     CHECK_NOTHROW(driver->set_connected(false));
 
     // Connected registration, so the expected set is explicit: NotConnected
-    // from losing the race with a disconnect, InvalidOperation from a goto
-    // landing while the previous one is still in flight (set_position's
-    // one-goto-at-a-time rule), and DriverException from a goto whose arrival
-    // reply is lost to a racing disconnect's cancel (the worker logs it and
-    // the next Position read re-asks the wheel).
-    alpacacore::test::StressCallGuard guard({alpacacore::AlpacaError::NotConnected,
-                                             alpacacore::AlpacaError::InvalidOperation,
-                                             alpacacore::AlpacaError::DriverException});
+    // from losing the race with a disconnect (set_position re-checks it under
+    // its locks, so a goto that lands during a teardown throws rather than
+    // spawning a worker), and InvalidOperation from a goto landing while the
+    // previous one is still in flight (set_position's one-goto-at-a-time
+    // rule). DriverException is deliberately NOT expected: it is what the
+    // driver throws for genuine internal failures, and the storm must keep
+    // seeing those.
+    alpacacore::test::StressCallGuard guard(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidOperation});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { wheel_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
