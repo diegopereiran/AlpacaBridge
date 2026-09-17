@@ -58,6 +58,10 @@ if(TARGET alpacacore_qhy)
     # connect path, so it carries its own [stress] registration.
     list(APPEND TEST_SOURCES test_qhy_focuser.cpp)
     list(APPEND TEST_SOURCES test_qhy_focuser_concurrency_stress.cpp)
+    # Standalone QHYCFW3 over its own CP2102 USB port: bare-ASCII serial
+    # protocol, no SDK; the pty fake gives it a real connect path too.
+    list(APPEND TEST_SOURCES test_qhy_cfw3_filterwheel.cpp)
+    list(APPEND TEST_SOURCES test_qhy_cfw3_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)
