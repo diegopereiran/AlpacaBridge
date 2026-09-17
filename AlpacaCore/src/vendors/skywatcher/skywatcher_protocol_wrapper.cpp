@@ -752,6 +752,18 @@ public:
         // the consecutive-failure latch lives here and covers serial and UDP
         // alike (UDP has no other health signal at all — link_alive() reports
         // the flag as-is there).
+        //
+        // The latch detects SILENCE, so ONLY a genuine no-reply timeout counts.
+        // Any frame from the board — mis-paired, malformed, stale or over-long
+        // — proves it is alive and talking, which is exactly the condition this
+        // must NOT fire on, so it RESETS the counter and leaves the
+        // protocol-level problem to the machinery that already owns it (the
+        // dirty/settle/resync path and send_command's shape check). A write or
+        // socket error is neither: it says nothing about whether the board is
+        // answering, so it is left uncounted rather than read as evidence
+        // either way.
+        exchange_saw_frame_ = false;
+        exchange_timed_out_ = false;
         try {
             std::string reply = info_.type == ConnectionType::Serial
                                     ? exchange_serial(frame, timeout_ms)
@@ -764,7 +776,11 @@ public:
             // would latch a fault on a device that is simply gone. Silence
             // with the node still present is what this latch is for.
             if (e.error_code() != AlpacaError::NotConnected && connected_) {
-                note_exchange_failed(e.what());
+                if (exchange_saw_frame_) {
+                    note_exchange_ok();
+                } else if (exchange_timed_out_) {
+                    note_exchange_failed(e.what());
+                }
             }
             throw;
         }
@@ -1059,7 +1075,11 @@ private:
         while (std::chrono::steady_clock::now() < deadline) {
             char ch = 0;
             ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-            if (r != 1) {
+            if (r == 1) {
+                // open-astro#505: a late reply being absorbed is still proof
+                // the board is answering, so it must not count toward silence.
+                exchange_saw_frame_ = true;
+            } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
         }
@@ -1104,6 +1124,7 @@ private:
                                ? serial_read_(serial_fd_, &ch, 1)
                                : ::read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
             if (r == 1) {
+                exchange_saw_frame_ = true;  // open-astro#505: the board is talking
                 if (ch == kFrameEnd) {
                     return reply;
                 }
@@ -1133,6 +1154,7 @@ private:
             lose_serial_link_locked("Serial device removed");
         }
         serial_dirty_ = true;
+        exchange_timed_out_ = true;
         ALPACA_LOG_WARN("SkyWatcher", "Timeout (" + std::to_string(timeout_ms) + " ms) waiting for the reply to '" +
                                           frame.substr(0, frame.size() - 1) + "'; link marked dirty");
         throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "'");
@@ -1197,6 +1219,7 @@ private:
                 ssize_t n =
                     recv(socket_fd_, buf, sizeof(buf) - 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
                 if (n > 0) {
+                    exchange_saw_frame_ = true;  // open-astro#505: the board is talking
                     std::string reply(buf, static_cast<std::size_t>(n));
                     while (!reply.empty() && (reply.back() == '\r' || reply.back() == '\n')) {
                         reply.pop_back();
@@ -1232,6 +1255,7 @@ private:
             }
             link_dirty_ = true;
         }
+        exchange_timed_out_ = true;
         throw AlpacaException("Timeout waiting for motor controller reply to '" + frame + "' after " +
                               std::to_string(kUdpRetries) + " attempts");
 #else
@@ -1251,6 +1275,7 @@ private:
             if (n <= 0) {
                 break;
             }
+            exchange_saw_frame_ = true;  // open-astro#505: a stale datagram is still an answer
         }
     }
 
@@ -1336,7 +1361,9 @@ private:
             tv.tv_sec = 0;
             tv.tv_usec = static_cast<long>(50) * 1000;
             setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            recv(socket_fd_, buf, sizeof(buf), 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            if (recv(socket_fd_, buf, sizeof(buf), 0) > 0) {  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+                exchange_saw_frame_ = true;                   // open-astro#505: still answering
+            }
         }
     }
 #endif
@@ -1365,6 +1392,13 @@ private:
     // open-astro#521: steady_clock tick of the first detection of the current
     // outage, 0 when the link has not been lost since the last connect.
     std::atomic<std::int64_t> link_lost_at_{0};
+    // open-astro#505: per-exchange evidence, written only under io_mutex_ by
+    // the transports. exchange_saw_frame_ means at least one byte/datagram
+    // arrived from the board during this exchange (its own reply, a stale one
+    // absorbed by a settle, or garbage); exchange_timed_out_ means the
+    // exchange ended in a no-reply timeout rather than a write/socket error.
+    bool exchange_saw_frame_ = false;
+    bool exchange_timed_out_ = false;
 
     // Own leaf mutex so link_alive() never waits behind io_mutex_.
     mutable std::mutex link_id_mutex_;
