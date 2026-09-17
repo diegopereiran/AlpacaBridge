@@ -499,13 +499,6 @@ against its checklist, 2026-09-06:
   profile without hardware to source it from would misrepresent guessed values as measured
   ones. HEQ5 PRO and EQ6 hardware is on hand via the `synscan` (hand-controller) driver
   validation (#7, #29); capture an actual reading from it over an EQDIR cable when available.
-- **Not yet done, intentionally: adding the EQM-35 Pro to `SUPPORTED-DRIVERS.md` and the
-  architecture table, and renaming the "Sky-Watcher Wave" section to "Sky-Watcher Direct
-  Motor Controller" per the issue's suggestion.** This PR's code and tests are ready for
-  review now; the "supported"/Production claim is deliberately withheld until a ConformU
-  pass is run on the EQM-35 Pro (blocked on Pi 5 hardware, per this repo's own documented
-  bar in `AlpacaCore/conformu/README.md` and `SUPPORTED-DRIVERS.md`). A follow-up
-  docs-only PR adds those lines once that report exists.
 #### KNOWN BUG (FIXED): superseded MoveAxis stop task strands `Slewing` and kills tracking
 
 Found on an EQM-35 Pro 2026-09-06, but **not hemisphere- or model-specific — the Wave
