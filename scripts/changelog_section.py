@@ -62,16 +62,53 @@ def heading_anchor(version: str, date: str) -> str:
     return kept.replace(" ", "-")
 
 
+def self_test() -> int:
+    """Pin the slug rule and the extractor; a wrong slug only misplaces a link."""
+    cases = {
+        ("4.0.0", "2026-09-17"): "400---2026-09-17",
+        ("10.2.30", "2027-01-05"): "10230---2027-01-05",
+        ("3.5.1", "2026-08-16"): "351---2026-08-16",
+    }
+    failures = [
+        f"heading_anchor{args!r} -> {heading_anchor(*args)!r}, expected {want!r}"
+        for args, want in cases.items()
+        if heading_anchor(*args) != want
+    ]
+    sample = (
+        "## [2.0.0] - UNRELEASED\n- new\n\n<details>\n"
+        "<summary><strong>[1.0.0] - 2026-01-01</strong></summary>\n\n- old\n</details>\n"
+    )
+    if extract(sample, "2.0.0") != ("UNRELEASED", ["- new"]):
+        failures.append("extract() did not read the expanded UNRELEASED section")
+    if extract(sample, "1.0.0") != ("2026-01-01", ["- old"]):
+        failures.append("extract() did not read the collapsed <details> section")
+    if extract(sample, "9.9.9") != (None, []):
+        failures.append("extract() reported a section that does not exist")
+    for f in failures:
+        print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
+    print("changelog_section self-test %s." % ("FAILED" if failures else "OK"))
+    return 1 if failures else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("version", help="bare version, e.g. 3.6.0 (no v prefix)")
+    parser.add_argument("version", nargs="?", help="bare version, e.g. 3.6.0 (no v prefix)")
     parser.add_argument("--changelog", default="CHANGELOG.md", type=Path)
     parser.add_argument(
         "--anchor",
         action="store_true",
         help="print the GitHub heading anchor for the section instead of its body",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="check heading_anchor() and extract() against known inputs and exit",
+    )
     args = parser.parse_args()
+    if args.self_test:
+        return self_test()
+    if args.version is None:
+        parser.error("the following arguments are required: version")
 
     date, body = extract(args.changelog.read_text(encoding="utf-8"), args.version)
     if date is None:

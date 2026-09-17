@@ -51,7 +51,8 @@ jobs:
           # Always run the extractor: it fails if the CHANGELOG section is
           # missing or still UNRELEASED, so a tag can never publish an uncut
           # version even when plain-language notes exist for it.
-          python3 scripts/changelog_section.py "${version}" > changelog-section.md
+          python3 scripts/changelog_section.py --self-test
+          python3 scripts/changelog_section.py "${version}" > /dev/null   # gate only: fails on a missing or UNRELEASED section
           anchor="$(python3 scripts/changelog_section.py --anchor "${version}")"
           if [ -f "docs/releases/${version}.md" ]; then
             # Plain-language notes written by /bump-release; the CHANGELOG
@@ -63,7 +64,11 @@ jobs:
               echo "Full technical changelog: https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md#${anchor}"
             } >> release-notes.md
           else
-            cp changelog-section.md release-notes.md
+            python3 scripts/changelog_section.py "${version}" > release-notes.md
+            {
+              echo ""
+              echo "---"
+            } >> release-notes.md
           fi
           {
             echo ""
