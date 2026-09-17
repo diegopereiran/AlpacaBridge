@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-09-13
+## Updated 2026-09-15
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -318,6 +318,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | miniCam8M CFW (integrated, 8-slot) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/miniCam8M%20CFW/) |
+| QHYCFW3 (standalone over USB, 5/7/8/9-slot S/M/L/XL) | USB serial (CP2102) | ✓ | [ConformU Validation](AlpacaCore/conformu/QHY/QHYCFW3/) |
 
 <details>
 <summary><strong>QHY FilterWheel Driver Notes</strong></summary>
@@ -326,6 +327,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB — controlled through the SAME physical handle as its paired QHY camera (not a separately enumerable device); the camera and filter wheel driver share one `OpenQHYCCD` via a reference-counted handle in `QHYSDKWrapper`, and can be connected/disconnected independently.
 - **Tested model**: miniCam8M integrated CFW (8-slot) on Linux arm64
 - **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
+- **Standalone QHYCFW3 over USB** (`wheelType: cfw3-usb`, no SDK): the wheel's own USB socket is a Silicon Labs CP2102 serial bridge at 9600 baud speaking QHY's bare-ASCII protocol (goto `0`..`F`, `VRS`, `MXP`, `NOW`). Set the wheel's internal mode switch to USB mode (red LED flash at power-on); in 4-pin mode it ignores USB commands. Opening the port resets the wheel, which then homes for about 17 seconds before it will talk, so the first connect after AlpacaBridge starts takes about 18 seconds and exceeds the 5 second Platform 7 `Connect` budget ConformU applies; the port is then held open and later connects are immediate. The ConformU run below was made with the wheel connected once beforehand in the web UI, which is the recommended way to start any client session. Slot count and firmware date are read from the wheel at connect. Auto-detect probes every CP210x adapter on the machine and resets each one; prefer an explicit serial port when other CP210x devices are attached. Tested model: 7-slot CFW3, firmware 20181114, ConformU 4.5.1 on Linux arm64 (IFilterWheelV3): 0 errors, 0 issues, 0 timing issues. Protocol notes: `AlpacaCore/external/QHY/QHYCFW3-USB-protocol.md`.
 - **Position caching**: `GetQHYCCDCFWStatus` is a ~100-130ms hardware round trip on this SDK, which blows the ASCOM FAST (0.1s) target for the first `Position`/`DeviceState` read after `Connect`. The driver does one warm-up read during `Connect` (charged against the 1.0s STANDARD budget) and caches the settled position afterward. The cache is served only when no move is outstanding — while a move is pending, every read stays live and is compared against the commanded target before caching, because this SDK does **not** report a distinct "moving" sentinel the way ToupTek's does: `GetQHYCCDCFWStatus` reports the wheel's actual passing position throughout the physical rotation (including intermediate slots and occasional `-1`) until it settles. A live read taken mid-move that doesn't match the commanded target is masked to `-1` rather than passed through raw — otherwise a client polling during the move can read a real but unrelated transit slot and mistake it for an erroneous arrival — and caching the first post-move reading unconditionally would still freeze `Position` at a stale value and the wheel would never appear to arrive.
 
 </details>
