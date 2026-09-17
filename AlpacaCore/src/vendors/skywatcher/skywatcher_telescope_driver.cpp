@@ -2113,6 +2113,12 @@ private:
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         position_cache_valid_ = false;
+        // open-astro#505: a reconnect re-runs the ":F" init, which is exactly
+        // what clears the board-reset condition, so the fault must not survive
+        // into the new session. Re-seed the epoch so the connect's own reads
+        // are not mistaken for a recovery that needs validating.
+        board_reset_fault_.clear();
+        seen_recovery_epoch_ = protocol_->link_recovery_epoch();
         pointing_branch_ = 1;  // open-astro#459: the a2 >= 0 branch, the pre-#459 answer at home
         // Both are MEASURED off the mount that was connected, so they must not
         // survive into the next one: a driver instance reconnected to
@@ -2442,9 +2448,66 @@ private:
         return ra_rate_sec_per_sidereal_sec_ != 0.0 || dec_rate_arcsec_per_sec_ != 0.0;
     }
 
+    // open-astro#505: refuse to serve the cache — or the dead-reckoned model —
+    // while the link fault is latched, and surface the board-reset case the
+    // latch alone cannot catch. Callers are the read paths; a faulted link is
+    // NOT a disconnection, so this is DriverException and Connected stays true.
+    void throw_comms_compromised_locked(const std::string& reason) const {
+        throw AlpacaException("Sky-Watcher mount communications compromised: " + reason, AlpacaError::DriverException);
+    }
+
+    // Terminal until reconnect, so it is checked BEFORE any hardware attempt —
+    // unlike a link fault, which must not short-circuit the read that would
+    // clear it.
+    void throw_if_board_reset_locked() const {
+        if (!board_reset_fault_.empty()) {
+            throw_comms_compromised_locked(board_reset_fault_);
+        }
+    }
+
+    // Run after a good reply cleared a latched fault. A board that merely went
+    // quiet comes back with its session intact; one that power-cycled answers
+    // just as well while reporting init_done false with its position registers
+    // reset to the home count, and the driver only ever sends ":F" at connect.
+    // Serving coordinates from those reset registers is silent mispointing, so
+    // latch it and make the client reconnect (which re-initialises the board).
+    // Confirmed on an EQM-35 Pro 2026-09-17: ":f1" read "=100" after a mains
+    // power cycle mid-session, ":j2" read the bare home count.
+    void check_board_survived_recovery_locked() const {
+        const std::uint64_t epoch = protocol_->link_recovery_epoch();
+        if (epoch == seen_recovery_epoch_) {
+            return;
+        }
+        seen_recovery_epoch_ = epoch;
+        try {
+            const AxisStatus ra = protocol_->inquire_status(kAxisRa);
+            const AxisStatus dec = protocol_->inquire_status(kAxisDec);
+            if (ra.init_done && dec.init_done) {
+                ALPACA_LOG_INFO("SkyWatcher", "Link recovered with the board's session intact");
+                return;
+            }
+            board_reset_fault_ =
+                "the motor controller restarted while the link was down (initialization cleared), so its "
+                "position registers no longer describe where the mount is pointing; reconnect to re-initialise";
+            position_cache_valid_ = false;
+            ALPACA_LOG_ERROR("SkyWatcher", "Link recovered but the board had restarted: RA init_done=" +
+                                               std::string(ra.init_done ? "true" : "false") +
+                                               ", Dec init_done=" + std::string(dec.init_done ? "true" : "false"));
+        } catch (const std::exception&) {
+            // The link went away again mid-check. Leave the epoch consumed;
+            // the next recovery re-runs this.
+        }
+    }
+
     void refresh_position_cache_locked(bool force) const {
         auto now = std::chrono::steady_clock::now();
-        if (!force && position_cache_valid_ && (now - last_position_update_) < kPositionCacheTtl) {
+        throw_if_board_reset_locked();
+        // A latched fault must not be short-circuited by a fresh-enough cache
+        // or by the offset model: on a polled link these reads are the only
+        // traffic that can clear the latch, so fall through to the hardware
+        // attempt instead of serving a value the board has not confirmed.
+        const bool faulted = protocol_->link_faulted();
+        if (!faulted && !force && position_cache_valid_ && (now - last_position_update_) < kPositionCacheTtl) {
             return;
         }
         // While rate offsets run, serve the dead-reckoned model instead of
@@ -2454,11 +2517,16 @@ private:
         // the hold is bounded: past kOffsetModelHold the model would pin at
         // the dt clamp and the reported position would silently freeze, so
         // fall through and take a fresh hardware anchor instead.
-        if (!force && position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
+        // open-astro#505: the 30-minute hold is the longest-lived stale window
+        // in this driver and the one the hardware run caught — a board powered
+        // off mid-offset-session is not noticed for the whole of it. A latched
+        // fault ends the hold.
+        if (!faulted && !force && position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
             (now - last_position_update_) < kOffsetModelHold) {
             return;
         }
         auto& protocol = *protocol_;
+        bool succeeded = false;
         try {
             uint32_t ra_counts = protocol.inquire_position(kAxisRa);
             uint32_t dec_counts = protocol.inquire_position(kAxisDec);
@@ -2466,7 +2534,17 @@ private:
             cached_dec_axis_deg_ = counts_to_degrees(dec_counts, axis_params_[1].counts_per_revolution);
             position_cache_valid_ = true;
             last_position_update_ = now;
+            succeeded = true;
         } catch (...) {
+            // Once latched, the cache is not an answer at any age: the values
+            // are as unreachable as the board. This supersedes the ad-hoc
+            // stale window below, which on its own let a powered-off mount
+            // keep reporting a plausible sidereal-advancing RA.
+            const std::string fault = protocol_->link_fault();
+            if (!fault.empty()) {
+                position_cache_valid_ = false;
+                throw_comms_compromised_locked(fault);
+            }
             if (!position_cache_valid_) {
                 throw;
             }
@@ -2476,6 +2554,12 @@ private:
                 position_cache_valid_ = false;
                 throw;
             }
+        }
+        if (succeeded) {
+            // Those reads just cleared a latched fault if anything did; find
+            // out whether the board behind them is still the one we set up.
+            check_board_survived_recovery_locked();
+            throw_if_board_reset_locked();
         }
     }
 
@@ -3973,6 +4057,13 @@ private:
     // deadband where the encoder cannot say. See branch_from_axis_locked().
     int pointing_branch_ = 1;
     mutable bool position_cache_valid_ = false;
+    // open-astro#505: set when a recovered link turned out to belong to a
+    // board that had restarted (init_done cleared, position registers reset).
+    // Terminal for the session — only a reconnect re-sends ":F" — and mutable
+    // because it is latched from the read path. Empty means no such fault.
+    mutable std::string board_reset_fault_;
+    // Last protocol-side recovery epoch this driver has validated.
+    mutable std::uint64_t seen_recovery_epoch_ = 0;
     mutable std::chrono::steady_clock::time_point last_position_update_{};
 
     bool tracking_ = false;

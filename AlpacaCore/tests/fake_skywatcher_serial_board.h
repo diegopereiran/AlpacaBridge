@@ -81,6 +81,27 @@ public:
         counts_[axis - 1] = counts & 0xFFFFFF;
     }
 
+    /// open-astro#505: a hung MCU behind a perfectly healthy fd — the mount
+    /// powered off with the USB adapter left plugged in, or the EQDIR cable
+    /// pulled at the mount end. Distinct from sever_link(), which removes the
+    /// node: here every frame still reaches the board and the board simply
+    /// never answers, so link_alive() stays true and only the exchange
+    /// timeouts can reveal it. Same knob name as the #237 fakes.
+    void set_muted(bool muted) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        muted_ = muted;
+    }
+
+    /// open-astro#505: the board's ":F" initialization bit, per axis. A board
+    /// that power-cycles mid-session comes back with this false and its
+    /// position registers reset, while answering every frame normally.
+    /// Confirmed on an EQM-35 Pro 2026-09-17 (":f1" read "=100").
+    void set_init_done(bool init_done) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        init_done_[0] = init_done;
+        init_done_[1] = init_done;
+    }
+
     /// Hold the reply to the next frame (any command, or only @p command if
     /// given) for @p ms before sending it, so it lands after the wrapper's
     /// timeout: the "late reply" that the next exchange must not consume.
@@ -192,6 +213,14 @@ private:
         if (answer_baud_ != 0 && line_baud() != answer_baud_) {
             return "";  // wrong rate for this board: nothing decodable arrives
         }
+        if (muted_) {
+            // The frame arrived (the fd is healthy and the node is there); the
+            // board is simply not answering. Recorded so a test can assert the
+            // driver kept talking while faulted — which is what lets the next
+            // good reply clear the latch without a reconnect.
+            frames_.push_back(frame);
+            return "";
+        }
         frames_.push_back(frame);
         if (frame.size() < 2) return "!3";
         const char cmd = frame[0];
@@ -214,8 +243,14 @@ private:
                 return "=01";
             case 'j':
                 return "=" + u24(counts_[axis - 1]);
-            case 'f':
-                return "=101";
+            case 'f': {
+                // char0 bit0 speed-mode, char1 bit0 running, char2 bit0 init-done.
+                const int c0 = speed_mode_[axis - 1] ? 1 : 0;
+                const int c1 = running_[axis - 1] ? 1 : 0;
+                const int c2 = init_done_[axis - 1] ? 1 : 0;
+                return std::string("=") + static_cast<char>('0' + c0) + static_cast<char>('0' + c1) +
+                       static_cast<char>('0' + c2);
+            }
             case 'q':
                 return "=0C1000";
             case 'I':
@@ -229,13 +264,27 @@ private:
                 }
                 if (no_readback_) return "!0";
                 return "=" + u24(t1_[axis - 1]);
-            case 'G':
-            case 'S':
-            case 'J':
             case 'K':
             case 'L':
-            case 'E':
+                // Stop: the axis actually comes to rest, so a driver-side
+                // stop-and-confirm loop terminates against this fake instead
+                // of spinning (open-astro#521).
+                running_[axis - 1] = false;
+                return "=";
+            case 'J':
+                running_[axis - 1] = true;
+                return "=";
             case 'F':
+                init_done_[axis - 1] = true;
+                return "=";
+            case 'G':
+                // ":G<mode><dir>": mode digit 1/2 = speed mode, 0/3 = GOTO.
+                if (!data.empty()) {
+                    speed_mode_[axis - 1] = data[0] == '1' || data[0] == '2';
+                }
+                return "=";
+            case 'S':
+            case 'E':
             case 'M':
                 return "=";
             default:
@@ -319,6 +368,12 @@ private:
     bool straggler_pending_ = false;
     bool no_readback_ = false;
     std::string reject_readback_code_;
+    // Defaults reproduce the fixed "=101" this fake used to answer for ":f":
+    // speed mode, not running, initialized.
+    bool muted_ = false;
+    bool running_[2] = {false, false};
+    bool speed_mode_[2] = {true, true};
+    bool init_done_[2] = {true, true};
     std::vector<std::string> frames_;
 };
 

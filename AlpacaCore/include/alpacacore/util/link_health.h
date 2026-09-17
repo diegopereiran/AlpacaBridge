@@ -87,4 +87,72 @@ private:
     std::string read_error_;  // errno_string() of the last persistent read failure, if any
 };
 
+/**
+ * @brief Link-health latch for REQUEST/RESPONSE drivers, whose cache is filled
+ *        by the reads themselves rather than by an unsolicited frame stream.
+ *
+ * Issue #505 (Sky-Watcher direct driver): StreamLinkHealth measures elapsed
+ * silence, which only means anything when the device sends on its own. A polled
+ * board is silent exactly as often as it is asked, so the signal there is
+ * CONSECUTIVE FAILED EXCHANGES with no good reply in between — the iOptron
+ * `device_faulted_` shape, promoted here so a third driver does not grow a
+ * fourth private copy of it.
+ *
+ * The contract is StreamLinkHealth's, so the two read the same way from a
+ * driver: latched until a good reply, recovery clears it with no reconnect,
+ * `Connected` is untouched throughout (the node is still there and the board
+ * may come back on the same fd), and `fault()` non-empty means refuse to serve
+ * the cache with `DriverException` "<device> communications compromised".
+ *
+ * Usage (caller holds whatever mutex guards its exchanges):
+ *   - reset() at connect;
+ *   - on_reply() after every good exchange; returns true when that reply
+ *     cleared a latched fault (log "restored" at INFO);
+ *   - note_failure(reason, threshold) after every failed exchange; returns the
+ *     fault reason on the call that LATCHES it (log that at ERROR), and
+ *     nullopt on the transient calls before it (log those at WARN with
+ *     consecutive_failures(), so a flapping link is visible before it latches);
+ *   - faulted()/fault() from the driver's read and write paths.
+ *
+ * The threshold is a count of exchanges, not a duration: a polled link only
+ * accumulates evidence when something asks, so the wall-clock time to latch is
+ * the caller's poll cadence times the threshold, not the response timeout
+ * times it.
+ *
+ * NOTE: a driver gating its reads on fault() must still ATTEMPT the hardware
+ * exchange while latched, because on a polled link those reads are the only
+ * traffic that can clear the fault. Refuse to serve the CACHE, not to talk.
+ */
+class PolledLinkHealth {
+public:
+    void reset() {
+        consecutive_failures_ = 0;
+        fault_.clear();
+    }
+
+    bool on_reply() {
+        consecutive_failures_ = 0;
+        const bool restored = !fault_.empty();
+        fault_.clear();
+        return restored;
+    }
+
+    std::optional<std::string> note_failure(const std::string& reason, int threshold) {
+        ++consecutive_failures_;
+        if (!fault_.empty() || consecutive_failures_ < threshold) {
+            return std::nullopt;
+        }
+        fault_ = reason + " (" + std::to_string(consecutive_failures_) + " consecutive failures)";
+        return fault_;
+    }
+
+    bool faulted() const { return !fault_.empty(); }
+    const std::string& fault() const { return fault_; }
+    int consecutive_failures() const { return consecutive_failures_; }
+
+private:
+    int consecutive_failures_ = 0;
+    std::string fault_;  // non-empty while latched
+};
+
 }  // namespace alpacacore::util
