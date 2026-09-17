@@ -14,7 +14,7 @@ AlpacaBridge turns a single-board computer into a control server for your entire
 
 Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-#### [4.0.0] - 2026-09-17 &middot; [Changelog](CHANGELOG.md)
+#### [4.0.1] - 2026-09-18 &middot; [Changelog](CHANGELOG.md)
 
 ## Why AlpacaBridge
 
