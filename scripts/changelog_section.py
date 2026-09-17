@@ -48,10 +48,29 @@ def extract(text: str, version: str) -> tuple[str | None, list[str]]:
     return date, body
 
 
+def heading_anchor(version: str, date: str) -> str:
+    """GitHub's auto-anchor for ``## [version] - date``.
+
+    GitHub lowercases the heading, drops everything but letters, digits,
+    spaces and hyphens, then turns spaces into hyphens: ``## [4.0.0] - 2026-09-17``
+    becomes ``400---2026-09-17``. Only a Markdown heading gets an anchor, so the
+    link resolves while the section is the expanded top one; once a release is
+    collapsed into ``<details>`` it degrades to the top of CHANGELOG.md.
+    """
+    heading = f"[{version}] - {date}".lower()
+    kept = re.sub(r"[^a-z0-9 -]", "", heading)
+    return kept.replace(" ", "-")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("version", help="bare version, e.g. 3.6.0 (no v prefix)")
     parser.add_argument("--changelog", default="CHANGELOG.md", type=Path)
+    parser.add_argument(
+        "--anchor",
+        action="store_true",
+        help="print the GitHub heading anchor for the section instead of its body",
+    )
     args = parser.parse_args()
 
     date, body = extract(args.changelog.read_text(encoding="utf-8"), args.version)
@@ -64,6 +83,9 @@ def main() -> int:
     if not body:
         print(f"ERROR: CHANGELOG section [{args.version}] is empty", file=sys.stderr)
         return 1
+    if args.anchor:
+        print(heading_anchor(args.version, date))
+        return 0
     print("\n".join(body))
     return 0
 
