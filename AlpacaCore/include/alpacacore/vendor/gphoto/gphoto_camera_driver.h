@@ -51,8 +51,13 @@ struct DecodedFrame {
  */
 class RawDecoder {
 public:
-    virtual ~RawDecoder() = default;
+    // Protected, non-virtual destructor for the same reason as GPhotoSDK:
+    // nothing owns a RawDecoder*. The driver holds a RawDecoder&, and every
+    // implementation is a function-local static or a stack object.
     virtual DecodedFrame decode(const std::vector<std::uint8_t>& raw_bytes) = 0;
+
+protected:
+    ~RawDecoder() = default;
 };
 
 /// Real libraw-backed decoder used in production.

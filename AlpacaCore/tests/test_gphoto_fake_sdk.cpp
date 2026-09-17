@@ -116,17 +116,46 @@ TEST_CASE("GPhoto camera fake - shutter widget fallback to shutterspeed when shu
     auto cam = make_camera();
     cam.choices.erase("shutterspeed2");
     cam.choice_value.erase("shutterspeed2");
-    cam.choices["shutterspeed"] = {"1/1000", "1", "bulb"};
-    cam.choice_value["shutterspeed"] = "1/1000";
+    // 1/2000 deliberately differs from min_native_shutter_seconds_'s 0.001
+    // default: asserting on a value the default already satisfies would pass
+    // even with the whole fallback loop removed. See the negative control below.
+    cam.choices["shutterspeed"] = {"1/2000", "1", "bulb"};
+    cam.choice_value["shutterspeed"] = "1/2000";
     fake.cameras.push_back(cam);
     FakeRawDecoder decoder;
 
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
     driver->set_connected(true);
     CHECK(driver->get_connected() == true);
-    // ExposureMax reflects the fallback widget's native shutter choices
-    // having been read at all (non-default sentinel of 30.0 from "1").
-    CHECK(driver->get_exposure_min() > 0.0);
+    // Only reachable if the probe fell through shutterspeed2 to shutterspeed
+    // AND read its choices: the default would leave this at 0.001.
+    CHECK(driver->get_exposure_min() < 0.0009);
+    CHECK(driver->get_exposure_min() > 0.0001);
+    // "bulb" among the fallback widget's choices must still be recognised.
+    CHECK(driver->get_exposure_max() == 3600.0);
+    driver->set_connected(false);
+}
+
+// Negative control for the case above: with no shutter widget under any of the
+// three probed names, the driver keeps its defaults. This is what makes the
+// 0.0005 assertion above meaningful rather than vacuous -- if the fallback loop
+// stopped working, that test would land on exactly these values.
+TEST_CASE("GPhoto camera fake - no shutter widget at all leaves the shutter defaults untouched",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_camera();
+    for (const char* name : {"shutterspeed2", "shutterspeed", "eos-shutterspeed"}) {
+        cam.choices.erase(name);
+        cam.choice_value.erase(name);
+    }
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_exposure_min() == 0.001);
     driver->set_connected(false);
 }
 

@@ -55,7 +55,14 @@ struct GPhotoCaptureResult {
  */
 class GPhotoSDK {
 public:
-    virtual ~GPhotoSDK() = default;
+    // Destructor is protected and NON-virtual (below), not public and virtual:
+    // nothing ever owns a GPhotoSDK*. Drivers hold a GPhotoSDK&, and every
+    // implementation is either a function-local static (GPhotoSDKWrapper) or a
+    // stack object (FakeGPhotoSDK, LockedGPhotoSDK). A public virtual
+    // destructor here would make `delete static_cast<GPhotoSDK*>(&...)`
+    // compile against the singleton, since access for delete is checked on the
+    // static type. AGENTS.md calls this the shape to copy; ToupTek's public
+    // virtual destructor predates that reasoning.
 
     /**
      * @brief Enumerate currently attached PTP/MTP cameras via USB autodetect.
@@ -107,6 +114,12 @@ public:
      * loop) and call this immediately after closing the shutter.
      */
     virtual GPhotoCaptureResult wait_for_bulb_file_and_download(int handle) = 0;
+
+protected:
+    // See the note at the top of the class: protected + non-virtual, so no
+    // caller can delete through a GPhotoSDK*, while every implementation is
+    // still destroyed normally through its own static type.
+    ~GPhotoSDK() = default;
 };
 
 /**
@@ -151,7 +164,7 @@ public:
 
 private:
     GPhotoSDKWrapper();
-    ~GPhotoSDKWrapper() override;
+    ~GPhotoSDKWrapper();
     GPhotoSDKWrapper(const GPhotoSDKWrapper&) = delete;
     GPhotoSDKWrapper& operator=(const GPhotoSDKWrapper&) = delete;
 
