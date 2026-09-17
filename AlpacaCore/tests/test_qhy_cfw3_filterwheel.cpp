@@ -453,7 +453,9 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outli
         const std::string goto_char(1, static_cast<char>('0' + target));
         if (fake.count(goto_char) > gotos_seen) {
             gotos_seen = fake.count(goto_char);
-            const auto landed = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            // Worst case is the fake's shortest-path distance times its
+            // travel time (3 slots x 1.5 s from slot 0), plus slack.
+            const auto landed = std::chrono::steady_clock::now() + std::chrono::seconds(7);
             while (fake.position() != target && std::chrono::steady_clock::now() < landed) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }

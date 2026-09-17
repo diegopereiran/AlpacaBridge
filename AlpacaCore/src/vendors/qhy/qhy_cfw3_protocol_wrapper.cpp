@@ -431,6 +431,13 @@ public:
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
+#ifndef _WIN32
+        if (serial_fd_ >= 0) {
+            ALPACA_LOG_INFO(kLogTag, "QHYCFW3 disconnected; " + config_.serial_port +
+                                         " stays open (and reserved) so the next connect skips the wheel's "
+                                         "~17 s reset. Remove the device to release the port");
+        }
+#endif
     }
 
     bool is_connected() const {
