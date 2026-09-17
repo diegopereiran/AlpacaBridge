@@ -516,7 +516,8 @@ don't — firmware/board revision, cable/adapter/chipset details, baud rate, clo
 host ConformU ran on, mount/model codes, or other rig specifics — is not the thing #478 removed.
 Those lines are legitimate, may be extended when a new run adds to that provenance, and a brand
 new one may be added when a validation surfaces this kind of detail (see the Sky-Watcher
-`Tested model (EQ class)` and `ConformU` lines in the Sky-Watcher Driver Notes for the shape).
+`Tested model (EQ class)` and `ConformU` lines in the Sky-Watcher Direct Motor Controller Driver
+Notes for the shape).
 Read what an existing line actually says before touching it — its presence alone doesn't mark it
 for removal.
 
