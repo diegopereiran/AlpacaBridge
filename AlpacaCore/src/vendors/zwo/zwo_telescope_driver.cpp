@@ -1411,7 +1411,7 @@ public:
         if (axis == 2) {
             return false;
         }
-        throw AlpacaException("Axis must be 0, 1, or 2", AlpacaError::InvalidValue);
+        throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
     }
 
     void move_axis(int axis, double rate) override {
@@ -1525,7 +1525,7 @@ public:
         if (axis == 2) {
             return {};
         }
-        throw AlpacaException("Axis must be 0, 1, or 2", AlpacaError::InvalidValue);
+        throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
     }
 
     bool get_slewing() const override {

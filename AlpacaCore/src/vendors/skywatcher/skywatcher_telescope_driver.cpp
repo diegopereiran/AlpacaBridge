@@ -1815,7 +1815,7 @@ public:
 
     bool get_can_move_axis(int axis) const override {
         if (axis != 0 && axis != 1 && axis != 2) {
-            throw AlpacaException("Axis must be 0, 1 or 2", AlpacaError::InvalidValue);
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
         return axis == 0 || axis == 1;
     }
@@ -1976,7 +1976,7 @@ public:
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
         if (axis != 0 && axis != 1) {
-            throw AlpacaException("Axis must be 0 or 1", AlpacaError::InvalidValue);
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
         return {0.0, kMaxMoveAxisRateDegPerSec};
     }
@@ -1987,7 +1987,7 @@ public:
             return {};
         }
         if (axis != 0 && axis != 1) {
-            throw AlpacaException("Axis must be 0 or 1", AlpacaError::InvalidValue);
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
         return {{0.0, kMaxMoveAxisRateDegPerSec}};
     }
