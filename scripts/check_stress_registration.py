@@ -61,7 +61,11 @@ Same shape for (gemini, covercalibrator): only Flat Panel Pro
 (GeminiFlatPanelV2Driver, gemini_flatpanel_driver.cpp) is stormed, but that
 also marks the Cover Lite class (GeminiFlatPanelDriver, same file, its own
 set_connected/calibrator implementation, no task threads) and the Rev2
-model path as covered; both are code-review only, not exercised.
+model path as covered; both are code-review only, not exercised. And for
+(qhy, filterwheel): the standalone QHYCFW3 USB driver
+(qhy_cfw3_filterwheel_driver.cpp, over its pty fake) is the registration,
+which also marks the integrated CFW driver (qhy_filterwheel_driver.cpp, over
+the camera handle) as covered; that one has fake-SDK unit cases but no storm.
 
 The device type for a driver file is read from its own
 `get_device_type() const override { return DeviceType::X; }` rather than
@@ -270,7 +274,6 @@ def strip_comments(text):
 # nothing here can silently go stale.
 ALLOWLIST = {
     ("qhy", "camera"),
-    ("qhy", "filterwheel"),
 }
 
 
