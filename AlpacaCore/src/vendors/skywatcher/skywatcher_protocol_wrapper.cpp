@@ -731,6 +731,7 @@ public:
             // poll, the in-flight exchange's own node check, or a relink all
             // retry the close; nothing is lost, but until one of those runs
             // the stale fd stays open with Connected already reading false.
+            note_link_lost();
             std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
             if (lock.owns_lock() && connected_.load()) {
                 ALPACA_LOG_WARN("SkyWatcher", "Serial device " + info_.port_path + " has gone away; link closed");
@@ -810,6 +811,31 @@ public:
         return link_health_.fault();
     }
 
+    // open-astro#521: when the link was last LOST (not cleanly disconnected).
+    // A relink needs the length of the outage to decide whether motion the
+    // board is still running was a glitch to ride out or an unattended runaway
+    // to stop. Only the loss paths stamp it; a client's own disconnect does
+    // not, so a fresh connect finds no stamp and takes the safe branch.
+    // Recorded once per outage: the first detection wins, because later polls
+    // would otherwise keep pushing the stamp forward and make every outage
+    // look brief.
+    void note_link_lost() {
+        std::int64_t expected = 0;
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        link_lost_at_.compare_exchange_strong(expected, now, std::memory_order_relaxed);
+    }
+
+    // Read-and-clear: the stamp answers exactly one question, asked once per
+    // connect, and leaving it set would make the NEXT connect think it was
+    // recovering from this outage.
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at() {
+        const std::int64_t at = link_lost_at_.exchange(0, std::memory_order_relaxed);
+        if (at == 0) {
+            return std::nullopt;
+        }
+        return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(at));
+    }
+
     std::uint64_t recovery_epoch() const { return recovery_epoch_.load(std::memory_order_relaxed); }
 
     // Read lock-free from send paths; published in connect() under io_mutex_.
@@ -865,6 +891,7 @@ private:
     // generic transport error on a link that still claims to be up.
     [[noreturn]] void lose_serial_link_locked(const std::string& what) {
         ALPACA_LOG_WARN("SkyWatcher", what + " on " + info_.port_path + "; serial link closed");
+        note_link_lost();
         disconnect_locked();
         throw AlpacaException(what + "; serial link to the motor controller lost", AlpacaError::NotConnected);
     }
@@ -1335,6 +1362,9 @@ private:
     // power-cycled board answers again with init_done false and its position
     // registers reset, and nothing re-sends ":F" outside connect).
     std::atomic<std::uint64_t> recovery_epoch_{0};
+    // open-astro#521: steady_clock tick of the first detection of the current
+    // outage, 0 when the link has not been lost since the last connect.
+    std::atomic<std::int64_t> link_lost_at_{0};
 
     // Own leaf mutex so link_alive() never waits behind io_mutex_.
     mutable std::mutex link_id_mutex_;
@@ -1376,6 +1406,10 @@ std::string SkyWatcherProtocolWrapper::link_fault() { return pimpl_->link_fault(
 bool SkyWatcherProtocolWrapper::link_faulted() { return !pimpl_->link_fault().empty(); }
 
 std::uint64_t SkyWatcherProtocolWrapper::link_recovery_epoch() { return pimpl_->recovery_epoch(); }
+
+std::optional<std::chrono::steady_clock::time_point> SkyWatcherProtocolWrapper::consume_link_lost_at() {
+    return pimpl_->consume_link_lost_at();
+}
 
 std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, const std::string& data,
                                                     int timeout_ms_override) {

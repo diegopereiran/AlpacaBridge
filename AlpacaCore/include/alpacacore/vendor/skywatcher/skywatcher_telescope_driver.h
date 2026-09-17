@@ -48,6 +48,13 @@ bool host_synchronized_probe();
 // (default 30 s; a test shortens it). Zero disables the re-sample.
 void set_host_discipline_resample_interval(std::chrono::milliseconds interval);
 std::chrono::milliseconds host_discipline_resample_interval();
+// open-astro#521: how long a link may be gone before motion that survived the
+// outage is treated as unattended and stopped at relink, rather than preserved
+// as a glitch the client still wants (default 5 s; a test shortens it so both
+// branches are reachable without a five-second sleep). Process-wide; tests
+// restore the default afterwards.
+void set_relink_motion_preserve_window(std::chrono::milliseconds window);
+std::chrono::milliseconds relink_motion_preserve_window();
 
 bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed,
