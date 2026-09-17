@@ -36,6 +36,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdlib.h>  // posix_openpt/grantpt/unlockpt/ptsname: POSIX, not the <cstdlib> subset
 #include <sys/resource.h>
 #include <termios.h>
@@ -341,12 +342,36 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
 
     const std::atomic<bool> stop{false};
     const std::string reply = "*G0000U000000A1T1D1M1D1M1B50C50S20H15V50P10D12C1B12#";
-    CHECK(pty_write_bounded(master, reply, stop) == reply.size());
+    // Issue #513: this was a CHECK, so a short write fell through into the
+    // unbounded read loop below instead of stopping the case here -- in a
+    // file whose entire purpose is proving that fake-pty writes no longer
+    // hang. REQUIRE so a short write fails fast.
+    REQUIRE(pty_write_bounded(master, reply, stop) == reply.size());
 
+    // The slave was opened blocking (UndrainedPty), so a read that never gets
+    // its remaining bytes -- exactly what a short write above would cause --
+    // would otherwise block forever. Bound each read with poll() against a
+    // deadline, consistent with how pty_write_bounded itself is bounded, so
+    // that failure mode is a clean CHECK rather than a hung test process.
     std::string received;
     received.resize(reply.size());
     std::size_t got = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (got < reply.size()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            break;
+        }
+        const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        pollfd pfd{};  // no `struct` tag: elaborated-type-specifier + braced-init is the one
+                       // construct clang-format 19 (trixie) and CI's unpinned apt clang-format
+                       // disagree on spacing for; a plain declaration formats identically on both.
+        pfd.fd = slave;
+        pfd.events = POLLIN;
+        const int ready = ::poll(&pfd, 1, static_cast<int>(remaining_ms));
+        if (ready <= 0) {
+            break;  // timed out or a poll error -- either way, stop waiting
+        }
         const ssize_t n = read(slave, received.data() + got, reply.size() - got);
         if (n <= 0) break;
         got += static_cast<std::size_t>(n);

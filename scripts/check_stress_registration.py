@@ -186,6 +186,36 @@ TEST_CASE_TAGS_RE = re.compile(
 STRING_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 RAW_STRING_RE = re.compile(r'"([^()\\ ]{0,16})\(.*?\)\1"', re.S)
 TAG_RE = re.compile(r"\[([^\]]+)\]")
+# Just the macro-name-plus-open-paren, for splitting a file into per-TEST_CASE
+# segments (check_guard_usage(), issue #514) -- unlike TEST_CASE_TAGS_RE this
+# does not require a description/tags pair to match, so it also finds a
+# registration macro invocation that check_guard_usage() itself is about to
+# flag for missing pieces.
+TEST_CASE_START_RE = re.compile(r"\b(?:" + _MACRO_ALTERNATION + r")\s*\(")
+
+
+def test_case_segments(text):
+    """[(label, segment_text), ...] -- `text` split at each Catch2 registration
+    macro invocation, comment-stripped text in, so this shares its notion of
+    "where a TEST_CASE starts" with every tag-scanning rule above it.
+
+    Each segment runs from one macro invocation to the next (or to EOF), which
+    is an approximation -- it doesn't balance braces -- but it is the same
+    approximation the rest of this script already makes about TEST_CASE
+    boundaries, and it is enough to scope a per-case rule instead of a
+    per-file one. `label` is the first string literal after the invocation
+    (the TEST_CASE description) for use in failure messages, falling back to
+    the raw macro text when a description can't be found.
+    """
+    starts = [m.start() for m in TEST_CASE_START_RE.finditer(text)]
+    segments = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        segment = text[start:end]
+        desc = STRING_LITERAL_RE.search(segment)
+        label = desc.group(1) if desc else segment[:60].strip()
+        segments.append((label, segment))
+    return segments
 
 
 def tags_in_literal_run(run):
@@ -312,15 +342,27 @@ LOCAL_CALL_HELPER_RE = re.compile(
 
 
 def check_guard_usage():
-    """StressCallGuard is used, and its result is actually asserted (issue #379).
+    """StressCallGuard is used, and its result is actually asserted (issue #379),
+    scoped to each TEST_CASE that constructs one (issue #514) -- AGENTS.md
+    states the closing idiom as ending THE TEST_CASE, not the file, and a
+    file-wide presence check let one fully-guarded case cover for every other
+    case in the same file that dropped the closing lines: #468 emptied
+    GUARD_ALLOWLIST, and files with many [stress] cases (the ToupTek and ZWO
+    concurrency-stress files, 14 and 13 cases respectively) could have
+    silently dropped the guard from all but one case with this gate still
+    green.
 
     Three failure modes, in increasing order of how convincing they look:
 
-    1. No guard at all. run_lifecycle_stress swallows exceptions in its own
-       outer catch, so the storm passes no matter what the driver threw.
-    2. A guard constructed and used, but the closing CHECK omitted. Worse than
-       (1): the file LOOKS like it follows the documented pattern, and a reader
-       scanning for StressCallGuard concludes the calls are checked.
+    1. No guard at all in the whole file. run_lifecycle_stress swallows
+       exceptions in its own outer catch, so the storm passes no matter what
+       the driver threw. This one rule stays file-scoped: GUARD_ALLOWLIST is
+       an opt-out for a whole file that predates the guard, not for individual
+       cases within an otherwise-migrated file.
+    2. A guard constructed in a TEST_CASE, but that same case's closing CHECK
+       omitted. Worse than (1): the file LOOKS like it follows the documented
+       pattern, and a reader scanning for StressCallGuard concludes every
+       case's calls are checked.
     3. The CHECK present but INFO(report()) missing, so a real finding arrives
        as a bare `0 == 1` naming nothing it swallowed.
 
@@ -334,6 +376,9 @@ def check_guard_usage():
     merged registrations used are caught: the file-scope function/template
     (`static void call(...)`, `template <...> void call(...)`) and the lambda
     (`auto call = [](auto&& fn) {...}`), which was three of the five (the other two were templates).
+    This one also stays file-scoped -- a helper can be defined once and used
+    from several TEST_CASEs, so per-case scoping would miss every use site but
+    the first.
 
     Reads the comment-stripped text, like rules 1-3: a closing CHECK that has
     been commented out must not satisfy the presence rules.
@@ -345,9 +390,10 @@ def check_guard_usage():
         seen.add(name)
         text = strip_comments(read_text(path))
         allowed = name in GUARD_ALLOWLIST
-        uses_guard = "StressCallGuard" in text
+        segments = test_case_segments(text)
+        guarded_cases = [(label, seg) for label, seg in segments if "StressCallGuard" in seg]
 
-        if not uses_guard:
+        if not guarded_cases:
             if not allowed:
                 failures.append(
                     "NO STRESS GUARD: %s has no StressCallGuard, so "
@@ -363,28 +409,32 @@ def check_guard_usage():
                 "GUARD_ALLOWLIST in %s." % (path, name, __file__)
             )
 
-        if not re.search(r"CHECK\s*\(\s*[\w.]*unexpected_count\s*\(\s*\)", text):
-            failures.append(
-                "GUARD NOT ASSERTED: %s constructs a StressCallGuard but never CHECKs "
-                "unexpected_count(). Counting without failing is worse than not guarding: the file looks "
-                "like it follows the documented pattern. End the TEST_CASE with the INFO/CHECK pair from "
-                "AGENTS.md." % path
-            )
-        if not re.search(r"INFO\s*\(\s*[\w.]*report\s*\(\s*\)", text):
-            failures.append(
-                "GUARD REPORT NOT ATTACHED: %s CHECKs unexpected_count() without a preceding "
-                "INFO(guard.report()). CHECK takes no message argument, so a real finding arrives as a "
-                "bare `0 == 1` naming nothing it swallowed." % path
-            )
-        # The comparison is part of the rule: `total_calls() >= 0` is exactly
-        # as vacuous as the hole #334 closes, so only `> 0` / `>= 1` count.
-        if not re.search(r"CHECK\s*\(\s*[\w.]*total_calls\s*\(\s*\)\s*(?:>\s*0|>=\s*1)\s*\)", text):
-            failures.append(
-                "GUARD COUNT VACUOUS: %s CHECKs unexpected_count() without also CHECKing "
-                "total_calls() > 0 (or >= 1). A guard that was never invoked reports zero unexpected "
-                "throws, exactly like one that saw a hundred clean calls, so a storm that silently "
-                "stopped exercising the driver still passes (issue #334)." % path
-            )
+        for label, seg in guarded_cases:
+            if not re.search(r"CHECK\s*\(\s*[\w.]*unexpected_count\s*\(\s*\)", seg):
+                failures.append(
+                    "GUARD NOT ASSERTED: %s (TEST_CASE %r) constructs a StressCallGuard but never CHECKs "
+                    "unexpected_count() IN THAT SAME CASE. Counting without failing is worse than not "
+                    "guarding: the file looks like it follows the documented pattern. End the TEST_CASE "
+                    "with the INFO/CHECK pair from AGENTS.md." % (path, label)
+                )
+            if not re.search(r"INFO\s*\(\s*[\w.]*report\s*\(\s*\)", seg):
+                failures.append(
+                    "GUARD REPORT NOT ATTACHED: %s (TEST_CASE %r) CHECKs unexpected_count() without a "
+                    "preceding INFO(guard.report()) IN THAT SAME CASE. CHECK takes no message argument, "
+                    "so a real finding arrives as a bare `0 == 1` naming nothing it swallowed." % (path, label)
+                )
+            # The comparison is part of the rule: `total_calls() >= 0` is
+            # exactly as vacuous as the hole #334 closes, so only `> 0` /
+            # `>= 1` count.
+            if not re.search(r"CHECK\s*\(\s*[\w.]*total_calls\s*\(\s*\)\s*(?:>\s*0|>=\s*1)\s*\)", seg):
+                failures.append(
+                    "GUARD COUNT VACUOUS: %s (TEST_CASE %r) CHECKs unexpected_count() without also "
+                    "CHECKing total_calls() > 0 (or >= 1) IN THAT SAME CASE. A guard that was never "
+                    "invoked reports zero unexpected throws, exactly like one that saw a hundred clean "
+                    "calls, so a storm that silently stopped exercising the driver still passes "
+                    "(issue #334)." % (path, label)
+                )
+
         if LOCAL_CALL_HELPER_RE.search(text):
             failures.append(
                 "LOCAL call() HELPER: %s defines its own call() wrapper. That is the hand-rolled "
@@ -839,6 +889,22 @@ def self_test():
 
     # No override at all.
     check("no override yields no types", device_types_in_text("// nothing here") == set())
+
+    # test_case_segments() (issue #514): splits at each macro invocation, not
+    # at balanced braces, and labels each segment with its description.
+    two_cases = ('TEST_CASE("First", "[a][stress]") { int x = 1; }\n'
+                 'TEST_CASE("Second", "[b][stress]") { int y = 2; }\n')
+    segs = test_case_segments(two_cases)
+    check("test_case_segments splits a file into one segment per TEST_CASE",
+          len(segs) == 2)
+    check("test_case_segments labels each segment with its description",
+          [label for label, _ in segs] == ["First", "Second"])
+    check("test_case_segments' first segment holds only that case's body",
+          "x = 1" in segs[0][1] and "y = 2" not in segs[0][1])
+    check("test_case_segments' second segment holds only that case's body",
+          "y = 2" in segs[1][1] and "x = 1" not in segs[1][1])
+    check("test_case_segments on text with no TEST_CASE yields nothing",
+          test_case_segments("// nothing here") == [])
 
     # A comma inside the TEST_CASE description must not cut the tag match
     # short (the exact bug fixed for #269's non-blocking review note).
@@ -1300,6 +1366,36 @@ def self_test():
                          "  // CHECK(guard.total_calls() > 0);\n}")
         check("main() FAILS when the total_calls() CHECK is commented out",
               run_main_with(commented_out) == 1)
+
+        # Issue #514: the guard rules must be scoped PER TEST_CASE, not per
+        # file. A second TEST_CASE that constructs its own StressCallGuard but
+        # drops every closing line must fail even though the FIRST case in the
+        # same file is fully compliant -- a file-wide "does the text contain
+        # these three lines somewhere" check would find them (in the first
+        # case) and pass the whole file, which is exactly the #468 hole: files
+        # with many [stress] cases could drop the guard from all but one.
+        second_case_unguarded = (
+            'TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n' + GUARDED_BODY + "}\n"
+            'TEST_CASE("Also stress but broken", "[fakevendor][camera][stress]") {\n'
+            "  alpacacore::test::StressCallGuard guard;\n"
+            "  guard([] {});\n"
+            "}\n"
+        )
+        check("main() FAILS when a second TEST_CASE constructs a guard "
+              "without closing it, even though an earlier case in the same "
+              "file does (issue #514 per-case scoping)",
+              run_main_with(second_case_unguarded) == 1)
+        # The mirror: two cases, both fully compliant on their own, must pass
+        # -- scoping to TEST_CASE must not become so strict it can no longer
+        # see a guard whose construction and closing lines are both present
+        # within the same case.
+        two_cases_both_guarded = (
+            'TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n' + GUARDED_BODY + "}\n"
+            'TEST_CASE("Also ok", "[fakevendor][camera][stress]") {\n' + GUARDED_BODY + "}\n"
+        )
+        check("main() passes when two TEST_CASEs each construct and fully "
+              "close their own guard",
+              run_main_with(two_cases_both_guarded) == 0)
 
         # The CMake gating rule's own wiring into main() (issue #396).
         ungated_cmake = ("set(TEST_SOURCES test_core.cpp\n"

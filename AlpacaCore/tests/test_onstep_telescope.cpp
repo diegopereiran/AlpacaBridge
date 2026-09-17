@@ -307,10 +307,38 @@ TEST_CASE("OnStep Telescope Driver - a slow mount ack does not turn an accurate 
           "[onstep][telescope][unit]") {
     // The offset is sampled BEFORE the mount write (review round 2 on #471):
     // set_time() is three serial round trips (:SL, :SC, :SG) against a 2 s
-    // threshold, so a mount that takes 750 ms to ack each one (2.25 s in
-    // all, each under the wrapper's 1 s per-ack timeout) would otherwise
-    // make a perfectly set client clock read as seconds out. With the offset
+    // threshold, so a mount slow to ack them would otherwise make a
+    // perfectly set client clock read as seconds out. With the offset
     // sampled after the write, this case logs a line; sampled before, nothing.
+    //
+    // The per-ack sleep sits between two fixed constants this test cannot
+    // change: the summed round trip (3 acks) must clear the 2 s
+    // kClientDisagreementWarn threshold, and each INDIVIDUAL ack must stay
+    // under the wrapper's internal per-ack timeout (OnStepProtocolWrapper's
+    // kSetAckTimeoutMs, 1000 ms -- private to the .cpp, so not reachable
+    // from here, and NOT retried on expiry: it throws straight away). set_time()
+    // always sends exactly three commands (:SL, :SC, :SG), and the driver
+    // sends nothing else during set_utc_date(), so there is no fourth leg to
+    // spread the load across -- a first attempt at this (950 ms/ack) widened
+    // the threshold margin from 250 ms to 850 ms but crushed the per-ack
+    // margin from 250 ms to 50 ms, trading one flake risk for a worse one
+    // (review round on the #512/#513/#514 bundle).
+    //
+    // With 3 fixed legs, an equal per-leg sleep is what maximizes the sum for
+    // a given per-leg ceiling, so 750 ms is the unique point that keeps both
+    // margins at their largest simultaneously achievable value:
+    //   threshold margin: 3 * 750 ms - 2000 ms = 250 ms
+    //   per-ack margin:   1000 ms - 750 ms     = 250 ms
+    // Any higher sleep buys threshold margin only by spending per-ack margin
+    // (and vice versa) -- this is the balanced optimum, not an arbitrary
+    // choice. The REQUIRE below pins that the round trip actually cleared the
+    // threshold (so a regression in the threshold, the per-ack timeout, or
+    // the ack count fails loudly here instead of silently vanishing), and the
+    // set_utc_date() call itself is wrapped in REQUIRE_NOTHROW so that on a
+    // loaded CI runner nudging one ack over its 1 s cap, the failure is a
+    // clean, named assertion rather than an unattributed exception.
+    constexpr auto kThreshold = alpacacore::util::HostClock::kClientDisagreementWarn;
+    const auto per_ack_sleep = std::chrono::milliseconds(750);
     struct ProbeGuard {
         ProbeGuard() {
             alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
@@ -330,9 +358,9 @@ TEST_CASE("OnStep Telescope Driver - a slow mount ack does not turn an accurate 
             }
         });
 
-    alpacacore::test::FakeMountServer server([](const std::string& chunk) {
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) {
         if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(750));  // the slow ack, x3
+            std::this_thread::sleep_for(per_ack_sleep);  // the slow ack, x3
             return std::string("1");
         }
         if (chunk.size() >= 2 && chunk[0] == 'K') {
@@ -349,7 +377,16 @@ TEST_CASE("OnStep Telescope Driver - a slow mount ack does not turn an accurate 
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    driver->set_utc_date(std::chrono::system_clock::now());  // accurate client, slow mount
+    const auto call_started = std::chrono::steady_clock::now();
+    // accurate client, slow mount; REQUIRE_NOTHROW so a per-ack timeout on a
+    // loaded runner reports as a named assertion, not a bare uncaught exception.
+    REQUIRE_NOTHROW(driver->set_utc_date(std::chrono::system_clock::now()));
+    const auto elapsed = std::chrono::steady_clock::now() - call_started;
+    // The case only proves the sampling order matters if the round trip it
+    // drove actually cleared the threshold -- otherwise sampling AFTER the
+    // write would read as agreeing too, and the CHECK below would pass
+    // either way.
+    REQUIRE(elapsed > kThreshold);
     CHECK(warns.load() == 0);
     driver->set_connected(false);
 }
