@@ -562,6 +562,34 @@ and delegates. `connect()` calls `disconnect_locked()`; external callers call
 `disconnect()`. All protocol wrappers follow this (gemini/ioptron/synscan/
 celestron/bisque/zwo-mount).
 
+### Arduino-class serial devices reset when the port opens (QHYCFW3)
+
+A USB-serial bridge (CP2102, CH340, FTDI) asserts DTR on `open()`, and an
+Arduino-class MCU behind it (ATmega328P with the auto-reset capacitor) reboots
+on that edge. The QHYCFW3 then homes for ~17 s and emits one status byte;
+everything written before that byte is discarded, and clearing HUPCL before
+`close()` did not stop the next open from resetting it. Symptoms on the bench
+read exactly like a protocol bug: motion on every open, a single stray byte
+that arrives a fixed time after the open regardless of what was sent, no reply
+to any query. Rules: (1) before assuming a dead protocol, log the time of each
+inbound byte relative to the OPEN, not the last command; a constant offset is a
+boot, not a reply; (2) the wrapper's `connect()` waits for the boot byte with
+a bounded timeout and proceeds at once when it lands (`Cfw3ProtocolWrapper`
+is the reference), the sync `Connected=true` path holds a
+`transition_mutex_` because the connect is now multi-second (#528), and the
+wrapper HOLDS the fd across logical disconnects so a reconnect never
+re-opens the port: **ConformU abandons a Platform 7 `Connect()` after 5 s of
+`Connecting`** ("The Connecting to device operation exceeded its 5 second
+timeout", CFW3 run 1), so any connect that costs more than that on every call
+fails the suite outright, and a boot paid once per process and never again
+is the only shape that passes; (3) an
+auto-detect probe of such a device resets everything on the same chip class,
+so filter candidates by descriptor, warn in the log, and recommend an
+explicit port in the UI; (4) a device with a hardware control-mode switch
+(the CFW3's USB vs 4-pin button) can boot, home and emit its status on USB
+while ignoring every USB command, so put the switch in the connect refusal
+message and check it before debugging the parser.
+
 ### Auto-detect failure message (`util/auto_detect.h`)
 
 Serial port enumeration is POSIX-only, so the `enumerate_*_ports()` helpers return

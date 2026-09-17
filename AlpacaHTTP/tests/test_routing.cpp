@@ -2165,6 +2165,57 @@ int main() {
         }
         EXPECT(!present);
     }
+    {
+        // qhy / filterwheel, wheelType "cfw3-usb" (standalone QHYCFW3 on its
+        // own serial port) — serial mode persists wheelType, connectionType,
+        // portPath, filterwheelIndex and filterNames through
+        // sanitize_device_config; the integrated wheel's cameraIndex/cameraId
+        // are NOT kept for this backend (only the two fields its branch
+        // reads), and an unknown key is dropped.
+        const std::vector<std::string> names = {"L", "R", "G", "B", "Ha", "OIII", "SII"};
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "qhy"},
+                                           {"deviceType", "filterwheel"},
+                                           {"deviceNumber", 9642},
+                                           {"wheelType", "cfw3-usb"},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB7"},
+                                           {"filterwheelIndex", 1},
+                                           {"filterNames", names},
+                                           {"cameraIndex", 3},
+                                           {"bogusKey", 1}},
+                                          "FilterWheel", 9642);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("wheelType", "") == "cfw3-usb");
+        EXPECT(cfg.value("connectionType", "") == "serial");
+        EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB7");
+        EXPECT(cfg.value("filterwheelIndex", -1) == 1);
+        EXPECT(cfg["filterNames"] == names);
+        EXPECT(!cfg.contains("cameraIndex"));
+        EXPECT(!cfg.contains("bogusKey"));
+        remove_device(router, "qhy", "filterwheel", 9642);
+    }
+    {
+        // qhy / filterwheel — an unknown wheelType is refused with a message
+        // naming the field, and nothing is registered.
+        const nlohmann::json bad = {
+            {"vendor", "qhy"},         {"deviceType", "filterwheel"}, {"deviceNumber", 9643},
+            {"wheelType", "cfw2-usb"}, {"connectionType", "serial"},  {"portPath", "/dev/ttyUSB8"}};
+        const auto response = route_request(router, "POST", "/management/v1/configuredevice", bad.dump());
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        EXPECT(json.value("ErrorMessage", "").find("wheelType") != std::string::npos);
+        const auto listed = route_request(router, "GET", "/management/v1/configureddevices");
+        const auto listed_json = nlohmann::json::parse(listed.body(), nullptr, false);
+        bool present = false;
+        if (!listed_json.is_discarded() && listed_json.contains("Value") && listed_json["Value"].is_array()) {
+            for (const auto& entry : listed_json["Value"]) {
+                if (entry.value("DeviceType", "") == "FilterWheel" && entry.value("DeviceNumber", -1) == 9643)
+                    present = true;
+            }
+        }
+        EXPECT(!present);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN

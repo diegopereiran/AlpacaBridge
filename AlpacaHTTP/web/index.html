@@ -933,13 +933,48 @@
                          the camera's own index/id rather than a separate wheel enumeration. -->
                     <div id="qhy-filterwheel-fields" style="display: none;">
                         <div class="form-group">
-                            <label for="qhy-cfw-camera-index">Camera Index:</label>
-                            <input type="number" id="qhy-cfw-camera-index" name="qhyCfwCameraIndex" value="0" min="0">
-                            <small>0-based index of the QHY camera this CFW is built into (same index as the paired camera device).</small>
+                            <label for="qhy-cfw-wheel-type">Wheel Connection:</label>
+                            <select id="qhy-cfw-wheel-type" name="qhyCfwWheelType">
+                                <option value="integrated">Camera 4-pin port (integrated CFW)</option>
+                                <option value="cfw3-usb">QHYCFW3 over its own USB cable</option>
+                            </select>
+                            <small>A wheel on the camera's 4-pin port is driven through the camera. A CFW3 on its own USB cable is a serial device; set its mode switch to USB mode (red LED flash at power-on).</small>
                         </div>
-                        <div class="form-group">
-                            <label for="qhy-cfw-camera-id">Camera ID (optional):</label>
-                            <input type="text" id="qhy-cfw-camera-id" name="qhyCfwCameraId" placeholder="(leave blank to use index)">
+
+                        <div id="qhy-cfw-integrated-config">
+                            <div class="form-group">
+                                <label for="qhy-cfw-camera-index">Camera Index:</label>
+                                <input type="number" id="qhy-cfw-camera-index" name="qhyCfwCameraIndex" value="0" min="0">
+                                <small>0-based index of the QHY camera this CFW is built into (same index as the paired camera device).</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="qhy-cfw-camera-id">Camera ID (optional):</label>
+                                <input type="text" id="qhy-cfw-camera-id" name="qhyCfwCameraId" placeholder="(leave blank to use index)">
+                            </div>
+                        </div>
+
+                        <div id="qhy-cfw3-config" style="display: none;">
+                            <div class="form-group">
+                                <label for="qhy-cfw3-connection-type">Connection Type:</label>
+                                <select id="qhy-cfw3-connection-type" name="qhyCfw3ConnectionType">
+                                    <option value="auto">Auto-Detect (USB serial)</option>
+                                    <option value="serial">Serial Port</option>
+                                </select>
+                            </div>
+                            <div id="qhy-cfw3-auto-config" class="connection-config">
+                                <div class="form-group">
+                                    <label for="qhy-cfw3-index">Filter Wheel Index:</label>
+                                    <input type="number" id="qhy-cfw3-index" name="qhyCfw3FilterwheelIndex" value="0" min="0">
+                                    <small>0-based index among detected wheels. Auto-detect opens every Silicon Labs CP210x serial adapter on the machine, which resets the device behind it, and a wheel takes about 17 seconds to home after that. Prefer an explicit serial port when other CP210x adapters are attached.</small>
+                                </div>
+                            </div>
+                            <div id="qhy-cfw3-serial-config" class="connection-config" style="display: none;">
+                                <div class="form-group">
+                                    <label for="qhy-cfw3-port-path">Serial Port:</label>
+                                    <input type="text" id="qhy-cfw3-port-path" name="qhyCfw3PortPath" placeholder="/dev/ttyUSB0">
+                                    <small>Use the /dev/serial/by-id/usb-Silicon_Labs_CP2102_... path when available. Connecting takes about 17 seconds while the wheel homes.</small>
+                                </div>
+                            </div>
                         </div>
 
                         <div class="form-group">
@@ -953,7 +988,7 @@
                                 <option value="custom">Custom</option>
                             </select>
                             <input type="number" id="qhy-filterwheel-slot-custom" min="1" max="16" placeholder="Custom">
-                            <small>The actual slot count is read from the wheel at connect; this only pre-seeds the filter name list.</small>
+                            <small>The actual slot count is read from the wheel at connect; this only pre-seeds the filter name list. QHY wheels come in 5, 7, 8 and 9 slot models.</small>
                         </div>
                         <div id="qhy-filterwheel-slot-list" class="filterwheel-slot-list"></div>
 
