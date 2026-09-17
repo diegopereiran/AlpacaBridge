@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
@@ -56,6 +57,16 @@ constexpr char kReplyError = '!';
 // UDP datagrams can be silently dropped (spec: one command per datagram, one
 // response per datagram) — retransmit a bounded number of times on timeout.
 constexpr int kUdpRetries = 3;
+
+// open-astro#505: consecutive failed exchanges before the link fault latches.
+// Matches the iOptron driver's kDeviceFaultThreshold rather than introducing a
+// second number for the same decision. This counts EXCHANGES, not seconds: a
+// polled board only looks silent when something asks it, so the wall-clock time
+// to latch is the caller's poll cadence times this, which on the EQM-35 rig
+// (~3-4 s between position polls) is about 10 s, not 3 x the 1 s response
+// timeout. Hardware run 2026-09-17: a board powered off with the adapter still
+// plugged in produced one WARN per poll indefinitely and never latched.
+constexpr int kLinkFaultThreshold = 3;
 
 int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -736,11 +747,70 @@ public:
         if (!connected_) {
             throw AlpacaException("Not connected to Sky-Watcher motor controller", AlpacaError::NotConnected);
         }
-        if (info_.type == ConnectionType::Serial) {
-            return exchange_serial(frame, timeout_ms);
+        // open-astro#505: this is the one place both transports converge, so
+        // the consecutive-failure latch lives here and covers serial and UDP
+        // alike (UDP has no other health signal at all — link_alive() reports
+        // the flag as-is there).
+        try {
+            std::string reply = info_.type == ConnectionType::Serial
+                                    ? exchange_serial(frame, timeout_ms)
+                                    : exchange_udp(frame, timeout_ms, expected_data_len);
+            note_exchange_ok();
+            return reply;
+        } catch (const AlpacaException& e) {
+            // A lost link is #445's business, not a fault: Connected goes
+            // false and operations throw NotConnected, so counting it here
+            // would latch a fault on a device that is simply gone. Silence
+            // with the node still present is what this latch is for.
+            if (e.error_code() != AlpacaError::NotConnected && connected_) {
+                note_exchange_failed(e.what());
+            }
+            throw;
         }
-        return exchange_udp(frame, timeout_ms, expected_data_len);
     }
+
+    // Both run under io_mutex_ (the exchange path); they take health_mutex_
+    // only to publish, so link_faulted() never waits behind an exchange.
+    void note_exchange_ok() {
+        bool restored = false;
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            restored = link_health_.on_reply();
+            if (restored) {
+                ++recovery_epoch_;
+            }
+        }
+        if (restored) {
+            ALPACA_LOG_INFO("SkyWatcher", "Motor controller link restored");
+        }
+    }
+
+    void note_exchange_failed(const std::string& reason) {
+        std::optional<std::string> latched;
+        int failures = 0;
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            const bool was_faulted = link_health_.faulted();
+            latched = link_health_.note_failure(reason, kLinkFaultThreshold);
+            failures = link_health_.consecutive_failures();
+            if (was_faulted) {
+                return;  // already latched: the per-exchange WARN would repeat forever
+            }
+        }
+        if (latched) {
+            ALPACA_LOG_ERROR("SkyWatcher", "Motor controller link fault latched: " + *latched);
+        } else {
+            ALPACA_LOG_WARN("SkyWatcher", "Motor controller exchange failed (transient, " + std::to_string(failures) +
+                                              "/" + std::to_string(kLinkFaultThreshold) + "): " + reason);
+        }
+    }
+
+    std::string link_fault() {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        return link_health_.fault();
+    }
+
+    std::uint64_t recovery_epoch() const { return recovery_epoch_.load(std::memory_order_relaxed); }
 
     // Read lock-free from send paths; published in connect() under io_mutex_.
     int default_timeout() const { return response_timeout_ms_.load(std::memory_order_relaxed); }
@@ -780,6 +850,11 @@ private:
             link_path_.clear();
         }
 #endif
+        {
+            // open-astro#505: a fault belongs to the session that latched it.
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            link_health_.reset();
+        }
         connected_ = false;
     }
 
@@ -1250,6 +1325,17 @@ private:
     int socket_fd_ = -1;
     std::string registered_port_;  // canonical path marked open in the cross-vendor registry
     // open-astro#445: the configured path and the node it reached at connect.
+    // open-astro#505: own leaf mutex, for the same reason link_id_mutex_ has
+    // one — a driver read path asking whether the link is faulted must not
+    // block behind an exchange in flight.
+    mutable std::mutex health_mutex_;
+    util::PolledLinkHealth link_health_;
+    // Bumped each time a good reply clears a latched fault. The driver watches
+    // it to run the post-recovery board check (open-astro#505 hardware run: a
+    // power-cycled board answers again with init_done false and its position
+    // registers reset, and nothing re-sends ":F" outside connect).
+    std::atomic<std::uint64_t> recovery_epoch_{0};
+
     // Own leaf mutex so link_alive() never waits behind io_mutex_.
     mutable std::mutex link_id_mutex_;
     std::string link_path_;  // empty: nothing to watch (UDP, or disconnected)
@@ -1284,6 +1370,12 @@ void SkyWatcherProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 bool SkyWatcherProtocolWrapper::is_connected() const { return pimpl_->is_connected(); }
 
 bool SkyWatcherProtocolWrapper::link_alive() { return pimpl_->link_alive(); }
+
+std::string SkyWatcherProtocolWrapper::link_fault() { return pimpl_->link_fault(); }
+
+bool SkyWatcherProtocolWrapper::link_faulted() { return !pimpl_->link_fault().empty(); }
+
+std::uint64_t SkyWatcherProtocolWrapper::link_recovery_epoch() { return pimpl_->recovery_epoch(); }
 
 std::string SkyWatcherProtocolWrapper::send_command(char command, int axis, const std::string& data,
                                                     int timeout_ms_override) {

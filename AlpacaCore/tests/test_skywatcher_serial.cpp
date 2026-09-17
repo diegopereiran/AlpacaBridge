@@ -496,4 +496,168 @@ TEST_CASE("SkyWatcher serial - read errors on a present node lose the link", "[s
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
 }
 
+// ── open-astro#505: a board that stops answering on a healthy link ──────────
+//
+// Distinct from #445 above: there the node is REMOVED, Connected drops and
+// operations throw NotConnected. Here the mount is powered off with the
+// adapter still plugged in, so the fd is healthy, the node still resolves,
+// link_alive() stays true, and only the exchange timeouts reveal anything.
+// Reproduced on an EQM-35 Pro 2026-09-17: `connected` read true for every one
+// of 62 samples, and the reported right ascension kept ADVANCING at sidereal
+// rate off the cached hour angle while the mount was unpowered — stale data
+// that ticks is far harder for a client to notice than stale data that sits.
+
+namespace {
+
+void require_driver_error(const std::function<void()>& fn, const std::string& needle) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find(needle) != std::string::npos);
+        return;
+    }
+    FAIL("expected AlpacaException(DriverException) containing '" << needle << "'");
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher serial - a silent board latches a link fault after three exchanges, Connected stays true",
+          "[skywatcher][serial][linkhealth]") {
+    FakeSkyWatcherSerialBoard board;
+    sw::SkyWatcherProtocolWrapper protocol;
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+    REQUIRE_FALSE(protocol.get_motor_board_version().empty());
+    CHECK_FALSE(protocol.link_faulted());
+
+    board.set_muted(true);
+    // One transient timeout must not brick a session: a single mis-timed reply
+    // during a slew is ordinary.
+    CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    CHECK_FALSE(protocol.link_faulted());
+    CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    CHECK_FALSE(protocol.link_faulted());
+    CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    CHECK(protocol.link_faulted());
+    CHECK(protocol.link_fault().find("consecutive failures") != std::string::npos);
+
+    // The node is still there and the board may come back on the same fd, so
+    // the client — not the driver — decides whether to reconnect (#237).
+    CHECK(protocol.is_connected());
+    CHECK(protocol.link_alive());
+
+    // The driver must keep talking while faulted: on a polled link these reads
+    // are the only traffic that can ever clear the latch.
+    const int frames_while_faulted = board.count_frames('j');
+    CHECK_THROWS_AS(protocol.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    CHECK(board.count_frames('j') > frames_while_faulted);
+
+    const std::uint64_t epoch_before = protocol.link_recovery_epoch();
+    board.set_muted(false);
+    CHECK(protocol.inquire_position(sw::kAxisRa) == 0x800000);
+    CHECK_FALSE(protocol.link_faulted());
+    CHECK(protocol.link_recovery_epoch() == epoch_before + 1);
+    CHECK(protocol.is_connected());  // never dropped, so no reconnect was needed
+    protocol.disconnect();
+}
+
+TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead of serving it",
+          "[skywatcher][serial][linkhealth]") {
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const double ra_before = driver->get_right_ascension();
+
+    board.set_muted(true);
+    // Wait out the position cache's TTL so the next read actually asks the
+    // board; inside the TTL a read is legitimately served from cache.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+
+    // The first attempts fail but are still within the pre-existing stale
+    // window, so they answer from cache — that window is what the hardware run
+    // measured at about nine seconds of plausible-looking data.
+    for (int i = 0; i < 2; ++i) {
+        try {
+            driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    }
+    // By the threshold the fault latches, and from then on the cache is not an
+    // answer at any age.
+    require_driver_error([&] { driver->get_right_ascension(); }, "communications compromised");
+    require_driver_error([&] { driver->get_declination(); }, "communications compromised");
+    CHECK(driver->get_connected());  // DriverException, not NotConnected
+
+    board.set_muted(false);
+    // Recovery is automatic: no reconnect, no client action.
+    const double ra_after = driver->get_right_ascension();
+    CHECK(std::abs(ra_after - ra_before) < 0.01);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - a board that restarted while the link was down is not silently resumed",
+          "[skywatcher][serial][linkhealth]") {
+    // The hardware run's sharpest finding (EQM-35 Pro, 2026-09-17): after a
+    // mains power cycle the board answered every frame normally while ":f1"
+    // read "=100" — initialization cleared — and ":j2" read the bare home
+    // count. The driver only sends ":F" at connect, so it would have gone on
+    // serving reset registers as a position for the rest of the session, and
+    // the board would have refused every motion command.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->get_right_ascension());
+
+    board.set_muted(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    for (int i = 0; i < 4; ++i) {
+        try {
+            driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    }
+
+    // The board comes back — but it is not the board we set up.
+    board.set_init_done(false);
+    board.set_muted(false);
+    require_driver_error([&] { driver->get_right_ascension(); }, "restarted");
+    // Terminal for the session: the latch cleared on that good reply, so
+    // nothing else would ever raise this again.
+    require_driver_error([&] { driver->get_right_ascension(); }, "restarted");
+    CHECK(driver->get_connected());
+
+    // A reconnect re-runs the ":F" init, which is what actually fixes it.
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK_NOTHROW(driver->get_right_ascension());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - a board that merely went quiet resumes with its session intact",
+          "[skywatcher][serial][linkhealth]") {
+    // The other half of the decision: forcing a client to re-establish tracking
+    // after a brief hiccup would be disruptive and needs a human, so a board
+    // that comes back initialized resumes with no client action at all.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    board.set_muted(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    for (int i = 0; i < 4; ++i) {
+        try {
+            driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {
+        }
+    }
+    board.set_muted(false);  // init_done left true: same session, still aligned
+    CHECK_NOTHROW(driver->get_right_ascension());
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

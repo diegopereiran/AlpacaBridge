@@ -130,6 +130,23 @@ public:
     // closes the dead link when it can). Safe to call from a Connected poll.
     virtual bool link_alive();
 
+    // open-astro#505: a board that stops answering while its node is still
+    // there — mount powered off with the adapter plugged in, EQDIR pulled at
+    // the mount end, controller hung. link_alive() cannot see that (the fd is
+    // healthy and the node resolves), so consecutive failed exchanges latch a
+    // fault instead. Non-empty fault means the caller must refuse to serve its
+    // CACHE (DriverException "communications compromised"), never that it
+    // should stop talking: on a polled link the reads are the only traffic
+    // that can clear the latch. Connected stays true throughout, per #237.
+    // Cheap and lock-free enough for a read path (own leaf mutex, no I/O).
+    virtual std::string link_fault();
+    virtual bool link_faulted();
+    // Bumped each time a good reply clears a latched fault. A driver keeps the
+    // value it last saw and re-validates the board when it changes, because a
+    // board that came back from a power cycle answers perfectly well while
+    // reporting init_done false with its position registers reset.
+    virtual std::uint64_t link_recovery_epoch();
+
     // Low-level framed exchange: sends ":<cmd><axis><data>\r", returns the
     // payload of a "=" response (without the leading "=" or trailing CR).
     // Throws AlpacaException on transport failure or a "!" error reply.
