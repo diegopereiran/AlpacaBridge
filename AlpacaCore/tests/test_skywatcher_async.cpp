@@ -2697,9 +2697,22 @@ TEST_CASE("SkyWatcher async - the synchronous slew reports Slewing until trackin
 
     // Gate on Slewing alone: a slew that finished before we looked leaves this
     // case unable to say anything, which is a failure rather than a pass.
-    const bool observed_slewing = wait_until([&] { return driver->get_slewing(); }, 5000);
+    // Share ONE counter between the gate and the polling loop below (PR review,
+    // 2026-09-18): two independent "did we see Slewing true" signals left a
+    // window where the gate's read counted but a fast-finishing slew skipped
+    // the loop's own first read entirely, so saw_slewing_true could read 0
+    // despite the gate having genuinely observed Slewing true moments earlier.
+    std::atomic<int> saw_slewing_true{0};
+    const bool observed_slewing = wait_until(
+        [&] {
+            const bool slewing = driver->get_slewing();
+            if (slewing) {
+                ++saw_slewing_true;
+            }
+            return slewing;
+        },
+        5000);
 
-    int saw_slewing_true = 0;
     bool saw_slewing_false = false;
     std::chrono::steady_clock::time_point false_read_completed{};
     while (!slew_returned.load()) {
