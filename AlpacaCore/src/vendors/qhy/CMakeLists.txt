@@ -1,7 +1,7 @@
 # QHY vendor support
 
 if(ALPACACORE_ENABLE_QHY)
-    message(STATUS "Building QHY camera, filter wheel and Q-Focuser driver support")
+    message(STATUS "Building QHY camera, filter wheel, CFW3 (USB) and Q-Focuser driver support")
 
     get_filename_component(ALPACACORE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
@@ -29,6 +29,8 @@ if(ALPACACORE_ENABLE_QHY)
         qhy_sdk_wrapper.cpp
         qhy_camera_driver.cpp
         qhy_filterwheel_driver.cpp
+        qhy_cfw3_protocol_wrapper.cpp
+        qhy_cfw3_filterwheel_driver.cpp
         qhy_qfocuser_protocol_wrapper.cpp
         qhy_focuser_driver.cpp
     )

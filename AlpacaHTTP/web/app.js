@@ -333,6 +333,7 @@ const INDEX_FIELDS = [
     { fieldId: 'rotator-index', vendor: 'zwo', deviceType: 'rotator', configKey: 'rotatorIndex', idFieldId: 'rotator-id' },
     { fieldId: 'qhy-camera-index', vendor: 'qhy', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'qhy-cfw-camera-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'cameraIndex', idFieldId: 'qhy-cfw-camera-id' },
+    { fieldId: 'qhy-cfw3-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'qhy-focuser-index', vendor: 'qhy', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'gphoto-camera-index', vendor: 'gphoto', deviceType: 'camera', configKey: 'cameraIndex' },
@@ -956,10 +957,28 @@ function startEditDevice(device) {
         }
         updateQhyConfigFields();
     } else if (vendor === 'qhy' && deviceType === 'filterwheel') {
-        // Integrated CFW: bound to the same camera index/id as the paired
-        // QHY camera device, but stored under its own field names.
-        setFormValue('qhy-cfw-camera-index', config.cameraIndex);
-        setFormValue('qhy-cfw-camera-id', config.cameraId);
+        // Two backends: the integrated CFW (bound to the paired camera's
+        // index/id, stored under its own field names) and the standalone
+        // CFW3 on its own serial port. A config saved before wheelType
+        // existed is an integrated wheel.
+        const qhyWheelType = config.wheelType || 'integrated';
+        setFormValue('qhy-cfw-wheel-type', qhyWheelType);
+        if (qhyWheelType === 'cfw3-usb') {
+            const cfw3ConnectionType = config.connectionType || 'auto';
+            setFormValue('qhy-cfw3-connection-type', cfw3ConnectionType);
+            if (cfw3ConnectionType === 'serial') {
+                setFormValue('qhy-cfw3-port-path', config.portPath);
+            } else if (config.filterwheelIndex !== undefined && config.filterwheelIndex !== null) {
+                setFormValue('qhy-cfw3-index', config.filterwheelIndex);
+            }
+        } else {
+            setFormValue('qhy-cfw-camera-index', config.cameraIndex);
+            setFormValue('qhy-cfw-camera-id', config.cameraId);
+        }
+        const qhyWheelTypeEl = document.getElementById('qhy-cfw-wheel-type');
+        if (qhyWheelTypeEl) qhyWheelTypeEl.dispatchEvent(new Event('change'));
+        const cfw3ConnectionTypeEl = document.getElementById('qhy-cfw3-connection-type');
+        if (cfw3ConnectionTypeEl) cfw3ConnectionTypeEl.dispatchEvent(new Event('change'));
         const qhyFilterNamesField = document.getElementById('qhy-filter-names');
         if (qhyFilterNamesField) {
             qhyFilterNamesField.value = Array.isArray(config.filterNames)
@@ -2303,8 +2322,9 @@ function updateVendorOptions() {
     }
     const qhyOption = vendorSelect.querySelector('option[value="qhy"]');
     if (qhyOption) {
-        // QHY provides cameras, an integrated CFW (filter wheel) on models
-        // like the miniCam8M, and the Q-Focuser (serial, no SDK).
+        // QHY provides cameras, filter wheels (the integrated CFW on models
+        // like the miniCam8M, and the standalone CFW3 over USB serial), and
+        // the Q-Focuser (serial, no SDK).
         const qhyAllowed = isCamera || isFilterWheel || isFocuser;
         qhyOption.disabled = !qhyAllowed;
         qhyOption.hidden = !qhyAllowed;
@@ -2603,6 +2623,24 @@ if (ioptronFilterwheelConnectionType) {
         const type = this.value;
         document.getElementById('ioptron-filterwheel-auto-config').style.display = type === 'serial' ? 'none' : 'block';
         document.getElementById('ioptron-filterwheel-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+    });
+}
+
+const qhyCfwWheelType = document.getElementById('qhy-cfw-wheel-type');
+if (qhyCfwWheelType) {
+    qhyCfwWheelType.addEventListener('change', function() {
+        const isCfw3 = this.value === 'cfw3-usb';
+        document.getElementById('qhy-cfw-integrated-config').style.display = isCfw3 ? 'none' : 'block';
+        document.getElementById('qhy-cfw3-config').style.display = isCfw3 ? 'block' : 'none';
+    });
+}
+
+const qhyCfw3ConnectionType = document.getElementById('qhy-cfw3-connection-type');
+if (qhyCfw3ConnectionType) {
+    qhyCfw3ConnectionType.addEventListener('change', function() {
+        const type = this.value;
+        document.getElementById('qhy-cfw3-auto-config').style.display = type === 'serial' ? 'none' : 'block';
+        document.getElementById('qhy-cfw3-serial-config').style.display = type === 'serial' ? 'block' : 'none';
     });
 }
 
@@ -3709,15 +3747,28 @@ document.getElementById('device-form').addEventListener('submit', async function
         deviceData.holdIhold = qfIhold !== null ? qfIhold : 4;
         deviceData.holdIrun = qfIrun !== null ? qfIrun : 8;
     } else if (deviceData.vendor === 'qhy' && normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
-        // Integrated CFW (e.g. miniCam8M): unique field names so hidden
-        // fields don't collide with the QHY camera device's own cameraId/
-        // cameraIndex when both sections are present in the same form.
-        const qhyCfwCameraId = formData.get('qhyCfwCameraId');
-        if (qhyCfwCameraId && qhyCfwCameraId.trim() !== '') {
-            deviceData.cameraId = qhyCfwCameraId.trim();
+        // Unique vendor-prefixed field names throughout: hidden sections
+        // still submit, so a bare cameraIndex/filterwheelIndex/portPath would
+        // lose the FormData collision to ZWO's same-named fields.
+        deviceData.wheelType = formData.get('qhyCfwWheelType') || 'integrated';
+        if (deviceData.wheelType === 'cfw3-usb') {
+            // Standalone CFW3 on its own CP2102 serial port, fixed 9600 baud.
+            deviceData.connectionType = formData.get('qhyCfw3ConnectionType') || 'auto';
+            if (deviceData.connectionType === 'serial') {
+                deviceData.portPath = formData.get('qhyCfw3PortPath');
+            } else {
+                const qhyCfw3Index = readOptionalNumber(formData, 'qhyCfw3FilterwheelIndex');
+                deviceData.filterwheelIndex = qhyCfw3Index !== null ? qhyCfw3Index : 0;
+            }
         } else {
-            const qhyCfwCameraIndex = readOptionalNumber(formData, 'qhyCfwCameraIndex');
-            deviceData.cameraIndex = qhyCfwCameraIndex !== null ? qhyCfwCameraIndex : 0;
+            // Integrated CFW (e.g. miniCam8M): bound to the paired camera's id/index.
+            const qhyCfwCameraId = formData.get('qhyCfwCameraId');
+            if (qhyCfwCameraId && qhyCfwCameraId.trim() !== '') {
+                deviceData.cameraId = qhyCfwCameraId.trim();
+            } else {
+                const qhyCfwCameraIndex = readOptionalNumber(formData, 'qhyCfwCameraIndex');
+                deviceData.cameraIndex = qhyCfwCameraIndex !== null ? qhyCfwCameraIndex : 0;
+            }
         }
         const qhyFilterNames = parseFilterNamesInput(formData.get('qhyFilterNames'), false);
         if (qhyFilterNames.length > 0) {
