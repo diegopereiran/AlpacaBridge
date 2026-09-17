@@ -78,6 +78,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
+#include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
 #endif
@@ -8589,17 +8590,54 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // physical handle as its paired camera (QHYSDKWrapper ref-counts the
         // shared open), so it is addressed by the same cameraId/cameraIndex
         // as the camera device rather than a separate wheel enumeration.
-        std::string camera_id = config_get(config, "cameraId", "");
-        int camera_index = config_get(config, "cameraIndex", -1);
+        // wheelType selects the backend: "integrated" (default, and what
+        // every config saved before the CFW3 USB driver existed means) or
+        // "cfw3-usb", a standalone QHYCFW3 on its own CP2102 serial port
+        // with the mode switch in USB mode. The two share filterNames and
+        // the slot UI; nothing else.
+        const std::string wheel_type = config_get(config, "wheelType", "integrated");
+        if (wheel_type != "integrated" && wheel_type != "cfw3-usb") {
+            error_message = "QHY filter wheel wheelType must be \"integrated\" or \"cfw3-usb\"";
+            return false;
+        }
 
         std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
-        if (!camera_id.empty()) {
-            wheel = alpacacore::vendor::qhy::create_qhy_filterwheel(device_number, camera_id);
-        } else if (camera_index >= 0) {
-            wheel = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(device_number, camera_index);
+        if (wheel_type == "cfw3-usb") {
+            const std::string conn_type = config_get(config, "connectionType", "auto");
+            if (conn_type != "auto" && conn_type != "serial") {
+                error_message = "QHY CFW3 connectionType must be \"auto\" or \"serial\"";
+                return false;
+            }
+            const std::string port_path = conn_type == "serial" ? config_get(config, "portPath", "") : std::string();
+            if (conn_type == "serial" && port_path.empty()) {
+                // Do not fall through to the probe: it opens (and DTR-resets)
+                // every CP210x on the box, which is not what "serial port" asked for.
+                error_message = "QHY CFW3 connectionType \"serial\" requires portPath";
+                return false;
+            }
+            if (!port_path.empty()) {
+                wheel = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(device_number, port_path);
+            } else {
+                // "auto": probe the CP210x bridges (each probe resets the
+                // device behind it).
+                const int wheel_index = config_get(config, "filterwheelIndex", 0);
+                if (wheel_index < 0) {
+                    error_message = "QHY CFW3 filterwheelIndex must be 0 or greater";
+                    return false;
+                }
+                wheel = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel_by_index(device_number, wheel_index);
+            }
         } else {
-            error_message = "QHY filter wheel requires cameraIndex or cameraId";
-            return false;
+            std::string camera_id = config_get(config, "cameraId", "");
+            int camera_index = config_get(config, "cameraIndex", -1);
+            if (!camera_id.empty()) {
+                wheel = alpacacore::vendor::qhy::create_qhy_filterwheel(device_number, camera_id);
+            } else if (camera_index >= 0) {
+                wheel = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(device_number, camera_index);
+            } else {
+                error_message = "QHY filter wheel requires cameraIndex or cameraId";
+                return false;
+            }
         }
 
         if (config_has(config, "filterNames")) {
@@ -8618,7 +8656,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         }
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
-            util::log_info("Registered QHY filter wheel");
+            util::log_info(wheel_type == "cfw3-usb" ? "Registered QHY CFW3 (USB) filter wheel"
+                                                    : "Registered QHY filter wheel");
             return true;
         }
 
@@ -9450,13 +9489,29 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         if (connection_type == "serial") {
             copy_if_present("portPath");
         }
+    } else if (vendor == "qhy" && device_type == "filterwheel") {
+        // Two backends share (qhy, filterwheel): the integrated CFW on a
+        // camera's handle (cameraIndex/cameraId) and the standalone CFW3 on
+        // its own serial port (connectionType/filterwheelIndex/portPath).
+        // wheelType selects; persist the fields each needs, and filterNames
+        // for both or custom names silently revert to "Filter N" after a save.
+        copy_if_present("wheelType");
+        copy_if_present("filterNames");
+        const std::string wheel_type = config_get(config, "wheelType", "integrated");
+        if (wheel_type == "cfw3-usb") {
+            copy_if_present("connectionType");
+            copy_if_present("filterwheelIndex");
+            const std::string connection_type = config_get(config, "connectionType", "");
+            if (connection_type == "serial") {
+                copy_if_present("portPath");
+            }
+        } else {
+            copy_if_present("cameraIndex");
+            copy_if_present("cameraId");
+        }
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
-        // Integrated CFW (filter wheel device type): persist custom filter
-        // names too, or they silently revert to "Filter N" after a save
-        // (sanitize_device_config strips anything not allowlisted).
-        copy_if_present("filterNames");
     } else if (vendor == "svbony" || vendor == "gphoto") {
         copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
