@@ -695,10 +695,15 @@ std::unique_ptr<FakeSkyWatcherSerialBoard> relink_board(std::unique_ptr<FakeSkyW
 }
 
 struct RelinkWindowGuard {
+    std::chrono::milliseconds previous_ = sw::detail::relink_motion_preserve_window();
     explicit RelinkWindowGuard(std::chrono::milliseconds window) {
         sw::detail::set_relink_motion_preserve_window(window);
     }
-    ~RelinkWindowGuard() { sw::detail::set_relink_motion_preserve_window(std::chrono::seconds(5)); }
+    // Restore whatever was configured before this guard, rather than a
+    // hardcoded default that would silently drift from
+    // kRelinkMotionPreserveWindow if that constant ever changes (PR review,
+    // 2026-09-18).
+    ~RelinkWindowGuard() { sw::detail::set_relink_motion_preserve_window(previous_); }
 };
 
 }  // namespace
@@ -796,6 +801,29 @@ TEST_CASE("SkyWatcher serial - a relink onto a board at rest sends no stop", "[s
     REQUIRE(driver->get_connected());
     CHECK(replugged->count_frames('K') == 0);
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// PR review, 2026-09-18: a driver instance that has NEVER connected before
+// has no recorded link-loss stamp at all -- not because the outage was
+// brief, but because there was no outage to record. That must not be
+// mistaken for "no stamp means a clean disconnect, so anything running is
+// unexplained": a process restart while the mount kept tracking under its
+// own power looks identical at the protocol level, and the old code sent
+// ":K" to a perfectly healthy, already-running axis on first connect.
+TEST_CASE("SkyWatcher serial - a fresh connect finds an already-running axis and does not stop it",
+          "[skywatcher][serial][relink]") {
+    FakeSkyWatcherSerialBoard board;
+    board.set_axis_running(sw::kAxisRa, true, /*speed_mode=*/true);
+    auto driver = serial_driver(board.slave_path());
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // No stamp exists for a driver that has never connected before, so the
+    // destructive branch must never fire here.
+    CHECK(board.count_frames('K') == 0);
+    CHECK(board.axis_running(sw::kAxisRa));
     driver->set_connected(false);
 }
 

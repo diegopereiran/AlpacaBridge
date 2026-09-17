@@ -2113,10 +2113,19 @@ private:
         (void)lock;  // held by the caller for the whole connect
         const auto lost_at = protocol_->consume_link_lost_at();
         const auto now = std::chrono::steady_clock::now();
-        // No stamp means the client disconnected cleanly, so there was no
-        // outage to ride out and anything still running is unexplained: take
-        // the safe branch.
-        const bool brief_outage = lost_at.has_value() && (now - *lost_at) < detail::relink_motion_preserve_window();
+        // A stop is only justified when we have POSITIVE evidence of a long,
+        // unmonitored outage (a recorded link-loss timestamp old enough to
+        // clear the preserve window). No stamp is NOT that evidence: it also
+        // covers a driver instance that has never connected before (a
+        // process restart while the mount kept tracking under its own
+        // power), where "nothing recorded" means nothing happened, not that
+        // something did. Treat the no-stamp case the same as a brief,
+        // still-supervised outage: preserve rather than stop. Reviewed
+        // 2026-09-18: sending ":K" on this branch previously halted a
+        // perfectly healthy tracking mount on every fresh connect where the
+        // axis was already running.
+        const bool long_unmonitored_outage =
+            lost_at.has_value() && (now - *lost_at) >= detail::relink_motion_preserve_window();
 
         for (int axis = 0; axis < 2; ++axis) {
             const AxisStatus& status = entry_status[axis];
@@ -2124,15 +2133,24 @@ private:
                 continue;
             }
             const int channel = axis == 0 ? kAxisRa : kAxisDec;
-            const std::string where = "axis " + std::to_string(channel) + " (" +
-                                      (status.speed_mode ? "speed mode" : "GOTO mode") + (status.fast ? ", fast" : "") +
-                                      (status.blocked ? ", blocked" : "") + ")";
-            const std::string gap =
-                lost_at
-                    ? std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now - *lost_at).count()) + " s"
-                    : "no recorded link loss";
+            std::string where = "axis " + std::to_string(channel) + " (";
+            where += status.speed_mode ? "speed mode" : "GOTO mode";
+            if (status.fast) {
+                where += ", fast";
+            }
+            if (status.blocked) {
+                where += ", blocked";
+            }
+            where += ")";
+            std::string gap;
+            if (lost_at) {
+                gap = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now - *lost_at).count());
+                gap += " s";
+            } else {
+                gap = "no recorded link loss";
+            }
 
-            if (brief_outage) {
+            if (!long_unmonitored_outage) {
                 // Preserve the motion, and reconstruct the session state the
                 // reset wiped so the ordinary stop path works again. This is
                 // NOT a redefinition of what Slewing reports for speed-mode
@@ -2151,11 +2169,19 @@ private:
                 }
                 // GOTO-mode motion needs no flag: get_hardware_slewing_locked()
                 // re-derives it from the board on every read.
-                ALPACA_LOG_WARN("SkyWatcher", "Link restored after " + gap + " with " + where +
-                                                  " still running; motion preserved and left under client control");
+                std::string message = "Link restored after ";
+                message += gap;
+                message += " with ";
+                message += where;
+                message += " still running; motion preserved and left under client control";
+                ALPACA_LOG_WARN("SkyWatcher", message);
             } else {
-                ALPACA_LOG_WARN("SkyWatcher", "Link restored after " + gap + " with " + where +
-                                                  " still running and nobody in control; stopping it");
+                std::string message = "Link restored after ";
+                message += gap;
+                message += " with ";
+                message += where;
+                message += " still running and nobody in control; stopping it";
+                ALPACA_LOG_WARN("SkyWatcher", message);
                 stop_surviving_axis_locked(channel);
             }
         }
@@ -2179,8 +2205,11 @@ private:
                     cmd_axis_rate_deg_s_[channel - 1] = 0.0;
                     return;
                 }
-            } catch (const std::exception&) {
+            } catch (const std::exception& e) {
                 // Transient poll failure; keep trying until the deadline.
+                std::string message = "stop_surviving_axis_locked: transient poll failure: ";
+                message += e.what();
+                ALPACA_LOG_TRACE("SkyWatcher", message);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
@@ -2600,9 +2629,12 @@ private:
             ALPACA_LOG_ERROR("SkyWatcher", "Link recovered but the board had restarted: RA init_done=" +
                                                std::string(ra.init_done ? "true" : "false") +
                                                ", Dec init_done=" + std::string(dec.init_done ? "true" : "false"));
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
             // The link went away again mid-check. Leave the epoch consumed;
             // the next recovery re-runs this.
+            std::string message = "check_board_survived_recovery_locked: link dropped again mid-check: ";
+            message += e.what();
+            ALPACA_LOG_TRACE("SkyWatcher", message);
         }
     }
 
