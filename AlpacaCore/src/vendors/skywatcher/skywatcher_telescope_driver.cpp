@@ -2147,6 +2147,12 @@ private:
                 // and the client cannot stop its own mount.
                 if (status.speed_mode) {
                     manual_axis_slewing_[axis] = true;
+                    // cmd_axis_rate_deg_s_ is deliberately left at zero: the
+                    // board reports THAT an axis is running, not at what rate,
+                    // and inventing one would feed the dead-reckoning model a
+                    // number nothing measured. Reads re-anchor on hardware
+                    // counts within kPositionCacheTtl, so the position stays
+                    // honest; only the between-poll interpolation is flat.
                 }
                 // GOTO-mode motion needs no flag: get_hardware_slewing_locked()
                 // re-derives it from the board on every read.
