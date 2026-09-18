@@ -243,7 +243,15 @@ TEST_CASE("GPhoto camera fake - stop_exposure mid-bulb closes the shutter early"
     // full requested duration elapses.
     driver->start_exposure(5.0, true);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // stop_exposure() joins the worker, so the toggle history alone cannot
+    // tell an early abort from the full 5 s bulb run: pin the "early" half
+    // by the clock. The abort poll slices are well under a second; the 2 s
+    // bound leaves headroom for a loaded runner while staying far from 5 s
+    // (review of #546).
+    const auto stop_started = std::chrono::steady_clock::now();
     driver->stop_exposure();
+    const auto stop_took = std::chrono::steady_clock::now() - stop_started;
+    CHECK(stop_took < std::chrono::seconds(2));
 
     REQUIRE(fake.bulb_toggle_history.size() >= 2);
     CHECK(fake.bulb_toggle_history.front() == true);

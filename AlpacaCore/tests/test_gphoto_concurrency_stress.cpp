@@ -58,7 +58,16 @@ TEST_CASE("GPhoto camera - concurrent connect/disconnect/operate stress", "[gpho
 
     // open-astro#326: one guard per call -- before this the callback stopped
     // at the first throw, so only the first operation was ever storm-tested.
-    alpacacore::test::StressCallGuard guard;
+    // This registration runs CONNECTED over the fake seam, so widen the
+    // expected set the way AGENTS.md requires (the ctor arg REPLACES the
+    // default, so NotConnected stays listed): today's four calls can only
+    // throw NotConnected, but the next call added here -- set_gain
+    // (InvalidValue/InvalidOperation), get_ccd_temperature
+    // (PropertyNotImplemented), start_exposure (InvalidValue) -- would turn
+    // the storm into a nondeterministic red otherwise (review of #546).
+    alpacacore::test::StressCallGuard guard{
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+         alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::PropertyNotImplemented}};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
         guard([&] { static_cast<void>(camera.get_camera_state()); });

@@ -17,7 +17,9 @@
 #include <unistd.h>
 
 #include <filesystem>
+#include <fstream>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -38,9 +40,43 @@ namespace alpacacore::test {
  * Deleting rather than filtering is safe: the cache is pure derived state
  * that the next priming capture rebuilds.
  */
+/**
+ * Drop this process's entries from the CWD-relative sensor cache.
+ *
+ * The cache file is real driver state (config/gphoto_sensor_cache.tsv, one
+ * TSV line per model), so deleting it wholesale from a test binary run in a
+ * deployment working directory would silently discard that rig's primed
+ * geometry for every model (review of #546). Every fake model this suite
+ * connects carries the unique_test_model() "[pid N]" suffix, so only lines
+ * keyed by THIS process's suffix are removed; everything else in the file,
+ * including sibling test processes' entries, is rewritten untouched.
+ */
 inline void reset_gphoto_sensor_cache() {
+    const std::filesystem::path path("config/gphoto_sensor_cache.tsv");
     std::error_code ec;
-    std::filesystem::remove("config/gphoto_sensor_cache.tsv", ec);
+    if (!std::filesystem::exists(path, ec)) {
+        return;
+    }
+    const std::string suffix = " [pid " + std::to_string(::getpid()) + "]";
+    std::vector<std::string> kept;
+    {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream iss(line);
+            std::string model;
+            std::getline(iss, model, '\t');
+            const bool mine = model.size() >= suffix.size() &&
+                              model.compare(model.size() - suffix.size(), suffix.size(), suffix) == 0;
+            if (!mine) {
+                kept.push_back(line);
+            }
+        }
+    }
+    std::ofstream out(path, std::ios::trunc);
+    for (const auto& line : kept) {
+        out << line << '\n';
+    }
 }
 
 /**
@@ -61,6 +97,19 @@ inline std::string unique_test_model(const std::string& base) {
 
 /**
  * Scripted fake for GPhotoSDK (issue #489 fault-injection seam).
+ *
+ * KNOWN PARITY GAPS (AGENTS.md: a fake must be the harsher of the two; keep
+ * this list exhaustive and prefer closing a gap to documenting it):
+ *  - `capture_result` defaults to an EMPTY `data` vector, where a real
+ *    capture returns 20+ MB of RAW. Harmless only because FakeRawDecoder
+ *    ignores the bytes; a test that exercises a real decoder path must fill
+ *    `data` itself.
+ *  - `has_widget` is inferred from map presence (choices / toggle_value /
+ *    text_value), not from a widget tree, so a widget that exists with an
+ *    EMPTY choice list cannot be modelled: it reads as absent.
+ *  - `close_camera` is the one method `throw_from` cannot target. Deliberate:
+ *    it mirrors the real close_session_locked, which never throws, so a
+ *    throwing close would test a path the driver can never see.
  *
  * Callers push one or more FakeCamera entries into `cameras` before
  * connecting (index == the Alpaca "cameraIndex"). Each fake camera carries
