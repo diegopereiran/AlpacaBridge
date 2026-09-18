@@ -221,7 +221,15 @@ def classify_static_download_page(dep: dict, state: dict, do_download: bool, art
         or prev.get("size_kb") not in (None, entry["size_kb"])
     )
 
-    verdict = {"status": "CURRENT", "detail": f"{entry['published_date']}, {entry['size_kb']} KB"}
+    # Only some of these documents carry an actual version number (e.g.
+    # "Synscan Serial Communication Protocol, Version 3.3" -> sources.yml's
+    # current.version: "3.3"); the Motor Controller Command Set has none on
+    # the page at all, just a publish date -- show it when it genuinely
+    # exists rather than presenting a date as if it were a version.
+    version = dep.get("current", {}).get("version")
+    version_prefix = f"v{version}, " if version else ""
+
+    verdict = {"status": "CURRENT", "detail": f"{version_prefix}{entry['published_date']}, {entry['size_kb']} KB"}
 
     if do_download and dep["updates"].get("verify_download"):
         with _artifact_dir(dep_id, artifacts_root) as adir:
@@ -236,17 +244,17 @@ def classify_static_download_page(dep: dict, state: dict, do_download: bool, art
             prev_hash = prev.get("sha256")
             if metadata_changed:
                 verdict = {"status": "SPEC_UPDATED",
-                           "detail": f"{prev.get('published_date')} -> {entry['published_date']} "
+                           "detail": f"{version_prefix}{prev.get('published_date')} -> {entry['published_date']} "
                                      f"({prev.get('size_kb')} KB -> {entry['size_kb']} KB)"}
             elif prev_hash and prev_hash != sha256:
                 verdict = {"status": "SILENT_REPLACEMENT",
-                           "detail": f"same date/URL/size ({entry['published_date']}) but document hash changed "
-                                     f"({prev_hash[:12]}... -> {sha256[:12]}...)"}
+                           "detail": f"{version_prefix}same date/URL/size ({entry['published_date']}) but document "
+                                     f"hash changed ({prev_hash[:12]}... -> {sha256[:12]}...)"}
             else:
-                verdict = {"status": "CURRENT", "detail": f"{entry['published_date']}, hash matches"}
+                verdict = {"status": "CURRENT", "detail": f"{version_prefix}{entry['published_date']}, hash matches"}
     elif metadata_changed:
         verdict = {"status": "SPEC_UPDATED",
-                   "detail": f"{prev.get('published_date')} -> {entry['published_date']} (not hash-verified)"}
+                   "detail": f"{version_prefix}{prev.get('published_date')} -> {entry['published_date']} (not hash-verified)"}
         result["sha256"] = prev.get("sha256")
     else:
         result["sha256"] = prev.get("sha256")
