@@ -1403,11 +1403,24 @@ private:
         sdk.set_toggle_value(handle, "bulb", true);
         const auto hold_deadline =
             clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
-        while (!abort_requested_.load()) {
-            const auto now = clock::now();
-            if (now >= hold_deadline) break;
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(hold_deadline - now);
-            sdk.drain_events(handle, std::min(remaining, std::chrono::milliseconds(kHoldSlice)));
+        // The hold calls into the SDK, so unlike the sleep it replaced it can
+        // throw. A throw that skipped the close would leave the shutter open,
+        // the exact wedge issue #569 is about, so bulb=0 is sent on every way
+        // out of the hold and the original failure is rethrown afterwards.
+        try {
+            while (!abort_requested_.load()) {
+                const auto now = clock::now();
+                if (now >= hold_deadline) break;
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(hold_deadline - now);
+                sdk.drain_events(handle, std::min(remaining, std::chrono::milliseconds(kHoldSlice)));
+            }
+        } catch (...) {
+            try {
+                sdk.set_toggle_value(handle, "bulb", false);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN(kLogTag, "Bulb close after a failed hold also failed: " + std::string(e.what()));
+            }
+            throw;
         }
         sdk.set_toggle_value(handle, "bulb", false);
 
