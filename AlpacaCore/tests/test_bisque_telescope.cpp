@@ -64,6 +64,10 @@ TEST_CASE("Bisque Telescope Driver - Defaults", "[bisque][telescope][unit]") {
     REQUIRE(driver->get_can_move_axis(0));
     REQUIRE(driver->get_can_move_axis(1));
     REQUIRE_FALSE(driver->get_can_move_axis(2));
+
+    // Out-of-range axis raises InvalidValue even while disconnected (#516).
+    require_alpaca_error([&]() { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { (void)driver->get_can_move_axis(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("Bisque Telescope Driver - Device metadata", "[bisque][telescope][unit]") {
@@ -177,6 +181,10 @@ TEST_CASE("Bisque Telescope Driver - Axis Rate Ranges", "[bisque][telescope][uni
     REQUIRE(tertiary_ranges.empty());
 
     REQUIRE_THROWS(driver->get_axis_rate_range(2));
+
+    // Out-of-range axis raises InvalidValue from AxisRates (#516).
+    require_alpaca_error([&]() { (void)driver->get_axis_rate_ranges(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { (void)driver->get_axis_rate_ranges(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("Bisque Telescope Driver - Target Coordinate Persistence", "[bisque][telescope][unit]") {

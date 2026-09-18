@@ -872,7 +872,12 @@ public:
         last_status_update_ = std::chrono::steady_clock::now();
     }
 
-    bool get_can_move_axis(int axis) const override { return axis == 0 || axis == 1; }
+    bool get_can_move_axis(int axis) const override {
+        if (axis != 0 && axis != 1 && axis != 2) {
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
+        }
+        return axis == 0 || axis == 1;
+    }
 
     void move_axis(int axis, double rate) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -919,7 +924,7 @@ public:
             return {0.0, 0.0};
         }
         if (axis != 0 && axis != 1) {
-            throw AlpacaException("Axis must be 0, 1 or 2", AlpacaError::InvalidValue);
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
         // OnStep's continuous-motion commands run at a single
         // firmware-selected rate (pinned to max at connect — see
@@ -934,7 +939,7 @@ public:
             return {};  // Tertiary axis unsupported.
         }
         if (axis != 0 && axis != 1) {
-            throw AlpacaException("Axis must be 0, 1 or 2", AlpacaError::InvalidValue);
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
         return {{0.0, kMaxMoveAxisRateDegPerSec}};
     }
