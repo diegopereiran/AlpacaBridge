@@ -115,9 +115,11 @@ public:
      * slices instead of sleeping: a Nikon body expects the host to keep
      * polling its events while a bulb capture is open, exactly what the
      * gphoto2 CLI's `--wait-event` does between `bulb=1` and `bulb=0`
-     * (issue #569). Best-effort and never throws: a failed poll sleeps out
-     * the remaining budget instead, because a throw here would leave the
-     * shutter open with nobody left to close it. A file-added event seen
+     * (issue #569). Best-effort for the poll itself: a failed event poll
+     * never throws and sleeps out the remaining budget instead. It may still
+     * throw for an invalid or closed handle (a disconnect racing the hold),
+     * so the caller must send `bulb=0` on the exception path as well; the
+     * driver's hold loop does exactly that. A file-added event seen
      * here cannot belong to the exposure in progress (its shutter is still
      * open), so it is a leftover from an earlier one: the file is deleted
      * from the camera and the event dropped, never handed to the next
