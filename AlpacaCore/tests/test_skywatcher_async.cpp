@@ -2663,29 +2663,84 @@ TEST_CASE("SkyWatcher async - the synchronous slew reports Slewing until trackin
 
     // The slew runs on its own thread so this one can watch Slewing while the
     // synchronous call is still inside restore_tracking_after_slew_locked().
-    // Polling cannot start until Slewing has gone true, or it samples the
-    // legitimately-false state before the slew begins.
-    std::atomic<bool> saw_slewing_false_early{false};
+    //
+    // open-astro#537: the original shape had a defect in each direction.
+    //
+    // FALSE FAILURE. The driver legitimately clears Slewing as the call
+    // returns, and the slewer published its completion flag only afterwards.
+    // The poller tested that flag and read Slewing as two separate operations,
+    // so it could interleave between them, read "not slewing" with the flag
+    // still unset, and score a correct driver as broken. Fixed by stamping
+    // when the call actually returned and requiring that a false reading
+    // COMPLETED before that instant to count: the value get_slewing() returns
+    // describes some instant no later than the moment the call completed, so a
+    // read completing before the return provably observed a pre-return state,
+    // while one completing after it proves nothing either way.
+    //
+    // VACUOUS PASS. The gating wait accepted EITHER Slewing going true or the
+    // slew finishing, so a slew that completed before the first poll satisfied
+    // it by completion, the loop body never ran, and the case passed having
+    // asserted nothing about the invariant it exists to protect -- the #512 /
+    // #514 shape. Fixed by gating on Slewing alone and pairing the negative
+    // check with a positive "this actually ran" assertion, which is the remedy
+    // #334 already landed for the stress harness (StressCallGuard::total_calls,
+    // documented in AGENTS.md as one of three lines that must always appear
+    // together). "Never polled" is a failure here, not a pass.
     std::atomic<bool> slew_returned{false};
+    std::atomic<std::chrono::steady_clock::rep> returned_at_tick{0};
     const double lst = driver->get_sidereal_time();
     std::thread slewer([&] {
         driver->slew_to_coordinates(std::fmod(lst - 0.15 + 24.0, 24.0), 18.0);
+        returned_at_tick.store(std::chrono::steady_clock::now().time_since_epoch().count());
         slew_returned.store(true);
     });
 
-    REQUIRE(wait_until([&] { return driver->get_slewing() || slew_returned.load(); }, 5000));
+    // Gate on Slewing alone: a slew that finished before we looked leaves this
+    // case unable to say anything, which is a failure rather than a pass.
+    // Share ONE counter between the gate and the polling loop below (PR review,
+    // 2026-09-18): two independent "did we see Slewing true" signals left a
+    // window where the gate's read counted but a fast-finishing slew skipped
+    // the loop's own first read entirely, so saw_slewing_true could read 0
+    // despite the gate having genuinely observed Slewing true moments earlier.
+    std::atomic<int> saw_slewing_true{0};
+    const bool observed_slewing = wait_until(
+        [&] {
+            const bool slewing = driver->get_slewing();
+            if (slewing) {
+                ++saw_slewing_true;
+            }
+            return slewing;
+        },
+        5000);
+
+    bool saw_slewing_false = false;
+    std::chrono::steady_clock::time_point false_read_completed{};
     while (!slew_returned.load()) {
-        if (!driver->get_slewing()) {
-            saw_slewing_false_early.store(true);
-            break;
+        const bool slewing = driver->get_slewing();
+        if (slewing) {
+            ++saw_slewing_true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        // Timestamp AFTER the read: the observation it reports happened at or
+        // before this instant, so comparing it against the return stamp is
+        // conservative in the direction that matters (it can only ever fail to
+        // report a violation, never invent one).
+        false_read_completed = std::chrono::steady_clock::now();
+        saw_slewing_false = true;
+        break;
     }
     slewer.join();
+    const auto returned_at =
+        std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(returned_at_tick.load()));
 
-    // Slewing may only go false after the synchronous call has returned, by
-    // which point tracking is restored.
-    CHECK_FALSE(saw_slewing_false_early.load());
+    // Positive: the invariant was actually exercised.
+    REQUIRE(observed_slewing);
+    CHECK(saw_slewing_true > 0);
+    // Negative: Slewing may only go false once the synchronous call has
+    // returned, by which point tracking is restored.
+    const bool violated = saw_slewing_false && false_read_completed < returned_at;
+    CHECK_FALSE(violated);
     REQUIRE_FALSE(driver->get_slewing());
 
     driver->set_tracking(false);

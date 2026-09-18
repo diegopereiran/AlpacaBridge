@@ -69,6 +69,35 @@ constexpr auto kStaleCacheLimit = std::chrono::seconds(10);
 constexpr auto kOffsetModelHold = std::chrono::minutes(30);  // offset sessions serve the model this long
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
 constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
+
+// How long the CONNECT path may spend confirming that axes it just stopped
+// have actually come to rest -- shared across BOTH axes, not per axis.
+// Deliberately far shorter than kAxisStopTimeout, for two reasons. The whole
+// connect has to fit inside the ~5 s a Platform 7 client (ConformU included)
+// allows Connect() before abandoning it, and this phase is only one item in a
+// sequence that also does ":e", ":a"/":b"/":g" and ":f" per axis, sometimes
+// ":F"/":E", and a position-cache warm. And the confirmation is best effort
+// by construction: ":K" is already on the wire before any polling starts, and
+// running out of budget logs and continues rather than failing the connect --
+// so a tight bound costs a log line, while a loose one costs the connect.
+// One deceleration ramp is documented elsewhere here as able to exceed 1 s;
+// 2 s covers that with margin and still leaves the rest of the budget free.
+constexpr auto kConnectStopConfirmBudget = std::chrono::seconds(2);
+
+// open-astro#521: how long a link may be gone before motion that survived it
+// is treated as unattended rather than as a glitch to ride out. A USB
+// re-enumeration or a briefly disturbed connector recovers in about one to
+// three seconds, so five is comfortably clear of the common case while staying
+// short enough that a runaway is stopped early. The asymmetry decides the
+// value: stopping motion that was still wanted costs an aborted slew the
+// client can re-issue, while preserving motion nobody is watching costs a
+// mount driving into the tripod, so this rounds DOWN rather than up.
+//
+// Issue #547 (the client-silence motion watchdog) will need a timer for the
+// other link — the one where the driver keeps command authority the whole
+// time. The two should read as one policy rather than two unrelated numbers:
+// prefer extending this constant's home over introducing a second one.
+constexpr auto kRelinkMotionPreserveWindow = std::chrono::seconds(5);
 // A goto the controller reports stopped can still be finishing its approach:
 // EQM-35 Pro (MC fw 3.39), 2026-09-12, the third landing refinement read 11
 // counts short of its target while ":f" already said stopped, and the
@@ -382,13 +411,20 @@ public:
                 // the controller reports "not initialized" and rejects motion until
                 // ":F" is sent. Only stamp the home position when uninitialized so a
                 // reconnect never clobbers an aligned session.
+                AxisStatus entry_status[2];
                 for (int axis = kAxisRa; axis <= kAxisDec; ++axis) {
                     AxisStatus status = protocol.inquire_status(axis);
+                    entry_status[axis - 1] = status;
                     if (!status.init_done) {
                         protocol.set_position(axis, kHomeCounts);
                         protocol.initialization_done(axis);
                     }
                 }
+                // open-astro#521: the connect sequence used to consume only the
+                // init_done bit above and discard `running` in the same reply,
+                // so an axis still turning after a cable pull was neither
+                // stopped nor reported.
+                adopt_surviving_motion_locked(lock, entry_status);
             } catch (...) {
                 protocol.disconnect();
                 connected_ = false;
@@ -2081,6 +2117,172 @@ private:
         }
     }
 
+    // open-astro#521: a Sky-Watcher axis keeps running until something tells it
+    // to stop, so motion outlives the link that started it. On the way back in,
+    // decide from the LENGTH of the outage rather than by a flat rule: a USB
+    // re-enumeration or a briefly disturbed connector is a glitch and the slew
+    // the client asked for is still wanted, while a long gap means nobody has
+    // been in control of a moving mount.
+    //
+    // Confirmed on an EQM-35 Pro (2026-09-17): with RA turning at 0.5 deg/s the
+    // cable was pulled and replaced, ":f1" then read "=111" (speed mode,
+    // running, initialized) while the driver reported Slewing false, and no
+    // ":K" was sent anywhere in the relink.
+    void adopt_surviving_motion_locked(std::unique_lock<std::mutex>& lock, const AxisStatus (&entry_status)[2]) {
+        (void)lock;  // held by the caller for the whole connect
+        const auto lost_at = protocol_->consume_link_lost_at();
+        const auto now = std::chrono::steady_clock::now();
+        // A stop is only justified when we have POSITIVE evidence of a long,
+        // unmonitored outage (a recorded link-loss timestamp old enough to
+        // clear the preserve window). No stamp is NOT that evidence: it also
+        // covers a driver instance that has never connected before (a
+        // process restart while the mount kept tracking under its own
+        // power), where "nothing recorded" means nothing happened, not that
+        // something did. Treat the no-stamp case the same as a brief,
+        // still-supervised outage: preserve rather than stop. Reviewed
+        // 2026-09-18: sending ":K" on this branch previously halted a
+        // perfectly healthy tracking mount on every fresh connect where the
+        // axis was already running.
+        //
+        // Consequence worth knowing before relying on the stop branch: only
+        // the SERIAL loss paths stamp link_lost_at_ (the device-node presence
+        // check and lose_serial_link_locked, both serial-only). A network
+        // (UDP) mount therefore never records an outage, so lost_at is always
+        // empty for it and it ALWAYS takes the preserve branch, however long
+        // it was gone. That follows the "no positive evidence => preserve"
+        // rule rather than violating it, but it means the stop branch is in
+        // practice serial-only today (review of #553).
+        const bool long_unmonitored_outage =
+            lost_at.has_value() && (now - *lost_at) >= detail::relink_motion_preserve_window();
+
+        // ONE budget for the whole stop-and-confirm phase, not one per axis.
+        // Both axes can take the stopping branch, and this all runs under the
+        // connect's lock -- which get_connected() also takes -- so a per-axis
+        // timeout made the worst case two full timeouts of blocking inside
+        // set_connected(true), overrunning the client's Connect() budget and
+        // stalling every Connected poll meanwhile (review of #553). Whichever
+        // axis is confirmed second gets whatever remains; its ":K" is sent
+        // regardless, since only the confirmation is bounded here.
+        const auto stop_confirm_deadline = std::chrono::steady_clock::now() + kConnectStopConfirmBudget;
+
+        for (int axis = 0; axis < 2; ++axis) {
+            const AxisStatus& status = entry_status[axis];
+            if (!status.running) {
+                continue;
+            }
+            const int channel = axis == 0 ? kAxisRa : kAxisDec;
+            std::string where = "axis " + std::to_string(channel) + " (";
+            where += status.speed_mode ? "speed mode" : "GOTO mode";
+            if (status.fast) {
+                where += ", fast";
+            }
+            if (status.blocked) {
+                where += ", blocked";
+            }
+            where += ")";
+            std::string gap;
+            if (lost_at) {
+                gap = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now - *lost_at).count());
+                gap += " s";
+            } else {
+                gap = "no recorded link loss";
+            }
+
+            if (!long_unmonitored_outage) {
+                // Preserve the motion and leave every session flag clear.
+                //
+                // manual_axis_slewing_ means "a MoveAxis THIS driver issued
+                // owns this axis": the only other writers set it having just
+                // commanded the motion (move_axis) or having failed to stop an
+                // axis they know is running away (the pulse-guide stop tail).
+                // Here the provenance is unknown -- ":f" reports speed mode
+                // and running for a MoveAxis and for ordinary sidereal
+                // tracking alike, and tracking is by far the likelier of the
+                // two to be found at connect. Setting the flag on that guess
+                // wedges Slewing true for the rest of the session on a merely
+                // tracking mount (nothing on the ordinary path clears it, so a
+                // sequencer waiting for Slewing to drop hangs), contradicts
+                // the board semantics this driver documents -- a tracking axis
+                // is NOT slewing -- and, through axis_busy_locked(), strands
+                // every RightAscensionRate / SiteLatitude write behind a
+                // "the busy operation's restore will re-apply this" branch
+                // whose restore is never scheduled (review of #553).
+                //
+                // Not setting it costs one bounded thing instead: a genuine
+                // MoveAxis that outlived the link is no longer stoppable
+                // through MoveAxis(axis, 0), which consults this flag.
+                // AbortSlew still stops it, and Slewing meanwhile reports what
+                // the board actually says. Guessing "tracking" degrades one
+                // stop route in a rare case; guessing "MoveAxis" silently
+                // breaks ordinary operation -- so the tie goes to leaving the
+                // flag clear.
+                //
+                // cmd_axis_rate_deg_s_ stays zero for its own reason: the
+                // board reports THAT an axis is running, not at what rate, and
+                // inventing one would feed the dead-reckoning model a number
+                // nothing measured. Reads re-anchor on hardware counts within
+                // kPositionCacheTtl, so the position stays honest; only the
+                // between-poll interpolation is flat.
+                //
+                // GOTO-mode motion needs no flag either:
+                // get_hardware_slewing_locked() re-derives it from the board
+                // on every read.
+                std::string message = "Link restored after ";
+                message += gap;
+                message += " with ";
+                message += where;
+                message +=
+                    " still running; motion preserved and left under client control"
+                    " (AbortSlew stops it; MoveAxis(axis, 0) cannot, the session flag is clear)";
+                ALPACA_LOG_WARN("SkyWatcher", message);
+            } else {
+                std::string message = "Link restored after ";
+                message += gap;
+                message += " with ";
+                message += where;
+                message += " still running and nobody in control; stopping it";
+                ALPACA_LOG_WARN("SkyWatcher", message);
+                stop_surviving_axis_locked(channel, stop_confirm_deadline);
+            }
+        }
+    }
+
+    // Stop and CONFIRM: a stop command that was accepted is not an axis at
+    // rest, and the caller is about to report the mount connected and idle.
+    // @p deadline is the caller's budget for the whole stop-confirm phase and
+    // is SHARED with the other axis, so this must never extend it: the stop
+    // itself always goes out, only the waiting for rest is bounded.
+    void stop_surviving_axis_locked(int channel, std::chrono::steady_clock::time_point deadline) {
+        auto& protocol = *protocol_;
+        try {
+            protocol.stop_motion(channel);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_ERROR("SkyWatcher",
+                             "Failed to stop surviving motion on axis " + std::to_string(channel) + ": " + e.what());
+            return;
+        }
+        while (std::chrono::steady_clock::now() < deadline) {
+            try {
+                if (!protocol.inquire_status(channel).running) {
+                    cmd_axis_rate_deg_s_[channel - 1] = 0.0;
+                    return;
+                }
+            } catch (const std::exception& e) {
+                // Transient poll failure; keep trying until the deadline.
+                std::string message = "stop_surviving_axis_locked: transient poll failure: ";
+                message += e.what();
+                ALPACA_LOG_TRACE("SkyWatcher", message);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        // The stop was sent and accepted; we simply ran out of the shared
+        // connect budget before seeing it come to rest. Say both halves, so
+        // this is not read as "the axis refused to stop".
+        ALPACA_LOG_ERROR("SkyWatcher", "Axis " + std::to_string(channel) +
+                                           " was stopped at connect but had not reported at rest within the shared "
+                                           "stop-confirm budget; it may still be decelerating");
+    }
+
     void reset_runtime_state_locked() {
         target_ra_set_ = false;
         target_dec_set_ = false;
@@ -2113,6 +2315,12 @@ private:
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         position_cache_valid_ = false;
+        // open-astro#505: a reconnect re-runs the ":F" init, which is exactly
+        // what clears the board-reset condition, so the fault must not survive
+        // into the new session. Re-seed the epoch so the connect's own reads
+        // are not mistaken for a recovery that needs validating.
+        board_reset_fault_.clear();
+        seen_recovery_epoch_ = protocol_->link_recovery_epoch();
         pointing_branch_ = 1;  // open-astro#459: the a2 >= 0 branch, the pre-#459 answer at home
         // Both are MEASURED off the mount that was connected, so they must not
         // survive into the next one: a driver instance reconnected to
@@ -2442,9 +2650,78 @@ private:
         return ra_rate_sec_per_sidereal_sec_ != 0.0 || dec_rate_arcsec_per_sec_ != 0.0;
     }
 
+    // open-astro#505: refuse to serve the cache — or the dead-reckoned model —
+    // while the link fault is latched, and surface the board-reset case the
+    // latch alone cannot catch. Callers are the read paths; a faulted link is
+    // NOT a disconnection, so this is DriverException and Connected stays true.
+    void throw_comms_compromised_locked(const std::string& reason) const {
+        throw AlpacaException("Sky-Watcher mount communications compromised: " + reason, AlpacaError::DriverException);
+    }
+
+    // Terminal until reconnect, so it is checked BEFORE any hardware attempt —
+    // unlike a link fault, which must not short-circuit the read that would
+    // clear it.
+    void throw_if_board_reset_locked() const {
+        if (!board_reset_fault_.empty()) {
+            throw_comms_compromised_locked(board_reset_fault_);
+        }
+    }
+
+    // Run after a good reply cleared a latched fault. A board that merely went
+    // quiet comes back with its session intact; one that power-cycled answers
+    // just as well while reporting init_done false with its position registers
+    // reset to the home count, and the driver only ever sends ":F" at connect.
+    // Serving coordinates from those reset registers is silent mispointing, so
+    // latch it and make the client reconnect (which re-initialises the board).
+    // Confirmed on an EQM-35 Pro 2026-09-17: ":f1" read "=100" after a mains
+    // power cycle mid-session, ":j2" read the bare home count.
+    void check_board_survived_recovery_locked() const {
+        const std::uint64_t epoch = protocol_->link_recovery_epoch();
+        if (epoch == seen_recovery_epoch_) {
+            return;
+        }
+        // The epoch is consumed only once BOTH probes have answered, below.
+        // Consuming it up front looked equivalent but was not: the link has
+        // just come back, so a single mis-paired straggler surviving the
+        // dirty/settle machinery turns one ":f" into an exception, and nothing
+        // mints a new epoch unless the link faults AND recovers all over
+        // again. The check would then never run, the fault would stay unset,
+        // and a power-cycled board's reset home-count registers would be
+        // served as a position for the rest of the session -- the exact silent
+        // mispointing this check exists to catch (review of #553).
+        try {
+            const AxisStatus ra = protocol_->inquire_status(kAxisRa);
+            const AxisStatus dec = protocol_->inquire_status(kAxisDec);
+            seen_recovery_epoch_ = epoch;  // both probes answered: this recovery is now checked
+            if (ra.init_done && dec.init_done) {
+                ALPACA_LOG_INFO("SkyWatcher", "Link recovered with the board's session intact");
+                return;
+            }
+            board_reset_fault_ =
+                "the motor controller restarted while the link was down (initialization cleared), so its "
+                "position registers no longer describe where the mount is pointing; reconnect to re-initialise";
+            position_cache_valid_ = false;
+            ALPACA_LOG_ERROR("SkyWatcher", "Link recovered but the board had restarted: RA init_done=" +
+                                               std::string(ra.init_done ? "true" : "false") +
+                                               ", Dec init_done=" + std::string(dec.init_done ? "true" : "false"));
+        } catch (const std::exception& e) {
+            // Link trouble mid-check: leave the epoch UNCONSUMED so the next
+            // read retries this recovery rather than skipping it forever.
+            std::string message = "check_board_survived_recovery_locked: probe failed, will retry this recovery: ";
+            message += e.what();
+            ALPACA_LOG_TRACE("SkyWatcher", message);
+        }
+    }
+
     void refresh_position_cache_locked(bool force) const {
         auto now = std::chrono::steady_clock::now();
-        if (!force && position_cache_valid_ && (now - last_position_update_) < kPositionCacheTtl) {
+        throw_if_board_reset_locked();
+        // A latched fault must not be short-circuited by a fresh-enough cache
+        // or by the offset model: on a polled link these reads are the only
+        // traffic that can clear the latch, so fall through to the hardware
+        // attempt instead of serving a value the board has not confirmed.
+        const bool faulted = protocol_->link_faulted();
+        if (!faulted && !force && position_cache_valid_ && (now - last_position_update_) < kPositionCacheTtl) {
             return;
         }
         // While rate offsets run, serve the dead-reckoned model instead of
@@ -2454,11 +2731,16 @@ private:
         // the hold is bounded: past kOffsetModelHold the model would pin at
         // the dt clamp and the reported position would silently freeze, so
         // fall through and take a fresh hardware anchor instead.
-        if (!force && position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
+        // open-astro#505: the 30-minute hold is the longest-lived stale window
+        // in this driver and the one the hardware run caught — a board powered
+        // off mid-offset-session is not noticed for the whole of it. A latched
+        // fault ends the hold.
+        if (!faulted && !force && position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
             (now - last_position_update_) < kOffsetModelHold) {
             return;
         }
         auto& protocol = *protocol_;
+        bool succeeded = false;
         try {
             uint32_t ra_counts = protocol.inquire_position(kAxisRa);
             uint32_t dec_counts = protocol.inquire_position(kAxisDec);
@@ -2466,7 +2748,17 @@ private:
             cached_dec_axis_deg_ = counts_to_degrees(dec_counts, axis_params_[1].counts_per_revolution);
             position_cache_valid_ = true;
             last_position_update_ = now;
+            succeeded = true;
         } catch (...) {
+            // Once latched, the cache is not an answer at any age: the values
+            // are as unreachable as the board. This supersedes the ad-hoc
+            // stale window below, which on its own let a powered-off mount
+            // keep reporting a plausible sidereal-advancing RA.
+            const std::string fault = protocol_->link_fault();
+            if (!fault.empty()) {
+                position_cache_valid_ = false;
+                throw_comms_compromised_locked(fault);
+            }
             if (!position_cache_valid_) {
                 throw;
             }
@@ -2476,6 +2768,12 @@ private:
                 position_cache_valid_ = false;
                 throw;
             }
+        }
+        if (succeeded) {
+            // Those reads just cleared a latched fault if anything did; find
+            // out whether the board behind them is still the one we set up.
+            check_board_survived_recovery_locked();
+            throw_if_board_reset_locked();
         }
     }
 
@@ -3973,6 +4271,13 @@ private:
     // deadband where the encoder cannot say. See branch_from_axis_locked().
     int pointing_branch_ = 1;
     mutable bool position_cache_valid_ = false;
+    // open-astro#505: set when a recovered link turned out to belong to a
+    // board that had restarted (init_done cleared, position registers reset).
+    // Terminal for the session — only a reconnect re-sends ":F" — and mutable
+    // because it is latched from the read path. Empty means no such fault.
+    mutable std::string board_reset_fault_;
+    // Last protocol-side recovery epoch this driver has validated.
+    mutable std::uint64_t seen_recovery_epoch_ = 0;
     mutable std::chrono::steady_clock::time_point last_position_update_{};
 
     bool tracking_ = false;
@@ -4073,6 +4378,11 @@ std::chrono::milliseconds& resample_slot() {
     static std::chrono::milliseconds interval{30000};
     return interval;
 }
+std::chrono::milliseconds& relink_window_slot() {
+    static std::chrono::milliseconds window =
+        std::chrono::duration_cast<std::chrono::milliseconds>(kRelinkMotionPreserveWindow);
+    return window;
+}
 }  // namespace
 
 void set_host_synchronized_probe(std::function<bool()> probe) {
@@ -4098,6 +4408,16 @@ void set_host_discipline_resample_interval(std::chrono::milliseconds interval) {
 std::chrono::milliseconds host_discipline_resample_interval() {
     std::lock_guard<std::mutex> lock(probe_mutex());
     return resample_slot();
+}
+
+void set_relink_motion_preserve_window(std::chrono::milliseconds window) {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    relink_window_slot() = window;
+}
+
+std::chrono::milliseconds relink_motion_preserve_window() {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    return relink_window_slot();
 }
 
 bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
