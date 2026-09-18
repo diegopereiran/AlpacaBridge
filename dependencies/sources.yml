@@ -325,10 +325,17 @@ dependencies:
     current:
       version: unknown
       path: AlpacaCore/external/SVBONY
+      note: >-
+        No version in the filename or SONAME; tracked via readme.txt's last
+        changelog entry cross-checked against the string embedded in the
+        .so itself (classify_svbony flags LOCAL_VERSION_MISMATCH if they
+        disagree).
     usage: {build: true, runtime: true, packaged: true}
     updates:
-      provider: manual
-      reason: "No reliable machine-readable version or release feed."
+      provider: svbony
+      url: https://www.svbony.com/downloads/software-driver
+      readme_path: AlpacaCore/external/SVBONY/readme.txt
+      so_path: AlpacaCore/external/SVBONY/lib/armv8/libSVBCameraSDK.so
 
   # Player One ships the camera and filter wheel SDKs as separate downloads
   # that version independently (same shape as ZWO above). Their software

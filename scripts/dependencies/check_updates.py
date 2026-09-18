@@ -44,7 +44,7 @@ STATE_PATH = REPO_ROOT / "dependencies" / "update-state.json"
 ISSUE_TITLE = "Dependency update status"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sources import debian, github, manual, vendor_page, wordpress_acf  # noqa: E402
+from sources import debian, github, manual, svbony, vendor_page, wordpress_acf  # noqa: E402
 import map_dependencies  # noqa: E402
 
 PROVIDERS = {
@@ -212,6 +212,59 @@ def classify_debian_system_package(dep: dict) -> dict:
     return {"status": "current", "detail": detail}
 
 
+def _local_readme_version(readme_path: Path) -> str | None:
+    if not readme_path.exists():
+        return None
+    matches = re.findall(r"Version:\s*v(\d+\.\d+\.\d+)", readme_path.read_text(encoding="utf-8", errors="replace"))
+    return matches[-1] if matches else None
+
+
+def _embedded_so_version(so_path: Path) -> str | None:
+    """Scan a binary's raw bytes for an embedded vX.Y.Z string without
+    shelling out to `strings` (not guaranteed present, and this pattern is
+    simple enough to find directly)."""
+    if not so_path.exists():
+        return None
+    data = so_path.read_bytes()
+    matches = re.findall(rb"v(\d+\.\d+\.\d+)\x00", data)
+    if not matches:
+        return None
+    return matches[0].decode("ascii")
+
+
+def classify_svbony(dep: dict) -> dict:
+    updates = dep["updates"]
+    upstream = svbony.fetch_upstream(updates.get("url", svbony.DOWNLOAD_PAGE))
+    if upstream["status"] != "ok":
+        return {"status": upstream["status"], "detail": upstream.get("detail", "")}
+
+    readme_version = _local_readme_version(REPO_ROOT / updates["readme_path"])
+    so_version = _embedded_so_version(REPO_ROOT / updates["so_path"])
+
+    if readme_version is None or so_version is None:
+        return {"status": "version-unknown",
+                "detail": f"could not read local version (readme={readme_version}, so={so_version})"}
+    if readme_version != so_version:
+        return {"status": "LOCAL_VERSION_MISMATCH",
+                "detail": f"readme.txt says v{readme_version}, libSVBCameraSDK.so embeds v{so_version}"}
+
+    local_version = readme_version
+    upstream_version = upstream["version"]
+    page_url = updates.get("url", svbony.DOWNLOAD_PAGE)
+    detail_suffix = ""
+    if upstream.get("restricted"):
+        detail_suffix = f" (download restricted; file UUID {upstream.get('file_uuid')}, check {page_url} by hand)"
+    if upstream.get("page_date"):
+        detail_suffix += f" [page-listed date {upstream['page_date']}, not necessarily the SDK release date]"
+
+    lv, uv = _version_tuple(local_version), _version_tuple(upstream_version)
+    if uv > lv:
+        return {"status": "UPDATE_AVAILABLE", "detail": f"{local_version} -> {upstream_version}{detail_suffix}"}
+    if uv < lv:
+        return {"status": "WARNING", "detail": f"local {local_version} is newer than published {upstream_version}{detail_suffix}"}
+    return {"status": "CURRENT", "detail": f"{local_version} (readme + .so agree){detail_suffix}"}
+
+
 def classify(dep: dict, state: dict, do_download: bool, artifacts_root: Path | None) -> dict:
     updates = dep.get("updates")
     if not updates:
@@ -226,6 +279,9 @@ def classify(dep: dict, state: dict, do_download: bool, artifacts_root: Path | N
 
     if provider == "debian" and dep["kind"] == "system-package":
         return classify_debian_system_package(dep)
+
+    if provider == "svbony":
+        return classify_svbony(dep)
 
     provider_fn = PROVIDERS.get(provider)
     if provider_fn is None:
