@@ -462,7 +462,7 @@ std::uint16_t Server::bound_port() const {
     if (fd == util::kInvalidSocket) {
         return 0;
     }
-    struct sockaddr_storage addr{};
+    struct sockaddr_storage addr {};
     socklen_t len = sizeof(addr);
     if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
         return 0;
