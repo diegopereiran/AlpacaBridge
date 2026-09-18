@@ -18,15 +18,12 @@ jobs:
   # The job id is the check-run name the skills bind verdicts to
   # (`.name == "review"` in /pr-checker and /submit-pr); do not add a `name:`.
   review:
-    # Same-repo branches review on every push. Fork PRs review only while the
-    # `safe-to-review` label is on (remove it to stop the bot). Dependabot
-    # bumps are reviewed by eye.
+    # Every PR, same-repo or fork, reviews only while the `safe-to-review`
+    # label is on (apply it to trigger the first review, remove it to stop
+    # the bot). Dependabot bumps are reviewed by eye.
     if: >-
       github.actor != 'dependabot[bot]'
-      && (
-        github.event.pull_request.head.repo.full_name == github.repository
-        || contains(github.event.pull_request.labels.*.name, 'safe-to-review')
-      )
+      && contains(github.event.pull_request.labels.*.name, 'safe-to-review')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
