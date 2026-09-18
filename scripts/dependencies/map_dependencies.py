@@ -119,7 +119,7 @@ def scan_vendor_tree(scan_path: Path) -> dict:
     example_present = False
     example_used_by_project = False
 
-    for p in scan_path.rglob("*"):
+    for p in sorted(scan_path.rglob("*")):
         if p.is_dir():
             if EXAMPLE_DIR_RE.search(p.name):
                 example_present = True
@@ -172,11 +172,11 @@ def scan_vendor_tree(scan_path: Path) -> dict:
     return {
         "file_count": file_count,
         "total_size_bytes": total_size,
-        "libraries": libraries,
-        "executables": executables,
+        "libraries": sorted(libraries, key=lambda r: r["path"]),
+        "executables": sorted(executables, key=lambda r: r["path"]),
         "firmware": firmware,
-        "archives": archives,
-        "licenses": licenses,
+        "archives": sorted(archives),
+        "licenses": sorted(licenses),
         "examples": {"present": example_present, "used_by_project": example_used_by_project},
     }
 
@@ -190,7 +190,7 @@ def compute_risks(contents: dict) -> list[dict]:
     if contents["firmware"]["count"]:
         risks.append({"code": "firmware-without-source", "severity": "medium"})
     risks.append({"code": "upstream-signature-unavailable", "severity": "medium"})
-    nested = {lib["path"] for lib in contents["libraries"] if lib.get("_nested_third_party")}
+    nested = sorted({lib["path"] for lib in contents["libraries"] if lib.get("_nested_third_party")})
     for path in nested:
         risks.append({"code": "nested-third-party-component", "severity": "medium", "detail": path})
     for lib in contents["libraries"]:
