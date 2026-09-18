@@ -520,6 +520,45 @@ dependencies:
         pin/comment consistency across workflow files (see
         map_dependencies.py's checkout-annotation check).
 
+  # Sky-Watcher publishes 4 documents on its Application Development page:
+  # Motor Controller Command Set, SynScan Serial Communication Protocol,
+  # SynScan App Protocol, and a SynScanLink API library (iOS-only binary).
+  # Only the first two are implemented here (drivers `skywatcher` and
+  # `synscan` speak these wire protocols directly; neither links against a
+  # Sky-Watcher SDK or library) -- the App protocol and the iOS-only library
+  # are out of scope and intentionally untracked.
+  #
+  # kind: external-specification -- a protocol-spec document, not a build
+  # dependency. The repo stores a Markdown conversion of the upstream PDF
+  # (AGENTS.md/docs convention), so the local file's hash can never be
+  # compared directly to the PDF's; update-state.json instead tracks the
+  # last-seen upstream PDF's own sha256, to catch a silent replacement of
+  # the PDF under the same URL/date.
+  - id: skywatcher-motor-controller-protocol
+    kind: external-specification
+    relationship: indirect
+    current:
+      path: AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: static-download-page
+      page: https://skywatcher.com/download/manual/application-development/
+      title: "Manual: Sky-Watcher Motor Controller Command Set"
+      verify_download: true
+
+  - id: synscan-serial-protocol
+    kind: external-specification
+    relationship: indirect
+    current:
+      version: "3.3"
+      path: AlpacaCore/external/SynScan/synscanserialcommunicationprotocol_version33.md
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: static-download-page
+      page: https://skywatcher.com/download/manual/application-development/
+      title: "Manual: Synscan Serial Communication Protocol, Version 3.3"
+      verify_download: true
+
 external_references:
   - id: bisque-theskyx-protocol
     path: AlpacaCore/external/Bisque
@@ -539,19 +578,6 @@ external_references:
     provenance: manual
   - id: oasisastro-focuser-protocol
     path: AlpacaCore/external/oasisastro
-    provenance: manual
-  - id: synscan-serial-protocol
-    path: AlpacaCore/external/SynScan/synscanserialcommunicationprotocol_version33.md
-    provenance: manual
-    version: "3.3"
-  # Shares the SynScan directory but documents a different protocol for a
-  # different driver (vendor key `skywatcher`, distinct from `synscan` --
-  # see .github/instructions/skywatcher.instructions.md): the Sky-Watcher
-  # motor controller command set, spoken directly to the mount's motor
-  # board rather than through a hand-controller. No compiled SDK exists
-  # for either vendor; both are pure protocol implementations.
-  - id: skywatcher-motor-controller-protocol
-    path: AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md
     provenance: manual
   - id: wandererastro-v4ec-manual
     path: AlpacaCore/external/WandererAstro

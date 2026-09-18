@@ -44,7 +44,7 @@ STATE_PATH = REPO_ROOT / "dependencies" / "update-state.json"
 ISSUE_TITLE = "Dependency update status"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sources import debian, github, manual, svbony, vendor_page, wordpress_acf  # noqa: E402
+from sources import debian, github, manual, static_download_page, svbony, vendor_page, wordpress_acf  # noqa: E402
 import map_dependencies  # noqa: E402
 
 PROVIDERS = {
@@ -194,6 +194,67 @@ def classify_wordpress_acf(dep: dict, state: dict, do_download: bool, artifacts_
     return verdict
 
 
+def classify_static_download_page(dep: dict, state: dict, do_download: bool, artifacts_root: Path | None) -> dict:
+    """A protocol-spec PDF on a vendor page (e.g. Sky-Watcher's application
+    development downloads): compares title/date/URL/size against the last
+    snapshot, and -- since the repo stores a Markdown conversion, not the
+    original PDF, so a local file hash can never be compared to it directly
+    -- optionally downloads the PDF to detect a same-metadata hash change
+    (a silent replacement under the same URL, same publication date)."""
+    dep_id = dep["id"]
+    entry = static_download_page.fetch_entry(dep)
+    if entry["status"] != "ok":
+        return {"status": entry["status"].upper().replace("-", "_"), "detail": entry.get("detail", "")}
+
+    prev = state.get(dep_id, {})
+    result = {
+        "title": entry["title"],
+        "download_url": entry["download_url"],
+        "size_kb": entry["size_kb"],
+        "published_date": entry["published_date"],
+        "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    metadata_changed = (
+        prev.get("download_url") not in (None, entry["download_url"])
+        or prev.get("published_date") not in (None, entry["published_date"])
+        or prev.get("size_kb") not in (None, entry["size_kb"])
+    )
+
+    verdict = {"status": "CURRENT", "detail": f"{entry['published_date']}, {entry['size_kb']} KB"}
+
+    if do_download and dep["updates"].get("verify_download"):
+        with _artifact_dir(dep_id, artifacts_root) as adir:
+            archive, err = download_artifact(entry["download_url"], adir)
+            if archive is None:
+                result["sha256"] = prev.get("sha256")
+                state[dep_id] = {**prev, **result}
+                return {"status": "SOURCE_UNREACHABLE", "detail": f"document download failed: {err}"}
+            sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            result["sha256"] = sha256
+
+            prev_hash = prev.get("sha256")
+            if metadata_changed:
+                verdict = {"status": "SPEC_UPDATED",
+                           "detail": f"{prev.get('published_date')} -> {entry['published_date']} "
+                                     f"({prev.get('size_kb')} KB -> {entry['size_kb']} KB)"}
+            elif prev_hash and prev_hash != sha256:
+                verdict = {"status": "SILENT_REPLACEMENT",
+                           "detail": f"same date/URL/size ({entry['published_date']}) but document hash changed "
+                                     f"({prev_hash[:12]}... -> {sha256[:12]}...)"}
+            else:
+                verdict = {"status": "CURRENT", "detail": f"{entry['published_date']}, hash matches"}
+    elif metadata_changed:
+        verdict = {"status": "SPEC_UPDATED",
+                   "detail": f"{prev.get('published_date')} -> {entry['published_date']} (not hash-verified)"}
+        result["sha256"] = prev.get("sha256")
+    else:
+        result["sha256"] = prev.get("sha256")
+
+    state[dep_id] = {**prev, **result}
+    return verdict
+
+
 def classify_debian_system_package(dep: dict) -> dict:
     """debian/control build/runtime deps carry no version pin -- they always
     track whatever Debian trixie currently ships. So there's no "update
@@ -282,6 +343,9 @@ def classify(dep: dict, state: dict, do_download: bool, artifacts_root: Path | N
 
     if provider == "svbony":
         return classify_svbony(dep)
+
+    if provider == "static-download-page":
+        return classify_static_download_page(dep, state, do_download, artifacts_root)
 
     provider_fn = PROVIDERS.get(provider)
     if provider_fn is None:

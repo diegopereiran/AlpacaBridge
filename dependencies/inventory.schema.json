@@ -29,7 +29,8 @@
             "type": "string",
             "enum": [
               "vendor-sdk", "vendored-source", "cmake-dependency",
-              "test-dependency", "ci-tool", "system-package", "managed-elsewhere"
+              "test-dependency", "ci-tool", "system-package", "managed-elsewhere",
+              "external-specification"
             ]
           },
           "relationship": {"type": "string", "enum": ["direct", "indirect"]},

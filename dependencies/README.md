@@ -55,11 +55,13 @@ adapters require `pip install -r scripts/dependencies/requirements.txt`
 
 | Provider | Used for | How |
 |---|---|---|
-| `debian.py` | `debian-build-deps`, `debian-runtime-deps`, `catch2` | Queries `sources.debian.org`'s API by **Debian source package name** (not the binary/-dev package name — they often differ, e.g. `libgpiod-dev` comes from source package `libgpiod`). |
+| `debian.py` | `debian-build-deps`, `debian-runtime-deps`, `catch2` | Queries `sources.debian.org`'s API by **Debian source package name** (not the binary/-dev package name — they often differ, e.g. `libgpiod-dev` comes from source package `libgpiod`). `debian-build-deps`/`debian-runtime-deps` carry no version pin to compare against (they always track whatever trixie ships), so `check_updates.py` reports their resolved per-package versions as informational `current`, not `update-available`. |
 | `github.py` | `nlohmann-json`, `cppcheck`, `zizmor` | GitHub releases/tags API. |
-| `vendor_page.py` | `qhy-sdk`, `touptek-sdk`, `libgpiod` | Fetches a vendor page/mirror listing and regex-matches the highest version. Reports `version-unknown` rather than guessing when the page is JS-rendered or the pattern doesn't match (QHY's changelog page is JS-rendered — this is a real, expected outcome, not a bug to chase). |
-| `manual.py` | `svbony-sdk`, `github-actions` | No machine-readable source exists; always `manual-check-required`. |
+| `vendor_page.py` | `qhy-sdk` | Fetches a vendor page and regex-matches the *highest* version among all matches (not the first — a version-sorted mirror listing is not necessarily in descending order). Reports `version-unknown` rather than guessing when the page is JS-rendered or the pattern doesn't match. QHY's `log_en.html` changelog is a docsify shell with no static content; `sources.yml` points at the markdown source it loads client-side (`log_en.md`) instead, which *is* static and lists real version history. |
+| `manual.py` | `touptek-sdk`, `playerone-camera-sdk`, `playerone-filterwheel-sdk`, `github-actions` | No reachable machine-readable source exists — verified live, not assumed: ToupTek's two real download pages (`touptekphotonics.com`, `touptek-astro.com`) and Player One's software page all render their version numbers client-side via JS, invisible to this script's plain `urllib` fetch even though they show up fine in a browser. |
+| `svbony.py` | `svbony-sdk` | SVBONY's download page turned out to be static HTML with the version in the filename (`linux-SVBCameraSDK-v1.13.4`) — a real exception to the JS-rendered pattern above. Cross-checks two independent local signals (`readme.txt`'s last changelog entry and a byte-level scan of the embedded version string in `libSVBCameraSDK.so`) and reports `LOCAL_VERSION_MISMATCH` if they disagree, even if one happens to match upstream. Detects (never bypasses) the page's UUID + `data-fileRestricted` download gate. |
 | `wordpress_acf.py` | ZWO's 4 product SDKs | ZWO's `wp-json` ACF endpoint returns structured JSON for every SDK product in one call — see below. |
+| `static_download_page.py` | Sky-Watcher's 2 protocol-spec PDFs | See "External specifications" below. |
 
 ### ZWO: 4 independently-versioned SDKs from one JSON endpoint
 
@@ -98,6 +100,30 @@ The workflow **never** writes into `AlpacaCore/external` or replaces a
 vendored binary automatically — it only reports and, in CI, uploads the
 downloaded archive as a temporary workflow artifact for a human to inspect
 (license, ABI, hardware behavior) before anyone commits an update by hand.
+
+### External specifications: protocol-spec PDFs, not build dependencies
+
+Sky-Watcher's `skywatcher` and `synscan` drivers implement published wire
+protocols directly — no vendor SDK or library involved (Sky-Watcher's only
+downloadable library, SynScanLink, is iOS-only and unused here). What *is*
+a real, trackable dependency is the protocol **specification document**
+itself, published as a PDF on Sky-Watcher's application-development page.
+`kind: external-specification` (`skywatcher-motor-controller-protocol`,
+`synscan-serial-protocol`) tracks these with the `static-download-page`
+provider, matched by exact document title (the page lists several PDFs).
+
+The repo stores a Markdown conversion of each PDF, so a local file hash can
+never be compared to the upstream PDF's directly. Instead `check_updates.py`
+downloads the PDF (when `verify_download` is set) and compares publication
+date, file size, download URL, and hash against the last snapshot:
+
+| Condition | Status |
+|---|---|
+| Title/date/size/URL unchanged from the last snapshot, hash matches | `CURRENT` |
+| Title/date/size/URL changed from the last snapshot | `SPEC_UPDATED` |
+| Same date/size/URL, but the downloaded PDF's hash differs | `SILENT_REPLACEMENT` |
+| Page unreachable | `SOURCE_UNREACHABLE` |
+| Document title not found, or the page's layout changed | `SOURCE_FORMAT_CHANGED` |
 
 ## Adding a new tracked dependency
 
