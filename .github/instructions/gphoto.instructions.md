@@ -6,15 +6,16 @@ applyTo: "AlpacaCore/src/vendors/gphoto/**,AlpacaCore/include/alpacacore/vendor/
 
 Devices: Camera.
 
-**STATUS: ConformU-validated against two real Nikon bodies (D5300, D3200).** Originally built
+**STATUS: ConformU-validated against three real Nikon bodies (D5300, D3200, D3300).** Originally built
 from libgphoto2/libraw API documentation and source reading, plus the reference indi-gphoto
 driver (`indilib/indi-3rdparty`) for protocol shape, with no physical DSLR available in the
 session that added it (issue #241). A later session with hardware access ran `/deploy-test` +
 `/conformu` against both bodies on the same rig and device slot (swapped with no reconfiguration)
 and fixed what that surfaced: `gp_camera_autodetect()`'s return-value contract, the Gain-mode
 ASCOM contract, a `StartExposure` ROI bounds check, and the `PixelSizeX`/`PixelSizeY` lookup table
-described below. Both runs are clean (0 errors, 0 issues, 0 timing violations); see
-`SUPPORTED-DRIVERS.md` and `AlpacaCore/conformu/GPhoto/`. Coverage beyond these two specific
+described below; a third session validated the D3300 on the same slot with no code change.
+All three runs are clean (0 errors, 0 issues, 0 timing violations); see
+`SUPPORTED-DRIVERS.md` and `AlpacaCore/conformu/GPhoto/`. Coverage beyond these three specific
 bodies (other Canon/Nikon/Sony models, bulb-mode capture, the SDK's other transports) is still
 only as validated as the notes below say for each.
 
@@ -116,7 +117,7 @@ SDK cleanup checklist does not apply here).
   since libgphoto2 reports whichever name matches the camera's actual USB product ID). A model not
   in the table — every fixed-lens compact/camcorder libgphoto2 also supports, or a body released
   after the table was last updated — still reports `0.0` (ASCOM "unknown") rather than a guess.
-  D5300 confirmed against ConformU: 3.91 microns; D3200: 3.86 microns.
+  D5300 confirmed against ConformU: 3.91 microns; D3200: 3.86 microns; D3300: 3.92 microns.
 - **ISO is a discrete `Gains()` list, not a continuous register** — deliberate departure from
   every other camera driver here (ZWO/QHY/SVBONY/PlayerOne/ToupTek all throw
   `PropertyNotImplemented` for `get_gains()` and treat `Gain` as a raw numeric register). A DSLR's
