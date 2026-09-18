@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T08:09:53.542317+00:00",
-  "source_commit": "e9d48db1af650109ea02ab98fb9c981ee69e0547",
+  "generated_at": "2026-09-18T08:12:52.674564+00:00",
+  "source_commit": "0dc55387d912437a34f3dbf6085d13d0f96b2dc6",
   "dependencies": [
     {
       "id": "zwo-asi-camera-sdk",
@@ -924,6 +924,8 @@
         "path": "debian/control",
         "packages": [
           "cmake",
+          "debhelper",
+          "pkgconf",
           "libgpiod",
           "nlohmann-json3",
           "hidapi",
