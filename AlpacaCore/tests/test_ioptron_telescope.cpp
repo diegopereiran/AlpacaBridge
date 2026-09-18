@@ -76,6 +76,10 @@ TEST_CASE("iOptron Telescope Driver - Defaults", "[ioptron][telescope][unit]") {
     REQUIRE(driver->get_can_move_axis(1));
     REQUIRE_FALSE(driver->get_can_move_axis(2));
     REQUIRE(driver->get_can_set_tracking());
+
+    // Out-of-range axis raises InvalidValue even while disconnected (#516).
+    require_alpaca_error([&]() { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { (void)driver->get_can_move_axis(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("iOptron Telescope Driver - Target Range Validation", "[ioptron][telescope][unit]") {
@@ -117,6 +121,10 @@ TEST_CASE("iOptron Telescope Driver - Axis Rate Ranges", "[ioptron][telescope][u
     auto invalid_axis_range = driver->get_axis_rate_range(2);
     REQUIRE(invalid_axis_range.first == 0.0);
     REQUIRE(invalid_axis_range.second == 0.0);
+
+    // Out-of-range axis raises InvalidValue from AxisRates, not an empty list (#516).
+    require_alpaca_error([&]() { (void)driver->get_axis_rate_ranges(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { (void)driver->get_axis_rate_ranges(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("iOptron Telescope Driver - Disconnected Behavior", "[ioptron][telescope][unit]") {
