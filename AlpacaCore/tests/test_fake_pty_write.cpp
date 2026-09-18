@@ -374,7 +374,7 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
             continue;  // interrupted (profiler/debugger/SIGCHLD) -- re-poll against the same deadline
         }
         if (ready <= 0) {
-            INFO(std::strerror(errno));  // names a genuine poll() failure (e.g. EBADF); stale/irrelevant on a plain timeout
+            INFO(std::strerror(errno));  // names a real poll() failure; stale on a plain timeout
             break;
         }
         const ssize_t n = read(slave, received.data() + got, reply.size() - got);
