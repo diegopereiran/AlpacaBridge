@@ -70,6 +70,20 @@ constexpr auto kOffsetModelHold = std::chrono::minutes(30);  // offset sessions 
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
 constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
 
+// How long the CONNECT path may spend confirming that axes it just stopped
+// have actually come to rest -- shared across BOTH axes, not per axis.
+// Deliberately far shorter than kAxisStopTimeout, for two reasons. The whole
+// connect has to fit inside the ~5 s a Platform 7 client (ConformU included)
+// allows Connect() before abandoning it, and this phase is only one item in a
+// sequence that also does ":e", ":a"/":b"/":g" and ":f" per axis, sometimes
+// ":F"/":E", and a position-cache warm. And the confirmation is best effort
+// by construction: ":K" is already on the wire before any polling starts, and
+// running out of budget logs and continues rather than failing the connect --
+// so a tight bound costs a log line, while a loose one costs the connect.
+// One deceleration ramp is documented elsewhere here as able to exceed 1 s;
+// 2 s covers that with margin and still leaves the rest of the budget free.
+constexpr auto kConnectStopConfirmBudget = std::chrono::seconds(2);
+
 // open-astro#521: how long a link may be gone before motion that survived it
 // is treated as unattended rather than as a glitch to ride out. A USB
 // re-enumeration or a briefly disturbed connector recovers in about one to
@@ -2141,6 +2155,16 @@ private:
         const bool long_unmonitored_outage =
             lost_at.has_value() && (now - *lost_at) >= detail::relink_motion_preserve_window();
 
+        // ONE budget for the whole stop-and-confirm phase, not one per axis.
+        // Both axes can take the stopping branch, and this all runs under the
+        // connect's lock -- which get_connected() also takes -- so a per-axis
+        // timeout made the worst case two full timeouts of blocking inside
+        // set_connected(true), overrunning the client's Connect() budget and
+        // stalling every Connected poll meanwhile (review of #553). Whichever
+        // axis is confirmed second gets whatever remains; its ":K" is sent
+        // regardless, since only the confirmation is bounded here.
+        const auto stop_confirm_deadline = std::chrono::steady_clock::now() + kConnectStopConfirmBudget;
+
         for (int axis = 0; axis < 2; ++axis) {
             const AxisStatus& status = entry_status[axis];
             if (!status.running) {
@@ -2216,14 +2240,17 @@ private:
                 message += where;
                 message += " still running and nobody in control; stopping it";
                 ALPACA_LOG_WARN("SkyWatcher", message);
-                stop_surviving_axis_locked(channel);
+                stop_surviving_axis_locked(channel, stop_confirm_deadline);
             }
         }
     }
 
     // Stop and CONFIRM: a stop command that was accepted is not an axis at
     // rest, and the caller is about to report the mount connected and idle.
-    void stop_surviving_axis_locked(int channel) {
+    // @p deadline is the caller's budget for the whole stop-confirm phase and
+    // is SHARED with the other axis, so this must never extend it: the stop
+    // itself always goes out, only the waiting for rest is bounded.
+    void stop_surviving_axis_locked(int channel, std::chrono::steady_clock::time_point deadline) {
         auto& protocol = *protocol_;
         try {
             protocol.stop_motion(channel);
@@ -2232,7 +2259,6 @@ private:
                              "Failed to stop surviving motion on axis " + std::to_string(channel) + ": " + e.what());
             return;
         }
-        const auto deadline = std::chrono::steady_clock::now() + kAxisStopTimeout;
         while (std::chrono::steady_clock::now() < deadline) {
             try {
                 if (!protocol.inquire_status(channel).running) {
@@ -2247,8 +2273,12 @@ private:
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        ALPACA_LOG_ERROR("SkyWatcher",
-                         "Axis " + std::to_string(channel) + " still reports running after a stop at connect");
+        // The stop was sent and accepted; we simply ran out of the shared
+        // connect budget before seeing it come to rest. Say both halves, so
+        // this is not read as "the axis refused to stop".
+        ALPACA_LOG_ERROR("SkyWatcher", "Axis " + std::to_string(channel) +
+                                           " was stopped at connect but had not reported at rest within the shared "
+                                           "stop-confirm budget; it may still be decelerating");
     }
 
     void reset_runtime_state_locked() {
