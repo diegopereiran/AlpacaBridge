@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T08:49:31.176261+00:00",
-  "source_commit": "b2e9ebf8956b8549c9a3370d212cd9d9eaf7edd0",
+  "generated_at": "2026-09-18T09:07:32.133849+00:00",
+  "source_commit": "cddeddcb3a34cc93d510a19c2f8e703aae3c66cd",
   "dependencies": [
     {
       "id": "zwo-asi-camera-sdk",
@@ -1042,6 +1042,95 @@
         "runtime": false,
         "packaged": false
       }
+    },
+    {
+      "id": "wanderer-cover-v4-protocol",
+      "kind": "external-specification",
+      "relationship": "indirect",
+      "current": {
+        "version": "20250506",
+        "path": "AlpacaCore/external/WandererAstro/Serial Protocol for WandererCover V4-EC and V4-EC IR.md",
+        "note": "Local copy confirmed to say \"Firmware version 20250506\", matching upstream."
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "wanderer-rotator-mini-protocol",
+      "kind": "external-specification",
+      "relationship": "indirect",
+      "current": {
+        "version": "20240226",
+        "note": "No local copy bundled; driver implemented from the INDI reference below."
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "wanderer-rotator-indi-reference",
+      "kind": "externally-derived-protocol",
+      "relationship": "indirect",
+      "current": {
+        "path": "AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_protocol_wrapper.cpp",
+        "reviewed_commit": "d3473444a7675148c83587f03456b3329c61c1ba",
+        "reviewed_at": "2026-09-18"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "wanderer-box-pro-v3-protocol",
+      "kind": "external-specification",
+      "relationship": "indirect",
+      "current": {
+        "version": "20231211",
+        "note": "No local copy bundled; driver implemented from the INDI reference below."
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "wanderer-box-indi-reference",
+      "kind": "externally-derived-protocol",
+      "relationship": "indirect",
+      "current": {
+        "path": "AlpacaCore/src/vendors/wandererastro/wandererastro_box_protocol_wrapper.cpp",
+        "reviewed_commit": "53efbbcb31655d49146732105c43862e539152cd",
+        "reviewed_at": "2026-09-18"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "wanderer-sfw-indi-reference",
+      "kind": "externally-derived-protocol",
+      "relationship": "indirect",
+      "current": {
+        "path": "AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_protocol_wrapper.cpp",
+        "reviewed_commit": "fd4300b915f3198a85d0996f157633289d353542",
+        "reviewed_at": "2026-09-18",
+        "note": "No protocol spec PDF exists for the Snowflake filter wheel, only a non-protocol User Guide."
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
     }
   ],
   "external_references": [
@@ -1072,7 +1161,13 @@
     },
     {
       "id": "wandererastro-v4ec-manual",
-      "path": "AlpacaCore/external/WandererAstro",
+      "path": "AlpacaCore/external/WandererAstro/WandererCoverV4 User Mannual 20250405.pdf",
+      "provenance": "manual",
+      "version": "20250405"
+    },
+    {
+      "id": "wandererempire-firmware-tool",
+      "path": "https://www.wandererastro.com/h-col-106.html (WandererEmpire-*-Setup.exe)",
       "provenance": "manual"
     }
   ],
