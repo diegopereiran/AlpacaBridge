@@ -710,6 +710,12 @@ struct RelinkWindowGuard {
 
 TEST_CASE("SkyWatcher serial - a brief outage preserves surviving motion and reports Slewing honestly",
           "[skywatcher][serial][relink]") {
+    // The default 5 s window would also cover this relink on an idle box, but a
+    // loaded arm64 runner under ASan/TSan can stretch sever -> new pty ->
+    // connect -> six probes past it, and then the case silently flips to the
+    // stop branch and fails on count_frames('K'). Pin the branch under test
+    // the way the sibling pins the other one (review of #553).
+    RelinkWindowGuard window(std::chrono::hours(1));  // every outage is "brief"
     auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
     PortLink link(board->slave_path());
     auto driver = serial_driver(link.path.string());
@@ -837,6 +843,35 @@ TEST_CASE("SkyWatcher serial - a fresh connect finds an already-running axis and
     // to drop, and strand rate/site writes behind axis_busy_locked() for the
     // rest of the session (review of #553).
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Review of #553: the fake decoded ":G"'s mode digit as "1 or 2 = speed
+// mode", but the board tests bit 0, and the driver sends '3' for a FAST speed
+// move. The fake therefore recorded a fast MoveAxis as GOTO motion, which is
+// what get_hardware_slewing_locked() reads as Slewing after a relink. Pin the
+// wire semantics: both MoveAxis rates select speed mode on the board.
+TEST_CASE("SkyWatcher serial - a fast MoveAxis puts the fake's axis in speed mode, like a slow one",
+          "[skywatcher][serial][fake]") {
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // 1 deg/s is above kFastModeThresholdDegPerSec (128x sidereal), so the
+    // driver sends ":G3x" (fast, speed mode) rather than ":G1x".
+    driver->move_axis(0, 1.0);
+    CHECK(board.axis_running(sw::kAxisRa));
+    CHECK(board.axis_speed_mode(sw::kAxisRa));
+    driver->move_axis(0, 0.0);
+    CHECK_FALSE(board.axis_running(sw::kAxisRa));
+
+    // Sidereal-class rate: ":G1x", also speed mode.
+    driver->move_axis(0, 0.01);
+    CHECK(board.axis_running(sw::kAxisRa));
+    CHECK(board.axis_speed_mode(sw::kAxisRa));
+    driver->move_axis(0, 0.0);
+    CHECK_FALSE(board.axis_running(sw::kAxisRa));
     driver->set_connected(false);
 }
 

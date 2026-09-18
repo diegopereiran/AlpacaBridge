@@ -108,6 +108,14 @@ public:
         return running_[axis - 1];
     }
 
+    /// The mode the last ":G" selected for @p axis: true = speed mode (a
+    /// MoveAxis or tracking drive), false = GOTO. Review of #553: pins the
+    /// bit-0 decode of the mode digit against what the driver sends.
+    bool axis_speed_mode(int axis) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return speed_mode_[axis - 1];
+    }
+
     /// open-astro#505: the board's ":F" initialization bit, per axis. A board
     /// that power-cycles mid-session comes back with this false and its
     /// position registers reset, while answering every frame normally.
@@ -294,9 +302,15 @@ private:
                 init_done_[axis - 1] = true;
                 return "=";
             case 'G':
-                // ":G<mode><dir>": mode digit 1/2 = speed mode, 0/3 = GOTO.
+                // ":G<mode><dir>": the mode digit is a bit field. Bit 0 set
+                // (1 or 3) selects SPEED mode, clear (0 or 2) selects GOTO;
+                // bit 1 picks the fast/slow rate. The driver sends '3' for a
+                // fast speed move and '1' for a slow one, so decode bit 0 the
+                // way the board does rather than listing digits (review of
+                // #553: the old "1 or 2" list recorded a fast MoveAxis as a
+                // GOTO, which get_hardware_slewing_locked() reports as Slewing).
                 if (!data.empty()) {
-                    speed_mode_[axis - 1] = data[0] == '1' || data[0] == '2';
+                    speed_mode_[axis - 1] = ((data[0] - '0') & 1) != 0;
                 }
                 return "=";
             case 'S':

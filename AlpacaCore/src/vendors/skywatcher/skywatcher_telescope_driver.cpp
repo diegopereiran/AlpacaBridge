@@ -2231,7 +2231,9 @@ private:
                 message += gap;
                 message += " with ";
                 message += where;
-                message += " still running; motion preserved and left under client control";
+                message +=
+                    " still running; motion preserved and left under client control"
+                    " (AbortSlew stops it; MoveAxis(axis, 0) cannot, the session flag is clear)";
                 ALPACA_LOG_WARN("SkyWatcher", message);
             } else {
                 std::string message = "Link restored after ";
