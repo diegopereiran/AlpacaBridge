@@ -620,6 +620,41 @@ int main() {
         EXPECT(json.value("ErrorNumber", 0) != 0);
     }
 
+    {
+        // #515: CanMoveAxis and AxisRates default to axis 0 when the Axis
+        // query parameter is absent, instead of raising InvalidValue like
+        // every other required-parameter telescope method. Vendor-free stub
+        // so this doesn't need any ALPACACORE_ENABLE_* vendor.
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9660);
+        EXPECT(registry.register_device(scope));
+        const std::string base = "/api/v1/telescope/9660";
+
+        {
+            const auto resp = route_request(router, "GET", base + "/canmoveaxis");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        }
+        {
+            const auto resp = route_request(router, "GET", base + "/axisrates");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        }
+        // With Axis explicitly supplied, both succeed.
+        {
+            const auto resp = route_request(router, "GET", base + "/canmoveaxis?Axis=0");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        }
+        {
+            const auto resp = route_request(router, "GET", base + "/axisrates?Axis=0");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        }
+
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9660);
+    }
+
 #ifdef ALPACACORE_ENABLE_ZWO
     // Ensure idempotent behavior across repeated test runs.
     {
