@@ -357,6 +357,11 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
     std::string received;
     received.resize(reply.size());
     std::size_t got = 0;
+    // Declared here, not inside the `if (ready <= 0)` block below, so the
+    // message survives the `break` that follows it (issue #560: a bare
+    // INFO(...) there is an unnamed Catch2 ScopedMessage, destroyed at the
+    // closing brace of that `if` before the CHECK below ever sees it).
+    std::string poll_err;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (got < reply.size()) {
         const auto now = std::chrono::steady_clock::now();
@@ -374,13 +379,17 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
             continue;  // interrupted (profiler/debugger/SIGCHLD) -- re-poll against the same deadline
         }
         if (ready <= 0) {
-            INFO(std::strerror(errno));  // names a real poll() failure; stale on a plain timeout
+            // Only a negative return is a poll() failure; ready == 0 is a plain
+            // timeout, which leaves errno untouched, so reading it there would
+            // report whatever stale value happened to be sitting in it.
+            if (ready < 0) poll_err = std::strerror(errno);
             break;
         }
         const ssize_t n = read(slave, received.data() + got, reply.size() - got);
         if (n <= 0) break;
         got += static_cast<std::size_t>(n);
     }
+    CAPTURE(poll_err);
     CHECK(got == reply.size());
     CHECK(received == reply);
 }
