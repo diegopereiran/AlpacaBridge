@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T08:20:43.606445+00:00",
-  "source_commit": "9a9c5751bb5e9feff99c1445dcd16635538c87c7",
+  "generated_at": "2026-09-18T08:30:41.832061+00:00",
+  "source_commit": "e7c25677ac5f6684ed23b1b76f607700095d78e8",
   "dependencies": [
     {
       "id": "zwo-asi-camera-sdk",
@@ -971,6 +971,33 @@
         "path": ".github/workflows/"
       },
       "usage": {}
+    },
+    {
+      "id": "skywatcher-motor-controller-protocol",
+      "kind": "external-specification",
+      "relationship": "indirect",
+      "current": {
+        "path": "AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "synscan-serial-protocol",
+      "kind": "external-specification",
+      "relationship": "indirect",
+      "current": {
+        "version": "3.3",
+        "path": "AlpacaCore/external/SynScan/synscanserialcommunicationprotocol_version33.md"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
     }
   ],
   "external_references": [
@@ -1003,17 +1030,6 @@
     {
       "id": "oasisastro-focuser-protocol",
       "path": "AlpacaCore/external/oasisastro",
-      "provenance": "manual"
-    },
-    {
-      "id": "synscan-serial-protocol",
-      "path": "AlpacaCore/external/SynScan/synscanserialcommunicationprotocol_version33.md",
-      "provenance": "manual",
-      "version": "3.3"
-    },
-    {
-      "id": "skywatcher-motor-controller-protocol",
-      "path": "AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md",
       "provenance": "manual"
     },
     {
