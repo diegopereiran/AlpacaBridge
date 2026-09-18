@@ -745,7 +745,7 @@ CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # AGENTS.md is legitimately trimmed below this, lower the floor.
 MIN_AGENTS_MD_PATH_REFS = 40
 # Tripwire for a docs/agents/ rename, not a target file count.
-MIN_AGENTS_DIR_FILES = 2
+MIN_AGENTS_DIR_FILES = 1
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
@@ -885,7 +885,7 @@ def check_agents_md_paths_exist():
     tracked_agents = _run_git(["-c", "core.quotePath=false", "ls-files", "docs/agents/*.md"]).stdout.splitlines()
     # A directory rename would make both the glob and ls-files go empty and
     # this whole block would silently pass nothing -- the vacuity class
-    # decision record 0003 calls out. Floor is today's file count (2); it is
+    # decision record 0003 calls out. Floor is today's file count (1); it is
     # a tripwire, not a target.
     if len(tracked_agents) < MIN_AGENTS_DIR_FILES:
         failures.append(

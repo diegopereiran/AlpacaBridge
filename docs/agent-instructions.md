@@ -45,11 +45,11 @@ ToupTek; for an iCAM task, read iOptron and Player One. A vendor comparison requ
 the files for all vendors being compared. The scoped files contain vendor-specific
 deltas only; a rule affecting a second vendor belongs in `AGENTS.md`.
 
-## Repository references
+## Issue tracker
 
-AGENTS.md's "Repository References" section points at `docs/agents/issue-tracker.md`
-and `docs/agents/domain.md` for how the issue-tracker and domain-doc
-conventions work in this repo. Read the relevant one before using them.
+AGENTS.md points at `docs/agents/issue-tracker.md` for `gh` CLI conventions
+when working with GitHub Issues. Read it before creating, listing, or
+commenting on an issue.
 
 ## Failure and decision memory
 
