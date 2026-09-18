@@ -361,16 +361,31 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     any thread, and a worker orphaned across a restart could still call
     that while a per-start recreation was in flight (PR #235 review round
     3); immutable descriptors have no such race.
-  - **No server thread is ever detached.** A thread `stop()` cannot join
-    because it is running on it (a handler calling `stop()` synchronously;
-    no current handler does) goes into `orphaned_threads_`, and the next
-    `stop()` from another thread or the destructor joins it. The threads this
-    covers are the accept/server thread, the reactor, the worker pool and the
-    RTC probe timer (`rtc_probe_thread_`, #314) -- the last spawns and joins
-    alongside the reactor and takes no lock `stop()` holds. So nothing
-    can touch a `Server`'s members, the wake pipe included, after the
-    destructor returns (review round 5). Destroying a `Server` from inside
-    one of its own handlers is not supported.
+  - **No server thread is ever detached on the self-join path.** A thread
+    `stop()` cannot join because it is running on it (a handler calling
+    `stop()` synchronously; no current handler does) goes into
+    `orphaned_threads_`, and the next `stop()` from another thread or the
+    destructor joins it. The threads this covers are the accept/server
+    thread, the reactor, the worker pool and the RTC probe timer
+    (`rtc_probe_thread_`, #314) -- the last spawns and joins alongside the
+    reactor and takes no lock `stop()` holds. So nothing can touch a
+    `Server`'s members, the wake pipe included, after the destructor returns
+    (review round 5). Destroying a `Server` from inside one of its own
+    handlers is not supported.
+    **Exception (issue #507, `join_or_abandon()`):** if `pthread_join` fails
+    on any of these threads on the CROSS-thread path (`ESRCH`/`EINVAL` --
+    `EDEADLK`, the self-join case, is excluded, since it never reaches
+    `join_or_abandon()`), the thread IS detached rather than retried: a
+    second `join()` on a handle that already failed once is not provably
+    non-blocking (`docs/decisions/0002-server-thread-ownership.md`), so
+    retrying it from `join_orphaned_threads()`, which runs under
+    `lifecycle_mutex_`, risks a deadlock instead of a clean failure. This is
+    a fault path, not normal operation -- neither the original PR nor its
+    review could demonstrate it reachable through the current test harness
+    -- but if it fires, the invariant above is void for that one thread: it
+    can still touch `this` (the wake pipe included) after `~Server()`
+    returns. `close_wake_pipe()` racing a detached worker's `wake_reactor()`
+    is the concrete consequence; nothing currently guards it.
   - The reactor enforces only the idle gap (`kKeepAliveIdleSeconds`) and the
     first-request slowloris bound (`kSocketTimeoutSeconds`, so a client that
     connects and never sends costs no worker). Caps that should end with a
