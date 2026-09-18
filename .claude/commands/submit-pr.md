@@ -155,8 +155,10 @@ skip or assume the answer:
      following the project's commit conventions, then continue to the Step 4 pre-flight and push.
   5. Remind the user that after the PR merges they tag the merge commit
      (`git tag -a v<version> -m "Release <version>" && git push origin v<version>`); the
-     `Release` workflow then creates the GitHub Release from the CHANGELOG section. See
-     "Releases" in `docs/development.md`.
+     `Release` workflow then creates the GitHub Release. Its body is
+     `docs/releases/<version>.md` when that file exists (plain-language notes), otherwise the
+     CHANGELOG section. `/bump-release` does all of this in one run, including the notes file;
+     prefer it to answering YES here. See "Releases" in `docs/development.md`.
 
 ## Step 4 — Local CI pre-flight (HARD BLOCK)
 

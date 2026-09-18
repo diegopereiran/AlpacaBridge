@@ -903,6 +903,9 @@ public:
     }
 
     bool get_can_move_axis(int axis) const override {
+        if (axis < 0 || axis > 2) {
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
+        }
         return (axis == 0 || axis == 1);
     }
     
@@ -996,6 +999,9 @@ public:
     }
 
     std::vector<std::pair<double, double>> get_axis_rate_ranges(int axis) const override {
+        if (axis < 0 || axis > 2) {
+            throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
+        }
         if (axis != 0 && axis != 1) {
             // Tertiary axis not supported; empty range set per ASCOM/ConformU (avoids min=max=0 issue).
             return {};

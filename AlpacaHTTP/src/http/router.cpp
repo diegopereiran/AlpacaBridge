@@ -3151,10 +3151,7 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "axisrates") {
-                int axis = 0;
-                if (request.has_query_param("Axis")) {
-                    axis = parse_int_value(request.get_query_param("Axis"), "Axis");
-                }
+                int axis = parse_int("Axis");
                 // AxisRates must return an array of rate objects, even if only one range.
                 auto ranges = telescope->get_axis_rate_ranges(axis);
                 nlohmann::json rates_array = nlohmann::json::array();
@@ -3169,10 +3166,7 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "canmoveaxis") {
-                int axis = 0;
-                if (request.has_query_param("Axis")) {
-                    axis = parse_int_value(request.get_query_param("Axis"), "Axis");
-                }
+                int axis = parse_int("Axis");
                 bool can_move = telescope->get_can_move_axis(axis);
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, can_move);
