@@ -2129,6 +2129,15 @@ private:
         // 2026-09-18: sending ":K" on this branch previously halted a
         // perfectly healthy tracking mount on every fresh connect where the
         // axis was already running.
+        //
+        // Consequence worth knowing before relying on the stop branch: only
+        // the SERIAL loss paths stamp link_lost_at_ (the device-node presence
+        // check and lose_serial_link_locked, both serial-only). A network
+        // (UDP) mount therefore never records an outage, so lost_at is always
+        // empty for it and it ALWAYS takes the preserve branch, however long
+        // it was gone. That follows the "no positive evidence => preserve"
+        // rule rather than violating it, but it means the stop branch is in
+        // practice serial-only today (review of #553).
         const bool long_unmonitored_outage =
             lost_at.has_value() && (now - *lost_at) >= detail::relink_motion_preserve_window();
 
