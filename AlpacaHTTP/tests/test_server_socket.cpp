@@ -101,6 +101,23 @@ std::string make_request_with_header_size(std::size_t header_bytes) {
 
 // --- keep-alive helpers ------------------------------------------------------
 
+// Read back the ephemeral port a just-started Server bound, retrying
+// briefly: is_running() can go true before the listener is actually created
+// (see the restart-case comment below for why), so bound_port() may answer 0
+// for a few milliseconds after start_async() returns. Returns 0 if the port
+// never showed up within the budget.
+std::uint16_t wait_for_bound_port(alpacahttp::Server& server, int budget_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
+    std::uint16_t port = 0;
+    while (port == 0 && std::chrono::steady_clock::now() < deadline) {
+        port = server.bound_port();
+        if (port == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    return port;
+}
+
 int connect_local(std::uint16_t port) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     EXPECT(fd >= 0);
@@ -191,7 +208,7 @@ int main() {
     std::cout << "Testing Server socket read path and keep-alive...\n";
 
     alpacahttp::Config config;
-    config.set_http_port(6871);
+    config.set_http_port(0);  // ephemeral: let the OS pick, so parallel test runs never collide
     config.set_discovery_enabled(false);
     config.set_server_name("TestServer");
 
@@ -199,12 +216,16 @@ int main() {
     server.start_async();
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    if (!server.is_running()) {
-        std::cerr << "Server socket test skipped: unable to bind port 6871.\n";
+    // is_running() can go true before the listener is actually bound (see
+    // wait_for_bound_port()'s comment), so the port readiness check -- not
+    // just is_running() -- decides whether this run is skipped. Folding both
+    // into one wait keeps a slow-but-eventually-successful bind on a loaded
+    // runner from hitting a hard EXPECT abort instead of the intended skip.
+    const std::uint16_t port = server.is_running() ? wait_for_bound_port(server, 2000) : 0;
+    if (port == 0) {
+        std::cerr << "Server socket test skipped: unable to bind an ephemeral port.\n";
         return 0;  // tolerate a busy/unavailable port, like the discovery test
     }
-
-    const std::uint16_t port = config.http_port();
 
     // Over the cap by one byte, terminator in the second write => 431.
     {
@@ -462,7 +483,7 @@ int main() {
     // port: the shared one above has the default pool of 32.
     {
         alpacahttp::Config small_config;
-        small_config.set_http_port(6872);
+        small_config.set_http_port(0);
         small_config.set_discovery_enabled(false);
         small_config.set_server_name("TestServerSmallPool");
         small_config.set_thread_pool_size(2);
@@ -470,9 +491,8 @@ int main() {
         small_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (small_server.is_running()) {
-            const std::uint16_t small_port = small_config.http_port();
-
+        if (const std::uint16_t small_port = small_server.is_running() ? wait_for_bound_port(small_server, 2000) : 0;
+            small_port != 0) {
             // Twice as many idle keep-alive connections as workers, every
             // one of them kept alive (no reserve forcing a close).
             constexpr int kParked = 4;
@@ -527,7 +547,7 @@ int main() {
             }
             small_server.stop();
         } else {
-            std::cout << "  (skipped reactor pool case: port 6872 unavailable)\n";
+            std::cout << "  (skipped reactor pool case: could not bind an ephemeral port)\n";
         }
     }
 
@@ -540,7 +560,7 @@ int main() {
     // open past the cap and gets the header on its next request.
     {
         alpacahttp::Config cap_config;
-        cap_config.set_http_port(6873);
+        cap_config.set_http_port(0);
         cap_config.set_discovery_enabled(false);
         cap_config.set_server_name("TestServerLifetime");
         cap_config.set_keep_alive_lifetime_seconds(2);
@@ -548,9 +568,8 @@ int main() {
         cap_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (cap_server.is_running()) {
-            const std::uint16_t cap_port = cap_config.http_port();
-
+        if (const std::uint16_t cap_port = cap_server.is_running() ? wait_for_bound_port(cap_server, 2000) : 0;
+            cap_port != 0) {
             // Idle connection: one request, then silence.
             int idle_fd = connect_local(cap_port);
             EXPECT(idle_fd >= 0);
@@ -596,7 +615,7 @@ int main() {
             ::close(idle_fd);
             cap_server.stop();
         } else {
-            std::cout << "  (skipped lifetime-cap case: port 6873 unavailable)\n";
+            std::cout << "  (skipped lifetime-cap case: could not bind an ephemeral port)\n";
         }
     }
 
@@ -607,7 +626,7 @@ int main() {
     // its request waits, unanswered, until a connection is released.
     {
         alpacahttp::Config bound_config;
-        bound_config.set_http_port(6874);
+        bound_config.set_http_port(0);
         bound_config.set_discovery_enabled(false);
         bound_config.set_server_name("TestServerBound");
         bound_config.set_max_connections(2);
@@ -615,9 +634,8 @@ int main() {
         bound_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (bound_server.is_running()) {
-            const std::uint16_t bound_port = bound_config.http_port();
-
+        if (const std::uint16_t bound_port = bound_server.is_running() ? wait_for_bound_port(bound_server, 2000) : 0;
+            bound_port != 0) {
             int held[2];
             for (int& fd : held) {
                 fd = connect_local(bound_port);
@@ -649,7 +667,7 @@ int main() {
             ::close(held[1]);
             bound_server.stop();
         } else {
-            std::cout << "  (skipped max-connections case: port 6874 unavailable)\n";
+            std::cout << "  (skipped max-connections case: could not bind an ephemeral port)\n";
         }
     }
 
@@ -667,7 +685,7 @@ int main() {
         // capturing lambda is destroyed first (open-astro#314 review).
         std::atomic<int> restart_probes{0};
         alpacahttp::Config restart_config;
-        restart_config.set_http_port(6875);
+        restart_config.set_http_port(0);
         restart_config.set_discovery_enabled(false);
         restart_config.set_server_name("TestServerRestart");
         restart_config.set_max_connections(3);
@@ -686,8 +704,8 @@ int main() {
         restart_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (restart_server.is_running()) {
-            const std::uint16_t restart_port = restart_config.http_port();
+        if (std::uint16_t restart_port = restart_server.is_running() ? wait_for_bound_port(restart_server, 2000) : 0;
+            restart_port != 0) {
             const std::string restart_request =
                 "PUT /management/restart HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
             struct timeval tv {};
@@ -727,6 +745,12 @@ int main() {
                     back = restart_server.is_running();
                 }
                 EXPECT(back);
+                // The new generation's listener is a fresh ephemeral port
+                // (config_.http_port() is still 0), not necessarily the one
+                // from before this restart -- re-read it before using
+                // restart_port again, here and on the next round.
+                restart_port = wait_for_bound_port(restart_server, 2000);
+                EXPECT(restart_port != 0);
 
                 // New generation accepts and serves, as many times as the
                 // bound allows: a drifted counter would refuse all of them.
@@ -758,7 +782,7 @@ int main() {
             }
             restart_server.stop();
         } else {
-            std::cout << "  (skipped restart case: port 6875 unavailable)\n";
+            std::cout << "  (skipped restart case: could not bind an ephemeral port)\n";
         }
     }
 
@@ -771,7 +795,7 @@ int main() {
     // to prove the object is still usable.
     {
         alpacahttp::Config churn_config;
-        churn_config.set_http_port(6876);
+        churn_config.set_http_port(0);
         churn_config.set_discovery_enabled(false);
         churn_config.set_server_name("TestServerChurn");
         churn_config.set_thread_pool_size(4);
@@ -788,8 +812,9 @@ int main() {
 
         churn_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        if (churn_server.is_running()) {
-            int fd = connect_local(churn_config.http_port());
+        if (const std::uint16_t churn_port = churn_server.is_running() ? wait_for_bound_port(churn_server, 2000) : 0;
+            churn_port != 0) {
+            int fd = connect_local(churn_port);
             EXPECT(fd >= 0);
             std::string carry;
             send_all(fd, kGet11);
@@ -797,7 +822,7 @@ int main() {
             ::close(fd);
             churn_server.stop();
         } else {
-            std::cout << "  (skipped churn case's final request: port 6876 unavailable)\n";
+            std::cout << "  (skipped churn case's final request: could not bind an ephemeral port)\n";
         }
     }
 
@@ -841,7 +866,7 @@ int main() {
     // assertion that the count rises on its own.
     {
         alpacahttp::Config rtc_config;
-        rtc_config.set_http_port(6877);
+        rtc_config.set_http_port(0);
         rtc_config.set_discovery_enabled(false);
         rtc_config.set_server_name("TestServerRtcProbe");
         rtc_config.set_rtc_probe_interval_seconds(1);
@@ -982,23 +1007,32 @@ int main() {
         // -- so if the fix regresses, this binary aborts rather than failing
         // an assertion.
         alpacahttp::Config holder_config;
-        holder_config.set_http_port(6879);
+        holder_config.set_http_port(0);
         holder_config.set_discovery_enabled(false);
         holder_config.set_server_name("TestServerPortHolder");
         alpacahttp::Server holder(holder_config);
         holder.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (!holder.is_running()) {
+        // The specific port doesn't matter here -- what matters is that
+        // conflict_config and retry_config below target the SAME one holder
+        // is already listening on, to force a genuine bind() collision
+        // (#402). Reading it back keeps this test off a fixed literal
+        // without weakening that collision. Gated on the port itself (not
+        // just is_running(), which can go true before the listener is
+        // actually bound) so a slow-but-eventually-successful bind on a
+        // loaded runner takes the skip path below instead of a hard abort.
+        const std::uint16_t holder_port = holder.is_running() ? wait_for_bound_port(holder, 2000) : 0;
+        if (holder_port == 0) {
             // Say so. The whole #402 block hangs off this, and a silent skip
             // turns the flagship regression case into a green no-op on a
-            // runner where 6879 happens to be taken.
-            std::cerr << "WARNING: port-conflict cases SKIPPED -- could not bind port 6879\n";
+            // runner where no ephemeral port could be bound at all.
+            std::cerr << "WARNING: port-conflict cases SKIPPED -- could not bind an ephemeral port\n";
         }
-        if (holder.is_running()) {
+        if (holder_port != 0) {
             {
                 alpacahttp::Config conflict_config;
-                conflict_config.set_http_port(6879);  // already held
+                conflict_config.set_http_port(holder_port);  // already held
                 conflict_config.set_discovery_enabled(false);
                 conflict_config.set_server_name("TestServerPortConflict");
                 alpacahttp::Server conflicted(conflict_config);
@@ -1023,7 +1057,7 @@ int main() {
                 // test read before review: it built a second Server, so
                 // deleting the join in start_async() left the suite green).
                 alpacahttp::Config retry_config;
-                retry_config.set_http_port(6879);
+                retry_config.set_http_port(holder_port);
                 retry_config.set_discovery_enabled(false);
                 retry_config.set_server_name("TestServerPortRetry");
                 alpacahttp::Server retried(retry_config);
@@ -1040,7 +1074,7 @@ int main() {
                 // that we got here at all.
                 EXPECT(!retried.is_running());
 
-                retry_config.set_http_port(6880);
+                retry_config.set_http_port(0);  // any free port; does not need to collide
                 alpacahttp::Server second(retry_config);
                 second.start_async();
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
@@ -1069,7 +1103,7 @@ int main() {
         // process terminates. Like the port-conflict case above, a regression
         // here ABORTS this binary rather than failing an assertion.
         alpacahttp::Config concurrent_config;
-        concurrent_config.set_http_port(6881);
+        concurrent_config.set_http_port(0);
         concurrent_config.set_discovery_enabled(false);
         concurrent_config.set_server_name("TestServerConcurrentStop");
         alpacahttp::Server concurrent(concurrent_config);
@@ -1077,7 +1111,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
         if (!concurrent.is_running()) {
-            std::cerr << "WARNING: concurrent-stop case SKIPPED -- could not bind port 6881\n";
+            std::cerr << "WARNING: concurrent-stop case SKIPPED -- could not bind an ephemeral port\n";
         }
         if (concurrent.is_running()) {
             // Released together so both land in stop() at once, which is what
@@ -1130,7 +1164,7 @@ int main() {
         // the destroyed Server's running_ flag, on every run.
         for (int round = 0; round < 25; ++round) {
             alpacahttp::Config teardown_config;
-            teardown_config.set_http_port(6882);
+            teardown_config.set_http_port(0);
             teardown_config.set_discovery_enabled(false);
             teardown_config.set_server_name("TestServerStopThenDestroy");
 
@@ -1139,7 +1173,7 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
             if (!server->is_running()) {
                 std::cerr << "WARNING: stop-then-destroy loop SKIPPED at round " << round
-                          << " -- could not bind port 6882\n";
+                          << " -- could not bind an ephemeral port\n";
                 break;
             }
 
@@ -1170,6 +1204,78 @@ int main() {
     }
 
     {
+        // Regression test for #428's join_server_thread() fix, specifically
+        // for wait() as one of the two racing callers -- issue #507 asked for
+        // this because the block above only proves it for two stop() callers,
+        // and a fix scoped to "the OTHER caller of stop()" rather than "any
+        // other caller of join_server_thread()" would still let a wait() that
+        // loses the ownership race return before the thread is truly gone.
+        // wait() and stop() share join_server_thread(), so the same
+        // early-return hazard applies: whichever call does not win the move
+        // must still block until the winner's join() completes, not merely
+        // find server_thread_ empty and return.
+        //
+        // stop() always runs its own teardown phases (closing the listener,
+        // stopping the reactor and workers) before it ever reaches
+        // join_server_thread(), regardless of which of the two calls wins
+        // ownership of the actual join -- so this cannot deadlock even when
+        // wait() wins the race and calls owned.join() first: stop()'s
+        // concurrent phase 3 still closes the listener and unblocks the
+        // accept loop that join() is waiting on.
+        //
+        // Same reasoning as the block above for why destruction is not
+        // raced here: a caller still inside join_server_thread() when the
+        // Server dies is a different hazard (the caller must outlive the
+        // callee), not what this proves. Both calls are joined before the
+        // Server is destroyed; what this exercises, many times over, is the
+        // interleaving itself -- stop() and wait() reaching
+        // join_server_thread() at the same moment, one of them losing the
+        // move -- for the ASan/TSan pre-flight gates to turn a surviving
+        // run_server() (reading a destroyed Server's members) into a report.
+        for (int round = 0; round < 25; ++round) {
+            alpacahttp::Config wait_config;
+            wait_config.set_http_port(0);
+            wait_config.set_discovery_enabled(false);
+            wait_config.set_server_name("TestServerStopWaitRace");
+
+            auto server = std::make_unique<alpacahttp::Server>(wait_config);
+            server->start_async();
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            if (!server->is_running()) {
+                std::cerr << "WARNING: stop/wait race loop SKIPPED at round " << round
+                          << " -- could not bind an ephemeral port\n";
+                break;
+            }
+
+            alpacahttp::Server* raw = server.get();
+            std::atomic<bool> go{false};
+            std::atomic<int> returned{0};
+            std::thread waiter([&]() {
+                while (!go.load()) {
+                    std::this_thread::yield();
+                }
+                raw->wait();
+                returned.fetch_add(1);
+            });
+
+            go.store(true);
+            raw->stop();
+            returned.fetch_add(1);
+
+            waiter.join();
+            EXPECT(returned.load() == 2);
+            EXPECT(!raw->is_running());
+
+            // Destroyed only once both stop() and wait() have returned. With
+            // the fix that means the server thread is already reaped;
+            // without it (a fix scoped to stop()-vs-stop() only rather than
+            // every join_server_thread() caller), wait() could have returned
+            // while run_server() was still unwinding.
+            server.reset();
+        }
+    }
+
+    {
         // The restart shape: one caller stops and immediately starts again
         // while another is still parked inside stop() waiting for the join.
         // Without a generation counter the waiter wakes after the restart has
@@ -1191,7 +1297,7 @@ int main() {
         // join_server_thread()'s comment and would need a test seam inside the
         // join to pin properly.
         alpacahttp::Config restart_config;
-        restart_config.set_http_port(6883);
+        restart_config.set_http_port(0);
         restart_config.set_discovery_enabled(false);
         restart_config.set_server_name("TestServerRestartRace");
 
@@ -1200,7 +1306,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
         if (!restarting.is_running()) {
-            std::cerr << "WARNING: restart-race case SKIPPED -- could not bind port 6883\n";
+            std::cerr << "WARNING: restart-race case SKIPPED -- could not bind an ephemeral port\n";
         } else {
             std::atomic<bool> done{false};
             std::atomic<long> waiter_returns{0};
