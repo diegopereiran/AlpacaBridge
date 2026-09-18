@@ -26,9 +26,66 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace alpacahttp {
+
+namespace {
+
+// Threads that failed both join() AND detach() (should not be reachable in
+// practice -- see join_or_abandon() below) are moved here instead of a bare
+// `new std::thread(...)` with the pointer discarded. Two requirements this
+// container has to satisfy at once, which is why it looks the way it does:
+// (a) it must stay REACHABLE for the life of the process, so the `sanitizers`
+// CI job's LeakSanitizer does not report the parked thread's allocation as an
+// indistinguishable ordinary leak; (b) the parked std::thread objects must
+// NEVER be destroyed, because they are still joinable() (both join() and
+// detach() throw without clearing libstdc++'s internal id) and a joinable
+// thread's destructor calls std::terminate(). A plain function-local or
+// namespace-scope `static std::vector<std::thread>` satisfies (a) but not
+// (b): it has a non-trivial destructor registered with `__cxa_atexit`, which
+// runs at normal process exit and would abort there instead of never. A
+// heap-allocated container reached through a static POINTER that is never
+// deleted satisfies both: `new` keeps it reachable (satisfying LSan), and
+// nothing ever runs its destructor (satisfying the no-terminate() guarantee).
+std::mutex g_abandoned_threads_mutex;
+std::vector<std::thread>& abandoned_threads() {
+    static auto* threads = new std::vector<std::thread>();
+    return *threads;
+}
+
+// Join `thread`, and if pthread_join fails (EDEADLK/ESRCH/EINVAL) fall back to
+// detach() instead of a second join() attempt. A second join() is not safe
+// here: libstdc++ only clears a thread's id on a SUCCESSFUL join, so the
+// object is still joinable() after the exception, and a caller running under
+// lifecycle_mutex_ (join_orphaned_threads()'s callers) that retried join()
+// could block on it -- if the thread is not actually gone but merely blocked
+// waiting for that same mutex (run_server()'s spawn phase takes it), the
+// retry would deadlock instead of throwing. detach() makes the destructor a
+// no-op at the cost of never confirming the thread has exited; if detach()
+// also throws (both calls failing on the same OS handle is not reachable in
+// practice), the thread object is parked in abandoned_threads() rather than
+// left to destruct joinable, which would call std::terminate().
+void join_or_abandon(std::thread& thread, const char* context) {
+    try {
+        thread.join();
+        return;
+    } catch (const std::system_error& e) {
+        util::log_error(std::string(context) + ": pthread_join failed (" + e.code().message() +
+                        "), detaching thread instead of reaping it");
+    }
+    try {
+        thread.detach();
+    } catch (const std::system_error& e) {
+        util::log_error(std::string(context) + ": detach also failed (" + e.code().message() +
+                        ") after a failed join; leaking the thread object rather than terminating");
+        std::lock_guard<std::mutex> guard(g_abandoned_threads_mutex);
+        abandoned_threads().push_back(std::move(thread));
+    }
+}
+
+}  // namespace
 
 Server::Server(const Config& config)
     : config_(config)
@@ -93,7 +150,7 @@ void Server::join_orphaned_threads(std::thread::id current_id) {
             still_orphaned.push_back(std::move(thread));
             continue;
         }
-        thread.join();
+        join_or_abandon(thread, "join_orphaned_threads");
     }
     orphaned_threads_.swap(still_orphaned);
 }
@@ -234,7 +291,7 @@ void Server::stop() {
             if (rtc_probe_thread_.get_id() == current_id) {
                 orphaned_threads_.push_back(std::move(rtc_probe_thread_));
             } else {
-                rtc_probe_thread_.join();
+                join_or_abandon(rtc_probe_thread_, "stop (rtc_probe_thread_)");
             }
         }
         if (reactor_thread_.joinable()) {
@@ -243,7 +300,7 @@ void Server::stop() {
             if (reactor_thread_.get_id() == current_id) {
                 orphaned_threads_.push_back(std::move(reactor_thread_));
             } else {
-                reactor_thread_.join();
+                join_or_abandon(reactor_thread_, "stop (reactor_thread_)");
             }
         }
 
@@ -271,7 +328,7 @@ void Server::stop() {
                 orphaned_threads_.push_back(std::move(thread));
                 continue;
             }
-            thread.join();
+            join_or_abandon(thread, "stop (worker_threads_)");
         }
         worker_threads_.clear();
     }
@@ -363,26 +420,49 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
         server_thread_joining_ = true;
     }
 
+    // Releases the join-in-flight flag on every exit from here down, whether
+    // this function returns normally or an exception propagates out of it.
+    // The flag is now set and server_thread_ is empty, so anything that let
+    // this function leave without clearing it would strand every waiter
+    // parked on server_thread_cv_ -- stop(), wait() and ~Server() included --
+    // on a join that no longer has an owner. Correctness must not depend on
+    // the code below staying throw-free.
+    struct ReleaseJoiningFlag {
+        Server* self;
+        ~ReleaseJoiningFlag() {
+            std::lock_guard<std::mutex> guard(self->server_thread_mutex_);
+            self->server_thread_joining_ = false;
+            // notify_all() INSIDE the lock, deliberately. A waiter only needs
+            // the mutex to re-check the predicate, so notifying after the
+            // unlock would let it return from stop() -- and the embedder run
+            // ~Server() -- while this thread is still about to touch
+            // server_thread_cv_. This is the last `this` access after the
+            // protocol's own "the thread is gone, you may destroy me now"
+            // signal, so it is the one that has to be inside. For the same
+            // reason this release lives ONLY here: a second release after the
+            // guard was declared would run before it and hand out that signal
+            // while the guard still had `this` to dereference.
+            self->server_thread_cv_.notify_all();
+        }
+    } release_joining_flag{this};
+
     if (owned.get_id() == current_id) {
         // Unreachable from stop() (run_server() never calls stop()); kept as
         // an orphan rather than a detach for the same reason as above.
         std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
         orphaned_threads_.push_back(std::move(owned));
     } else {
-        owned.join();
+        // join_or_abandon() falls back to detach() rather than parking a
+        // failed join in orphaned_threads_: a second join() attempt from
+        // join_orphaned_threads() is not provably safe here (see its doc
+        // comment above) since that call runs under lifecycle_mutex_, which
+        // this very thread's spawn phase (run_server()) may still be
+        // waiting on.
+        join_or_abandon(owned, "join_server_thread");
     }
 
-    {
-        std::lock_guard<std::mutex> guard(server_thread_mutex_);
-        server_thread_joining_ = false;
-        // notify_all() INSIDE the lock, deliberately. A waiter only needs the
-        // mutex to re-check the predicate, so notifying after the unlock would
-        // let it return from stop() -- and the embedder run ~Server() -- while
-        // this thread is still about to touch server_thread_cv_. This is the
-        // last `this` access after the protocol's own "the thread is gone, you
-        // may destroy me now" signal, so it is the one that has to be inside.
-        server_thread_cv_.notify_all();
-    }
+    // No explicit release here: ReleaseJoiningFlag's destructor does it, and
+    // must be the last thing that touches `this`.
 }
 
 // Destructor only, after every thread has been joined. The pipe is never
@@ -397,6 +477,36 @@ void Server::close_wake_pipe() {
             pipe_fd = -1;
         }
     }
+}
+
+std::uint16_t Server::bound_port() const {
+    auto fd = server_fd_.load();
+    if (fd == util::kInvalidSocket) {
+        return 0;
+    }
+    // fd can be closed and its number reused by an unrelated socket between
+    // the load above and here (a concurrent stop() or rebind_listener()) --
+    // the same hazard rebind_listener() guards when reclaiming the OLD fd
+    // number, with the same check. Confirm it is still a listening socket
+    // before trusting getsockname()'s answer, so a race reports 0 (unknown)
+    // instead of a stranger's port.
+    int acc = 0;
+    socklen_t acc_len = sizeof(acc);
+    if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &acc, &acc_len) != 0 || acc == 0) {
+        return 0;
+    }
+    struct sockaddr_storage addr {};
+    socklen_t len = sizeof(addr);
+    if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
+        return 0;
+    }
+    if (addr.ss_family == AF_INET) {
+        return ntohs(reinterpret_cast<const struct sockaddr_in*>(&addr)->sin_port);
+    }
+    if (addr.ss_family == AF_INET6) {
+        return ntohs(reinterpret_cast<const struct sockaddr_in6*>(&addr)->sin6_port);
+    }
+    return 0;
 }
 
 void Server::wait() {
