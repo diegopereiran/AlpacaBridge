@@ -31,6 +31,40 @@
 
 namespace alpacahttp {
 
+namespace {
+
+// Join `thread`, and if pthread_join fails (EDEADLK/ESRCH/EINVAL) fall back to
+// detach() instead of a second join() attempt. A second join() is not safe
+// here: libstdc++ only clears a thread's id on a SUCCESSFUL join, so the
+// object is still joinable() after the exception, and a caller running under
+// lifecycle_mutex_ (join_orphaned_threads()'s callers) that retried join()
+// could block on it -- if the thread is not actually gone but merely blocked
+// waiting for that same mutex (run_server()'s spawn phase takes it), the
+// retry would deadlock instead of throwing. detach() makes the destructor a
+// no-op at the cost of never confirming the thread has exited; if detach()
+// also throws (both calls failing on the same OS handle is not reachable in
+// practice), the thread object is leaked deliberately rather than left to
+// destruct joinable, which would call std::terminate().
+void join_or_abandon(std::thread& thread, const char* context) {
+    try {
+        thread.join();
+        return;
+    } catch (const std::system_error& e) {
+        util::log_error(std::string(context) + ": pthread_join failed (" + e.code().message() +
+                        "), detaching thread instead of reaping it");
+    }
+    try {
+        thread.detach();
+    } catch (const std::system_error& e) {
+        util::log_error(std::string(context) + ": detach also failed (" + e.code().message() +
+                        ") after a failed join; leaking the thread object rather than terminating");
+        auto* leaked = new std::thread(std::move(thread));
+        (void)leaked;
+    }
+}
+
+}  // namespace
+
 Server::Server(const Config& config)
     : config_(config)
 {
@@ -94,7 +128,7 @@ void Server::join_orphaned_threads(std::thread::id current_id) {
             still_orphaned.push_back(std::move(thread));
             continue;
         }
-        thread.join();
+        join_or_abandon(thread, "join_orphaned_threads");
     }
     orphaned_threads_.swap(still_orphaned);
 }
@@ -235,7 +269,7 @@ void Server::stop() {
             if (rtc_probe_thread_.get_id() == current_id) {
                 orphaned_threads_.push_back(std::move(rtc_probe_thread_));
             } else {
-                rtc_probe_thread_.join();
+                join_or_abandon(rtc_probe_thread_, "stop (rtc_probe_thread_)");
             }
         }
         if (reactor_thread_.joinable()) {
@@ -244,7 +278,7 @@ void Server::stop() {
             if (reactor_thread_.get_id() == current_id) {
                 orphaned_threads_.push_back(std::move(reactor_thread_));
             } else {
-                reactor_thread_.join();
+                join_or_abandon(reactor_thread_, "stop (reactor_thread_)");
             }
         }
 
@@ -272,7 +306,7 @@ void Server::stop() {
                 orphaned_threads_.push_back(std::move(thread));
                 continue;
             }
-            thread.join();
+            join_or_abandon(thread, "stop (worker_threads_)");
         }
         worker_threads_.clear();
     }
@@ -396,22 +430,13 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
         std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
         orphaned_threads_.push_back(std::move(owned));
     } else {
-        try {
-            owned.join();
-        } catch (const std::system_error& e) {
-            // pthread_join failed (EDEADLK/ESRCH/EINVAL): owned is still
-            // joinable, so letting it destruct here would call
-            // std::terminate(), and letting the exception escape would strand
-            // every waiter parked on the condition variable -- stop(), wait()
-            // and ~Server() included -- behind a server_thread_joining_ that
-            // the guard above would have cleared but that nothing would then
-            // be left to join. Park it exactly like the self-join branch
-            // above so ~Server() reaps it.
-            util::log_warning("join_server_thread: pthread_join failed (" + e.code().message() +
-                              "), parking thread for later reap");
-            std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
-            orphaned_threads_.push_back(std::move(owned));
-        }
+        // join_or_abandon() falls back to detach() rather than parking a
+        // failed join in orphaned_threads_: a second join() attempt from
+        // join_orphaned_threads() is not provably safe here (see its doc
+        // comment above) since that call runs under lifecycle_mutex_, which
+        // this very thread's spawn phase (run_server()) may still be
+        // waiting on.
+        join_or_abandon(owned, "join_server_thread");
     }
 
     // No explicit release here: ReleaseJoiningFlag's destructor does it, and
@@ -430,6 +455,25 @@ void Server::close_wake_pipe() {
             pipe_fd = -1;
         }
     }
+}
+
+std::uint16_t Server::bound_port() const {
+    auto fd = server_fd_.load();
+    if (fd == util::kInvalidSocket) {
+        return 0;
+    }
+    struct sockaddr_storage addr{};
+    socklen_t len = sizeof(addr);
+    if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
+        return 0;
+    }
+    if (addr.ss_family == AF_INET) {
+        return ntohs(reinterpret_cast<const struct sockaddr_in*>(&addr)->sin_port);
+    }
+    if (addr.ss_family == AF_INET6) {
+        return ntohs(reinterpret_cast<const struct sockaddr_in6*>(&addr)->sin6_port);
+    }
+    return 0;
 }
 
 void Server::wait() {
