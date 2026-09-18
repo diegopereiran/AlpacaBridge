@@ -16,10 +16,6 @@ written, not the remote name from your own checkout.
 - **Apply / remove labels**: `gh issue edit <number> --repo open-astro/AlpacaBridge --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --repo open-astro/AlpacaBridge --comment "..."`
 
-## Pull requests
-
-External PRs are not treated as a triage/request surface in this repo.
-
 ## When a skill says "publish to the issue tracker"
 
 Create a GitHub issue.
