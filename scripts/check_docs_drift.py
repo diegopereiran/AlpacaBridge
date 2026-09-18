@@ -39,11 +39,12 @@ Checks:
      production's cancel skips the per-handle mutex so it can interrupt a
      download blocked on the same handle) -- and the forward sweep in
      test_qhy_fake_sdk.cpp drives all of them.
-  7. Every relative path referenced in AGENTS.md, scoped instructions, and
-     docs/failures/ and docs/decisions/ inline code spans
-     (`` `AlpacaCore/...` ``, `` `scripts/...` ``, `` `docs/...` ``, etc.)
-     that looks like a real repo path actually exists. First-party code-comment
-     references to a failure or decision record must resolve too.
+  7. Every relative path referenced in AGENTS.md, scoped instructions,
+     docs/agents/ agent-skills config, and docs/failures/ and docs/decisions/
+     inline code spans (`` `AlpacaCore/...` ``, `` `scripts/...` ``,
+     `` `docs/...` ``, etc.) that looks like a real repo path actually exists.
+     First-party code-comment references to a failure or decision record must
+     resolve too.
   8. The TSan job's filtered runs are identical between ci.yml and
      ci_preflight.sh: the same ordered `alpacacore_tests "<tag>"` invocations
      out of the same build directory, each one followed by a zero-test
@@ -743,6 +744,8 @@ CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # Tripwire for the span matcher, not a rule about document size: if
 # AGENTS.md is legitimately trimmed below this, lower the floor.
 MIN_AGENTS_MD_PATH_REFS = 40
+# Tripwire for a docs/agents/ rename, not a target file count.
+MIN_AGENTS_DIR_FILES = 3
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
@@ -876,6 +879,24 @@ def check_agents_md_paths_exist():
     for path in files:
         doc = str(path.relative_to(ROOT))
         doc_failures, _ = _check_doc_path_refs(doc, 0, "instruction file floor")
+        failures.extend(doc_failures)
+    agents_dir = ROOT / "docs/agents"
+    agents_files = sorted(agents_dir.glob("*.md"))
+    tracked_agents = _run_git(["-c", "core.quotePath=false", "ls-files", "docs/agents/*.md"]).stdout.splitlines()
+    # A directory rename would make both the glob and ls-files go empty and
+    # this whole block would silently pass nothing -- the vacuity class
+    # decision record 0003 calls out. Floor is today's file count (3); it is
+    # a tripwire, not a target.
+    if len(tracked_agents) < MIN_AGENTS_DIR_FILES:
+        failures.append(
+            "only %d tracked file(s) found under docs/agents/*.md (floor %d): "
+            "the directory may have been renamed, or check_agents_md_paths_exist "
+            "should be updated" % (len(tracked_agents), MIN_AGENTS_DIR_FILES))
+    for missing in sorted(set(tracked_agents) - {str(p.relative_to(ROOT)) for p in agents_files}):
+        failures.append("%s is a tracked agent-skills doc but is missing" % missing)
+    for path in agents_files:
+        doc = str(path.relative_to(ROOT))
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "agent-skills doc floor")
         failures.extend(doc_failures)
     for directory in ("docs/failures", "docs/decisions"):
         paths = sorted((ROOT / directory).glob("*.md"))
