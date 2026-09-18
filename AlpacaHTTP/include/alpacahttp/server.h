@@ -58,6 +58,13 @@ public:
     // Check if server is running
     bool is_running() const { return running_; }
 
+    // The port actually bound, read back from the listening socket via
+    // getsockname(). Differs from config's http_port() when that was 0 ("let
+    // the OS pick an ephemeral port") -- callers that asked for an ephemeral
+    // port need this to learn what was actually chosen. Returns 0 when not
+    // currently listening.
+    std::uint16_t bound_port() const;
+
     // Wait for server to stop
     void wait();
 
