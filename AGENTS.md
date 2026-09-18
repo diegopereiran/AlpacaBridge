@@ -1100,7 +1100,7 @@ Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.
 
 ### Issue tracker
 
-Issues live in GitHub Issues on `open-astro/AlpacaBridge` (upstream `origin`), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues on `open-astro/AlpacaBridge`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

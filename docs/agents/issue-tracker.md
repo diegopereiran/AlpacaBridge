@@ -2,16 +2,19 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
+Issues live on **`open-astro/AlpacaBridge`**, not on whichever remote a given
+clone happens to call `origin`. Every example below carries
+`--repo open-astro/AlpacaBridge` explicitly for that reason — copy it as
+written, not the remote name from your own checkout.
+
 ## Conventions
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
-- **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
-- **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
-- **Comment on an issue**: `gh issue comment <number> --body "..."`
-- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
-- **Close**: `gh issue close <number> --comment "..."`
-
-This repo has two remotes (`origin` = `open-astro/AlpacaBridge`, `mine` = a fork). Issues live on **`open-astro/AlpacaBridge`**; pass `--repo open-astro/AlpacaBridge` to every `gh` command so it never resolves to the fork.
+- **Create an issue**: `gh issue create --repo open-astro/AlpacaBridge --title "..." --body "..."`. Use a heredoc for multi-line bodies.
+- **Read an issue**: `gh issue view <number> --repo open-astro/AlpacaBridge --comments`, filtering comments by `jq` and also fetching labels.
+- **List issues**: `gh issue list --repo open-astro/AlpacaBridge --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
+- **Comment on an issue**: `gh issue comment <number> --repo open-astro/AlpacaBridge --body "..."`
+- **Apply / remove labels**: `gh issue edit <number> --repo open-astro/AlpacaBridge --add-label "..."` / `--remove-label "..."`
+- **Close**: `gh issue close <number> --repo open-astro/AlpacaBridge --comment "..."`
 
 ## Pull requests as a triage surface
 
@@ -19,11 +22,11 @@ This repo has two remotes (`origin` = `open-astro/AlpacaBridge`, `mine` = a fork
 
 When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
 
-- **Read a PR**: `gh pr view <number> --comments` and `gh pr diff <number>` for the diff.
-- **List external PRs for triage**: `gh pr list --state open --json number,title,body,labels,author,authorAssociation,comments` then keep only `authorAssociation` of `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, or `NONE` (drop `OWNER`/`MEMBER`/`COLLABORATOR`).
-- **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label`/`--remove-label`, `gh pr close`.
+- **Read a PR**: `gh pr view <number> --repo open-astro/AlpacaBridge --comments` and `gh pr diff <number> --repo open-astro/AlpacaBridge` for the diff.
+- **List external PRs for triage**: `gh pr list --repo open-astro/AlpacaBridge --state open --json number,title,body,labels,author,authorAssociation,comments` then keep only `authorAssociation` of `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, or `NONE` (drop `OWNER`/`MEMBER`/`COLLABORATOR`).
+- **Comment / label / close**: `gh pr comment --repo open-astro/AlpacaBridge`, `gh pr edit --repo open-astro/AlpacaBridge --add-label`/`--remove-label`, `gh pr close --repo open-astro/AlpacaBridge`.
 
-GitHub shares one number space across issues and PRs, so a bare `#42` may be either: resolve with `gh pr view 42` and fall back to `gh issue view 42`.
+GitHub shares one number space across issues and PRs, so a bare `#42` may be either: resolve with `gh pr view 42 --repo open-astro/AlpacaBridge` and fall back to `gh issue view 42 --repo open-astro/AlpacaBridge`.
 
 ## When a skill says "publish to the issue tracker"
 
@@ -31,15 +34,15 @@ Create a GitHub issue.
 
 ## When a skill says "fetch the relevant ticket"
 
-Run `gh issue view <number> --comments`.
+Run `gh issue view <number> --repo open-astro/AlpacaBridge --comments`.
 
 ## Wayfinding operations
 
-Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
+Used by `/wayfinder`, which is not installed in this repo's `.claude/commands/` yet; this section configures it for when it is. The **map** is a single issue with **child** issues as tickets.
 
-- **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
+- **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --repo open-astro/AlpacaBridge --label wayfinder:map`.
 - **Child ticket**: an issue linked to the map as a GitHub sub-issue (`gh api` on the sub-issues endpoint). Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Once claimed, the ticket is assigned to the driving dev.
-- **Blocking**: GitHub's **native issue dependencies**, the canonical, UI-visible representation. Add an edge with `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where `<blocker-db-id>` is the blocker's numeric **database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`, _not_ the `#number` or `node_id`). GitHub reports `issue_dependencies_summary.blocked_by` (open blockers only, the live gate). Where dependencies aren't available, fall back to a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every blocker is closed.
-- **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
-- **Claim**: `gh issue edit <n> --add-assignee @me`, the session's first write.
-- **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
+- **Blocking**: GitHub's **native issue dependencies**, the canonical, UI-visible representation. Add an edge with `gh api --method POST repos/open-astro/AlpacaBridge/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where `<blocker-db-id>` is the blocker's numeric **database id** (`gh api repos/open-astro/AlpacaBridge/issues/<n> --jq .id`, _not_ the `#number` or `node_id`). GitHub reports `issue_dependencies_summary.blocked_by` (open blockers only, the live gate). Where dependencies aren't available, fall back to a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every blocker is closed.
+- **Frontier query**: list the map's open children (`gh issue list --repo open-astro/AlpacaBridge --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
+- **Claim**: `gh issue edit <n> --repo open-astro/AlpacaBridge --add-assignee @me`, the session's first write.
+- **Resolve**: `gh issue comment <n> --repo open-astro/AlpacaBridge --body "<answer>"`, then `gh issue close <n> --repo open-astro/AlpacaBridge`, then append a context pointer (gist + link) to the map's Decisions-so-far.

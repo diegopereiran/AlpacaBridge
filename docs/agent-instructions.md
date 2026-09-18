@@ -45,6 +45,13 @@ ToupTek; for an iCAM task, read iOptron and Player One. A vendor comparison requ
 the files for all vendors being compared. The scoped files contain vendor-specific
 deltas only; a rule affecting a second vendor belongs in `AGENTS.md`.
 
+## Agent skills configuration
+
+AGENTS.md's "Agent skills" section points at `docs/agents/issue-tracker.md`,
+`docs/agents/triage-labels.md`, and `docs/agents/domain.md` for how
+issue-tracker, triage-label, and domain-doc skills should behave in this repo.
+Read the relevant one before using or configuring those skills.
+
 ## Failure and decision memory
 
 - [Failure index](failures/README.md): incidents, root causes, prevention and concrete evidence.
