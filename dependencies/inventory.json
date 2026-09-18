@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T07:39:05.129448+00:00",
-  "source_commit": "40ed21cd1d3e2fbc577f7060d16ce5ae5f5b63a8",
+  "generated_at": "2026-09-18T07:41:33.209585+00:00",
+  "source_commit": "1335983c6999f9f0a8eb890f95cd99e529d05f49",
   "dependencies": [
     {
       "id": "zwo-asi-camera-sdk",
@@ -101,7 +101,7 @@
         "total_size_bytes": 2894680,
         "libraries": [
           {
-            "path": "lib/armv8/libEAFFocuser.so.1.7.7",
+            "path": "lib/armv8/libEAFFocuser.so",
             "sha256": "0ce25b248a727ec4cad07cc4de4ffeb256773f9bc23794a66a8a527132d5df6d",
             "size": 766816,
             "needed": [
@@ -114,7 +114,7 @@
             "rpath": null
           },
           {
-            "path": "lib/armv8/libEAFFocuser.so",
+            "path": "lib/armv8/libEAFFocuser.so.1.7.7",
             "sha256": "0ce25b248a727ec4cad07cc4de4ffeb256773f9bc23794a66a8a527132d5df6d",
             "size": 766816,
             "needed": [
@@ -129,9 +129,9 @@
         ],
         "executables": [
           {
-            "path": "license.txt",
-            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
-            "size": 1095
+            "path": "include/EAF_focuser.h",
+            "sha256": "2391a9020eea40e3072a9dbfc3359b8dfde8b75f124bb602c7a55d5fd61edc26",
+            "size": 27367
           },
           {
             "path": "lib/eaf.rules",
@@ -139,9 +139,9 @@
             "size": 108
           },
           {
-            "path": "include/EAF_focuser.h",
-            "sha256": "2391a9020eea40e3072a9dbfc3359b8dfde8b75f124bb602c7a55d5fd61edc26",
-            "size": 27367
+            "path": "license.txt",
+            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
+            "size": 1095
           }
         ],
         "firmware": {
@@ -190,7 +190,7 @@
         "total_size_bytes": 181095,
         "libraries": [
           {
-            "path": "lib/armv8/libEFWFilter.so.1.8.4",
+            "path": "lib/armv8/libEFWFilter.so",
             "sha256": "100fcfd03a2370c715db3b188710fa619bfab7fb83eb54ea754aad07fdbd328b",
             "size": 53216,
             "needed": [
@@ -203,7 +203,7 @@
             "rpath": null
           },
           {
-            "path": "lib/armv8/libEFWFilter.so",
+            "path": "lib/armv8/libEFWFilter.so.1.8.4",
             "sha256": "100fcfd03a2370c715db3b188710fa619bfab7fb83eb54ea754aad07fdbd328b",
             "size": 53216,
             "needed": [
@@ -218,9 +218,9 @@
         ],
         "executables": [
           {
-            "path": "license.txt",
-            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
-            "size": 1095
+            "path": "include/EFW_filter.h",
+            "sha256": "c55474d3d8a7fadf9d08575d25807050dcebd3bff29943c9dbe22fbd40a7e76c",
+            "size": 10004
           },
           {
             "path": "lib/efw.rules",
@@ -228,9 +228,9 @@
             "size": 110
           },
           {
-            "path": "include/EFW_filter.h",
-            "sha256": "c55474d3d8a7fadf9d08575d25807050dcebd3bff29943c9dbe22fbd40a7e76c",
-            "size": 10004
+            "path": "license.txt",
+            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
+            "size": 1095
           }
         ],
         "firmware": {
@@ -307,9 +307,9 @@
         ],
         "executables": [
           {
-            "path": "license.txt",
-            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
-            "size": 1095
+            "path": "include/CAA_API.h",
+            "sha256": "cacf58d33ccc1911fd6f7788b62cac0ec8284729ea24942f988bb089d972e697",
+            "size": 14347
           },
           {
             "path": "lib/caa.rules",
@@ -317,9 +317,9 @@
             "size": 118
           },
           {
-            "path": "include/CAA_API.h",
-            "sha256": "cacf58d33ccc1911fd6f7788b62cac0ec8284729ea24942f988bb089d972e697",
-            "size": 14347
+            "path": "license.txt",
+            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
+            "size": 1095
           }
         ],
         "firmware": {
@@ -379,6 +379,17 @@
             "rpath": null
           },
           {
+            "path": "sdk_linux_arm64_26.06.04/usr/local/fx3load/fxload",
+            "sha256": "218d8ab3ef2a8d440cce4ae6a4069aa46e5b28bae38da9f21cf231afebb86f45",
+            "size": 23264,
+            "needed": [
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
+          },
+          {
             "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so.26.6.4.16",
             "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
             "size": 5037960,
@@ -391,17 +402,6 @@
               "ld-linux-aarch64.so.1"
             ],
             "soname": "libqhyccd.so.20",
-            "rpath": null
-          },
-          {
-            "path": "sdk_linux_arm64_26.06.04/usr/local/fx3load/fxload",
-            "sha256": "218d8ab3ef2a8d440cce4ae6a4069aa46e5b28bae38da9f21cf231afebb86f45",
-            "size": 23264,
-            "needed": [
-              "libc.so.6",
-              "ld-linux-aarch64.so.1"
-            ],
-            "soname": null,
             "rpath": null
           }
         ],
@@ -611,20 +611,6 @@
         "total_size_bytes": 2539210,
         "libraries": [
           {
-            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1.2.3",
-            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
-            "size": 140616,
-            "needed": [
-              "libudev.so.1",
-              "libstdc++.so.6",
-              "libm.so.6",
-              "libgcc_s.so.1",
-              "libc.so.6"
-            ],
-            "soname": "libPlayerOnePW.so.1",
-            "rpath": null
-          },
-          {
             "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.3.10.0",
             "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
             "size": 474808,
@@ -636,6 +622,20 @@
               "libc.so.6"
             ],
             "soname": "libPlayerOneCamera.so.3",
+            "rpath": null
+          },
+          {
+            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1.2.3",
+            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
+            "size": 140616,
+            "needed": [
+              "libudev.so.1",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOnePW.so.1",
             "rpath": null
           }
         ],
