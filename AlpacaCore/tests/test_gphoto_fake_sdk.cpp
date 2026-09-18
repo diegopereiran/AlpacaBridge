@@ -260,6 +260,67 @@ TEST_CASE("GPhoto camera fake - stop_exposure mid-bulb closes the shutter early"
     driver->set_connected(false);
 }
 
+TEST_CASE("GPhoto camera fake - bulb hold pumps camera events for the whole exposure instead of sleeping",
+          "[gphoto][camera][unit][fakesdk]") {
+    // Issue #569: a Nikon D3300 wedged its PTP stack when the shutter-close
+    // toggle arrived after a hold spent in a plain sleep, while the gphoto2
+    // CLI's --wait-event hold (polling events throughout) closed cleanly
+    // every time. Pin that the hold is spent in drain_events() and that the
+    // slices add up to the requested duration, so a future "simplification"
+    // back to sleep_for shows up here rather than on the bench.
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_bulb_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    constexpr double kDuration = 0.25;  // > 1/50 s native ceiling => bulb path
+    driver->start_exposure(kDuration, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_image_ready() == true);
+    CHECK(fake.drain_events_calls >= 2);  // 100 ms slices over 250 ms
+    // The fake sleeps out every slice, so the summed budget is the hold.
+    CHECK(fake.drained_budget >= std::chrono::milliseconds(200));
+    CHECK(fake.drained_budget <= std::chrono::milliseconds(400));
+    REQUIRE(fake.bulb_toggle_history.size() == 2);
+    CHECK(fake.bulb_toggle_history.front() == true);
+    CHECK(fake.bulb_toggle_history.back() == false);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - bulb frame poll keeps polling until the camera delivers the file",
+          "[gphoto][camera][unit][fakesdk]") {
+    // Issue #569: the file-added event can lag the shutter close by up to a
+    // second exposure-length (long-exposure noise reduction), so a fixed
+    // 15 s wait lost long frames. The driver must poll in bounded slices
+    // (so stop/abort stay responsive) and keep going past a few empty ones.
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_bulb_camera());
+    fake.bulb_file_polls_before_ready = 3;
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    driver->start_exposure(0.05, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_image_ready() == true);
+    CHECK(fake.bulb_file_polls == 4);  // three "not yet" answers, then the frame
+    REQUIRE(!fake.bulb_file_poll_timeouts.empty());
+    for (const auto& timeout : fake.bulb_file_poll_timeouts) {
+        CHECK(timeout > std::chrono::milliseconds(0));
+        CHECK(timeout <= std::chrono::seconds(1));
+    }
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto camera fake - decoder failure leaves camera idle with no image ready",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();

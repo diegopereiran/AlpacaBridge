@@ -14,7 +14,9 @@
 
 #include <alpacacore/vendor/gphoto/gphoto_sdk_wrapper.h>
 
+#include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -89,8 +91,13 @@ public:
         return locked([&] { return inner_.capture_and_download(handle); });
     }
 
-    vendor::gphoto::GPhotoCaptureResult wait_for_bulb_file_and_download(int handle) override {
-        return locked([&] { return inner_.wait_for_bulb_file_and_download(handle); });
+    void drain_events(int handle, std::chrono::milliseconds budget) override {
+        locked([&] { inner_.drain_events(handle, budget); });
+    }
+
+    std::optional<vendor::gphoto::GPhotoCaptureResult> poll_bulb_file_and_download(
+        int handle, std::chrono::milliseconds timeout) override {
+        return locked([&] { return inner_.poll_bulb_file_and_download(handle, timeout); });
     }
 
 private:

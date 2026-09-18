@@ -989,10 +989,17 @@ public:
             image_cached_ = false;
             abort_requested_.store(false);
             // Generous watchdog margin over the requested duration: USB
-            // transfer of a 20+MB RAW file plus libgphoto2/PTP overhead.
+            // transfer of a 20+MB RAW file plus libgphoto2/PTP overhead. A
+            // bulb capture also gets the whole window bulb_capture_with_abort
+            // may spend waiting for the frame after the shutter closes, so
+            // the watchdog never declares Idle while that wait is still
+            // legitimately running.
             auto duration_margin = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                        std::chrono::duration<double>(duration)) +
                                    std::chrono::seconds(60);
+            if (use_bulb) {
+                duration_margin += bulb_file_wait_for(duration);
+            }
             exposure_deadline_ = std::chrono::steady_clock::now() + duration_margin;
             exposure_deadline_valid_ = true;
             exposure_active_.store(true);
@@ -1362,24 +1369,72 @@ private:
         exposure_active_.store(false);
     }
 
-    // Bulb capture with early-abort support: sleeps in short slices so
+    // How long to keep polling for the frame after a bulb shutter closes. A
+    // body with long-exposure noise reduction on holds the file for a second
+    // exposure-length (the dark frame) before posting it, so the window
+    // scales with the exposure rather than being a fixed few seconds; the
+    // constant margin covers the RAW write and the USB download on top.
+    static std::chrono::steady_clock::duration bulb_file_wait_for(double duration_s) {
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                   std::chrono::duration<double>(duration_s)) +
+               std::chrono::seconds(30);
+    }
+
+    // After an abort the frame is still polled for -- briefly -- so the
+    // aborted file is consumed and deleted rather than left queued for the
+    // next exposure to mistake for its own (a body posts it a second or two
+    // after the close). run_exposure() discards whatever arrives.
+    static constexpr auto kAbortedBulbFileWait = std::chrono::seconds(15);
+
+    // Bulb capture with early-abort support. The hold loop pumps the camera's
+    // event queue in short slices instead of sleeping, so a Nikon body sees
+    // the host polling for the whole exposure the way the gphoto2 CLI's
+    // --wait-event does between bulb=1 and bulb=0 (issue #569), and so
     // stop_exposure()/abort_exposure() can close the shutter well before the
-    // full requested duration elapses.
+    // full requested duration elapses. After the close, the frame is polled
+    // for in slices up to bulb_file_wait_for(duration), checking the abort
+    // flag between slices.
     GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
         auto& sdk = sdk_;
+        using clock = std::chrono::steady_clock;
+        constexpr auto kHoldSlice = std::chrono::milliseconds(100);
+        constexpr auto kFilePollSlice = std::chrono::seconds(1);
+
         sdk.set_toggle_value(handle, "bulb", true);
-        constexpr double kSliceSeconds = 0.1;
-        double remaining = duration_s;
-        while (remaining > 0.0) {
-            double slice = std::min(remaining, kSliceSeconds);
-            std::this_thread::sleep_for(std::chrono::duration<double>(slice));
-            remaining -= slice;
-            if (abort_requested_.load()) {
-                break;
-            }
+        const auto hold_deadline =
+            clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
+        while (!abort_requested_.load()) {
+            const auto now = clock::now();
+            if (now >= hold_deadline) break;
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(hold_deadline - now);
+            sdk.drain_events(handle, std::min(remaining, std::chrono::milliseconds(kHoldSlice)));
         }
         sdk.set_toggle_value(handle, "bulb", false);
-        return sdk.wait_for_bulb_file_and_download(handle);
+
+        bool aborted = abort_requested_.load();
+        auto file_deadline =
+            clock::now() + (aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s));
+        while (true) {
+            const auto now = clock::now();
+            if (now >= file_deadline) break;
+            if (!aborted && abort_requested_.load()) {
+                aborted = true;
+                file_deadline = std::min(file_deadline, now + clock::duration(kAbortedBulbFileWait));
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(file_deadline - now);
+            auto frame =
+                sdk.poll_bulb_file_and_download(handle, std::min(remaining, std::chrono::milliseconds(kFilePollSlice)));
+            if (frame.has_value()) {
+                return std::move(*frame);
+            }
+        }
+        throw AlpacaException(
+            "Bulb capture: no file-added event from camera within " +
+                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                   aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s))
+                                   .count()) +
+                " s of closing the shutter (is long-exposure noise reduction on?)",
+            AlpacaError::DriverException);
     }
 
     // Requires mutex_ held. Populates the geometry properties (CameraXSize/

@@ -12,8 +12,10 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -106,14 +108,36 @@ public:
     virtual GPhotoCaptureResult capture_and_download(int handle) = 0;
 
     /**
-     * @brief Wait for the file-added event a just-closed bulb shutter
-     * produces, then download and delete it.
+     * @brief Pump the camera's PTP event queue for up to `budget`, discarding
+     * everything it delivers, and return once the budget is spent.
      *
-     * Callers drive the bulb sequence themselves via set_toggle_value(handle,
-     * "bulb", true/false) (see gphoto_camera_driver.cpp's abortable sleep
-     * loop) and call this immediately after closing the shutter.
+     * The bulb hold loop in gphoto_camera_driver.cpp calls this in short
+     * slices instead of sleeping: a Nikon body expects the host to keep
+     * polling its events while a bulb capture is open, exactly what the
+     * gphoto2 CLI's `--wait-event` does between `bulb=1` and `bulb=0`
+     * (issue #569). Best-effort and never throws: a failed poll sleeps out
+     * the remaining budget instead, because a throw here would leave the
+     * shutter open with nobody left to close it. A file-added event seen
+     * here cannot belong to the exposure in progress (its shutter is still
+     * open), so it is a leftover from an earlier one: the file is deleted
+     * from the camera and the event dropped, never handed to the next
+     * poll_bulb_file_and_download() as a fresh frame.
      */
-    virtual GPhotoCaptureResult wait_for_bulb_file_and_download(int handle) = 0;
+    virtual void drain_events(int handle, std::chrono::milliseconds budget) = 0;
+
+    /**
+     * @brief Wait up to `timeout` for the file-added event a just-closed
+     * bulb shutter produces, then download and delete that file.
+     *
+     * Returns std::nullopt when no file arrived within `timeout` so the caller
+     * can keep polling in slices (checking its own abort flag between them)
+     * up to a deadline of its own choosing; a real libgphoto2 failure throws.
+     * Callers drive the bulb sequence themselves via set_toggle_value(handle,
+     * "bulb", true/false) and drain_events() (see gphoto_camera_driver.cpp's
+     * abortable hold loop) and call this after closing the shutter.
+     */
+    virtual std::optional<GPhotoCaptureResult> poll_bulb_file_and_download(int handle,
+                                                                           std::chrono::milliseconds timeout) = 0;
 
 protected:
     // See the note at the top of the class: protected + non-virtual, so no
@@ -160,7 +184,10 @@ public:
 
     GPhotoCaptureResult capture_and_download(int handle) override;
 
-    GPhotoCaptureResult wait_for_bulb_file_and_download(int handle) override;
+    void drain_events(int handle, std::chrono::milliseconds budget) override;
+
+    std::optional<GPhotoCaptureResult> poll_bulb_file_and_download(int handle,
+                                                                   std::chrono::milliseconds timeout) override;
 
 private:
     GPhotoSDKWrapper();
