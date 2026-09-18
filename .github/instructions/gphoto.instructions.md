@@ -15,9 +15,12 @@ and fixed what that surfaced: `gp_camera_autodetect()`'s return-value contract, 
 ASCOM contract, a `StartExposure` ROI bounds check, and the `PixelSizeX`/`PixelSizeY` lookup table
 described below; a third session validated the D3300 on the same slot with no code change.
 All three runs are clean (0 errors, 0 issues, 0 timing violations); see
-`SUPPORTED-DRIVERS.md` and `AlpacaCore/conformu/GPhoto/`. Coverage beyond these three specific
-bodies (other Canon/Nikon/Sony models, bulb-mode capture, the SDK's other transports) is still
-only as validated as the notes below say for each.
+`SUPPORTED-DRIVERS.md` and `AlpacaCore/conformu/GPhoto/`. Bulb-mode capture was validated on the
+D3300 in a fourth session (issue #569: 60 s and 300 s frames through the Alpaca API), which also
+found and fixed the driver's first real bulb defect -- see the bulb bullet below and
+`docs/failures/0009-gphoto-nikon-bulb-full-config-walk.md`. Coverage beyond these three specific
+bodies (other Canon/Nikon/Sony models, the SDK's other transports) is still only as validated as
+the notes below say for each.
 
 SDK: **system packages**, not vendored — `libgphoto2-dev` + `libraw-dev` via pkg-config
 (`AlpacaCore/src/vendors/gphoto/CMakeLists.txt`). Unlike every other camera vendor, gphoto has no
@@ -132,14 +135,38 @@ SDK cleanup checklist does not apply here).
   libgphoto2 2.5.31's `ptp2.so` camlib via `strings`, which is the single camlib handling
   Canon/Nikon/Sony PTP — not a per-vendor code branch, so this should generalize across brands):
   set the shutter-speed widget to its `"bulb"` choice if the choice list has one, flip `"bulb"`
-  toggle on, sleep (in a driver-owned abortable loop so `StopExposure`/`AbortExposure` can close
-  the shutter early), flip `"bulb"` off, then `gp_camera_wait_for_event` for
-  `GP_EVENT_FILE_ADDED` and download. **The classic Canon `eosremoterelease` press/release bulb
+  toggle on, hold for the requested duration by pumping the camera's event queue in 100 ms slices
+  (`GPhotoSDK::drain_events`, a driver-owned abortable loop so `StopExposure`/`AbortExposure` can
+  close the shutter early), flip `"bulb"` off, then poll for `GP_EVENT_FILE_ADDED` in 1 s slices
+  (`GPhotoSDK::poll_bulb_file_and_download`) for up to `duration + 30 s` and download.
+  **Validated on the Nikon D3300 (issue #569): 60 s and 300 s frames through the Alpaca API.**
+  Three things that first run taught, all now load-bearing:
+  - **Every widget read/write goes through libgphoto2's single-config API**
+    (`gp_camera_get_single_config` / `gp_camera_set_single_config`), never the full tree
+    (`gp_camera_get_config` + `gp_camera_set_config`). The full walk reads dozens of PTP
+    properties; on a busy Nikon body (mid-bulb, or after a capture it refused) it fails or comes
+    back truncated, which is how the shutter-close toggle reported "Unspecified error", left the
+    capture unterminated and hung the camera's PTP stack until a power cycle, and how a later
+    session saw "Widget not present: shutterspeed2" for a widget `gphoto2 --get-config` showed
+    plainly. The gphoto2 CLI takes the single-widget path and the identical bulb sequence
+    succeeded every time on the same body. Record:
+    `docs/failures/0009-gphoto-nikon-bulb-full-config-walk.md`.
+  - **The hold pumps events rather than sleeping**, the way `gphoto2 --set-config bulb=1
+    --wait-event=<n>s --set-config bulb=0` does; a file-added event seen during the hold cannot be
+    this exposure's (the shutter is open) and is deleted from the camera and dropped rather than
+    handed to the next poll as a fresh frame.
+  - **The frame wait scales with the exposure.** With the body's long-exposure noise reduction on,
+    the file is posted a full exposure-length after the close (the dark frame), so a fixed 15 s
+    wait lost every long frame; the watchdog deadline in `start_exposure` includes that window
+    for a bulb capture. Tell users to turn "Long exposure NR" **Off** for astro use regardless:
+    it doubles the time to every frame and the dark is better taken separately. Also from the
+    bench: mode dial on M with the shutter speed on Bulb, and the lens/body on MF (with AF the
+    body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
+    first connect).
+  **The classic Canon `eosremoterelease` press/release bulb
   sequence (older EOS bodies with no standalone `"bulb"` widget) is NOT implemented** — a camera
   in that category will report bulb support as unavailable (native shutter-speed ceiling only)
   rather than fail confusingly; add the press/release path if/when tested against real hardware.
-  This whole sequence is unverified against physical hardware — treat any bulb-mode ConformU
-  failure or timeout as expected first-pass friction, not a design red flag.
 - **RAW format selection**: at connect, the driver scans the `"imageformat"`/`"imagequality"`
   widget's choices for one containing `raw`/`nef`/`cr2`/`cr3`/`arw` (case-insensitive), preferring
   a pure-RAW choice over a combined RAW+JPEG one, and sets it. If no RAW choice is found, capture

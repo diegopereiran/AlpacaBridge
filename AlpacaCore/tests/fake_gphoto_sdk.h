@@ -16,11 +16,15 @@
 #include <alpacacore/vendor/gphoto/gphoto_sdk_wrapper.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -110,6 +114,14 @@ inline std::string unique_test_model(const std::string& base) {
  *    gated by has_widget or has_bulb_), but lenient in the direction a fake
  *    must not be; a test that scripts an absent widget must not rely on the
  *    write failing.
+ *  - `drain_events` sleeps out its WHOLE budget where the real wrapper
+ *    returns as each event lands and polls again; the fake is the slower of
+ *    the two, so the hold loop's timing is exercised at its harshest.
+ *  - `poll_bulb_file_and_download` answers instantly, where the real wrapper
+ *    blocks up to its timeout for the file-added event. A "not ready" poll
+ *    (`bulb_file_polls_before_ready`) sleeps at most 10 ms of the timeout so
+ *    a multi-poll case stays fast; a test must not read the wall-clock of
+ *    that wait as the real one.
  *
  * Callers push one or more FakeCamera entries into `cameras` before
  * connecting (index == the Alpaca "cameraIndex"). Each fake camera carries
@@ -143,12 +155,26 @@ public:
     int close_count{0};
     std::string gphoto_version{"2.5.31"};
 
-    // Canned result returned by capture_and_download / wait_for_bulb_file_and_download.
+    // Canned result returned by capture_and_download / poll_bulb_file_and_download.
     vendor::gphoto::GPhotoCaptureResult capture_result;
 
     // Records every set_toggle_value(handle, "bulb", on) call, in order, so
     // bulb-sequence tests can assert true-then-false-then-download ordering.
     std::vector<bool> bulb_toggle_history;
+
+    // drain_events() bookkeeping: how many hold slices the driver pumped and
+    // their summed budget, so a test can pin that the bulb hold is spent
+    // polling the camera's events rather than sleeping (issue #569).
+    int drain_events_calls{0};
+    std::chrono::milliseconds drained_budget{0};
+
+    // poll_bulb_file_and_download() bookkeeping. `bulb_file_polls_before_ready`
+    // is how many polls answer "no file yet" (std::nullopt) before
+    // capture_result is delivered; 0 delivers on the first poll. Every poll
+    // is counted and its timeout recorded.
+    int bulb_file_polls_before_ready{0};
+    int bulb_file_polls{0};
+    std::vector<std::chrono::milliseconds> bulb_file_poll_timeouts;
 
     std::vector<vendor::gphoto::GPhotoCameraInfo> enumerate_cameras() override {
         log_and_maybe_throw("enumerate_cameras");
@@ -256,9 +282,25 @@ public:
         return capture_result;
     }
 
-    vendor::gphoto::GPhotoCaptureResult wait_for_bulb_file_and_download(int handle) override {
-        log_and_maybe_throw("wait_for_bulb_file_and_download");
+    void drain_events(int handle, std::chrono::milliseconds budget) override {
+        log_and_maybe_throw("drain_events");
         camera_for(handle);
+        ++drain_events_calls;
+        drained_budget += budget;
+        std::this_thread::sleep_for(budget);
+    }
+
+    std::optional<vendor::gphoto::GPhotoCaptureResult> poll_bulb_file_and_download(
+        int handle, std::chrono::milliseconds timeout) override {
+        log_and_maybe_throw("poll_bulb_file_and_download");
+        camera_for(handle);
+        ++bulb_file_polls;
+        bulb_file_poll_timeouts.push_back(timeout);
+        if (bulb_file_polls_before_ready > 0) {
+            --bulb_file_polls_before_ready;
+            std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
+            return std::nullopt;
+        }
         return capture_result;
     }
 
