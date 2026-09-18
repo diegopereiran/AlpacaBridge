@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T08:12:52.674564+00:00",
-  "source_commit": "0dc55387d912437a34f3dbf6085d13d0f96b2dc6",
+  "generated_at": "2026-09-18T08:15:57.968127+00:00",
+  "source_commit": "c21d0c8ca445cc866e9bf581a82931d2d9fab23b",
   "dependencies": [
     {
       "id": "zwo-asi-camera-sdk",
@@ -1005,10 +1005,15 @@
       "provenance": "manual"
     },
     {
-      "id": "synscan-motor-protocol",
-      "path": "AlpacaCore/external/SynScan",
+      "id": "synscan-serial-protocol",
+      "path": "AlpacaCore/external/SynScan/synscanserialcommunicationprotocol_version33.md",
       "provenance": "manual",
       "version": "3.3"
+    },
+    {
+      "id": "skywatcher-motor-controller-protocol",
+      "path": "AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md",
+      "provenance": "manual"
     },
     {
       "id": "wandererastro-v4ec-manual",
