@@ -1102,10 +1102,6 @@ Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.
 
 Issues live in GitHub Issues on `open-astro/AlpacaBridge`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
-### Triage labels
-
-Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
-
 ### Domain docs
 
-Single-context layout at repo root (created lazily by `/domain-modeling`). See `docs/agents/domain.md`.
+Single-context layout at repo root (`CONTEXT.md`, `docs/decisions/`). See `docs/agents/domain.md`.

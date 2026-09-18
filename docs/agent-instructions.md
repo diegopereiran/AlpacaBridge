@@ -47,10 +47,9 @@ deltas only; a rule affecting a second vendor belongs in `AGENTS.md`.
 
 ## Agent skills configuration
 
-AGENTS.md's "Agent skills" section points at `docs/agents/issue-tracker.md`,
-`docs/agents/triage-labels.md`, and `docs/agents/domain.md` for how
-issue-tracker, triage-label, and domain-doc skills should behave in this repo.
-Read the relevant one before using or configuring those skills.
+AGENTS.md's "Agent skills" section points at `docs/agents/issue-tracker.md`
+and `docs/agents/domain.md` for how the issue-tracker and domain-doc
+conventions work in this repo. Read the relevant one before using them.
 
 ## Failure and decision memory
 
