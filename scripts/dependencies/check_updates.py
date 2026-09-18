@@ -264,6 +264,16 @@ def build_report(sources: dict, inventory: dict | None, state: dict, do_download
     ]
     for dep_id, kind, status, detail in rows:
         lines.append(f"| `{dep_id}` | {kind} | {status} | {detail} |")
+
+    external_refs = sources.get("external_references", [])
+    if external_refs:
+        lines += ["", "## External reference material", "",
+                   "Protocol docs / manuals with external provenance, not a build dependency "
+                   "-- tracked for visibility only, never automatically checked.", "",
+                   "| Reference | Path |", "|---|---|"]
+        for ref in external_refs:
+            lines.append(f"| `{ref['id']}` | `{ref['path']}` |")
+
     lines.append(stale_note)
     lines.append("GitHub Actions pins are tracked by Dependabot, not this workflow.")
     lines.append(

@@ -464,8 +464,13 @@ dependencies:
     relationship: direct
     current:
       path: debian/control
+      # g++ (compiler) and adduser (basic system account tool) are
+      # intentionally excluded -- toolchain/trivial, not meaningfully
+      # trackable "versions" the way a library or build tool is.
       packages:
         - cmake
+        - debhelper
+        - pkgconf
         - libgpiod
         - nlohmann-json3
         - hidapi
