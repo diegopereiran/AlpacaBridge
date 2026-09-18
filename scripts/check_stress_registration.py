@@ -1179,8 +1179,7 @@ def self_test():
             "    list(APPEND TEST_SOURCES fakevendor_concurrency_stress.cpp)\n"
             "endif()\n")
 
-        def run_main_with(stress_source, core_source="", cmake_source=None, guard_allowlist=(),
-                          capture_output=False):
+        def run_main_with(stress_source, core_source="", cmake_source=None, guard_allowlist=()):
             with open(stress, "w", encoding="utf-8") as fh:
                 fh.write(stress_source + "\n")
             with open(core, "w", encoding="utf-8") as fh:
@@ -1211,21 +1210,19 @@ def self_test():
             GUARD_ALLOWLIST.clear()
             GUARD_ALLOWLIST.update(guard_allowlist)
             try:
-                if capture_output:
-                    # Some self-tests need to assert on the finding TEXT, not
-                    # just the exit code -- an unrelated future rule that also
-                    # happens to reject the same fixture would otherwise keep
-                    # an exit-code-only check green through a regression in
-                    # the rule this case actually exists to pin (the same
-                    # unfalsifiability class this script's own fixes remove,
-                    # one level up). Captured rather than threaded through
-                    # main()'s own return value, so every other call site
-                    # (int-only) is untouched.
-                    buf = io.StringIO()
-                    with contextlib.redirect_stdout(buf):
-                        code = main()
-                    return code, buf.getvalue()
-                return main()
+                # Always returns (exit_code, printed_output) -- never a bare
+                # int. The earlier shape (an int by default, a tuple only
+                # when a `capture_output=True` kwarg was passed) let a call
+                # site that forgot to unpack quietly get back a
+                # comparison against the wrong kind of value with no error
+                # (review note on the #512/#513/#514 bundle: exactly the
+                # unfalsifiability class this file exists to remove, one
+                # level up in its own test suite). One shape, no flag,
+                # nothing to get wrong: every caller unpacks `code, _ = ...`.
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = main()
+                return code, buf.getvalue()
             finally:
                 globals()["tracked_files"] = real_tracked_files
                 globals()["read_text"] = real_read_text
@@ -1247,11 +1244,11 @@ def self_test():
             "  CHECK(guard.total_calls() > 0);\n"
         )
         clean = 'TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n' + GUARDED_BODY + "}"
-        check("main() passes when a registration file uses [stress]",
-              run_main_with(clean) == 0)
+        code, _ = run_main_with(clean)
+        check("main() passes when a registration file uses [stress]", code == 0)
         offending = 'TEST_CASE("Bad", "[fakevendor][camera][stress-guard]") {\n' + GUARDED_BODY + "}"
-        check("main() FAILS when a registration file uses [stress-guard] alone",
-              run_main_with(offending) == 1)
+        code, _ = run_main_with(offending)
+        check("main() FAILS when a registration file uses [stress-guard] alone", code == 1)
         # Pins that the rejection is PER CASE, not per file. Every other
         # fixture here holds a single TEST_CASE, so a per-file implementation
         # (union the file's tags, then test) would pass all of them
@@ -1264,46 +1261,46 @@ def self_test():
         # deleting both tag rules left it green (review finding on PR #465).
         mixed = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n' + GUARDED_BODY + "}\n"
                  'TEST_CASE("Bad", "[fakevendor][camera][stress-guard]") {}')
-        check("main() FAILS on a [stress-guard]-only case beside a [stress] one",
-              run_main_with(mixed) == 1)
+        code, _ = run_main_with(mixed)
+        check("main() FAILS on a [stress-guard]-only case beside a [stress] one", code == 1)
 
         # The sibling wiring: a [stress] case in a NON-registration file is the
         # regression that made CI's vendor zero-coverage grep vacuous.
         stray = 'TEST_CASE("Stray", "[fakecore][stress]") {}'
-        check("main() FAILS when a non-registration file uses [stress]",
-              run_main_with(clean, stray) == 1)
+        code, _ = run_main_with(clean, stray)
+        check("main() FAILS when a non-registration file uses [stress]", code == 1)
         guarded = 'TEST_CASE("Fine", "[fakecore][stress-guard]") {}'
-        check("main() passes when a non-registration file uses [stress-guard]",
-              run_main_with(clean, guarded) == 0)
+        code, _ = run_main_with(clean, guarded)
+        check("main() passes when a non-registration file uses [stress-guard]", code == 0)
 
         # The guard rules and their wiring into main() (issues #379, #334).
         # Each drops ONE line from the documented idiom, so a rule that stops
         # firing is caught here rather than only when a real registration
         # quietly loses its assertion.
         no_guard = 'TEST_CASE("Ok", "[fakevendor][camera][stress]") {}'
-        check("main() FAILS when a registration file has no StressCallGuard",
-              run_main_with(no_guard) == 1)
+        code, _ = run_main_with(no_guard)
+        check("main() FAILS when a registration file has no StressCallGuard", code == 1)
 
         unasserted = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                       "  alpacacore::test::StressCallGuard guard;\n"
                       "  INFO(guard.report());\n"
                       "  CHECK(guard.total_calls() > 0);\n}")
-        check("main() FAILS when a guard's unexpected_count() is never CHECKed",
-              run_main_with(unasserted) == 1)
+        code, _ = run_main_with(unasserted)
+        check("main() FAILS when a guard's unexpected_count() is never CHECKed", code == 1)
 
         no_info = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                    "  alpacacore::test::StressCallGuard guard;\n"
                    "  CHECK(guard.unexpected_count() == 0);\n"
                    "  CHECK(guard.total_calls() > 0);\n}")
-        check("main() FAILS when INFO(guard.report()) is missing",
-              run_main_with(no_info) == 1)
+        code, _ = run_main_with(no_info)
+        check("main() FAILS when INFO(guard.report()) is missing", code == 1)
 
         vacuous = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                    "  alpacacore::test::StressCallGuard guard;\n"
                    "  INFO(guard.report());\n"
                    "  CHECK(guard.unexpected_count() == 0);\n}")
-        check("main() FAILS when total_calls() is not CHECKed (vacuous zero)",
-              run_main_with(vacuous) == 1)
+        code, _ = run_main_with(vacuous)
+        check("main() FAILS when total_calls() is not CHECKed (vacuous zero)", code == 1)
         # The comparison matters: `>= 0` always holds, so it is the same hole
         # with a CHECK line present (review note on PR #465).
         vacuous_cmp = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
@@ -1311,48 +1308,48 @@ def self_test():
                        "  INFO(guard.report());\n"
                        "  CHECK(guard.unexpected_count() == 0);\n"
                        "  CHECK(guard.total_calls() >= 0);\n}")
-        check("main() FAILS when total_calls() is CHECKed against >= 0",
-              run_main_with(vacuous_cmp) == 1)
+        code, _ = run_main_with(vacuous_cmp)
+        check("main() FAILS when total_calls() is CHECKed against >= 0", code == 1)
         ge_one = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                   "  alpacacore::test::StressCallGuard guard;\n"
                   "  INFO(guard.report());\n"
                   "  CHECK(guard.unexpected_count() == 0);\n"
                   "  CHECK(guard.total_calls() >= 1);\n}")
-        check("main() passes when total_calls() is CHECKed against >= 1",
-              run_main_with(ge_one) == 0)
+        code, _ = run_main_with(ge_one)
+        check("main() passes when total_calls() is CHECKed against >= 1", code == 0)
 
         local_call = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                       + GUARDED_BODY +
                       "}\n"
                       "static void call(const std::function<void()>& fn) { try { fn(); } catch (...) {} }")
-        check("main() FAILS when a registration file defines its own call() helper",
-              run_main_with(local_call) == 1)
+        code, _ = run_main_with(local_call)
+        check("main() FAILS when a registration file defines its own call() helper", code == 1)
         # The lambda form, which three of the five merged helpers used; the
         # first regex needed `call(` directly and never matched `call = [`.
         local_call_lambda = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                              "  auto call = [](auto&& fn) { try { fn(); } catch (...) {} };\n"
                              + GUARDED_BODY +
                              "}\n")
-        check("main() FAILS when a registration file defines a call() lambda",
-              run_main_with(local_call_lambda) == 1)
+        code, _ = run_main_with(local_call_lambda)
+        check("main() FAILS when a registration file defines a call() lambda", code == 1)
         # Both STALE GUARD ALLOWLIST ENTRY arms: a listed file that already
         # uses the guard, and an entry naming a file the tree does not hold.
         # Neither fires on the real tree today, so without these two cases
         # deleting either rule left every self-test green.
-        check("main() FAILS when an allow-listed registration file uses the guard",
-              run_main_with(clean, guard_allowlist={os.path.basename(stress)}) == 1)
-        check("main() FAILS when GUARD_ALLOWLIST names a file that does not exist",
-              run_main_with(clean, guard_allowlist={"nosuch_concurrency_stress.cpp"}) == 1)
-        check("main() passes when an allow-listed file really lacks the guard",
-              run_main_with(no_guard, guard_allowlist={os.path.basename(stress)}) == 0)
+        code, _ = run_main_with(clean, guard_allowlist={os.path.basename(stress)})
+        check("main() FAILS when an allow-listed registration file uses the guard", code == 1)
+        code, _ = run_main_with(clean, guard_allowlist={"nosuch_concurrency_stress.cpp"})
+        check("main() FAILS when GUARD_ALLOWLIST names a file that does not exist", code == 1)
+        code, _ = run_main_with(no_guard, guard_allowlist={os.path.basename(stress)})
+        check("main() passes when an allow-listed file really lacks the guard", code == 0)
         # A call SITE is not a definition: the guard's own invocation style
         # and any helper named call() from a header must not trip the rule.
         call_site = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                      "  guard([&] { call(1); });\n"
                      + GUARDED_BODY +
                      "}\n")
-        check("main() passes when call() is only invoked, not defined",
-              run_main_with(call_site) == 0)
+        code, _ = run_main_with(call_site)
+        check("main() passes when call() is only invoked, not defined", code == 0)
         # Line-LEADING uses: the regex is anchored at ^, so a keyword must be
         # the first token for the lookahead to matter (a mid-line use never
         # matched to begin with).
@@ -1366,8 +1363,8 @@ def self_test():
                         'TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                         + GUARDED_BODY +
                         "}\n")
-        check("main() passes when call() follows a keyword (a use, not a definition)",
-              run_main_with(keyword_site) == 0)
+        code, _ = run_main_with(keyword_site)
+        check("main() passes when call() follows a keyword (a use, not a definition)", code == 0)
         # The return-type class stays on one line: a type on one line and
         # `call(` on the next is not read as one definition.
         wrapped = ('int x = 0;\n'
@@ -1375,8 +1372,8 @@ def self_test():
                    'TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
                    + GUARDED_BODY +
                    "}\n")
-        check("main() passes when a type ends one line and call( starts the next",
-              run_main_with(wrapped) == 0)
+        code, _ = run_main_with(wrapped)
+        check("main() passes when a type ends one line and call( starts the next", code == 0)
         # Rule 5 reads comment-stripped text, like rules 1-3: a closing CHECK
         # that has been commented out must not count as present.
         commented_out = ('TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n'
@@ -1384,8 +1381,8 @@ def self_test():
                          "  INFO(guard.report());\n"
                          "  CHECK(guard.unexpected_count() == 0);\n"
                          "  // CHECK(guard.total_calls() > 0);\n}")
-        check("main() FAILS when the total_calls() CHECK is commented out",
-              run_main_with(commented_out) == 1)
+        code, _ = run_main_with(commented_out)
+        check("main() FAILS when the total_calls() CHECK is commented out", code == 1)
 
         # Issue #514: the guard rules must be scoped PER TEST_CASE, not per
         # file. A second TEST_CASE that constructs its own StressCallGuard but
@@ -1406,7 +1403,7 @@ def self_test():
         # unfalsifiability class the #512/#513/#514 bundle removes elsewhere,
         # one level up here) -- assert the actual per-case finding fired, not
         # just that *something* failed.
-        second_case_code, second_case_output = run_main_with(second_case_unguarded, capture_output=True)
+        second_case_code, second_case_output = run_main_with(second_case_unguarded)
         check("main() FAILS when a second TEST_CASE constructs a guard "
               "without closing it, even though an earlier case in the same "
               "file does (issue #514 per-case scoping)",
@@ -1423,17 +1420,17 @@ def self_test():
             'TEST_CASE("Ok", "[fakevendor][camera][stress]") {\n' + GUARDED_BODY + "}\n"
             'TEST_CASE("Also ok", "[fakevendor][camera][stress]") {\n' + GUARDED_BODY + "}\n"
         )
+        code, _ = run_main_with(two_cases_both_guarded)
         check("main() passes when two TEST_CASEs each construct and fully "
-              "close their own guard",
-              run_main_with(two_cases_both_guarded) == 0)
+              "close their own guard", code == 0)
 
         # The CMake gating rule's own wiring into main() (issue #396).
         ungated_cmake = ("set(TEST_SOURCES test_core.cpp\n"
                          "    fakevendor_concurrency_stress.cpp)\n")
-        check("main() FAILS when a registration file compiles unconditionally",
-              run_main_with(clean, "", ungated_cmake) == 1)
-        check("main() FAILS when a registration file is in no CMakeLists at all",
-              run_main_with(clean, "", "set(TEST_SOURCES test_core.cpp)\n") == 1)
+        code, _ = run_main_with(clean, "", ungated_cmake)
+        check("main() FAILS when a registration file compiles unconditionally", code == 1)
+        code, _ = run_main_with(clean, "", "set(TEST_SOURCES test_core.cpp)\n")
+        check("main() FAILS when a registration file is in no CMakeLists at all", code == 1)
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
