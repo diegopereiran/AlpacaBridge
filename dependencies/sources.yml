@@ -533,10 +533,19 @@ external_references:
   - id: oasisastro-focuser-protocol
     path: AlpacaCore/external/oasisastro
     provenance: manual
-  - id: synscan-motor-protocol
-    path: AlpacaCore/external/SynScan
+  - id: synscan-serial-protocol
+    path: AlpacaCore/external/SynScan/synscanserialcommunicationprotocol_version33.md
     provenance: manual
     version: "3.3"
+  # Shares the SynScan directory but documents a different protocol for a
+  # different driver (vendor key `skywatcher`, distinct from `synscan` --
+  # see .github/instructions/skywatcher.instructions.md): the Sky-Watcher
+  # motor controller command set, spoken directly to the mount's motor
+  # board rather than through a hand-controller. No compiled SDK exists
+  # for either vendor; both are pure protocol implementations.
+  - id: skywatcher-motor-controller-protocol
+    path: AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller_Command_Set.md
+    provenance: manual
   - id: wandererastro-v4ec-manual
     path: AlpacaCore/external/WandererAstro
     provenance: manual
