@@ -1,0 +1,759 @@
+{
+  "generated_at": "2026-09-18T07:27:40.766007+00:00",
+  "source_commit": "a83c9b5f1b09051a75e4a3c0265fd1f7e1a1d282",
+  "dependencies": [
+    {
+      "id": "zwo-asi-camera-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "note": "version resolved at scan time from the installed SONAME",
+        "version": "1.41"
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": true
+      },
+      "contents": {
+        "file_count": 7,
+        "total_size_bytes": 15666127,
+        "libraries": [
+          {
+            "path": "lib/linux/armv8/libASICamera2.so",
+            "sha256": "3ecf511979ed571131e7d7f4a467112aba21940b4dc91d63bd109b9683bf67c4",
+            "size": 4042678
+          },
+          {
+            "path": "lib/linux/armv8/libASICamera2.so.1.41",
+            "sha256": "3ecf511979ed571131e7d7f4a467112aba21940b4dc91d63bd109b9683bf67c4",
+            "size": 4042678
+          }
+        ],
+        "executables": [
+          {
+            "path": "lib/linux/asi.rules",
+            "sha256": "0e7bbbcd99f56014e0a593416491a9ebf3fce72cd31238dbd657ed4aa62d01c0",
+            "size": 213
+          }
+        ],
+        "firmware": {
+          "count": 0,
+          "aggregate_sha256": null
+        },
+        "archives": [],
+        "licenses": [
+          "license.txt"
+        ],
+        "examples": {
+          "present": false,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "zwo-eaf-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "note": "version resolved at scan time from the installed SONAME",
+        "version": "1.7.7"
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": false
+      },
+      "contents": {
+        "file_count": 6,
+        "total_size_bytes": 2894680,
+        "libraries": [
+          {
+            "path": "lib/armv8/libEAFFocuser.so.1.7.7",
+            "sha256": "0ce25b248a727ec4cad07cc4de4ffeb256773f9bc23794a66a8a527132d5df6d",
+            "size": 766816
+          },
+          {
+            "path": "lib/armv8/libEAFFocuser.so",
+            "sha256": "0ce25b248a727ec4cad07cc4de4ffeb256773f9bc23794a66a8a527132d5df6d",
+            "size": 766816
+          }
+        ],
+        "executables": [
+          {
+            "path": "license.txt",
+            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
+            "size": 1095
+          },
+          {
+            "path": "include/EAF_focuser.h",
+            "sha256": "2391a9020eea40e3072a9dbfc3359b8dfde8b75f124bb602c7a55d5fd61edc26",
+            "size": 27367
+          },
+          {
+            "path": "lib/eaf.rules",
+            "sha256": "0a2496843e2409f753b5b82b8580217282cd31958bdf20589a4277df7669debb",
+            "size": 108
+          }
+        ],
+        "firmware": {
+          "count": 0,
+          "aggregate_sha256": null
+        },
+        "archives": [],
+        "licenses": [
+          "license.txt"
+        ],
+        "examples": {
+          "present": false,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "zwo-efw-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "note": "version resolved at scan time from the installed SONAME",
+        "version": "1.8.4"
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": false
+      },
+      "contents": {
+        "file_count": 6,
+        "total_size_bytes": 181095,
+        "libraries": [
+          {
+            "path": "lib/armv8/libEFWFilter.so",
+            "sha256": "100fcfd03a2370c715db3b188710fa619bfab7fb83eb54ea754aad07fdbd328b",
+            "size": 53216
+          },
+          {
+            "path": "lib/armv8/libEFWFilter.so.1.8.4",
+            "sha256": "100fcfd03a2370c715db3b188710fa619bfab7fb83eb54ea754aad07fdbd328b",
+            "size": 53216
+          }
+        ],
+        "executables": [
+          {
+            "path": "license.txt",
+            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
+            "size": 1095
+          },
+          {
+            "path": "include/EFW_filter.h",
+            "sha256": "c55474d3d8a7fadf9d08575d25807050dcebd3bff29943c9dbe22fbd40a7e76c",
+            "size": 10004
+          },
+          {
+            "path": "lib/efw.rules",
+            "sha256": "07166fbfee4220bf3d7195e94230ae7d7bd9002fbed69af3f192b9369fc7236f",
+            "size": 110
+          }
+        ],
+        "firmware": {
+          "count": 0,
+          "aggregate_sha256": null
+        },
+        "archives": [],
+        "licenses": [
+          "license.txt"
+        ],
+        "examples": {
+          "present": false,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "zwo-caa-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "note": "version resolved at scan time from the installed SONAME",
+        "version": "1.5.9"
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": false
+      },
+      "contents": {
+        "file_count": 6,
+        "total_size_bytes": 1415592,
+        "libraries": [
+          {
+            "path": "lib/armv8/libCAA.so",
+            "sha256": "680286a000d203883fc626e1ea4d4addadf5d93e940c33135a7ee20d98abe901",
+            "size": 393248
+          },
+          {
+            "path": "lib/armv8/libCAA.so.1.5.9",
+            "sha256": "680286a000d203883fc626e1ea4d4addadf5d93e940c33135a7ee20d98abe901",
+            "size": 393248
+          }
+        ],
+        "executables": [
+          {
+            "path": "license.txt",
+            "sha256": "98ad1c18048bfdabc8463740ac36a8d8cd710bdc3102ac6c22978ec50056e5a2",
+            "size": 1095
+          },
+          {
+            "path": "include/CAA_API.h",
+            "sha256": "cacf58d33ccc1911fd6f7788b62cac0ec8284729ea24942f988bb089d972e697",
+            "size": 14347
+          },
+          {
+            "path": "lib/caa.rules",
+            "sha256": "b1570b3678872fd8bd63e2ad8ad9ae3371a8a45fbfa66ce5f05346c28ff15534",
+            "size": 118
+          }
+        ],
+        "firmware": {
+          "count": 0,
+          "aggregate_sha256": null
+        },
+        "archives": [],
+        "licenses": [
+          "license.txt"
+        ],
+        "examples": {
+          "present": false,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "qhy-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "version": "26.06.04",
+        "path": "AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04"
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": true
+      },
+      "contents": {
+        "file_count": 230,
+        "total_size_bytes": 55569794,
+        "libraries": [
+          {
+            "path": "sdk_linux_arm64_26.06.04/sbin/fxload",
+            "sha256": "218d8ab3ef2a8d440cce4ae6a4069aa46e5b28bae38da9f21cf231afebb86f45",
+            "size": 23264
+          },
+          {
+            "path": "sdk_linux_arm64_26.06.04/usr/local/fx3load/fxload",
+            "sha256": "218d8ab3ef2a8d440cce4ae6a4069aa46e5b28bae38da9f21cf231afebb86f45",
+            "size": 23264
+          },
+          {
+            "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so.26.6.4.16",
+            "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
+            "size": 5037960
+          },
+          {
+            "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so.20",
+            "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
+            "size": 5037960
+          },
+          {
+            "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so",
+            "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
+            "size": 5037960
+          }
+        ],
+        "executables": [],
+        "firmware": {
+          "count": 110,
+          "aggregate_sha256": "b5d65282a3a53e3c94695baae2dba5134bfc132724ed28e996ad8c5d524fe749"
+        },
+        "archives": [],
+        "licenses": [],
+        "examples": {
+          "present": true,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "no-sdk-license",
+          "severity": "high",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "firmware-without-source",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "touptek-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "version": "20260128",
+        "path": "AlpacaCore/external/ToupTek/toupcamsdk.20260128"
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": true
+      },
+      "contents": {
+        "file_count": 67,
+        "total_size_bytes": 45575137,
+        "libraries": [
+          {
+            "path": "toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so",
+            "sha256": "382a84e4b8197f2f359610ccc59288f8dd5109f5de077f1cddb13ff0ae10bde8",
+            "size": 45156504
+          }
+        ],
+        "executables": [],
+        "firmware": {
+          "count": 0,
+          "aggregate_sha256": null
+        },
+        "archives": [],
+        "licenses": [],
+        "examples": {
+          "present": true,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "no-sdk-license",
+          "severity": "high",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "svbony-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "version": "unknown",
+        "path": "AlpacaCore/external/SVBONY"
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": true
+      },
+      "contents": {
+        "file_count": 10,
+        "total_size_bytes": 13106651,
+        "libraries": [
+          {
+            "path": "lib/armv8/libSVBCameraSDK.so",
+            "sha256": "d8c6c1848d4cc95de6594449f43ee339693dfe52a8341bc857a3fe183d16e0e3",
+            "size": 5265352
+          },
+          {
+            "path": "lib/armv8/libusb-1.0.so.0.1.0",
+            "sha256": "038dcbf60a1cb511bd039bbb6444f8ce08328ff1a208b795c3581a640e8f7dde",
+            "size": 407056
+          }
+        ],
+        "executables": [],
+        "firmware": {
+          "count": 0,
+          "aggregate_sha256": null
+        },
+        "archives": [],
+        "licenses": [],
+        "examples": {
+          "present": true,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "no-sdk-license",
+          "severity": "high",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "nested-third-party-component",
+          "severity": "medium",
+          "detail": "lib/armv8/libusb-1.0.so.0.1.0",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "playerone-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "version": "unknown",
+        "note": "Two independently versioned SDK bundles from the same vendor (camera V3.10.0, filter wheel V1.2.3) -- not representable as one comparable version string, so update checks report version-unknown rather than a false comparison against either sub-version."
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": true
+      },
+      "contents": {
+        "file_count": 19,
+        "total_size_bytes": 2539210,
+        "libraries": [
+          {
+            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1.2",
+            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
+            "size": 140616
+          },
+          {
+            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so",
+            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
+            "size": 140616
+          },
+          {
+            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1.2.3",
+            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
+            "size": 140616
+          },
+          {
+            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1",
+            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
+            "size": 140616
+          },
+          {
+            "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.3.10.0",
+            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
+            "size": 474808
+          },
+          {
+            "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.3.10",
+            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
+            "size": 474808
+          },
+          {
+            "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.3",
+            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
+            "size": 474808
+          },
+          {
+            "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so",
+            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
+            "size": 474808
+          }
+        ],
+        "executables": [
+          {
+            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/udev/99-player_one_astronomy.rules",
+            "sha256": "715becf8a67280077d4f6d80bc2663676272765d32b9f1d87aeebdbbd992e402",
+            "size": 376
+          }
+        ],
+        "firmware": {
+          "count": 0,
+          "aggregate_sha256": null
+        },
+        "archives": [],
+        "licenses": [
+          "PlayerOne_Camera_SDK_Linux_V3.10.0/license.txt",
+          "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/license.txt"
+        ],
+        "examples": {
+          "present": false,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "libgpiod",
+      "kind": "vendored-source",
+      "relationship": "direct",
+      "current": {
+        "version": "2.2.4",
+        "path": "AlpacaCore/external/libgpiod/libgpiod-2.2.4.tar.xz",
+        "sha256": "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592"
+      },
+      "usage": {
+        "build": true,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "nlohmann-json",
+      "kind": "cmake-dependency",
+      "relationship": "direct",
+      "current": {
+        "version": "3.11.3",
+        "path": "AlpacaHTTP/CMakeLists.txt"
+      },
+      "usage": {
+        "build": true,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "catch2",
+      "kind": "test-dependency",
+      "relationship": "direct",
+      "current": {
+        "version": "apt (unpinned)",
+        "path": "AlpacaCore/tests/CMakeLists.txt"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "cppcheck",
+      "kind": "ci-tool",
+      "relationship": "direct",
+      "current": {
+        "version": "2.17.1",
+        "sha256": "bfd681868248ec03855ca7c2aea7bcb1f39b8b18860d76aec805a92a967b966c",
+        "path": ".github/workflows/ci.yml"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "zizmor",
+      "kind": "ci-tool",
+      "relationship": "direct",
+      "current": {
+        "version": "1.25.2",
+        "sha256": "4b4b9491112c2a09b318101c0d3349b73af1c4f532e097dd6d0164f2abda760d",
+        "path": ".github/workflows/ci.yml"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "debian-build-deps",
+      "kind": "system-package",
+      "relationship": "direct",
+      "current": {
+        "path": "debian/control",
+        "packages": [
+          "cmake",
+          "libgpiod",
+          "nlohmann-json3",
+          "hidapi",
+          "libusb-1.0",
+          "systemd",
+          "libgphoto2",
+          "libraw",
+          "curl",
+          "zlib"
+        ]
+      },
+      "usage": {
+        "build": true,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "debian-runtime-deps",
+      "kind": "system-package",
+      "relationship": "direct",
+      "current": {
+        "path": "debian/control",
+        "packages": [
+          "libgpiod",
+          "hidapi",
+          "libusb-1.0",
+          "systemd"
+        ]
+      },
+      "usage": {
+        "build": false,
+        "runtime": true,
+        "packaged": true
+      }
+    },
+    {
+      "id": "github-actions",
+      "kind": "managed-elsewhere",
+      "relationship": "indirect",
+      "current": {
+        "path": ".github/workflows/"
+      },
+      "usage": {}
+    }
+  ],
+  "external_references": [
+    {
+      "id": "bisque-theskyx-protocol",
+      "path": "AlpacaCore/external/Bisque",
+      "provenance": "manual"
+    },
+    {
+      "id": "celestron-nexstar-protocol",
+      "path": "AlpacaCore/external/Celestron",
+      "provenance": "manual"
+    },
+    {
+      "id": "gemini-powerdatahub-protocol",
+      "path": "AlpacaCore/external/Gemini",
+      "provenance": "manual"
+    },
+    {
+      "id": "ioptron-rs232-protocol",
+      "path": "AlpacaCore/external/iOptron",
+      "provenance": "manual",
+      "version": "3.10"
+    },
+    {
+      "id": "losmandy-g11-protocol",
+      "path": "AlpacaCore/external/Losmandy",
+      "provenance": "manual"
+    },
+    {
+      "id": "oasisastro-focuser-protocol",
+      "path": "AlpacaCore/external/oasisastro",
+      "provenance": "manual"
+    },
+    {
+      "id": "synscan-motor-protocol",
+      "path": "AlpacaCore/external/SynScan",
+      "provenance": "manual",
+      "version": "3.3"
+    },
+    {
+      "id": "wandererastro-v4ec-manual",
+      "path": "AlpacaCore/external/WandererAstro",
+      "provenance": "manual"
+    }
+  ],
+  "drift_failures": []
+}

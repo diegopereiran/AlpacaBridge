@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/open-astro/AlpacaBridge/dependencies/inventory.schema.json",
+  "title": "AlpacaBridge dependency inventory",
+  "type": "object",
+  "required": ["generated_at", "source_commit", "dependencies", "external_references", "drift_failures"],
+  "properties": {
+    "generated_at": {"type": "string", "format": "date-time"},
+    "source_commit": {"type": "string"},
+    "drift_failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["component", "message"],
+        "properties": {
+          "component": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "relationship", "current"],
+        "properties": {
+          "id": {"type": "string"},
+          "kind": {
+            "type": "string",
+            "enum": [
+              "vendor-sdk", "vendored-source", "cmake-dependency",
+              "test-dependency", "ci-tool", "system-package", "managed-elsewhere"
+            ]
+          },
+          "relationship": {"type": "string", "enum": ["direct", "indirect"]},
+          "current": {"type": "object"},
+          "usage": {
+            "type": "object",
+            "properties": {
+              "build": {"type": "boolean"},
+              "runtime": {"type": "boolean"},
+              "packaged": {"type": "boolean"}
+            }
+          },
+          "contents": {
+            "type": "object",
+            "description": "Present only for kind=vendor-sdk. Recursive file-level scan.",
+            "properties": {
+              "file_count": {"type": "integer"},
+              "total_size_bytes": {"type": "integer"},
+              "libraries": {"type": "array"},
+              "executables": {"type": "array"},
+              "firmware": {"type": "object"},
+              "archives": {"type": "array"},
+              "licenses": {"type": "array"},
+              "examples": {
+                "type": "object",
+                "properties": {
+                  "present": {"type": "boolean"},
+                  "used_by_project": {"type": "boolean"}
+                }
+              }
+            }
+          },
+          "risks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["code", "severity", "acknowledged"],
+              "properties": {
+                "code": {"type": "string"},
+                "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                "detail": {"type": "string"},
+                "acknowledged": {"type": "boolean"},
+                "review_after": {"type": ["string", "null"]}
+              }
+            }
+          }
+        }
+      }
+    },
+    "external_references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "path", "provenance"],
+        "properties": {
+          "id": {"type": "string"},
+          "path": {"type": "string"},
+          "provenance": {"type": "string"},
+          "version": {"type": "string"}
+        }
+      }
+    }
+  }
+}

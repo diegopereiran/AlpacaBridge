@@ -1,0 +1,491 @@
+# Human-maintained dependency provenance and update rules.
+#
+# scripts/dependencies/map_dependencies.py reads this file, cross-checks it
+# against the repository (CMakeLists.txt, debian/rules, ci.yml, build
+# scripts), and regenerates dependencies/inventory.json.
+# scripts/dependencies/check_updates.py reads the generated inventory and
+# this file's `updates` blocks to check each dependency against its upstream
+# source. See dependencies/README.md for the model this file implements.
+#
+# `kind` values:
+#   vendor-sdk        - a vendored camera/mount/filter-wheel SDK tree. Treated
+#                        as ONE component for update purposes (it usually ships
+#                        as a single upstream bundle) but recursively scanned
+#                        file-by-file for risk (see `scan_path`).
+#   vendored-source    - upstream source vendored and built in-tree (libgpiod).
+#   cmake-dependency   - a library resolved via CMake find_package/FetchContent.
+#   test-dependency    - a dependency used only by the test suite.
+#   ci-tool            - a tool downloaded by CI, not shipped in the package.
+#   system-package     - a Debian package this repo build-depends or
+#                         run-depends on (see debian/control).
+#   managed-elsewhere  - tracked here for visibility only; updates are handled
+#                         by another system (Dependabot for GitHub Actions).
+#
+# `updates.provider` values map to scripts/dependencies/sources/*.py:
+#   release-page, github-release, vendor-page, debian, manual
+
+acknowledged_risks:
+  - component: qhy-sdk
+    code: no-sdk-license
+    rationale: >-
+      Official public QHY Linux SDK redistributed unmodified; QHY does not
+      ship a separate license file with the SDK tarball.
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: touptek-sdk
+    code: no-sdk-license
+    rationale: >-
+      Official public ToupTek Linux SDK redistributed unmodified; ToupTek
+      does not ship a separate license file with the SDK tarball.
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: svbony-sdk
+    code: no-sdk-license
+    rationale: >-
+      Official public SVBONY Linux SDK redistributed unmodified; SVBONY
+      does not ship a separate license file with the SDK tarball.
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: svbony-sdk
+    code: nested-third-party-component
+    rationale: >-
+      SVBONY bundles its own libusb shared library alongside the Debian
+      libusb dependency AlpacaBridge itself build-depends on. Tracked as a
+      separate instance, not a defect.
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+
+  # Structural properties of every prebuilt vendor camera SDK: shipping a
+  # precompiled .so and having no vendor-published checksum/signature to
+  # verify the download against. These do not change per version, so they
+  # are baselined once per vendor rather than re-approved every release.
+  - component: zwo-asi-camera-sdk
+    code: precompiled-binary
+    rationale: "ZWO ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: zwo-asi-camera-sdk
+    code: upstream-signature-unavailable
+    rationale: "ZWO does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: zwo-eaf-sdk
+    code: precompiled-binary
+    rationale: "ZWO ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: zwo-eaf-sdk
+    code: upstream-signature-unavailable
+    rationale: "ZWO does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: zwo-efw-sdk
+    code: precompiled-binary
+    rationale: "ZWO ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: zwo-efw-sdk
+    code: upstream-signature-unavailable
+    rationale: "ZWO does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: zwo-caa-sdk
+    code: precompiled-binary
+    rationale: "ZWO ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: zwo-caa-sdk
+    code: upstream-signature-unavailable
+    rationale: "ZWO does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: qhy-sdk
+    code: precompiled-binary
+    rationale: "QHY ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: qhy-sdk
+    code: firmware-without-source
+    rationale: "QHY ships camera firmware blobs with no published source."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: qhy-sdk
+    code: upstream-signature-unavailable
+    rationale: "QHY does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: touptek-sdk
+    code: precompiled-binary
+    rationale: "ToupTek ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: touptek-sdk
+    code: upstream-signature-unavailable
+    rationale: "ToupTek does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: svbony-sdk
+    code: precompiled-binary
+    rationale: "SVBONY ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: svbony-sdk
+    code: upstream-signature-unavailable
+    rationale: "SVBONY does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: playerone-sdk
+    code: precompiled-binary
+    rationale: "Player One ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: playerone-sdk
+    code: upstream-signature-unavailable
+    rationale: "Player One does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+
+dependencies:
+  # ZWO ships 4 independently-versioned product SDKs (Camera, EAF focuser,
+  # EFW filter wheel, CAA rotator/climate) from one WordPress-backed JSON
+  # endpoint (acf.software_downloads[], matched by software_download_title).
+  # Tracked as 4 separate dependencies since they release independently --
+  # see check_updates.py's wordpress-acf provider.
+  - id: zwo-asi-camera-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/ZWO/ASI_Camera_SDK
+    local:
+      version_from:
+        type: filename
+        glob: "AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so.*"
+        regex: 'libASICamera2\.so\.(.+)$'
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8"
+    current: {note: "version resolved at scan time from the installed SONAME"}
+    usage: {build: true, runtime: true, packaged: true}
+    updates:
+      provider: wordpress-acf
+      endpoint: "https://www.zwoastro.com/wp-json/wp/v2/zwo_software?slug=product-sdk"
+      collection: "0.acf.software_downloads"
+      match: {software_download_title: "ASI Camera SDK"}
+      version_field: software_version
+      release_date_field: software_release_date
+      size_field: software_file_size
+      download_url_field: software_download_url
+      release_notes_field: software_update_log_url
+      verify_download: true
+      expect_library_glob: "*armv8*libASICamera2.so*"
+
+  - id: zwo-eaf-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/ZWO/EAF
+    local:
+      version_from:
+        type: filename
+        glob: "AlpacaCore/external/ZWO/EAF/lib/armv8/libEAFFocuser.so.*"
+        regex: 'libEAFFocuser\.so\.(.+)$'
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/ZWO/EAF/lib/eaf.rules"
+    current: {note: "version resolved at scan time from the installed SONAME"}
+    usage: {build: true, runtime: true, packaged: false}
+    updates:
+      provider: wordpress-acf
+      endpoint: "https://www.zwoastro.com/wp-json/wp/v2/zwo_software?slug=product-sdk"
+      collection: "0.acf.software_downloads"
+      match: {software_download_title: "EAF SDK"}
+      version_field: software_version
+      release_date_field: software_release_date
+      size_field: software_file_size
+      download_url_field: software_download_url
+      release_notes_field: software_update_log_url
+      verify_download: true
+      expect_library_glob: "*armv8*libEAFFocuser.so*"
+
+  - id: zwo-efw-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/ZWO/EFW
+    local:
+      version_from:
+        type: filename
+        glob: "AlpacaCore/external/ZWO/EFW/lib/armv8/libEFWFilter.so.*"
+        regex: 'libEFWFilter\.so\.(.+)$'
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/ZWO/EFW/lib/efw.rules"
+    current: {note: "version resolved at scan time from the installed SONAME"}
+    usage: {build: true, runtime: true, packaged: false}
+    updates:
+      provider: wordpress-acf
+      endpoint: "https://www.zwoastro.com/wp-json/wp/v2/zwo_software?slug=product-sdk"
+      collection: "0.acf.software_downloads"
+      match: {software_download_title: "EFW SDK"}
+      version_field: software_version
+      release_date_field: software_release_date
+      size_field: software_file_size
+      download_url_field: software_download_url
+      release_notes_field: software_update_log_url
+      verify_download: true
+      expect_library_glob: "*armv8*libEFWFilter.so*"
+
+  - id: zwo-caa-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/ZWO/CAA
+    local:
+      version_from:
+        type: filename
+        glob: "AlpacaCore/external/ZWO/CAA/lib/armv8/libCAA.so.*"
+        regex: 'libCAA\.so\.(.+)$'
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/ZWO/CAA/lib/caa.rules"
+    current: {note: "version resolved at scan time from the installed SONAME"}
+    usage: {build: true, runtime: true, packaged: false}
+    updates:
+      provider: wordpress-acf
+      endpoint: "https://www.zwoastro.com/wp-json/wp/v2/zwo_software?slug=product-sdk"
+      collection: "0.acf.software_downloads"
+      match: {software_download_title: "CAA SDK"}
+      version_field: software_version
+      release_date_field: software_release_date
+      size_field: software_file_size
+      download_url_field: software_download_url
+      release_notes_field: software_update_log_url
+      verify_download: true
+      expect_library_glob: "*armv8*libCAA.so*"
+
+  - id: qhy-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/QHY
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04"
+    current:
+      version: "26.06.04"
+      path: AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04
+    usage: {build: true, runtime: true, packaged: true}
+    updates:
+      provider: vendor-page
+      url: https://www.qhyccd.com/html/prepub/log_en.html
+      version_pattern: '(\d+\.\d+\.\d+\.\d+)'
+
+  - id: touptek-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/ToupTek
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc"
+    current:
+      version: "20260128"
+      path: AlpacaCore/external/ToupTek/toupcamsdk.20260128
+    usage: {build: true, runtime: true, packaged: true}
+    updates:
+      provider: vendor-page
+      url: https://www.touptek.com/download/showdownload.php?lcid=39
+      version_pattern: 'toupcamsdk\.(\d{8})'
+
+  - id: svbony-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/SVBONY
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/SVBONY/lib/armv8"
+    current:
+      version: unknown
+      path: AlpacaCore/external/SVBONY
+    usage: {build: true, runtime: true, packaged: true}
+    updates:
+      provider: manual
+      reason: "No reliable machine-readable version or release feed."
+
+  - id: playerone-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/PlayerOne
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
+          - "AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64"
+    current:
+      version: unknown
+      note: >-
+        Two independently versioned SDK bundles from the same vendor
+        (camera V3.10.0, filter wheel V1.2.3) -- not representable as one
+        comparable version string, so update checks report version-unknown
+        rather than a false comparison against either sub-version.
+    usage: {build: true, runtime: true, packaged: true}
+    updates:
+      provider: vendor-page
+      url: https://www.player-one-astronomy.com/service/software
+      version_pattern: 'V(\d+\.\d+\.\d+)'
+
+  - id: libgpiod
+    kind: vendored-source
+    relationship: direct
+    current:
+      version: "2.2.4"
+      path: AlpacaCore/external/libgpiod/libgpiod-2.2.4.tar.xz
+      sha256: "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592"
+    drift:
+      - file: .github/workflows/ci.yml
+        must_contain:
+          - 'LIBGPIOD_VER: "2.2.4"'
+          - 'LIBGPIOD_SHA256: "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592"'
+    usage: {build: true, runtime: false, packaged: false}
+    updates:
+      provider: release-page
+      url: https://mirrors.edge.kernel.org/pub/software/libs/libgpiod/
+      version_pattern: 'libgpiod-(\d+\.\d+\.\d+)\.tar\.xz'
+
+  - id: nlohmann-json
+    kind: cmake-dependency
+    relationship: direct
+    current:
+      version: "3.11.3"
+      path: AlpacaHTTP/CMakeLists.txt
+    drift:
+      - file: AlpacaHTTP/CMakeLists.txt
+        must_contain:
+          - "GIT_TAG v3.11.3"
+    usage: {build: true, runtime: false, packaged: false}
+    updates:
+      provider: github-release
+      repository: nlohmann/json
+
+  - id: catch2
+    kind: test-dependency
+    relationship: direct
+    current:
+      version: "apt (unpinned)"
+      path: AlpacaCore/tests/CMakeLists.txt
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: debian
+      package: catch2
+      release: trixie
+
+  - id: cppcheck
+    kind: ci-tool
+    relationship: direct
+    current:
+      version: "2.17.1"
+      sha256: "bfd681868248ec03855ca7c2aea7bcb1f39b8b18860d76aec805a92a967b966c"
+      path: .github/workflows/ci.yml
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: github-release
+      repository: danmar/cppcheck
+
+  - id: zizmor
+    kind: ci-tool
+    relationship: direct
+    current:
+      version: "1.25.2"
+      sha256: "4b4b9491112c2a09b318101c0d3349b73af1c4f532e097dd6d0164f2abda760d"
+      path: .github/workflows/ci.yml
+    drift:
+      - file: scripts/ci_preflight.sh
+        must_contain:
+          - 'ZIZMOR_VER="1.25.2"'
+          - 'ZIZMOR_SHA256="4b4b9491112c2a09b318101c0d3349b73af1c4f532e097dd6d0164f2abda760d"'
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: github-release
+      repository: zizmorcore/zizmor
+
+  # `packages` names the Debian SOURCE package (sources.debian.org's /api/src/<name>/
+  # unit) that provides each debian/control build/runtime dependency, not the
+  # binary/-dev package name -- they often differ (libgpiod-dev comes from
+  # source package "libgpiod", libudev-dev from "systemd", etc.).
+  - id: debian-build-deps
+    kind: system-package
+    relationship: direct
+    current:
+      path: debian/control
+      packages:
+        - cmake
+        - libgpiod
+        - nlohmann-json3
+        - hidapi
+        - libusb-1.0
+        - systemd
+        - libgphoto2
+        - libraw
+        - curl
+        - zlib
+    usage: {build: true, runtime: false, packaged: false}
+    updates:
+      provider: debian
+      release: trixie
+
+  - id: debian-runtime-deps
+    kind: system-package
+    relationship: direct
+    current:
+      path: debian/control
+      packages:
+        - libgpiod
+        - hidapi
+        - libusb-1.0
+        - systemd
+    usage: {build: false, runtime: true, packaged: true}
+    updates:
+      provider: debian
+      release: trixie
+
+  - id: github-actions
+    kind: managed-elsewhere
+    relationship: indirect
+    current:
+      path: .github/workflows/
+    updates:
+      provider: manual
+      reason: >-
+        Handled by Dependabot (.github/dependabot.yml). This system does not
+        open competing update PRs for pinned Actions; it only tracks
+        pin/comment consistency across workflow files (see
+        map_dependencies.py's checkout-annotation check).
+
+external_references:
+  - id: bisque-theskyx-protocol
+    path: AlpacaCore/external/Bisque
+    provenance: manual
+  - id: celestron-nexstar-protocol
+    path: AlpacaCore/external/Celestron
+    provenance: manual
+  - id: gemini-powerdatahub-protocol
+    path: AlpacaCore/external/Gemini
+    provenance: manual
+  - id: ioptron-rs232-protocol
+    path: AlpacaCore/external/iOptron
+    provenance: manual
+    version: "3.10"
+  - id: losmandy-g11-protocol
+    path: AlpacaCore/external/Losmandy
+    provenance: manual
+  - id: oasisastro-focuser-protocol
+    path: AlpacaCore/external/oasisastro
+    provenance: manual
+  - id: synscan-motor-protocol
+    path: AlpacaCore/external/SynScan
+    provenance: manual
+    version: "3.3"
+  - id: wandererastro-v4ec-manual
+    path: AlpacaCore/external/WandererAstro
+    provenance: manual
