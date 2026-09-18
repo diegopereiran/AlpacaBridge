@@ -38,6 +38,91 @@ struct GPhotoCaptureResult {
 };
 
 /**
+ * @brief Abstract interface over the libgphoto2 operations the gphoto driver
+ * uses.
+ *
+ * This is the fault-injection seam (issue #489), mirroring the shape used by
+ * the other camera vendors (e.g. ToupTekSDK in
+ * AlpacaCore/include/alpacacore/vendor/touptek/touptek_sdk_wrapper.h):
+ * production code talks to the GPhotoSDKWrapper singleton below; unit tests
+ * substitute a scripted fake (AlpacaCore/tests/fake_gphoto_sdk.h) that can
+ * throw from any specific call, script widget choices/values per camera, and
+ * count opens vs closes -- so the connect/configure/capture/bulb paths are
+ * exercisable without hardware. Every driver factory has an overload taking
+ * a GPhotoSDK&; the default overload passes the singleton.
+ *
+ * Methods report failure by throwing AlpacaException, never by return code.
+ */
+class GPhotoSDK {
+public:
+    // Destructor is protected and NON-virtual (below), not public and virtual:
+    // nothing ever owns a GPhotoSDK*. Drivers hold a GPhotoSDK&, and every
+    // implementation is either a function-local static (GPhotoSDKWrapper) or a
+    // stack object (FakeGPhotoSDK, LockedGPhotoSDK). A public virtual
+    // destructor here would make `delete static_cast<GPhotoSDK*>(&...)`
+    // compile against the singleton, since access for delete is checked on the
+    // static type. AGENTS.md calls this the shape to copy; ToupTek's public
+    // virtual destructor predates that reasoning.
+
+    /**
+     * @brief Enumerate currently attached PTP/MTP cameras via USB autodetect.
+     *
+     * Index into the returned vector is the Alpaca "cameraIndex" config
+     * field, matching the SDK-enumerated convention used by the other camera
+     * vendors (ZWO/QHY/SVBONY/PlayerOne/ToupTek).
+     */
+    virtual std::vector<GPhotoCameraInfo> enumerate_cameras() = 0;
+
+    /**
+     * @brief Open a session for the camera at the given model/port pair.
+     *
+     * @return An opaque handle for use with every other method below.
+     * @throws AlpacaException on failure (camera not found, busy, etc).
+     */
+    virtual int open_camera(const std::string& model, const std::string& port) = 0;
+
+    /// Close a previously opened camera. Safe to call on an unknown handle
+    /// (no-op) so driver disconnect paths never need to track validity.
+    virtual void close_camera(int handle) = 0;
+
+    virtual std::string get_gphoto_version() = 0;
+    virtual std::string get_camera_summary(int handle) = 0;
+
+    virtual bool has_widget(int handle, const std::string& name) = 0;
+
+    /// Radio/menu widgets (e.g. "iso", "shutterspeed2", "imagequality").
+    virtual std::vector<std::string> get_choices(int handle, const std::string& name) = 0;
+    virtual std::string get_choice_value(int handle, const std::string& name) = 0;
+    virtual void set_choice_value(int handle, const std::string& name, const std::string& value) = 0;
+
+    /// Toggle widgets (e.g. the Nikon/Canon PTP "bulb" shutter-open toggle).
+    virtual bool get_toggle_value(int handle, const std::string& name) = 0;
+    virtual void set_toggle_value(int handle, const std::string& name, bool on) = 0;
+
+    /// Text widgets (rarely needed; kept for completeness/diagnostics).
+    virtual std::string get_text_value(int handle, const std::string& name) = 0;
+
+    /// Trigger a normal (non-bulb) capture and download the resulting file.
+    virtual GPhotoCaptureResult capture_and_download(int handle) = 0;
+
+    /**
+     * @brief Wait for the file-added event a just-closed bulb shutter
+     * produces, then download and delete it.
+     *
+     * Callers drive the bulb sequence themselves via set_toggle_value(handle,
+     * "bulb", true/false) (see gphoto_camera_driver.cpp's abortable sleep
+     * loop) and call this immediately after closing the shutter.
+     */
+    virtual GPhotoCaptureResult wait_for_bulb_file_and_download(int handle) = 0;
+
+protected:
+    // See the note at the top of the class: protected + non-virtual, so no
+    // caller can delete through a GPhotoSDK*, while every implementation is
+    // still destroyed normally through its own static type.
+    ~GPhotoSDK() = default;
+};
+
+/**
  * @brief Thin RAII wrapper around libgphoto2's Camera/GPContext/CameraWidget
  * API, isolating raw libgphoto2 calls from the Alpaca driver logic (the
  * project's SDK-wrapper pattern -- see AlpacaCore/src/vendors/svbony for the
@@ -49,60 +134,33 @@ struct GPhotoCaptureResult {
  * camera gets its own integer handle (mirroring the "camera_id" shape the
  * other camera wrappers use), so driver code looks the same across vendors.
  */
-class GPhotoSDKWrapper {
+class GPhotoSDKWrapper final : public GPhotoSDK {
 public:
     static GPhotoSDKWrapper& instance();
 
-    /**
-     * @brief Enumerate currently attached PTP/MTP cameras via USB autodetect.
-     *
-     * Index into the returned vector is the Alpaca "cameraIndex" config
-     * field, matching the SDK-enumerated convention used by the other camera
-     * vendors (ZWO/QHY/SVBONY/PlayerOne/ToupTek).
-     */
-    std::vector<GPhotoCameraInfo> enumerate_cameras();
+    std::vector<GPhotoCameraInfo> enumerate_cameras() override;
 
-    /**
-     * @brief Open a session for the camera at the given model/port pair.
-     *
-     * @return An opaque handle for use with every other method below.
-     * @throws AlpacaException on failure (camera not found, busy, etc).
-     */
-    int open_camera(const std::string& model, const std::string& port);
+    int open_camera(const std::string& model, const std::string& port) override;
 
-    /// Close a previously opened camera. Safe to call on an unknown handle
-    /// (no-op) so driver disconnect paths never need to track validity.
-    void close_camera(int handle);
+    void close_camera(int handle) override;
 
-    std::string get_gphoto_version();
-    std::string get_camera_summary(int handle);
+    std::string get_gphoto_version() override;
+    std::string get_camera_summary(int handle) override;
 
-    bool has_widget(int handle, const std::string& name);
+    bool has_widget(int handle, const std::string& name) override;
 
-    /// Radio/menu widgets (e.g. "iso", "shutterspeed2", "imagequality").
-    std::vector<std::string> get_choices(int handle, const std::string& name);
-    std::string get_choice_value(int handle, const std::string& name);
-    void set_choice_value(int handle, const std::string& name, const std::string& value);
+    std::vector<std::string> get_choices(int handle, const std::string& name) override;
+    std::string get_choice_value(int handle, const std::string& name) override;
+    void set_choice_value(int handle, const std::string& name, const std::string& value) override;
 
-    /// Toggle widgets (e.g. the Nikon/Canon PTP "bulb" shutter-open toggle).
-    bool get_toggle_value(int handle, const std::string& name);
-    void set_toggle_value(int handle, const std::string& name, bool on);
+    bool get_toggle_value(int handle, const std::string& name) override;
+    void set_toggle_value(int handle, const std::string& name, bool on) override;
 
-    /// Text widgets (rarely needed; kept for completeness/diagnostics).
-    std::string get_text_value(int handle, const std::string& name);
+    std::string get_text_value(int handle, const std::string& name) override;
 
-    /// Trigger a normal (non-bulb) capture and download the resulting file.
-    GPhotoCaptureResult capture_and_download(int handle);
+    GPhotoCaptureResult capture_and_download(int handle) override;
 
-    /**
-     * @brief Wait for the file-added event a just-closed bulb shutter
-     * produces, then download and delete it.
-     *
-     * Callers drive the bulb sequence themselves via set_toggle_value(handle,
-     * "bulb", true/false) (see gphoto_camera_driver.cpp's abortable sleep
-     * loop) and call this immediately after closing the shutter.
-     */
-    GPhotoCaptureResult wait_for_bulb_file_and_download(int handle);
+    GPhotoCaptureResult wait_for_bulb_file_and_download(int handle) override;
 
 private:
     GPhotoSDKWrapper();

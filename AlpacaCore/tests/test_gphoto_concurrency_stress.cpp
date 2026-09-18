@@ -11,26 +11,63 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the gphoto camera
-// (issue #241). No fake seam exists for libgphoto2, so on a hardware-free
-// host every connect fails fast at gp_camera_autodetect() -- which still
-// storms the AsyncConnectable machinery, the failure-path cleanup, and the
-// exposure/gain gates racing the lifecycle. With a camera attached the same
-// tests exercise the full connect path.
+// (issue #241). Runs against FakeGPhotoSDK wrapped in LockedGPhotoSDK (issue
+// #489's fault-injection seam) so a real connect path -- open/configure/prime/
+// close -- is what gets storm-tested, not just the fast-fail-at-autodetect
+// path a hardware-free host previously hit for every connect attempt.
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_gphoto_sdk.h"
+#include "fake_raw_decoder.h"
+#include "locked_gphoto_sdk.h"
 
 using alpacacore::AlpacaDriver;
+using alpacacore::test::FakeGPhotoSDK;
+using alpacacore::test::FakeRawDecoder;
+using alpacacore::test::LockedGPhotoSDK;
+using alpacacore::test::reset_gphoto_sensor_cache;
+using alpacacore::test::unique_test_model;
+
+namespace {
+
+FakeGPhotoSDK::FakeCamera make_stress_camera() {
+    FakeGPhotoSDK::FakeCamera cam;
+    cam.model = unique_test_model("Nikon DSC D5300 (stress)");
+    cam.port = "usb:001,099";
+    cam.choices["iso"] = {"100", "200", "400"};
+    cam.choice_value["iso"] = "200";
+    cam.choices["shutterspeed2"] = {"1/200", "1", "bulb"};
+    cam.choice_value["shutterspeed2"] = "1/200";
+    cam.toggle_value["bulb"] = false;
+    return cam;
+}
+
+}  // namespace
 
 TEST_CASE("GPhoto camera - concurrent connect/disconnect/operate stress", "[gphoto][camera][stress]") {
-    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_stress_camera());
+    LockedGPhotoSDK locked_sdk(fake);
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, locked_sdk, decoder);
 
     // open-astro#326: one guard per call -- before this the callback stopped
     // at the first throw, so only the first operation was ever storm-tested.
-    alpacacore::test::StressCallGuard guard;
+    // This registration runs CONNECTED over the fake seam, so widen the
+    // expected set the way AGENTS.md requires (the ctor arg REPLACES the
+    // default, so NotConnected stays listed): today's four calls can only
+    // throw NotConnected, but the next call added here -- set_gain
+    // (InvalidValue/InvalidOperation), get_ccd_temperature
+    // (PropertyNotImplemented), start_exposure (InvalidValue) -- would turn
+    // the storm into a nondeterministic red otherwise (review of #546).
+    alpacacore::test::StressCallGuard guard{
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+         alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::PropertyNotImplemented}};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
         guard([&] { static_cast<void>(camera.get_camera_state()); });
@@ -51,6 +88,11 @@ TEST_CASE("GPhoto camera - concurrent connect/disconnect/operate stress", "[gpho
 }
 
 TEST_CASE("GPhoto camera - destruction races an in-flight connect", "[gphoto][camera][stress]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_stress_camera());
+    LockedGPhotoSDK locked_sdk(fake);
+    FakeRawDecoder decoder;
     alpacacore::test::run_destruction_during_connect_stress(
-        []() { return alpacacore::vendor::gphoto::create_gphoto_camera(0, 0); });
+        [&]() { return alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, locked_sdk, decoder); });
 }
