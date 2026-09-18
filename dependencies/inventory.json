@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T07:27:40.766007+00:00",
-  "source_commit": "a83c9b5f1b09051a75e4a3c0265fd1f7e1a1d282",
+  "generated_at": "2026-09-18T07:39:05.129448+00:00",
+  "source_commit": "40ed21cd1d3e2fbc577f7060d16ce5ae5f5b63a8",
   "dependencies": [
     {
       "id": "zwo-asi-camera-sdk",
@@ -22,12 +22,30 @@
           {
             "path": "lib/linux/armv8/libASICamera2.so",
             "sha256": "3ecf511979ed571131e7d7f4a467112aba21940b4dc91d63bd109b9683bf67c4",
-            "size": 4042678
+            "size": 4042678,
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": null,
+            "rpath": null
           },
           {
             "path": "lib/linux/armv8/libASICamera2.so.1.41",
             "sha256": "3ecf511979ed571131e7d7f4a467112aba21940b4dc91d63bd109b9683bf67c4",
-            "size": 4042678
+            "size": 4042678,
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": null,
+            "rpath": null
           }
         ],
         "executables": [
@@ -85,12 +103,28 @@
           {
             "path": "lib/armv8/libEAFFocuser.so.1.7.7",
             "sha256": "0ce25b248a727ec4cad07cc4de4ffeb256773f9bc23794a66a8a527132d5df6d",
-            "size": 766816
+            "size": 766816,
+            "needed": [
+              "libstdc++.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
           },
           {
             "path": "lib/armv8/libEAFFocuser.so",
             "sha256": "0ce25b248a727ec4cad07cc4de4ffeb256773f9bc23794a66a8a527132d5df6d",
-            "size": 766816
+            "size": 766816,
+            "needed": [
+              "libstdc++.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
           }
         ],
         "executables": [
@@ -100,14 +134,14 @@
             "size": 1095
           },
           {
-            "path": "include/EAF_focuser.h",
-            "sha256": "2391a9020eea40e3072a9dbfc3359b8dfde8b75f124bb602c7a55d5fd61edc26",
-            "size": 27367
-          },
-          {
             "path": "lib/eaf.rules",
             "sha256": "0a2496843e2409f753b5b82b8580217282cd31958bdf20589a4277df7669debb",
             "size": 108
+          },
+          {
+            "path": "include/EAF_focuser.h",
+            "sha256": "2391a9020eea40e3072a9dbfc3359b8dfde8b75f124bb602c7a55d5fd61edc26",
+            "size": 27367
           }
         ],
         "firmware": {
@@ -156,14 +190,30 @@
         "total_size_bytes": 181095,
         "libraries": [
           {
-            "path": "lib/armv8/libEFWFilter.so",
-            "sha256": "100fcfd03a2370c715db3b188710fa619bfab7fb83eb54ea754aad07fdbd328b",
-            "size": 53216
-          },
-          {
             "path": "lib/armv8/libEFWFilter.so.1.8.4",
             "sha256": "100fcfd03a2370c715db3b188710fa619bfab7fb83eb54ea754aad07fdbd328b",
-            "size": 53216
+            "size": 53216,
+            "needed": [
+              "libstdc++.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
+          },
+          {
+            "path": "lib/armv8/libEFWFilter.so",
+            "sha256": "100fcfd03a2370c715db3b188710fa619bfab7fb83eb54ea754aad07fdbd328b",
+            "size": 53216,
+            "needed": [
+              "libstdc++.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
           }
         ],
         "executables": [
@@ -173,14 +223,14 @@
             "size": 1095
           },
           {
-            "path": "include/EFW_filter.h",
-            "sha256": "c55474d3d8a7fadf9d08575d25807050dcebd3bff29943c9dbe22fbd40a7e76c",
-            "size": 10004
-          },
-          {
             "path": "lib/efw.rules",
             "sha256": "07166fbfee4220bf3d7195e94230ae7d7bd9002fbed69af3f192b9369fc7236f",
             "size": 110
+          },
+          {
+            "path": "include/EFW_filter.h",
+            "sha256": "c55474d3d8a7fadf9d08575d25807050dcebd3bff29943c9dbe22fbd40a7e76c",
+            "size": 10004
           }
         ],
         "firmware": {
@@ -231,12 +281,28 @@
           {
             "path": "lib/armv8/libCAA.so",
             "sha256": "680286a000d203883fc626e1ea4d4addadf5d93e940c33135a7ee20d98abe901",
-            "size": 393248
+            "size": 393248,
+            "needed": [
+              "libstdc++.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
           },
           {
             "path": "lib/armv8/libCAA.so.1.5.9",
             "sha256": "680286a000d203883fc626e1ea4d4addadf5d93e940c33135a7ee20d98abe901",
-            "size": 393248
+            "size": 393248,
+            "needed": [
+              "libstdc++.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
           }
         ],
         "executables": [
@@ -246,14 +312,14 @@
             "size": 1095
           },
           {
-            "path": "include/CAA_API.h",
-            "sha256": "cacf58d33ccc1911fd6f7788b62cac0ec8284729ea24942f988bb089d972e697",
-            "size": 14347
-          },
-          {
             "path": "lib/caa.rules",
             "sha256": "b1570b3678872fd8bd63e2ad8ad9ae3371a8a45fbfa66ce5f05346c28ff15534",
             "size": 118
+          },
+          {
+            "path": "include/CAA_API.h",
+            "sha256": "cacf58d33ccc1911fd6f7788b62cac0ec8284729ea24942f988bb089d972e697",
+            "size": 14347
           }
         ],
         "firmware": {
@@ -304,27 +370,39 @@
           {
             "path": "sdk_linux_arm64_26.06.04/sbin/fxload",
             "sha256": "218d8ab3ef2a8d440cce4ae6a4069aa46e5b28bae38da9f21cf231afebb86f45",
-            "size": 23264
-          },
-          {
-            "path": "sdk_linux_arm64_26.06.04/usr/local/fx3load/fxload",
-            "sha256": "218d8ab3ef2a8d440cce4ae6a4069aa46e5b28bae38da9f21cf231afebb86f45",
-            "size": 23264
+            "size": 23264,
+            "needed": [
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
           },
           {
             "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so.26.6.4.16",
             "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
-            "size": 5037960
+            "size": 5037960,
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": "libqhyccd.so.20",
+            "rpath": null
           },
           {
-            "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so.20",
-            "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
-            "size": 5037960
-          },
-          {
-            "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so",
-            "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
-            "size": 5037960
+            "path": "sdk_linux_arm64_26.06.04/usr/local/fx3load/fxload",
+            "sha256": "218d8ab3ef2a8d440cce4ae6a4069aa46e5b28bae38da9f21cf231afebb86f45",
+            "size": 23264,
+            "needed": [
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": null,
+            "rpath": null
           }
         ],
         "executables": [],
@@ -386,7 +464,17 @@
           {
             "path": "toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so",
             "sha256": "382a84e4b8197f2f359610ccc59288f8dd5109f5de077f1cddb13ff0ae10bde8",
-            "size": 45156504
+            "size": 45156504,
+            "needed": [
+              "libpthread.so.0",
+              "libm.so.6",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1",
+              "librt.so.1",
+              "libdl.so.2"
+            ],
+            "soname": "libtoupcam.so",
+            "rpath": null
           }
         ],
         "executables": [],
@@ -442,12 +530,27 @@
           {
             "path": "lib/armv8/libSVBCameraSDK.so",
             "sha256": "d8c6c1848d4cc95de6594449f43ee339693dfe52a8341bc857a3fe183d16e0e3",
-            "size": 5265352
+            "size": 5265352,
+            "needed": [
+              "libstdc++.so.6",
+              "libusb-1.0.so.0",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": null,
+            "rpath": null
           },
           {
             "path": "lib/armv8/libusb-1.0.so.0.1.0",
             "sha256": "038dcbf60a1cb511bd039bbb6444f8ce08328ff1a208b795c3581a640e8f7dde",
-            "size": 407056
+            "size": 407056,
+            "needed": [
+              "libpthread.so.0",
+              "libc.so.6"
+            ],
+            "soname": "libusb-1.0.so.0",
+            "rpath": null
           }
         ],
         "executables": [],
@@ -508,44 +611,32 @@
         "total_size_bytes": 2539210,
         "libraries": [
           {
-            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1.2",
-            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
-            "size": 140616
-          },
-          {
-            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so",
-            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
-            "size": 140616
-          },
-          {
             "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1.2.3",
             "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
-            "size": 140616
-          },
-          {
-            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1",
-            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
-            "size": 140616
+            "size": 140616,
+            "needed": [
+              "libudev.so.1",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOnePW.so.1",
+            "rpath": null
           },
           {
             "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.3.10.0",
             "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
-            "size": 474808
-          },
-          {
-            "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.3.10",
-            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
-            "size": 474808
-          },
-          {
-            "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.3",
-            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
-            "size": 474808
-          },
-          {
-            "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so",
-            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
-            "size": 474808
+            "size": 474808,
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOneCamera.so.3",
+            "rpath": null
           }
         ],
         "executables": [
