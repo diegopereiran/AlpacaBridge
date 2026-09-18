@@ -333,16 +333,28 @@ def self_test():
         write_report("AlpacaCore/conformu/Vendor/Renamed/Linux-arm64.txt")
         write_report("AlpacaCore/conformu/Vendor/Edited/Linux-arm64.txt")
         write_report("AlpacaCore/conformu/Vendor/Removed/Linux-arm64.txt")
+        write_report("AlpacaCore/conformu/Vendor/OnBase/Linux-arm64.txt")
         write_report("docs/moved-in.txt")
         write("README.md", "base\n")
         git("add", "-A")
         git("commit", "-q", "-m", "base")
         git("checkout", "-q", "-b", "topic")
-        # The base branch moves on AFTER the topic branched: a report added
-        # there must NOT be attributed to the topic, which is what the
-        # merge-base (rather than a plain diff against the base tip) buys.
+        # The base branch moves on AFTER the topic branched: a report
+        # MODIFIED there must NOT be attributed to the topic, which is what
+        # the merge-base (rather than a plain diff against the base tip)
+        # buys. It has to already exist at the fork point and be edited here,
+        # not merely added here (issue #512): an added-then-diffed-from-tip
+        # report shows as a DELETION in a base-tip diff (present on the base
+        # tip, absent from the topic tip that never saw the commit that added
+        # it) and --diff-filter=d already excludes deletions regardless of
+        # whether the diff started from the tip or the merge-base -- so that
+        # shape could never fail even with the merge-base logic broken. A
+        # modification instead diffs as an M either way: excluded correctly
+        # from the merge-base (unchanged there) but wrongly INCLUDED from a
+        # plain base-tip diff (different content), which is what gives this
+        # case something to actually catch.
         git("checkout", "-q", "base")
-        write_report("AlpacaCore/conformu/Vendor/OnBase/Linux-arm64.txt")
+        write_report("AlpacaCore/conformu/Vendor/OnBase/Linux-arm64.txt", "changed on base\n")
         git("add", "-A")
         git("commit", "-q", "-m", "base moves on")
         git("checkout", "-q", "topic")
