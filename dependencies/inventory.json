@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T07:41:33.209585+00:00",
-  "source_commit": "1335983c6999f9f0a8eb890f95cd99e529d05f49",
+  "generated_at": "2026-09-18T08:09:53.542317+00:00",
+  "source_commit": "e9d48db1af650109ea02ab98fb9c981ee69e0547",
   "dependencies": [
     {
       "id": "zwo-asi-camera-sdk",
@@ -390,6 +390,38 @@
             "rpath": null
           },
           {
+            "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so",
+            "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
+            "size": 5037960,
+            "symlink_target": "libqhyccd.so.20",
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": "libqhyccd.so.20",
+            "rpath": null
+          },
+          {
+            "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so.20",
+            "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
+            "size": 5037960,
+            "symlink_target": "libqhyccd.so.26.6.4.16",
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6",
+              "ld-linux-aarch64.so.1"
+            ],
+            "soname": "libqhyccd.so.20",
+            "rpath": null
+          },
+          {
             "path": "sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so.26.6.4.16",
             "sha256": "c334c906bcf36ac5be7c88c706b1df28c32397ca09d75525066a880a10a2bd57",
             "size": 5037960,
@@ -594,12 +626,12 @@
       ]
     },
     {
-      "id": "playerone-sdk",
+      "id": "playerone-camera-sdk",
       "kind": "vendor-sdk",
       "relationship": "direct",
       "current": {
-        "version": "unknown",
-        "note": "Two independently versioned SDK bundles from the same vendor (camera V3.10.0, filter wheel V1.2.3) -- not representable as one comparable version string, so update checks report version-unknown rather than a false comparison against either sub-version."
+        "note": "version resolved at scan time from the installed SONAME",
+        "version": "3.10.0"
       },
       "usage": {
         "build": true,
@@ -607,13 +639,14 @@
         "packaged": true
       },
       "contents": {
-        "file_count": 19,
-        "total_size_bytes": 2539210,
+        "file_count": 10,
+        "total_size_bytes": 1957648,
         "libraries": [
           {
-            "path": "PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.3.10.0",
+            "path": "lib/arm64/libPlayerOneCamera.so",
             "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
             "size": 474808,
+            "symlink_target": "libPlayerOneCamera.so.3.10.0",
             "needed": [
               "libusb-1.0.so.0",
               "libstdc++.so.6",
@@ -625,7 +658,143 @@
             "rpath": null
           },
           {
-            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.1.2.3",
+            "path": "lib/arm64/libPlayerOneCamera.so.3",
+            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
+            "size": 474808,
+            "symlink_target": "libPlayerOneCamera.so.3.10.0",
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOneCamera.so.3",
+            "rpath": null
+          },
+          {
+            "path": "lib/arm64/libPlayerOneCamera.so.3.10",
+            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
+            "size": 474808,
+            "symlink_target": "libPlayerOneCamera.so.3.10.0",
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOneCamera.so.3",
+            "rpath": null
+          },
+          {
+            "path": "lib/arm64/libPlayerOneCamera.so.3.10.0",
+            "sha256": "d3c8eff03613785b21014484f47f39431c52c5d723484b6dde74fb9667e7d637",
+            "size": 474808,
+            "needed": [
+              "libusb-1.0.so.0",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOneCamera.so.3",
+            "rpath": null
+          }
+        ],
+        "executables": [],
+        "firmware": {
+          "count": 0,
+          "aggregate_sha256": null
+        },
+        "archives": [],
+        "licenses": [
+          "license.txt"
+        ],
+        "examples": {
+          "present": false,
+          "used_by_project": false
+        }
+      },
+      "risks": [
+        {
+          "code": "precompiled-binary",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        },
+        {
+          "code": "upstream-signature-unavailable",
+          "severity": "medium",
+          "acknowledged": true,
+          "review_after": "2027-03-18"
+        }
+      ]
+    },
+    {
+      "id": "playerone-filterwheel-sdk",
+      "kind": "vendor-sdk",
+      "relationship": "direct",
+      "current": {
+        "note": "version resolved at scan time from the installed SONAME",
+        "version": "1.2.3"
+      },
+      "usage": {
+        "build": true,
+        "runtime": true,
+        "packaged": true
+      },
+      "contents": {
+        "file_count": 9,
+        "total_size_bytes": 581562,
+        "libraries": [
+          {
+            "path": "lib/arm64/libPlayerOnePW.so",
+            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
+            "size": 140616,
+            "symlink_target": "libPlayerOnePW.so.1.2.3",
+            "needed": [
+              "libudev.so.1",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOnePW.so.1",
+            "rpath": null
+          },
+          {
+            "path": "lib/arm64/libPlayerOnePW.so.1",
+            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
+            "size": 140616,
+            "symlink_target": "libPlayerOnePW.so.1.2.3",
+            "needed": [
+              "libudev.so.1",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOnePW.so.1",
+            "rpath": null
+          },
+          {
+            "path": "lib/arm64/libPlayerOnePW.so.1.2",
+            "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
+            "size": 140616,
+            "symlink_target": "libPlayerOnePW.so.1.2.3",
+            "needed": [
+              "libudev.so.1",
+              "libstdc++.so.6",
+              "libm.so.6",
+              "libgcc_s.so.1",
+              "libc.so.6"
+            ],
+            "soname": "libPlayerOnePW.so.1",
+            "rpath": null
+          },
+          {
+            "path": "lib/arm64/libPlayerOnePW.so.1.2.3",
             "sha256": "f41b883855408dd954e19830fff11be04976c76e74e8ba068daf6e294b46fed0",
             "size": 140616,
             "needed": [
@@ -641,7 +810,7 @@
         ],
         "executables": [
           {
-            "path": "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/udev/99-player_one_astronomy.rules",
+            "path": "udev/99-player_one_astronomy.rules",
             "sha256": "715becf8a67280077d4f6d80bc2663676272765d32b9f1d87aeebdbbd992e402",
             "size": 376
           }
@@ -652,8 +821,7 @@
         },
         "archives": [],
         "licenses": [
-          "PlayerOne_Camera_SDK_Linux_V3.10.0/license.txt",
-          "PlayerOne_FilterWheel_SDK_Linux_V1.2.3/license.txt"
+          "license.txt"
         ],
         "examples": {
           "present": false,
