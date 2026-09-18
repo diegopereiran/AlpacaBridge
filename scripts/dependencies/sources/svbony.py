@@ -10,8 +10,8 @@ attempts to fetch the file.
 from __future__ import annotations
 
 import re
-import urllib.error
-import urllib.request
+
+from . import _http
 
 DOWNLOAD_PAGE = "https://www.svbony.com/downloads/software-driver"
 ENTRY_RE = re.compile(r"linux[-_]SVBCameraSDK[-_]v(\d+\.\d+\.\d+)", re.IGNORECASE)
@@ -21,16 +21,11 @@ DATE_RE = re.compile(r'<div class="date">([\d-]+)</div>')
 
 
 def fetch_upstream(url: str = DOWNLOAD_PAGE) -> dict:
-    req = urllib.request.Request(url, headers={"User-Agent": "AlpacaBridge dependency monitor"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
-        return {"status": "source-unreachable"}
-    except Exception:
+    page_html, _ = _http.get_text(url)
+    if page_html is None:
         return {"status": "source-unreachable"}
 
-    matches = ENTRY_RE.findall(html)
+    matches = ENTRY_RE.findall(page_html)
     if not matches:
         return {"status": "source-format-changed", "detail": "no linux-SVBCameraSDK-vX.Y.Z entry found"}
 
@@ -42,14 +37,14 @@ def fetch_upstream(url: str = DOWNLOAD_PAGE) -> dict:
     # Best-effort: pull the UUID/restricted flag/date from the same entry
     # block as the winning version string, not just the first of each on
     # the page (the page lists several SDK entries).
-    idx = html.find(f"linux-SVBCameraSDK-v{best_version}")
+    idx = page_html.find(f"linux-SVBCameraSDK-v{best_version}")
     if idx == -1:
-        idx = html.lower().find(f"linux-svbcamerasdk-v{best_version}".lower())
-    window = html[idx:idx + 1500] if idx != -1 else ""
+        idx = page_html.lower().find(f"linux-svbcamerasdk-v{best_version}".lower())
+    window = page_html[idx:idx + 1500] if idx != -1 else ""
 
     uuid_m = UUID_RE.search(window)
     restricted_m = RESTRICTED_RE.search(window)
-    date_m = DATE_RE.search(html[max(0, idx - 400):idx + 100]) if idx != -1 else None
+    date_m = DATE_RE.search(page_html[max(0, idx - 400):idx + 100]) if idx != -1 else None
 
     return {
         "status": "ok",

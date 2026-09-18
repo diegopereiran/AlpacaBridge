@@ -46,7 +46,7 @@ ISSUE_TITLE = "Dependency update status"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sources import (  # noqa: E402
     debian, direct_document, github, github_source_reference, manual,
-    static_download_page, svbony, vendor_page, wordpress_acf,
+    static_download_page, svbony, vendor_page, wanderer_downloads, wordpress_acf,
 )
 import map_dependencies  # noqa: E402
 
@@ -352,6 +352,66 @@ def classify_github_source_reference(dep: dict) -> dict:
     return {"status": "CURRENT", "detail": f"reviewed commit {reviewed[:12]} still latest"}
 
 
+def classify_wanderer_download(dep: dict, state: dict, do_download: bool, artifacts_root: Path | None) -> dict:
+    """Same status vocabulary and drift model as classify_static_download_page
+    (CURRENT / SPEC_UPDATED / SILENT_REPLACEMENT / SOURCE_UNREACHABLE /
+    SOURCE_FORMAT_CHANGED) -- this is the same kind of protocol-spec-PDF
+    tracking, just against a page whose date is embedded in the title and
+    whose download link needs no CAPTCHA (wanderer_downloads.py)."""
+    dep_id = dep["id"]
+    entry = wanderer_downloads.fetch_entry(dep)
+    if entry["status"] != "ok":
+        return {"status": entry["status"].upper().replace("-", "_"), "detail": entry.get("detail", "")}
+
+    prev = state.get(dep_id, {})
+    result = {
+        "title": entry["title"],
+        "download_url": entry["download_url"],
+        "size": entry["size"],
+        "published_date": entry["published_date"],
+        "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    metadata_changed = (
+        prev.get("download_url") not in (None, entry["download_url"])
+        or prev.get("published_date") not in (None, entry["published_date"])
+        or prev.get("size") not in (None, entry["size"])
+    )
+
+    verdict = {"status": "CURRENT", "detail": f"{entry['published_date']}, {entry['size']}"}
+
+    if do_download and dep["updates"].get("verify_download"):
+        with _artifact_dir(dep_id, artifacts_root) as adir:
+            archive, err = download_artifact(entry["download_url"], adir)
+            if archive is None:
+                result["sha256"] = prev.get("sha256")
+                state[dep_id] = {**prev, **result}
+                return {"status": "SOURCE_UNREACHABLE", "detail": f"document download failed: {err}"}
+            sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            result["sha256"] = sha256
+
+            prev_hash = prev.get("sha256")
+            if metadata_changed:
+                verdict = {"status": "SPEC_UPDATED",
+                           "detail": f"{prev.get('published_date')} -> {entry['published_date']} "
+                                     f"({prev.get('size')} -> {entry['size']})"}
+            elif prev_hash and prev_hash != sha256:
+                verdict = {"status": "SILENT_REPLACEMENT",
+                           "detail": f"same date/size ({entry['published_date']}) but document hash changed "
+                                     f"({prev_hash[:12]}... -> {sha256[:12]}...)"}
+            else:
+                verdict = {"status": "CURRENT", "detail": f"{entry['published_date']}, hash matches"}
+    elif metadata_changed:
+        verdict = {"status": "SPEC_UPDATED",
+                   "detail": f"{prev.get('published_date')} -> {entry['published_date']} (not hash-verified)"}
+        result["sha256"] = prev.get("sha256")
+    else:
+        result["sha256"] = prev.get("sha256")
+
+    state[dep_id] = {**prev, **result}
+    return verdict
+
+
 def classify_debian_system_package(dep: dict) -> dict:
     """debian/control build/runtime deps carry no version pin -- they always
     track whatever Debian trixie currently ships. So there's no "update
@@ -449,6 +509,9 @@ def classify(dep: dict, state: dict, do_download: bool, artifacts_root: Path | N
 
     if provider == "github-source-reference":
         return classify_github_source_reference(dep)
+
+    if provider == "wanderer-downloads":
+        return classify_wanderer_download(dep, state, do_download, artifacts_root)
 
     provider_fn = PROVIDERS.get(provider)
     if provider_fn is None:

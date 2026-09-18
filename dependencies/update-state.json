@@ -1,6 +1,6 @@
 {
   "ioptron-mount-rs232-protocol": {
-    "checked_at": "2026-09-18T08:48:53.114740+00:00",
+    "checked_at": "2026-09-18T09:06:35.957306+00:00",
     "content_length": "211630",
     "content_type": "application/pdf",
     "etag": "\"7678f16d6c1d71:0\"",
@@ -8,7 +8,7 @@
     "sha256": "ef24c2baaff769ad3ff4b3030c5afe4ddaff27d888bcf03616158906a1a2523a"
   },
   "skywatcher-motor-controller-protocol": {
-    "checked_at": "2026-09-18T08:29:08.424186+00:00",
+    "checked_at": "2026-09-18T09:06:34.071312+00:00",
     "download_url": "https://inter-static.skywatcher.com/downloads/skywatcher_motor_controller_command_set.pdf",
     "published_date": "25-08-2021",
     "sha256": "a4c583bdf617b45ea64b3c742e8b8ab7009a953a2d42c97fdaacd67455d7f73a",
@@ -16,23 +16,47 @@
     "title": "Manual: Sky-Watcher Motor Controller Command Set"
   },
   "synscan-serial-protocol": {
-    "checked_at": "2026-09-18T08:29:09.883643+00:00",
+    "checked_at": "2026-09-18T09:06:34.794014+00:00",
     "download_url": "https://inter-static.skywatcher.com/downloads/synscanserialcommunicationprotocol_version33.pdf",
     "published_date": "21-02-2018",
     "sha256": "bbdbb0c785f9b4e61fd1c1ff2e7adbe294ead97c9e98c3d07e55187ced03f33e",
     "size_kb": 687,
     "title": "Manual: Synscan Serial Communication Protocol, Version 3.3"
   },
+  "wanderer-box-pro-v3-protocol": {
+    "checked_at": "2026-09-18T09:06:46.002948+00:00",
+    "download_url": "https://download.s21i.co99.net/28647633/0/0/ABUIABA9GAAghNPZqwYoo93ipwU.pdf?f=Serial%20protocol%20for%20WandererBox%20Pro%20V3%2820231211%29.pdf&v=1702259076",
+    "published_date": "20231211",
+    "sha256": "86facc533cf96f9e8aceafd2dc7b630d045bf69a57752a8a4d0d17155beb7662",
+    "size": "147.3KB",
+    "title": "Serial protocol for WandererBox Pro V3(20231211).pdf"
+  },
+  "wanderer-cover-v4-protocol": {
+    "checked_at": "2026-09-18T09:06:38.640007+00:00",
+    "download_url": "https://download.s21i.co99.net/28647633/0/0/ABUIABA9GAAg1c-rwgYogJDcGw.pdf?f=Serial%20protocol%20for%20WandererCover%20V4-EC%20%2820250506%29.pdf&v=1750788053",
+    "published_date": "20250506",
+    "sha256": "5f8a05ed794eb8330fd1613f7836c30fe5e5829acb427972bb77df09df561836",
+    "size": "144KB",
+    "title": "Serial protocol for WandererCover V4-EC (20250506).pdf"
+  },
+  "wanderer-rotator-mini-protocol": {
+    "checked_at": "2026-09-18T09:06:42.793036+00:00",
+    "download_url": "https://download.s21i.co99.net/28647633/0/0/ABUIABA9GAAg-NT7rgYo8_7XuAY.pdf?f=Serial%20protocol%20for%20WandererRotator%20Mini%20and%20Mini%20V2-20240226.pdf&v=1709107836",
+    "published_date": "20240226",
+    "sha256": "9264aad87dc192a5e90c71e146d6a61060fe1a68c0cdf5bb4af40d9e9de0f6cd",
+    "size": "58KB",
+    "title": "Serial protocol for WandererRotator Mini and Mini V2-20240226.pdf"
+  },
   "zwo-asi-camera-sdk": {
-    "checked_at": "2026-09-18T08:27:19.645735+00:00",
+    "checked_at": "2026-09-18T09:05:58.811462+00:00",
     "download_url": "https://dl.zwoastro.com/software?app=DeveloperCameraSdk&platform=windows86&region=Overseas",
     "release_date": "20260112",
-    "sha256": null,
+    "sha256": "c6d59bf2de5b807f13d60d10b035e10dff31aeaa43391c6cd4782242126775ec",
     "size": "107 MB",
     "upstream_version": "1.41"
   },
   "zwo-caa-sdk": {
-    "checked_at": "2026-09-18T08:28:48.508674+00:00",
+    "checked_at": "2026-09-18T09:06:15.038593+00:00",
     "download_url": "https://dl.zwoastro.com/software?app=DeveloperCaaSdk&platform=windows86&region=Overseas",
     "release_date": "20251201",
     "sha256": "548bb1764db1d0af0b3570ef55f7088fd3b3f603afd6183a09e8faa3ddca70c3",
@@ -40,7 +64,7 @@
     "upstream_version": "1.5.9"
   },
   "zwo-eaf-sdk": {
-    "checked_at": "2026-09-18T08:28:25.968470+00:00",
+    "checked_at": "2026-09-18T09:06:07.544050+00:00",
     "download_url": "https://dl.zwoastro.com/software?app=DeveloperEafSdk&platform=windows86&region=Overseas",
     "release_date": "20260318",
     "sha256": "52e1bbb97fc7d7063ead125adb8bb920b675d1bda55ddb9275f67f575d0ccc9f",
@@ -48,7 +72,7 @@
     "upstream_version": "1.8.1"
   },
   "zwo-efw-sdk": {
-    "checked_at": "2026-09-18T08:28:44.992486+00:00",
+    "checked_at": "2026-09-18T09:06:11.909602+00:00",
     "download_url": "https://dl.zwoastro.com/software?app=DeveloperEfwSdk&platform=windows86&region=Overseas",
     "release_date": "20251201",
     "sha256": "e6a11a58acec98f7907e8e025cce1529a2f6db6f0df153dda247b8f14a67dfd9",

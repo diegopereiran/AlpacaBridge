@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import re
-import urllib.error
-import urllib.request
+
+from . import _http
 
 
 def _version_key(v: str) -> tuple:
@@ -21,13 +21,8 @@ def latest_version(dep: dict) -> dict:
             "reason": updates.get("reason", "No machine-readable version pattern configured."),
         }
 
-    req = urllib.request.Request(url, headers={"User-Agent": "alpacabridge-dependency-mapper"})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            text = resp.read().decode("utf-8", errors="ignore")
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
-        return {"status": "source-unreachable", "latest_version": None}
-    except Exception:
+    text, _ = _http.get_text(url)
+    if text is None:
         return {"status": "source-unreachable", "latest_version": None}
 
     matches = re.findall(pattern, text)

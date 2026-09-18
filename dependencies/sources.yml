@@ -621,6 +621,103 @@ dependencies:
       repository: indilib/indi
       path: drivers/filter_wheel/ioptron_wheel.cpp
 
+  # WandererAstro's downloads page (verified live) publishes real,
+  # dated protocol-spec PDFs for Cover, Rotator, Box, and ETA M54 --
+  # unlike SVBONY, no CAPTCHA on the download link (data-url attribute
+  # is a direct, unauthenticated URL). No PDF exists for the Snowflake
+  # filter wheel (only a non-protocol "User Guide"). Wanderer ETA M54 has
+  # no AlpacaBridge driver at all yet ("relevant if ETA support is added")
+  # -- intentionally untracked until it's a real dependency.
+  #
+  # AlpacaBridge's actual reference varies by device (verified in
+  # .github/instructions/wandererastro.instructions.md): the Cover driver
+  # was built directly from the bundled protocol doc below (local copy
+  # confirmed to say "Firmware version 20250506", matching upstream
+  # exactly), so only the spec PDF is tracked for it. Rotator and Box are
+  # explicitly documented as implemented from INDI's reference drivers
+  # instead, even though a vendor PDF also exists -- both signals are
+  # tracked: the vendor PDF (spec-drift-worth-knowing-about) and the INDI
+  # file actually used (github-source-reference, advisory).
+  - id: wanderer-cover-v4-protocol
+    kind: external-specification
+    relationship: indirect
+    current:
+      version: "20250506"
+      path: "AlpacaCore/external/WandererAstro/Serial Protocol for WandererCover V4-EC and V4-EC IR.md"
+      note: "Local copy confirmed to say \"Firmware version 20250506\", matching upstream."
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: wanderer-downloads
+      page: https://www.wandererastro.com/h-col-106.html
+      title_pattern: 'Serial protocol for WandererCover V4-EC \((\d{8})\)\.pdf'
+      verify_download: true
+
+  - id: wanderer-rotator-mini-protocol
+    kind: external-specification
+    relationship: indirect
+    current:
+      version: "20240226"
+      note: "No local copy bundled; driver implemented from the INDI reference below."
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: wanderer-downloads
+      page: https://www.wandererastro.com/h-col-106.html
+      title_pattern: 'Serial protocol for WandererRotator Mini and Mini V2-(\d{8})\.pdf'
+      verify_download: true
+
+  - id: wanderer-rotator-indi-reference
+    kind: externally-derived-protocol
+    relationship: indirect
+    current:
+      path: AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_protocol_wrapper.cpp
+      reviewed_commit: "d3473444a7675148c83587f03456b3329c61c1ba"
+      reviewed_at: "2026-09-18"
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: github-source-reference
+      repository: indilib/indi
+      path: drivers/rotator/wanderer_rotator_mini.cpp
+
+  - id: wanderer-box-pro-v3-protocol
+    kind: external-specification
+    relationship: indirect
+    current:
+      version: "20231211"
+      note: "No local copy bundled; driver implemented from the INDI reference below."
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: wanderer-downloads
+      page: https://www.wandererastro.com/h-col-106.html
+      title_pattern: 'Serial protocol for WandererBox Pro V3\((\d{8})\)\.pdf'
+      verify_download: true
+
+  - id: wanderer-box-indi-reference
+    kind: externally-derived-protocol
+    relationship: indirect
+    current:
+      path: AlpacaCore/src/vendors/wandererastro/wandererastro_box_protocol_wrapper.cpp
+      reviewed_commit: "53efbbcb31655d49146732105c43862e539152cd"
+      reviewed_at: "2026-09-18"
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: github-source-reference
+      repository: indilib/indi
+      path: drivers/auxiliary/wandererbox_pro_v3.cpp
+
+  - id: wanderer-sfw-indi-reference
+    kind: externally-derived-protocol
+    relationship: indirect
+    current:
+      path: AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_protocol_wrapper.cpp
+      reviewed_commit: "fd4300b915f3198a85d0996f157633289d353542"
+      reviewed_at: "2026-09-18"
+      note: "No protocol spec PDF exists for the Snowflake filter wheel, only a non-protocol User Guide."
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: github-source-reference
+      repository: indilib/indi
+      path: drivers/filter_wheel/wanderer_snowflake.cpp
+
 external_references:
   - id: bisque-theskyx-protocol
     path: AlpacaCore/external/Bisque
@@ -638,5 +735,16 @@ external_references:
     path: AlpacaCore/external/oasisastro
     provenance: manual
   - id: wandererastro-v4ec-manual
-    path: AlpacaCore/external/WandererAstro
+    path: "AlpacaCore/external/WandererAstro/WandererCoverV4 User Mannual 20250405.pdf"
+    provenance: manual
+    version: "20250405"
+  # WandererEmpire is WandererAstro's own firmware-updater/ASCOM app
+  # (verified live: WandererEmpire-V2.4.3-Setup.exe on the downloads
+  # page). It's used as a secondary reference for the Box driver
+  # (.github/instructions/wandererastro.instructions.md) and its releases
+  # can signal new device firmware worth knowing about, but it is not a
+  # build or runtime dependency of AlpacaBridge -- tracked here for
+  # visibility only, like the other external references.
+  - id: wandererempire-firmware-tool
+    path: "https://www.wandererastro.com/h-col-106.html (WandererEmpire-*-Setup.exe)"
     provenance: manual
