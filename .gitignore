@@ -70,6 +70,7 @@ __pycache__/
 
 # Claude Code local settings
 .claude/settings.local.json
+.claude/worktrees/
 
 # SVBONY SDK auto-generated camera config files
 U2SM*.bin
