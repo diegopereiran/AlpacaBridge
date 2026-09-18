@@ -2156,24 +2156,44 @@ private:
             }
 
             if (!long_unmonitored_outage) {
-                // Preserve the motion, and reconstruct the session state the
-                // reset wiped so the ordinary stop path works again. This is
-                // NOT a redefinition of what Slewing reports for speed-mode
-                // motion: it restores exactly the flag a MoveAxis sets in
-                // normal operation, which is what MoveAxis(axis, 0) consults
-                // before sending ":K". Without it that call is a silent no-op
-                // and the client cannot stop its own mount.
-                if (status.speed_mode) {
-                    manual_axis_slewing_[axis] = true;
-                    // cmd_axis_rate_deg_s_ is deliberately left at zero: the
-                    // board reports THAT an axis is running, not at what rate,
-                    // and inventing one would feed the dead-reckoning model a
-                    // number nothing measured. Reads re-anchor on hardware
-                    // counts within kPositionCacheTtl, so the position stays
-                    // honest; only the between-poll interpolation is flat.
-                }
-                // GOTO-mode motion needs no flag: get_hardware_slewing_locked()
-                // re-derives it from the board on every read.
+                // Preserve the motion and leave every session flag clear.
+                //
+                // manual_axis_slewing_ means "a MoveAxis THIS driver issued
+                // owns this axis": the only other writers set it having just
+                // commanded the motion (move_axis) or having failed to stop an
+                // axis they know is running away (the pulse-guide stop tail).
+                // Here the provenance is unknown -- ":f" reports speed mode
+                // and running for a MoveAxis and for ordinary sidereal
+                // tracking alike, and tracking is by far the likelier of the
+                // two to be found at connect. Setting the flag on that guess
+                // wedges Slewing true for the rest of the session on a merely
+                // tracking mount (nothing on the ordinary path clears it, so a
+                // sequencer waiting for Slewing to drop hangs), contradicts
+                // the board semantics this driver documents -- a tracking axis
+                // is NOT slewing -- and, through axis_busy_locked(), strands
+                // every RightAscensionRate / SiteLatitude write behind a
+                // "the busy operation's restore will re-apply this" branch
+                // whose restore is never scheduled (review of #553).
+                //
+                // Not setting it costs one bounded thing instead: a genuine
+                // MoveAxis that outlived the link is no longer stoppable
+                // through MoveAxis(axis, 0), which consults this flag.
+                // AbortSlew still stops it, and Slewing meanwhile reports what
+                // the board actually says. Guessing "tracking" degrades one
+                // stop route in a rare case; guessing "MoveAxis" silently
+                // breaks ordinary operation -- so the tie goes to leaving the
+                // flag clear.
+                //
+                // cmd_axis_rate_deg_s_ stays zero for its own reason: the
+                // board reports THAT an axis is running, not at what rate, and
+                // inventing one would feed the dead-reckoning model a number
+                // nothing measured. Reads re-anchor on hardware counts within
+                // kPositionCacheTtl, so the position stays honest; only the
+                // between-poll interpolation is flat.
+                //
+                // GOTO-mode motion needs no flag either:
+                // get_hardware_slewing_locked() re-derives it from the board
+                // on every read.
                 std::string message = "Link restored after ";
                 message += gap;
                 message += " with ";

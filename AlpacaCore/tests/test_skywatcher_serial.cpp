@@ -708,7 +708,7 @@ struct RelinkWindowGuard {
 
 }  // namespace
 
-TEST_CASE("SkyWatcher serial - a brief outage preserves surviving motion, and MoveAxis(0) can still stop it",
+TEST_CASE("SkyWatcher serial - a brief outage preserves surviving motion and reports Slewing honestly",
           "[skywatcher][serial][relink]") {
     auto board = std::make_unique<FakeSkyWatcherSerialBoard>();
     PortLink link(board->slave_path());
@@ -717,10 +717,9 @@ TEST_CASE("SkyWatcher serial - a brief outage preserves surviving motion, and Mo
     REQUIRE(driver->get_connected());
 
     auto replugged = relink_board(board, link, *driver);
-    // The board kept turning across the outage, in SPEED mode: a MoveAxis or
-    // an energized tracking drive. This is the invisible case — the driver
-    // classifies speed-mode motion as not-slewing, so a test written only
-    // against GOTO mode proves nothing here.
+    // The board kept turning across the outage, in SPEED mode. ":f" cannot say
+    // whether that is a MoveAxis or an ordinary tracking drive — they are the
+    // same bits on the wire — so the driver must not guess.
     replugged->set_axis_running(sw::kAxisRa, true, /*speed_mode=*/true);
 
     driver->set_connected(true);
@@ -730,14 +729,22 @@ TEST_CASE("SkyWatcher serial - a brief outage preserves surviving motion, and Mo
     // because a connector was jostled for a second is worse than the bug.
     CHECK(replugged->axis_running(sw::kAxisRa));
     CHECK(replugged->count_frames('K') == 0);
-    // The reconstructed session state is what makes the mount controllable
-    // again — and it is the flag a MoveAxis sets in normal operation, not a
-    // new meaning for Slewing.
-    CHECK(driver->get_slewing());
+    // Slewing reports what the board actually says, and a speed-mode axis is
+    // NOT slewing. Claiming otherwise (by reconstructing the MoveAxis flag on
+    // a guess) wedges Slewing true for the whole session on a mount that is
+    // merely tracking, and strands every rate/site write behind
+    // axis_busy_locked(). Review of #553.
+    CHECK_FALSE(driver->get_slewing());
 
-    // The regression the hardware run found: this used to be a silent no-op.
+    // The accepted cost of not guessing, pinned so it cannot regress silently:
+    // MoveAxis(axis, 0) consults that flag, so it is a no-op here.
     driver->move_axis(0, 0.0);
-    CHECK(replugged->count_frames('K') >= 1);
+    CHECK(replugged->count_frames('K') == 0);
+    CHECK(replugged->axis_running(sw::kAxisRa));
+
+    // AbortSlew is the route that still works: it stops both axes
+    // unconditionally (":L"), without consulting the flag.
+    driver->abort_slew();
     CHECK_FALSE(replugged->axis_running(sw::kAxisRa));
     driver->set_connected(false);
 }
@@ -824,6 +831,12 @@ TEST_CASE("SkyWatcher serial - a fresh connect finds an already-running axis and
     // destructive branch must never fire here.
     CHECK(board.count_frames('K') == 0);
     CHECK(board.axis_running(sw::kAxisRa));
+    // And the axis is left honestly reported: this is the service-restart
+    // case, where the running speed-mode axis is almost certainly tracking.
+    // Reporting Slewing true here would hang any sequencer that waits for it
+    // to drop, and strand rate/site writes behind axis_busy_locked() for the
+    // rest of the session (review of #553).
+    CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 
