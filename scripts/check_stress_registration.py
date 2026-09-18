@@ -1117,6 +1117,8 @@ def self_test():
     # The predicate above is well covered, but main()'s USE of it was not:
     # deleting `failures.extend(guard_failures)` left every check green. Drive
     # main() end to end over synthetic files so the wiring is pinned too.
+    import contextlib
+    import io
     import os
     import tempfile
 
@@ -1177,7 +1179,8 @@ def self_test():
             "    list(APPEND TEST_SOURCES fakevendor_concurrency_stress.cpp)\n"
             "endif()\n")
 
-        def run_main_with(stress_source, core_source="", cmake_source=None, guard_allowlist=()):
+        def run_main_with(stress_source, core_source="", cmake_source=None, guard_allowlist=(),
+                          capture_output=False):
             with open(stress, "w", encoding="utf-8") as fh:
                 fh.write(stress_source + "\n")
             with open(core, "w", encoding="utf-8") as fh:
@@ -1208,6 +1211,20 @@ def self_test():
             GUARD_ALLOWLIST.clear()
             GUARD_ALLOWLIST.update(guard_allowlist)
             try:
+                if capture_output:
+                    # Some self-tests need to assert on the finding TEXT, not
+                    # just the exit code -- an unrelated future rule that also
+                    # happens to reject the same fixture would otherwise keep
+                    # an exit-code-only check green through a regression in
+                    # the rule this case actually exists to pin (the same
+                    # unfalsifiability class this script's own fixes remove,
+                    # one level up). Captured rather than threaded through
+                    # main()'s own return value, so every other call site
+                    # (int-only) is untouched.
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        code = main()
+                    return code, buf.getvalue()
                 return main()
             finally:
                 globals()["tracked_files"] = real_tracked_files
@@ -1384,10 +1401,20 @@ def self_test():
             "  guard([] {});\n"
             "}\n"
         )
+        # Exit-code-only would stay green through a regression in a totally
+        # different rule that happens to also reject this fixture (the same
+        # unfalsifiability class the #512/#513/#514 bundle removes elsewhere,
+        # one level up here) -- assert the actual per-case finding fired, not
+        # just that *something* failed.
+        second_case_code, second_case_output = run_main_with(second_case_unguarded, capture_output=True)
         check("main() FAILS when a second TEST_CASE constructs a guard "
               "without closing it, even though an earlier case in the same "
               "file does (issue #514 per-case scoping)",
-              run_main_with(second_case_unguarded) == 1)
+              second_case_code == 1)
+        check("...and the failure names the actual per-case finding "
+              "(GUARD NOT ASSERTED) and the offending case, not just any exit 1",
+              "GUARD NOT ASSERTED" in second_case_output
+              and "Also stress but broken" in second_case_output)
         # The mirror: two cases, both fully compliant on their own, must pass
         # -- scoping to TEST_CASE must not become so strict it can no longer
         # see a guard whose construction and closing lines are both present

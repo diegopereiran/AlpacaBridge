@@ -369,8 +369,11 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
         pfd.fd = slave;
         pfd.events = POLLIN;
         const int ready = ::poll(&pfd, 1, static_cast<int>(remaining_ms));
+        if (ready < 0 && errno == EINTR) {
+            continue;  // interrupted (profiler/debugger/SIGCHLD) -- re-poll against the same deadline
+        }
         if (ready <= 0) {
-            break;  // timed out or a poll error -- either way, stop waiting
+            break;  // timed out or a real poll error -- either way, stop waiting
         }
         const ssize_t n = read(slave, received.data() + got, reply.size() - got);
         if (n <= 0) break;
