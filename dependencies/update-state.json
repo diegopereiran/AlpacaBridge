@@ -1,4 +1,12 @@
 {
+  "ioptron-mount-rs232-protocol": {
+    "checked_at": "2026-09-18T08:48:53.114740+00:00",
+    "content_length": "211630",
+    "content_type": "application/pdf",
+    "etag": "\"7678f16d6c1d71:0\"",
+    "last_modified": "Fri, 12 Feb 2021 18:25:24 GMT",
+    "sha256": "ef24c2baaff769ad3ff4b3030c5afe4ddaff27d888bcf03616158906a1a2523a"
+  },
   "skywatcher-motor-controller-protocol": {
     "checked_at": "2026-09-18T08:29:08.424186+00:00",
     "download_url": "https://inter-static.skywatcher.com/downloads/skywatcher_motor_controller_command_set.pdf",

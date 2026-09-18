@@ -344,6 +344,14 @@ dependencies:
   # response -- what this script's urllib actually fetches -- contains the
   # "Camera SDK" label but not the version number next to it), so it can't
   # be regex-scraped the way ZWO's or libgpiod's static pages can.
+  #
+  # playerone-camera-sdk also covers iOptron's iCAM cameras: iCAM178M/462C/
+  # 464C enumerate as USB VID a0a0 with a "Player One iCAM..." descriptor
+  # string and are recognized by the Player One SDK with no special
+  # handling (.github/instructions/ioptron.instructions.md, 2026-08-26).
+  # iOptron publishes no camera SDK of its own -- there is deliberately no
+  # separate ioptron-camera-sdk entry here; that would be a fictional
+  # dependency.
   - id: playerone-camera-sdk
     kind: vendor-sdk
     relationship: direct
@@ -559,6 +567,60 @@ dependencies:
       title: "Manual: Synscan Serial Communication Protocol, Version 3.3"
       verify_download: true
 
+  # iOptron publishes no general SDK. Its mount protocol IS a real,
+  # versioned, directly-downloadable spec PDF (unlike Sky-Watcher's listing
+  # page above, iOptron serves it at a stable URL with real HTTP caching
+  # headers -- verified live: Content-Type application/pdf, Content-Length
+  # 211630, ETag "7678f16d6c1d71:0", Last-Modified 2021-02-12). iEAF/iEFW
+  # have no vendor SDK OR published spec at all -- AlpacaBridge implements
+  # their serial protocol directly from INDI's open-source reference
+  # drivers, so those are tracked as advisory source references instead
+  # (kind: externally-derived-protocol), not as a spec to diff bytes
+  # against. iMate PowerBox uses Linux GPIO via libgpiod (already tracked
+  # above); iCAM is covered by playerone-camera-sdk (see its comment).
+  - id: ioptron-mount-rs232-protocol
+    kind: external-specification
+    relationship: indirect
+    current:
+      version: "3.10"
+      path: AlpacaCore/external/iOptron/RS-232_Command_Language2014V310.md
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: direct-document
+      url: https://www.ioptron.com/v/ASCOM/RS-232_Command_Language2014V310.pdf
+      verify_download: true
+
+  # Advisory only -- see classify_github_source_reference() in
+  # check_updates.py. reviewed_commit is the INDI commit this driver's
+  # protocol implementation was last checked against; bump it by hand
+  # after reviewing a flagged change, the same way acknowledged_risks
+  # entries are bumped after a human decision.
+  - id: ioptron-ieaf-protocol
+    kind: externally-derived-protocol
+    relationship: indirect
+    current:
+      path: AlpacaCore/src/vendors/ioptron/ioptron_ieaf_protocol_wrapper.cpp
+      reviewed_commit: "e086bab634cbbbdf99cd4602255fd2775c71fa38"
+      reviewed_at: "2026-09-18"
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: github-source-reference
+      repository: indilib/indi
+      path: drivers/focuser/ieaffocus.cpp
+
+  - id: ioptron-iefw-protocol
+    kind: externally-derived-protocol
+    relationship: indirect
+    current:
+      path: AlpacaCore/src/vendors/ioptron/ioptron_iefw_protocol_wrapper.cpp
+      reviewed_commit: "499dcd61b9cf701a41b465a5c36b2df55ba3c3a9"
+      reviewed_at: "2026-09-18"
+    usage: {build: false, runtime: false, packaged: false}
+    updates:
+      provider: github-source-reference
+      repository: indilib/indi
+      path: drivers/filter_wheel/ioptron_wheel.cpp
+
 external_references:
   - id: bisque-theskyx-protocol
     path: AlpacaCore/external/Bisque
@@ -569,10 +631,6 @@ external_references:
   - id: gemini-powerdatahub-protocol
     path: AlpacaCore/external/Gemini
     provenance: manual
-  - id: ioptron-rs232-protocol
-    path: AlpacaCore/external/iOptron
-    provenance: manual
-    version: "3.10"
   - id: losmandy-g11-protocol
     path: AlpacaCore/external/Losmandy
     provenance: manual

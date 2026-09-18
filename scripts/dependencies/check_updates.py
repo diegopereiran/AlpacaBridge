@@ -44,7 +44,10 @@ STATE_PATH = REPO_ROOT / "dependencies" / "update-state.json"
 ISSUE_TITLE = "Dependency update status"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sources import debian, github, manual, static_download_page, svbony, vendor_page, wordpress_acf  # noqa: E402
+from sources import (  # noqa: E402
+    debian, direct_document, github, github_source_reference, manual,
+    static_download_page, svbony, vendor_page, wordpress_acf,
+)
 import map_dependencies  # noqa: E402
 
 PROVIDERS = {
@@ -263,6 +266,92 @@ def classify_static_download_page(dep: dict, state: dict, do_download: bool, art
     return verdict
 
 
+def classify_direct_document(dep: dict, state: dict, do_download: bool, artifacts_root: Path | None) -> dict:
+    """A document served directly at a stable URL with real HTTP caching
+    headers (ETag/Last-Modified/Content-Length) -- e.g. iOptron's RS-232
+    Command Language PDF. Cheaper than static-download-page: no listing
+    page to parse, and a HEAD request alone usually detects a change."""
+    dep_id = dep["id"]
+    meta = direct_document.fetch_metadata(dep)
+    if meta["status"] != "ok":
+        return {"status": meta["status"].upper().replace("-", "_"), "detail": meta.get("detail", "")}
+
+    prev = state.get(dep_id, {})
+    result = {
+        "content_type": meta["content_type"],
+        "content_length": meta["content_length"],
+        "etag": meta["etag"],
+        "last_modified": meta["last_modified"],
+        "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    metadata_changed = (
+        prev.get("etag") not in (None, meta["etag"])
+        or prev.get("last_modified") not in (None, meta["last_modified"])
+        or prev.get("content_length") not in (None, meta["content_length"])
+    )
+
+    version = dep.get("current", {}).get("version")
+    version_prefix = f"v{version}, " if version else ""
+    verdict = {"status": "CURRENT", "detail": f"{version_prefix}{meta['last_modified']}"}
+
+    if do_download and dep["updates"].get("verify_download"):
+        with _artifact_dir(dep_id, artifacts_root) as adir:
+            archive, err = download_artifact(dep["updates"]["url"], adir)
+            if archive is None:
+                result["sha256"] = prev.get("sha256")
+                state[dep_id] = {**prev, **result}
+                return {"status": "SOURCE_UNREACHABLE", "detail": f"document download failed: {err}"}
+            sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            result["sha256"] = sha256
+
+            prev_hash = prev.get("sha256")
+            if metadata_changed:
+                verdict = {"status": "SPEC_UPDATED",
+                           "detail": f"{version_prefix}{prev.get('last_modified')} -> {meta['last_modified']} "
+                                     f"(etag {prev.get('etag')} -> {meta['etag']})"}
+            elif prev_hash and prev_hash != sha256:
+                verdict = {"status": "SILENT_REPLACEMENT",
+                           "detail": f"{version_prefix}same headers ({meta['last_modified']}) but document hash "
+                                     f"changed ({prev_hash[:12]}... -> {sha256[:12]}...)"}
+            else:
+                verdict = {"status": "CURRENT", "detail": f"{version_prefix}{meta['last_modified']}, hash matches"}
+    elif metadata_changed:
+        verdict = {"status": "SPEC_UPDATED",
+                   "detail": f"{version_prefix}{prev.get('last_modified')} -> {meta['last_modified']} (not hash-verified)"}
+        result["sha256"] = prev.get("sha256")
+    else:
+        result["sha256"] = prev.get("sha256")
+
+    state[dep_id] = {**prev, **result}
+    return verdict
+
+
+def classify_github_source_reference(dep: dict) -> dict:
+    """Advisory only: AlpacaBridge implements this driver's protocol from a
+    third-party open-source reference (no vendor SDK or spec exists at
+    all). A changed reference file means "worth a human look", not
+    "AlpacaBridge is broken" -- so this never reports anything as urgent
+    as UPDATE_AVAILABLE, only ADVISORY_SOURCE_CHANGED."""
+    latest = github_source_reference.fetch_latest_commit(dep)
+    if latest["status"] != "ok":
+        return {"status": latest["status"].upper().replace("-", "_"), "detail": latest.get("detail", "")}
+
+    reviewed = dep.get("current", {}).get("reviewed_commit")
+    if not reviewed:
+        return {"status": "manual-check-required", "detail": "no reviewed_commit baseline set in sources.yml"}
+
+    if latest["sha"] != reviewed:
+        repo = dep["updates"]["repository"]
+        path = dep["updates"]["path"]
+        return {
+            "status": "ADVISORY_SOURCE_CHANGED",
+            "detail": f"{reviewed[:12]} -> {latest['sha'][:12]} ({latest['date']}: {latest['message']}) "
+                      f"-- https://github.com/{repo}/commits/{latest['sha']}/{path}",
+        }
+    return {"status": "CURRENT", "detail": f"reviewed commit {reviewed[:12]} still latest"}
+
+
 def classify_debian_system_package(dep: dict) -> dict:
     """debian/control build/runtime deps carry no version pin -- they always
     track whatever Debian trixie currently ships. So there's no "update
@@ -354,6 +443,12 @@ def classify(dep: dict, state: dict, do_download: bool, artifacts_root: Path | N
 
     if provider == "static-download-page":
         return classify_static_download_page(dep, state, do_download, artifacts_root)
+
+    if provider == "direct-document":
+        return classify_direct_document(dep, state, do_download, artifacts_root)
+
+    if provider == "github-source-reference":
+        return classify_github_source_reference(dep)
 
     provider_fn = PROVIDERS.get(provider)
     if provider_fn is None:

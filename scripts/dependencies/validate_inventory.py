@@ -20,7 +20,7 @@ SCHEMA_PATH = REPO_ROOT / "dependencies" / "inventory.schema.json"
 VALID_KINDS = {
     "vendor-sdk", "vendored-source", "cmake-dependency",
     "test-dependency", "ci-tool", "system-package", "managed-elsewhere",
-    "external-specification",
+    "external-specification", "externally-derived-protocol",
 }
 VALID_RELATIONSHIPS = {"direct", "indirect"}
 VALID_SEVERITIES = {"low", "medium", "high"}
