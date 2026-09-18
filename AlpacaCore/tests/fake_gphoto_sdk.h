@@ -27,7 +27,7 @@
 namespace alpacacore::test {
 
 /**
- * Drop the driver's on-disk sensor-geometry cache
+ * Drop this process's entries from the driver's on-disk sensor-geometry cache
  * (gphoto_camera_driver.cpp's kSensorCacheRelativePath, CWD-relative).
  *
  * Every fake-SDK connect that reaches the priming capture writes this file.
@@ -37,19 +37,13 @@ namespace alpacacore::test {
  * tests exist for would evaporate silently on run 2 in a persistent build
  * directory. Call this first in any gphoto test case that connects.
  *
- * Deleting rather than filtering is safe: the cache is pure derived state
- * that the next priming capture rebuilds.
- */
-/**
- * Drop this process's entries from the CWD-relative sensor cache.
- *
- * The cache file is real driver state (config/gphoto_sensor_cache.tsv, one
- * TSV line per model), so deleting it wholesale from a test binary run in a
- * deployment working directory would silently discard that rig's primed
- * geometry for every model (review of #546). Every fake model this suite
- * connects carries the unique_test_model() "[pid N]" suffix, so only lines
- * keyed by THIS process's suffix are removed; everything else in the file,
- * including sibling test processes' entries, is rewritten untouched.
+ * The file is real driver state (one TSV line per model), so deleting it
+ * wholesale from a test binary run in a deployment working directory would
+ * silently discard that rig's primed geometry for every model (review of
+ * #546). Every fake model this suite connects carries the unique_test_model()
+ * "[pid N]" suffix, so only lines keyed by THIS process's suffix are removed;
+ * everything else in the file, including sibling test processes' entries, is
+ * rewritten as read.
  */
 inline void reset_gphoto_sensor_cache() {
     const std::filesystem::path path("config/gphoto_sensor_cache.tsv");
@@ -110,6 +104,12 @@ inline std::string unique_test_model(const std::string& base) {
  *  - `close_camera` is the one method `throw_from` cannot target. Deliberate:
  *    it mirrors the real close_session_locked, which never throws, so a
  *    throwing close would test a path the driver can never see.
+ *  - `set_choice_value` / `set_toggle_value` on an UNMODELLED widget insert a
+ *    new map entry and succeed, where GPhotoSDKWrapper throws
+ *    PropertyNotImplemented. Unreachable today (every production write is
+ *    gated by has_widget or has_bulb_), but lenient in the direction a fake
+ *    must not be; a test that scripts an absent widget must not rely on the
+ *    write failing.
  *
  * Callers push one or more FakeCamera entries into `cameras` before
  * connecting (index == the Alpaca "cameraIndex"). Each fake camera carries
