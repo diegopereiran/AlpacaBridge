@@ -2639,10 +2639,19 @@ private:
         if (epoch == seen_recovery_epoch_) {
             return;
         }
-        seen_recovery_epoch_ = epoch;
+        // The epoch is consumed only once BOTH probes have answered, below.
+        // Consuming it up front looked equivalent but was not: the link has
+        // just come back, so a single mis-paired straggler surviving the
+        // dirty/settle machinery turns one ":f" into an exception, and nothing
+        // mints a new epoch unless the link faults AND recovers all over
+        // again. The check would then never run, the fault would stay unset,
+        // and a power-cycled board's reset home-count registers would be
+        // served as a position for the rest of the session -- the exact silent
+        // mispointing this check exists to catch (review of #553).
         try {
             const AxisStatus ra = protocol_->inquire_status(kAxisRa);
             const AxisStatus dec = protocol_->inquire_status(kAxisDec);
+            seen_recovery_epoch_ = epoch;  // both probes answered: this recovery is now checked
             if (ra.init_done && dec.init_done) {
                 ALPACA_LOG_INFO("SkyWatcher", "Link recovered with the board's session intact");
                 return;
@@ -2655,9 +2664,9 @@ private:
                                                std::string(ra.init_done ? "true" : "false") +
                                                ", Dec init_done=" + std::string(dec.init_done ? "true" : "false"));
         } catch (const std::exception& e) {
-            // The link went away again mid-check. Leave the epoch consumed;
-            // the next recovery re-runs this.
-            std::string message = "check_board_survived_recovery_locked: link dropped again mid-check: ";
+            // Link trouble mid-check: leave the epoch UNCONSUMED so the next
+            // read retries this recovery rather than skipping it forever.
+            std::string message = "check_board_survived_recovery_locked: probe failed, will retry this recovery: ";
             message += e.what();
             ALPACA_LOG_TRACE("SkyWatcher", message);
         }
