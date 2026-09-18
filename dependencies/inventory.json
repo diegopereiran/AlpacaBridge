@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-18T08:30:41.832061+00:00",
-  "source_commit": "e7c25677ac5f6684ed23b1b76f607700095d78e8",
+  "generated_at": "2026-09-18T08:49:31.176261+00:00",
+  "source_commit": "b2e9ebf8956b8549c9a3370d212cd9d9eaf7edd0",
   "dependencies": [
     {
       "id": "zwo-asi-camera-sdk",
@@ -998,6 +998,50 @@
         "runtime": false,
         "packaged": false
       }
+    },
+    {
+      "id": "ioptron-mount-rs232-protocol",
+      "kind": "external-specification",
+      "relationship": "indirect",
+      "current": {
+        "version": "3.10",
+        "path": "AlpacaCore/external/iOptron/RS-232_Command_Language2014V310.md"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "ioptron-ieaf-protocol",
+      "kind": "externally-derived-protocol",
+      "relationship": "indirect",
+      "current": {
+        "path": "AlpacaCore/src/vendors/ioptron/ioptron_ieaf_protocol_wrapper.cpp",
+        "reviewed_commit": "e086bab634cbbbdf99cd4602255fd2775c71fa38",
+        "reviewed_at": "2026-09-18"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
+    },
+    {
+      "id": "ioptron-iefw-protocol",
+      "kind": "externally-derived-protocol",
+      "relationship": "indirect",
+      "current": {
+        "path": "AlpacaCore/src/vendors/ioptron/ioptron_iefw_protocol_wrapper.cpp",
+        "reviewed_commit": "499dcd61b9cf701a41b465a5c36b2df55ba3c3a9",
+        "reviewed_at": "2026-09-18"
+      },
+      "usage": {
+        "build": false,
+        "runtime": false,
+        "packaged": false
+      }
     }
   ],
   "external_references": [
@@ -1015,12 +1059,6 @@
       "id": "gemini-powerdatahub-protocol",
       "path": "AlpacaCore/external/Gemini",
       "provenance": "manual"
-    },
-    {
-      "id": "ioptron-rs232-protocol",
-      "path": "AlpacaCore/external/iOptron",
-      "provenance": "manual",
-      "version": "3.10"
     },
     {
       "id": "losmandy-g11-protocol",
