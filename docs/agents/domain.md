@@ -10,7 +10,17 @@ How the engineering skills should consume this repo's domain documentation when 
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved. None of these three skills are installed in this repo's `.claude/commands/` yet; this file configures them for when they are.
 
+A record `/domain-modeling` creates under `docs/decisions/` still needs the two
+things AGENTS.md's "Failure and decision memory" section requires of every
+decision record: an entry in `docs/decisions/README.md`'s index, and a link
+from the instruction file or `AGENTS.md` section that owns the rule it
+explains. Nothing gates this, so add both by hand when a record is created.
+
 ## File structure
+
+This repo is single-context (`AlpacaCore/` and `AlpacaHTTP/`, no `src/`, no
+`CONTEXT-MAP.md`); the multi-context tree below is a generic template for
+repos that opt into that layout, not a description of this one.
 
 Single-context repo (most repos):
 

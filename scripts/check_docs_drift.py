@@ -744,6 +744,8 @@ CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # Tripwire for the span matcher, not a rule about document size: if
 # AGENTS.md is legitimately trimmed below this, lower the floor.
 MIN_AGENTS_MD_PATH_REFS = 40
+# Tripwire for a docs/agents/ rename, not a target file count.
+MIN_AGENTS_DIR_FILES = 3
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
@@ -881,6 +883,15 @@ def check_agents_md_paths_exist():
     agents_dir = ROOT / "docs/agents"
     agents_files = sorted(agents_dir.glob("*.md"))
     tracked_agents = _run_git(["-c", "core.quotePath=false", "ls-files", "docs/agents/*.md"]).stdout.splitlines()
+    # A directory rename would make both the glob and ls-files go empty and
+    # this whole block would silently pass nothing -- the vacuity class
+    # decision record 0003 calls out. Floor is today's file count (3); it is
+    # a tripwire, not a target.
+    if len(tracked_agents) < MIN_AGENTS_DIR_FILES:
+        failures.append(
+            "only %d tracked file(s) found under docs/agents/*.md (floor %d): "
+            "the directory may have been renamed, or check_agents_md_paths_exist "
+            "should be updated" % (len(tracked_agents), MIN_AGENTS_DIR_FILES))
     for missing in sorted(set(tracked_agents) - {str(p.relative_to(ROOT)) for p in agents_files}):
         failures.append("%s is a tracked agent-skills doc but is missing" % missing)
     for path in agents_files:
