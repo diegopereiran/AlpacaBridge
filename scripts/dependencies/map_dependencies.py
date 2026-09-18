@@ -20,6 +20,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -58,7 +59,13 @@ def load_sources() -> dict:
 def resolve_local_version(dep: dict) -> str | None:
     """Resolve a dependency's installed version from disk instead of trusting a
     static sources.yml value -- used for SDKs whose version lives only in a
-    SONAME (e.g. libASICamera2.so.1.41). Returns None if no file matches."""
+    SONAME (e.g. libASICamera2.so.1.41). Returns None if no file matches.
+
+    A SONAME symlink chain (libFoo.so.3, libFoo.so.3.10, libFoo.so.3.10.0) can
+    match the same glob at several specificity levels; the fullest -- most
+    dot-separated version components -- is the real version, so pick the
+    longest captured group across all matches rather than the first match in
+    sorted filename order (which would pick the shortest stub, e.g. "3")."""
     version_from = dep.get("local", {}).get("version_from")
     if not version_from or version_from.get("type") != "filename":
         return None
@@ -66,11 +73,10 @@ def resolve_local_version(dep: dict) -> str | None:
     if not matches:
         return None
     pattern = re.compile(version_from["regex"])
-    for path in matches:
-        m = pattern.search(path.name)
-        if m:
-            return m.group(1)
-    return None
+    candidates = [m.group(1) for path in matches if (m := pattern.search(path.name))]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda v: v.count("."))
 
 
 def sha256_file(path: Path) -> str:
@@ -82,10 +88,16 @@ def sha256_file(path: Path) -> str:
 
 
 def file_type(path: Path) -> str | None:
+    """Classify a file's type, always dereferencing symlinks (-L) so a
+    symlink (e.g. libqhyccd.so -> libqhyccd.so.20 -> libqhyccd.so.26.6.4.16)
+    classifies identically regardless of platform: macOS's `file` follows
+    symlinks by default, Linux's does not without -L -- without forcing it,
+    the same symlink would appear as a library on one OS and be silently
+    dropped on the other."""
     if not shutil.which("file"):
         return None
     try:
-        out = subprocess.run(["file", "-b", str(path)], capture_output=True, text=True, timeout=10)
+        out = subprocess.run(["file", "-bL", str(path)], capture_output=True, text=True, timeout=10)
         return out.stdout.strip() or None
     except Exception:
         return None
@@ -146,6 +158,11 @@ def scan_vendor_tree(scan_path: Path) -> dict:
         is_exec = bool(p.stat().st_mode & 0o111)
 
         record = {"path": rel, "sha256": sha256_file(p), "size": size}
+        if p.is_symlink():
+            try:
+                record["symlink_target"] = os.readlink(p)
+            except OSError:
+                pass
         if is_elf:
             info = elf_info(p, ftype)
             if info:

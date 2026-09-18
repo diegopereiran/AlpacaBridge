@@ -194,6 +194,24 @@ def classify_wordpress_acf(dep: dict, state: dict, do_download: bool, artifacts_
     return verdict
 
 
+def classify_debian_system_package(dep: dict) -> dict:
+    """debian/control build/runtime deps carry no version pin -- they always
+    track whatever Debian trixie currently ships. So there's no "update
+    available" concept to report; the useful signal is which package's
+    current trixie version couldn't be resolved at all."""
+    result = debian.latest_version(dep)
+    per_package = result.get("per_package", {})
+    if not per_package:
+        return {"status": "manual-check-required", "detail": "no packages configured"}
+
+    unreachable = [pkg for pkg, r in per_package.items() if r["status"] != "ok"]
+    if unreachable:
+        return {"status": "source-unreachable", "detail": f"could not resolve: {', '.join(sorted(unreachable))}"}
+
+    detail = ", ".join(f"{pkg}={r['latest_version']}" for pkg, r in sorted(per_package.items()))
+    return {"status": "current", "detail": detail}
+
+
 def classify(dep: dict, state: dict, do_download: bool, artifacts_root: Path | None) -> dict:
     updates = dep.get("updates")
     if not updates:
@@ -206,6 +224,9 @@ def classify(dep: dict, state: dict, do_download: bool, artifacts_root: Path | N
     if provider == "wordpress-acf":
         return classify_wordpress_acf(dep, state, do_download, artifacts_root)
 
+    if provider == "debian" and dep["kind"] == "system-package":
+        return classify_debian_system_package(dep)
+
     provider_fn = PROVIDERS.get(provider)
     if provider_fn is None:
         return {"status": "manual-check-required", "detail": f"unknown provider {provider!r}"}
@@ -215,7 +236,7 @@ def classify(dep: dict, state: dict, do_download: bool, artifacts_root: Path | N
     if status != "ok":
         return {"status": status, "detail": result.get("reason", "")}
 
-    current_version = str(dep.get("current", {}).get("version", "")).strip()
+    current_version = map_dependencies.resolve_local_version(dep) or str(dep.get("current", {}).get("version", "")).strip()
     latest = result.get("latest_version")
     if not current_version or current_version.lower() == "unknown":
         return {"status": "version-unknown", "detail": f"latest upstream: {latest}"}

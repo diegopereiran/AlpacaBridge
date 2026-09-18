@@ -1,6 +1,6 @@
 {
   "zwo-asi-camera-sdk": {
-    "checked_at": "2026-09-18T07:29:59.356196+00:00",
+    "checked_at": "2026-09-18T08:08:45.684955+00:00",
     "download_url": "https://dl.zwoastro.com/software?app=DeveloperCameraSdk&platform=windows86&region=Overseas",
     "release_date": "20260112",
     "sha256": null,
@@ -8,7 +8,7 @@
     "upstream_version": "1.41"
   },
   "zwo-caa-sdk": {
-    "checked_at": "2026-09-18T07:30:04.688725+00:00",
+    "checked_at": "2026-09-18T08:08:49.894223+00:00",
     "download_url": "https://dl.zwoastro.com/software?app=DeveloperCaaSdk&platform=windows86&region=Overseas",
     "release_date": "20251201",
     "sha256": null,
@@ -16,7 +16,7 @@
     "upstream_version": "1.5.9"
   },
   "zwo-eaf-sdk": {
-    "checked_at": "2026-09-18T07:30:01.887125+00:00",
+    "checked_at": "2026-09-18T08:08:47.122990+00:00",
     "download_url": "https://dl.zwoastro.com/software?app=DeveloperEafSdk&platform=windows86&region=Overseas",
     "release_date": "20260318",
     "sha256": null,
@@ -24,7 +24,7 @@
     "upstream_version": "1.8.1"
   },
   "zwo-efw-sdk": {
-    "checked_at": "2026-09-18T07:30:03.261531+00:00",
+    "checked_at": "2026-09-18T08:08:48.443126+00:00",
     "download_url": "https://dl.zwoastro.com/software?app=DeveloperEfwSdk&platform=windows86&region=Overseas",
     "release_date": "20251201",
     "sha256": null,

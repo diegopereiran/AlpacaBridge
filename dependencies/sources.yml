@@ -134,12 +134,22 @@ acknowledged_risks:
     rationale: "SVBONY does not publish checksums or signatures for SDK downloads."
     approved: "2026-09-18"
     review_after: "2027-03-18"
-  - component: playerone-sdk
+  - component: playerone-camera-sdk
     code: precompiled-binary
     rationale: "Player One ships prebuilt .so libraries; no source is published."
     approved: "2026-09-18"
     review_after: "2027-03-18"
-  - component: playerone-sdk
+  - component: playerone-camera-sdk
+    code: upstream-signature-unavailable
+    rationale: "Player One does not publish checksums or signatures for SDK downloads."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: playerone-filterwheel-sdk
+    code: precompiled-binary
+    rationale: "Player One ships prebuilt .so libraries; no source is published."
+    approved: "2026-09-18"
+    review_after: "2027-03-18"
+  - component: playerone-filterwheel-sdk
     code: upstream-signature-unavailable
     rationale: "Player One does not publish checksums or signatures for SDK downloads."
     approved: "2026-09-18"
@@ -276,9 +286,11 @@ dependencies:
       path: AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04
     usage: {build: true, runtime: true, packaged: true}
     updates:
+      # log_en.html is a docsify shell rendered client-side (no static
+      # content); the actual changelog is the markdown source it fetches.
       provider: vendor-page
-      url: https://www.qhyccd.com/html/prepub/log_en.html
-      version_pattern: '(\d+\.\d+\.\d+\.\d+)'
+      url: https://www.qhyccd.com/html/prepub/log_en.md
+      version_pattern: 'sdk_linux_arm64_(\d+\.\d+\.\d+)\.tar\.gz'
 
   - id: touptek-sdk
     kind: vendor-sdk
@@ -293,9 +305,14 @@ dependencies:
       path: AlpacaCore/external/ToupTek/toupcamsdk.20260128
     usage: {build: true, runtime: true, packaged: true}
     updates:
-      provider: vendor-page
-      url: https://www.touptek.com/download/showdownload.php?lcid=39
-      version_pattern: 'toupcamsdk\.(\d{8})'
+      # No reachable machine-readable source found: touptek.com/download/...
+      # 404s, and both www.touptekphotonics.com/download/ and
+      # www.touptek-astro.com/downloads/ render their SDK list client-side
+      # (no static filename/version text to regex against).
+      provider: manual
+      reason: >-
+        No static, machine-readable SDK version source found. Check
+        https://www.touptek-astro.com/downloads/ (Developers > Linux) by hand.
 
   - id: svbony-sdk
     kind: vendor-sdk
@@ -313,27 +330,56 @@ dependencies:
       provider: manual
       reason: "No reliable machine-readable version or release feed."
 
-  - id: playerone-sdk
+  # Player One ships the camera and filter wheel SDKs as separate downloads
+  # that version independently (same shape as ZWO above). Their software
+  # page (player-one-astronomy.com/service/software) shows each product's
+  # version, but it's injected client-side by JS (confirmed: the raw HTTP
+  # response -- what this script's urllib actually fetches -- contains the
+  # "Camera SDK" label but not the version number next to it), so it can't
+  # be regex-scraped the way ZWO's or libgpiod's static pages can.
+  - id: playerone-camera-sdk
     kind: vendor-sdk
     relationship: direct
-    scan_path: AlpacaCore/external/PlayerOne
+    scan_path: AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0
+    local:
+      version_from:
+        type: filename
+        glob: "AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so.*"
+        regex: '\.so\.(\d+\.\d+\.\d+)$'
     drift:
       - file: debian/rules
         must_contain:
           - "AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
-          - "AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64"
-    current:
-      version: unknown
-      note: >-
-        Two independently versioned SDK bundles from the same vendor
-        (camera V3.10.0, filter wheel V1.2.3) -- not representable as one
-        comparable version string, so update checks report version-unknown
-        rather than a false comparison against either sub-version.
+    current: {note: "version resolved at scan time from the installed SONAME"}
     usage: {build: true, runtime: true, packaged: true}
     updates:
-      provider: vendor-page
-      url: https://www.player-one-astronomy.com/service/software
-      version_pattern: 'V(\d+\.\d+\.\d+)'
+      provider: manual
+      reason: >-
+        Page renders SDK versions client-side via JS; no static source
+        found. Check https://www.player-one-astronomy.com/service/software
+        by hand.
+
+  - id: playerone-filterwheel-sdk
+    kind: vendor-sdk
+    relationship: direct
+    scan_path: AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3
+    local:
+      version_from:
+        type: filename
+        glob: "AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so.*"
+        regex: '\.so\.(\d+\.\d+\.\d+)$'
+    drift:
+      - file: debian/rules
+        must_contain:
+          - "AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64"
+    current: {note: "version resolved at scan time from the installed SONAME"}
+    usage: {build: true, runtime: true, packaged: true}
+    updates:
+      provider: manual
+      reason: >-
+        Page renders SDK versions client-side via JS; no static source
+        found. Check https://www.player-one-astronomy.com/service/software
+        by hand.
 
   - id: libgpiod
     kind: vendored-source
