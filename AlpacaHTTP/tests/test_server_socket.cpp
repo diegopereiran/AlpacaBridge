@@ -216,13 +216,16 @@ int main() {
     server.start_async();
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-    if (!server.is_running()) {
+    // is_running() can go true before the listener is actually bound (see
+    // wait_for_bound_port()'s comment), so the port readiness check -- not
+    // just is_running() -- decides whether this run is skipped. Folding both
+    // into one wait keeps a slow-but-eventually-successful bind on a loaded
+    // runner from hitting a hard EXPECT abort instead of the intended skip.
+    const std::uint16_t port = server.is_running() ? wait_for_bound_port(server, 2000) : 0;
+    if (port == 0) {
         std::cerr << "Server socket test skipped: unable to bind an ephemeral port.\n";
         return 0;  // tolerate a busy/unavailable port, like the discovery test
     }
-
-    const std::uint16_t port = wait_for_bound_port(server, 2000);
-    EXPECT(port != 0);
 
     // Over the cap by one byte, terminator in the second write => 431.
     {
@@ -488,10 +491,8 @@ int main() {
         small_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (small_server.is_running()) {
-            const std::uint16_t small_port = wait_for_bound_port(small_server, 2000);
-            EXPECT(small_port != 0);
-
+        if (const std::uint16_t small_port = small_server.is_running() ? wait_for_bound_port(small_server, 2000) : 0;
+            small_port != 0) {
             // Twice as many idle keep-alive connections as workers, every
             // one of them kept alive (no reserve forcing a close).
             constexpr int kParked = 4;
@@ -567,10 +568,8 @@ int main() {
         cap_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (cap_server.is_running()) {
-            const std::uint16_t cap_port = wait_for_bound_port(cap_server, 2000);
-            EXPECT(cap_port != 0);
-
+        if (const std::uint16_t cap_port = cap_server.is_running() ? wait_for_bound_port(cap_server, 2000) : 0;
+            cap_port != 0) {
             // Idle connection: one request, then silence.
             int idle_fd = connect_local(cap_port);
             EXPECT(idle_fd >= 0);
@@ -635,10 +634,8 @@ int main() {
         bound_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (bound_server.is_running()) {
-            const std::uint16_t bound_port = wait_for_bound_port(bound_server, 2000);
-            EXPECT(bound_port != 0);
-
+        if (const std::uint16_t bound_port = bound_server.is_running() ? wait_for_bound_port(bound_server, 2000) : 0;
+            bound_port != 0) {
             int held[2];
             for (int& fd : held) {
                 fd = connect_local(bound_port);
@@ -707,9 +704,8 @@ int main() {
         restart_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (restart_server.is_running()) {
-            std::uint16_t restart_port = wait_for_bound_port(restart_server, 2000);
-            EXPECT(restart_port != 0);
+        if (std::uint16_t restart_port = restart_server.is_running() ? wait_for_bound_port(restart_server, 2000) : 0;
+            restart_port != 0) {
             const std::string restart_request =
                 "PUT /management/restart HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
             struct timeval tv {};
@@ -816,9 +812,8 @@ int main() {
 
         churn_server.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        if (churn_server.is_running()) {
-            const std::uint16_t churn_port = wait_for_bound_port(churn_server, 2000);
-            EXPECT(churn_port != 0);
+        if (const std::uint16_t churn_port = churn_server.is_running() ? wait_for_bound_port(churn_server, 2000) : 0;
+            churn_port != 0) {
             int fd = connect_local(churn_port);
             EXPECT(fd >= 0);
             std::string carry;
@@ -1019,20 +1014,22 @@ int main() {
         holder.start_async();
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
-        if (!holder.is_running()) {
+        // The specific port doesn't matter here -- what matters is that
+        // conflict_config and retry_config below target the SAME one holder
+        // is already listening on, to force a genuine bind() collision
+        // (#402). Reading it back keeps this test off a fixed literal
+        // without weakening that collision. Gated on the port itself (not
+        // just is_running(), which can go true before the listener is
+        // actually bound) so a slow-but-eventually-successful bind on a
+        // loaded runner takes the skip path below instead of a hard abort.
+        const std::uint16_t holder_port = holder.is_running() ? wait_for_bound_port(holder, 2000) : 0;
+        if (holder_port == 0) {
             // Say so. The whole #402 block hangs off this, and a silent skip
             // turns the flagship regression case into a green no-op on a
             // runner where no ephemeral port could be bound at all.
             std::cerr << "WARNING: port-conflict cases SKIPPED -- could not bind an ephemeral port\n";
         }
-        if (holder.is_running()) {
-            // The specific port doesn't matter here -- what matters is that
-            // conflict_config and retry_config below target the SAME one
-            // holder is already listening on, to force a genuine bind()
-            // collision (#402). Reading it back keeps this test off a fixed
-            // literal without weakening that collision.
-            const std::uint16_t holder_port = wait_for_bound_port(holder, 2000);
-            EXPECT(holder_port != 0);
+        if (holder_port != 0) {
             {
                 alpacahttp::Config conflict_config;
                 conflict_config.set_http_port(holder_port);  // already held

@@ -35,13 +35,25 @@ namespace {
 
 // Threads that failed both join() AND detach() (should not be reachable in
 // practice -- see join_or_abandon() below) are moved here instead of a bare
-// `new std::thread(...)` with the pointer discarded: that pointer would be
-// unreachable, and the `sanitizers` CI job's LeakSanitizer would report it as
-// a genuine leak with no way to tell it apart from a real one. Kept reachable
-// from this static container for the life of the process instead -- leaked
-// by design, not by omission.
+// `new std::thread(...)` with the pointer discarded. Two requirements this
+// container has to satisfy at once, which is why it looks the way it does:
+// (a) it must stay REACHABLE for the life of the process, so the `sanitizers`
+// CI job's LeakSanitizer does not report the parked thread's allocation as an
+// indistinguishable ordinary leak; (b) the parked std::thread objects must
+// NEVER be destroyed, because they are still joinable() (both join() and
+// detach() throw without clearing libstdc++'s internal id) and a joinable
+// thread's destructor calls std::terminate(). A plain function-local or
+// namespace-scope `static std::vector<std::thread>` satisfies (a) but not
+// (b): it has a non-trivial destructor registered with `__cxa_atexit`, which
+// runs at normal process exit and would abort there instead of never. A
+// heap-allocated container reached through a static POINTER that is never
+// deleted satisfies both: `new` keeps it reachable (satisfying LSan), and
+// nothing ever runs its destructor (satisfying the no-terminate() guarantee).
 std::mutex g_abandoned_threads_mutex;
-std::vector<std::thread> g_abandoned_threads;
+std::vector<std::thread>& abandoned_threads() {
+    static auto* threads = new std::vector<std::thread>();
+    return *threads;
+}
 
 // Join `thread`, and if pthread_join fails (EDEADLK/ESRCH/EINVAL) fall back to
 // detach() instead of a second join() attempt. A second join() is not safe
@@ -53,7 +65,7 @@ std::vector<std::thread> g_abandoned_threads;
 // retry would deadlock instead of throwing. detach() makes the destructor a
 // no-op at the cost of never confirming the thread has exited; if detach()
 // also throws (both calls failing on the same OS handle is not reachable in
-// practice), the thread object is parked in g_abandoned_threads_ rather than
+// practice), the thread object is parked in abandoned_threads() rather than
 // left to destruct joinable, which would call std::terminate().
 void join_or_abandon(std::thread& thread, const char* context) {
     try {
@@ -69,7 +81,7 @@ void join_or_abandon(std::thread& thread, const char* context) {
         util::log_error(std::string(context) + ": detach also failed (" + e.code().message() +
                         ") after a failed join; leaking the thread object rather than terminating");
         std::lock_guard<std::mutex> guard(g_abandoned_threads_mutex);
-        g_abandoned_threads.push_back(std::move(thread));
+        abandoned_threads().push_back(std::move(thread));
     }
 }
 
