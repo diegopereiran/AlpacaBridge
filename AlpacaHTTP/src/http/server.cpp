@@ -33,6 +33,16 @@ namespace alpacahttp {
 
 namespace {
 
+// Threads that failed both join() AND detach() (should not be reachable in
+// practice -- see join_or_abandon() below) are moved here instead of a bare
+// `new std::thread(...)` with the pointer discarded: that pointer would be
+// unreachable, and the `sanitizers` CI job's LeakSanitizer would report it as
+// a genuine leak with no way to tell it apart from a real one. Kept reachable
+// from this static container for the life of the process instead -- leaked
+// by design, not by omission.
+std::mutex g_abandoned_threads_mutex;
+std::vector<std::thread> g_abandoned_threads;
+
 // Join `thread`, and if pthread_join fails (EDEADLK/ESRCH/EINVAL) fall back to
 // detach() instead of a second join() attempt. A second join() is not safe
 // here: libstdc++ only clears a thread's id on a SUCCESSFUL join, so the
@@ -43,8 +53,8 @@ namespace {
 // retry would deadlock instead of throwing. detach() makes the destructor a
 // no-op at the cost of never confirming the thread has exited; if detach()
 // also throws (both calls failing on the same OS handle is not reachable in
-// practice), the thread object is leaked deliberately rather than left to
-// destruct joinable, which would call std::terminate().
+// practice), the thread object is parked in g_abandoned_threads_ rather than
+// left to destruct joinable, which would call std::terminate().
 void join_or_abandon(std::thread& thread, const char* context) {
     try {
         thread.join();
@@ -58,8 +68,8 @@ void join_or_abandon(std::thread& thread, const char* context) {
     } catch (const std::system_error& e) {
         util::log_error(std::string(context) + ": detach also failed (" + e.code().message() +
                         ") after a failed join; leaking the thread object rather than terminating");
-        auto* leaked = new std::thread(std::move(thread));
-        (void)leaked;
+        std::lock_guard<std::mutex> guard(g_abandoned_threads_mutex);
+        g_abandoned_threads.push_back(std::move(thread));
     }
 }
 
@@ -460,6 +470,17 @@ void Server::close_wake_pipe() {
 std::uint16_t Server::bound_port() const {
     auto fd = server_fd_.load();
     if (fd == util::kInvalidSocket) {
+        return 0;
+    }
+    // fd can be closed and its number reused by an unrelated socket between
+    // the load above and here (a concurrent stop() or rebind_listener()) --
+    // the same hazard rebind_listener() guards when reclaiming the OLD fd
+    // number, with the same check. Confirm it is still a listening socket
+    // before trusting getsockname()'s answer, so a race reports 0 (unknown)
+    // instead of a stranger's port.
+    int acc = 0;
+    socklen_t acc_len = sizeof(acc);
+    if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &acc, &acc_len) != 0 || acc == 0) {
         return 0;
     }
     struct sockaddr_storage addr {};
