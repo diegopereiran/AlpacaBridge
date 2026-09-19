@@ -32,7 +32,22 @@
 // the goto cases downstream of it pin the goto path against the model rather
 // than against the sky. They are still worth having -- they catch a goto that
 // stops commanding what the model says -- but they are not independent
-// evidence for the model. #458 tracks the vector oracle that would be.
+// evidence for the model.
+//
+// open-astro#458 found that the model's dec-axis home-sense term (`eps`) is a
+// per-board wiring fact, not a hemisphere effect, and generalized the fixed
+// `+6 h` used here into `eps * 6 h`. `sky_from_axes()` and every case below
+// now take eps explicitly (`kWaveDecHomeSense` / `kSyntaDecHomeSense`), and
+// two new cases exercise the (hemisphere, board) combination neither
+// hardware sample could reach: a classic Synta board in the north, and a
+// Wave in the south. Both are still self-consistency checks against the
+// generalized formula, not independent sky evidence -- a genuinely new
+// board family still needs its own hardware row before its eps can be
+// trusted, exactly as the #432 header above already says for the model as a
+// whole. A true vector oracle (rigid-body rotation, no per-axis formula at
+// all) remains open; the "always level" case near the eps-generalization
+// tests is the one check here that holds independently of which eps a board
+// turns out to have.
 //
 // If you change the pointing model, this file is what has to justify it, and
 // a new hardware row is what has to extend it. Do not "verify" a change here
@@ -104,26 +119,37 @@ struct AltAz {
 // THE REFERENCE. Where a Sky-Watcher German equatorial physically points for
 // raw axis angles measured from the counterweight-down, tube-at-the-pole home.
 //
-//   HA  = s * (a1 / 15) + (a2 >= 0 ? +6 h : -6 h)
-//   dec = s * (90 - |a2|)                      s = +1 north, -1 south
+//   HA  = s * (a1 / 15) + s * eps * (a2 >= 0 ? +6 h : -6 h)
+//   dec = s * (90 - |a2|)      s = +1 north, -1 south, eps = dec-axis home sense
 //
 // The 6 h term is the home position: with the counterweight hanging straight
 // down the dec axis lies in the meridian plane, so rotating the dec axis
 // alone sweeps the tube along the HA = +/-6 h circle and the meridian is
 // reached only with the counterweight bar horizontal. Its SIGN follows which
-// side of the dec axis the tube is on, and does NOT flip with hemisphere.
-// The a1 term does flip, because the mount faces the opposite pole.
+// side of the dec axis the tube is on (branch, does NOT flip with hemisphere)
+// and which mechanical direction of the dec axis that side is on THIS board
+// (eps, a wiring fact that also does not flip with hemisphere but differs
+// between boards, open-astro#458). The a1 term flips with hemisphere alone,
+// because the mount faces the opposite pole. eps is +1 for the Wave
+// (mount code 0x44/0x45) and -1 for every classic Synta EQ board (measured
+// on the EQM-35 Pro, 0x32) -- see dec_home_sense_locked() in the driver.
 //
 // Caveat (open-astro#459): this oracle reads the branch from the sign of a2
 // alone. Inside the driver's two-count deadband of a2 = 0 the driver answers
 // the branch it last commanded instead, so a case landing there must judge
 // the report against the target, as the pole cases below do, never through
 // check_landing().
-SkyPoint sky_from_axes(double latitude_degrees, double a1_degrees, double a2_degrees) {
+SkyPoint sky_from_axes(double latitude_degrees, double a1_degrees, double a2_degrees, double dec_home_sense) {
     const double s = latitude_degrees < 0.0 ? -1.0 : 1.0;
-    const double ha = s * (a1_degrees / 15.0) + (a2_degrees >= 0.0 ? 6.0 : -6.0);
+    const double ha = s * (a1_degrees / 15.0) + s * dec_home_sense * (a2_degrees >= 0.0 ? 6.0 : -6.0);
     return {wrap_ha(ha), s * (90.0 - std::abs(a2_degrees))};
 }
+
+// eps for the Wave (mount code 0x44/0x45).
+constexpr double kWaveDecHomeSense = 1.0;
+// eps for every classic Synta EQ board (measured on the EQM-35 Pro, 0x32);
+// see dec_home_sense_locked() in the driver for why the bucket generalizes.
+constexpr double kSyntaDecHomeSense = -1.0;
 
 AltAz horizon_from_sky(const SkyPoint& p, double latitude_degrees) {
     const double h = p.ha_hours * 15.0 * kPi / 180.0;
@@ -168,8 +194,9 @@ LandedFrame land(alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount
 constexpr double kHaToleranceHours = 0.01;
 constexpr double kDecToleranceDegrees = 0.05;
 
-void check_landing(const LandedFrame& f, double latitude, double target_ra, double target_dec, int expected_side) {
-    const SkyPoint sky = sky_from_axes(latitude, f.a1, f.a2);
+void check_landing(const LandedFrame& f, double latitude, double dec_home_sense, double target_ra, double target_dec,
+                   int expected_side) {
+    const SkyPoint sky = sky_from_axes(latitude, f.a1, f.a2, dec_home_sense);
     const double target_ha = wrap_ha(f.lst - target_ra);
     INFO("axes a1=" << f.a1 << " a2=" << f.a2 << " -> real HA " << sky.ha_hours << " h, dec " << sky.dec_degrees
                     << "; target HA " << target_ha << " h, dec " << target_dec);
@@ -195,6 +222,7 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     struct Row {
         const char* what;
         double latitude;
+        double dec_home_sense;
         double a1;
         double a2;
         double expect_ha;
@@ -204,13 +232,17 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         const char* observed;
     };
     const Row rows[] = {
-        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -6.11, 0.0, -1.3, 91.0, "level, pointing east"},
-        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -10.00, 0.0, -43.6, -1.0, "down about 45 deg"},
-        {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -9.01, -20.0, -18.9, 136.0, "down, azimuth about 136"},
-        {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
+        {"counterweight down, dec axis square", -37.2, kSyntaDecHomeSense, 1.6, -90.0, -6.11, 0.0, -1.3, 91.0,
+         "level, pointing east"},
+        {"RA axis 60 deg, dec axis square", -37.2, kSyntaDecHomeSense, 60.0, -90.0, -10.00, 0.0, -43.6, -1.0,
+         "down about 45 deg"},
+        {"RA axis 45 deg, dec axis 70 deg", -37.2, kSyntaDecHomeSense, 45.1, -70.0, -9.01, -20.0, -18.9, 136.0,
+         "down, azimuth about 136"},
+        {"Wave 150i, the #432 report", 45.45, kWaveDecHomeSense, 61.98, 70.95, 10.13, 19.05, -20.7, -1.0,
+         "down about 20 deg"},
     };
     for (const Row& r : rows) {
-        const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2);
+        const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2, r.dec_home_sense);
         const AltAz horizon = horizon_from_sky(sky, r.latitude);
         INFO(r.what << ": observed " << r.observed);
         CHECK(std::abs(wrap_ha(sky.ha_hours - r.expect_ha)) < 0.02);
@@ -230,7 +262,7 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // tube MUST be level. Level and square to the meridian is six hours of
     // hour angle away from it. The shipped model called that position
     // HA -11.9 h, which is 53 degrees below the horizon.
-    const AltAz perpendicular = horizon_from_sky(sky_from_axes(-37.2, 0.0, -90.0), -37.2);
+    const AltAz perpendicular = horizon_from_sky(sky_from_axes(-37.2, 0.0, -90.0, kSyntaDecHomeSense), -37.2);
     CHECK(std::abs(perpendicular.altitude_degrees) < 0.5);
 }
 
@@ -249,7 +281,7 @@ TEST_CASE("SkyWatcher pointing - a goto west of the meridian lands on the sky, s
     REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 0);
 
     const LandedFrame f = land(*driver, mount, target_ra, target_dec);
-    check_landing(f, latitude, target_ra, target_dec, 0);
+    check_landing(f, latitude, kSyntaDecHomeSense, target_ra, target_dec, 0);
     // HA >= 0 takes the a2 >= 0 branch in both hemispheres; south of the
     // equator the RA axis then runs the other way: a1 = -(3 - 6) * 15 = +45.
     CHECK(f.a2 > 0.0);
@@ -274,7 +306,7 @@ TEST_CASE("SkyWatcher pointing - a goto east of the meridian lands on the sky, s
     REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
 
     const LandedFrame f = land(*driver, mount, target_ra, target_dec);
-    check_landing(f, latitude, target_ra, target_dec, 1);
+    check_landing(f, latitude, kSyntaDecHomeSense, target_ra, target_dec, 1);
     CHECK(f.a2 < 0.0);
     CHECK(std::abs(f.a1 + 45.0) < 1.0);
 
@@ -297,7 +329,7 @@ TEST_CASE("SkyWatcher pointing - the Wave 150i goto from the #432 report lands o
     REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 0);
 
     const LandedFrame f = land(*driver, mount, target_ra, target_dec);
-    check_landing(f, latitude, target_ra, target_dec, 0);
+    check_landing(f, latitude, kWaveDecHomeSense, target_ra, target_dec, 0);
     // The shipped build sent a1 = +62 here and the tube ended 20 deg below
     // the horizon. The correct axis angle is (4.12 - 6) * 15 = -28.2.
     CHECK(std::abs(f.a1 + 28.2) < 1.0);
@@ -322,12 +354,98 @@ TEST_CASE("SkyWatcher pointing - a goto east of the meridian lands on the sky, n
     REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
 
     const LandedFrame f = land(*driver, mount, target_ra, target_dec);
-    check_landing(f, latitude, target_ra, target_dec, 1);
+    check_landing(f, latitude, kWaveDecHomeSense, target_ra, target_dec, 1);
     CHECK(f.a2 < 0.0);
     CHECK(std::abs(f.a1 - 45.0) < 1.0);
 
     driver->set_tracking(false);
     driver->set_connected(false);
+}
+
+// open-astro#458: the two cells nothing on hand could exercise before -- a
+// classic Synta EQ board in the NORTH, and a Wave in the SOUTH. Both mounts
+// only had readings from the other hemisphere, so eps (the board's dec-axis
+// home sense) and s (hemisphere) always multiplied to the same +1 by
+// coincidence and a real sign error was invisible. These reuse the existing
+// profiles at the OPPOSITE hemisphere from where each was measured, which is
+// exactly the untested (s, eps) combination the bug was in: before the fix
+// (home term always `+6 * branch`, no eps) both land 12 h off target and the
+// first CHECK in check_landing() fails.
+TEST_CASE("SkyWatcher pointing - a classic Synta board in the north lands on the sky (#458)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = 35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst - 3.0 + 24.0, 24.0);  // HA +3 h
+    const double target_dec = 20.0;
+    // home_term_sign = s * eps = (+1) * (-1) = -1 here, so the branch that
+    // keeps the counterweight below horizontal is the MIRROR of the
+    // sign(HA) rule (#458): HA >= 0 lands on the a2 < 0 branch, pierWest.
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
+
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, kSyntaDecHomeSense, target_ra, target_dec, 1);
+    CHECK(f.a2 < 0.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a Wave in the south lands on the sky (#458)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+    REQUIRE(mount.ok());
+    const double latitude = -35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 3.0, 24.0);  // HA -3 h
+    const double target_dec = -40.0;
+    // home_term_sign = s * eps = (-1) * (+1) = -1 here too, so this is also
+    // the mirrored branch rule: HA < 0 lands on the a2 >= 0 branch, pierEast.
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 0);
+
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, kWaveDecHomeSense, target_ra, target_dec, 0);
+    CHECK(f.a2 > 0.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// The one check in this file that needs no eps at all, at all four (s, eps)
+// combinations: counterweight straight down with the dec axis square (a2 =
+// +/-90) puts the OTA perpendicular to both the polar axis and the
+// counterweight bar, which share one vertical plane, so the tube MUST be
+// level. That is pure rigid-body geometry -- the home term flips sign with
+// eps and branch together in a way that leaves this particular position
+// unchanged, so it holds regardless of which eps turns out to be right for
+// a board this driver has never measured.
+TEST_CASE("SkyWatcher pointing - counterweight-down-square-dec is always level, every eps (#458)",
+          "[skywatcher][telescope][pointing][hemisphere]") {
+    const struct {
+        double latitude;
+        double dec_home_sense;
+    } cases[] = {
+        {45.0, kWaveDecHomeSense},
+        {45.0, kSyntaDecHomeSense},
+        {-35.0, kWaveDecHomeSense},
+        {-35.0, kSyntaDecHomeSense},
+    };
+    for (const auto& c : cases) {
+        for (const double a2 : {90.0, -90.0}) {
+            INFO("latitude " << c.latitude << " eps " << c.dec_home_sense << " a2 " << a2);
+            const AltAz level = horizon_from_sky(sky_from_axes(c.latitude, 0.0, a2, c.dec_home_sense), c.latitude);
+            CHECK(std::abs(level.altitude_degrees) < 0.5);
+        }
+    }
 }
 
 TEST_CASE("SkyWatcher pointing - tracking holds the physical hour angle in both hemispheres",
@@ -337,10 +455,11 @@ TEST_CASE("SkyWatcher pointing - tracking holds the physical hour angle in both 
         double latitude;
         double longitude;
         double expected_axis_sign;  // which way the counts must run to follow the sky
+        double dec_home_sense;
     };
     const Site sites[] = {
-        {alpacacore::test::FakeMountProfile::wave_100i(), 45.0, 11.0, +1.0},
-        {alpacacore::test::FakeMountProfile::eqm35_pro(), -35.0, 150.0, -1.0},
+        {alpacacore::test::FakeMountProfile::wave_100i(), 45.0, 11.0, +1.0, kWaveDecHomeSense},
+        {alpacacore::test::FakeMountProfile::eqm35_pro(), -35.0, 150.0, -1.0, kSyntaDecHomeSense},
     };
     for (const Site& site : sites) {
         FakeSkyWatcherMount mount(site.profile);
@@ -365,8 +484,8 @@ TEST_CASE("SkyWatcher pointing - tracking holds the physical hour angle in both 
         CHECK((a1_1 - a1_0) * site.expected_axis_sign > 0.0);
         // And at the rate that keeps the tube on the star: the physical hour
         // angle advances with sidereal time.
-        const double physical_advance = wrap_ha(sky_from_axes(site.latitude, a1_1, 45.0).ha_hours -
-                                                sky_from_axes(site.latitude, a1_0, 45.0).ha_hours);
+        const double physical_advance = wrap_ha(sky_from_axes(site.latitude, a1_1, 45.0, site.dec_home_sense).ha_hours -
+                                                sky_from_axes(site.latitude, a1_0, 45.0, site.dec_home_sense).ha_hours);
         const double lst_advance = lst1 - lst0;
         CHECK(physical_advance > 0.0);
         CHECK(std::abs(physical_advance - lst_advance) < 0.3 * lst_advance + 0.5 / 3600.0);
@@ -558,7 +677,7 @@ TEST_CASE("SkyWatcher pointing - after leaving the pole the branch comes from th
     const double target_ra = std::fmod(lst - 3.0 + 24.0, 24.0);  // HA +3 h
     const double target_dec = 20.0;
     const LandedFrame f = land(*driver, mount, target_ra, target_dec);
-    check_landing(f, latitude, target_ra, target_dec, 0);
+    check_landing(f, latitude, kWaveDecHomeSense, target_ra, target_dec, 0);
     CHECK(f.a2 > 1.0);
 
     driver->set_tracking(false);
