@@ -74,9 +74,16 @@ Checks:
      are skipped exactly as in check 7; a stale entry inside a tree block
      stays unchecked, and that is an accepted limit of this check, not an
      oversight. Each file carries its own floor.
+ 11. The SHA-256 of the LF-normalized docs/AlpacaDeviceAPI_v1.yaml matches
+     the one pinned in the ascom-alpaca-driver skill's
+     references/version-and-sources.md. The skill's endpoint catalog was
+     built from that snapshot; /driver-build Step 0 refreshes the schema
+     from ascom-standards.org, and without this pin the catalog would keep
+     describing the old one.
 """
 
 import glob
+import hashlib
 import re
 import subprocess
 import sys
@@ -1288,6 +1295,32 @@ def check_license_headers():
 from check_instruction_structure import check as check_instruction_structure
 
 
+SKILL_SPEC_PATH = "docs/AlpacaDeviceAPI_v1.yaml"
+SKILL_SOURCES_PATH = ".claude/skills/ascom-alpaca-driver/references/version-and-sources.md"
+SKILL_SPEC_PIN_RE = re.compile(r"SHA-256:\s*`([0-9a-f]{64})`")
+
+
+def check_skill_spec_hash(root=ROOT):
+    """Check 11. `root` is a parameter so the self-test can drive it."""
+    spec = root / SKILL_SPEC_PATH
+    sources = root / SKILL_SOURCES_PATH
+    for path in (spec, sources):
+        if not path.is_file():
+            return ["%s does not exist -- it was renamed or deleted; update check_skill_spec_hash"
+                    % path.relative_to(root)]
+    pins = SKILL_SPEC_PIN_RE.findall(sources.read_text(encoding="utf-8"))
+    if len(pins) != 1:
+        return ["%s has no pinned Device API SHA-256 (found %d `SHA-256:` pins, expected 1)"
+                % (SKILL_SOURCES_PATH, len(pins))]
+    actual = hashlib.sha256(spec.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    if actual != pins[0]:
+        return ["%s (LF-normalized SHA-256 %s) does not match the snapshot pinned in %s (%s): "
+                "regenerate the skill's references/device-api-catalog.md from the new schema, "
+                "then update the pin and the verification date"
+                % (SKILL_SPEC_PATH, actual, SKILL_SOURCES_PATH, pins[0])]
+    return []
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -1300,6 +1333,7 @@ CHECKS = [
     ("TSan filtered runs sync (ci.yml vs ci_preflight.sh)", check_tsan_filtered_runs_sync),
     ("AGPL header form on every first-party source file", check_license_headers),
     ("Cursor rule file path references exist", check_rule_file_paths_exist),
+    ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
 ]
 
 
@@ -1490,6 +1524,35 @@ def self_test():
         empty.mkdir()
         check("memory comment check: a root with no first-party files trips the floor",
               any("floor" in f for f in check_memory_comment_paths_exist(empty)))
+
+    # check_skill_spec_hash over a fixture tree: the skill pins the SHA-256
+    # of the LF-normalized Device API schema its endpoint catalog was built
+    # from, so a refreshed docs/ schema must fail until the pin moves.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        spec = "openapi: 3.1.1\npaths: {}\n"
+        pin = hashlib.sha256(spec.encode("utf-8")).hexdigest()
+
+        def write_fixture(spec_text, sources_text):
+            for name, text in ((SKILL_SPEC_PATH, spec_text), (SKILL_SOURCES_PATH, sources_text)):
+                if text is None:
+                    (root / name).unlink(missing_ok=True)
+                    continue
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes(text.encode("utf-8"))
+            return check_skill_spec_hash(root)
+
+        sources = "The schema snapshot has SHA-256:\n\n`%s`\n" % pin
+        check("skill spec hash: a schema matching the pin is not reported",
+              write_fixture(spec, sources) == [])
+        check("skill spec hash: the same schema with CRLF line endings is not reported",
+              write_fixture(spec.replace("\n", "\r\n"), sources) == [])
+        check("skill spec hash: a changed schema is reported",
+              any("does not match" in f for f in write_fixture(spec + "x: 1\n", sources)))
+        check("skill spec hash: a skill doc with no pinned hash is reported",
+              any("no pinned" in f for f in write_fixture(spec, "no hash here\n")))
+        check("skill spec hash: a missing schema file is reported",
+              any("does not exist" in f for f in write_fixture(None, sources)))
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
