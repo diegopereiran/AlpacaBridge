@@ -387,7 +387,7 @@ The device-type API surfaces are:
 Key compliance rules:
 - **Every property and method** listed in the API for the device type must be implemented. If the hardware doesn't support a capability, the method must still exist and throw the appropriate ASCOM error (e.g., `PropertyNotImplemented`, `NotConnected`, `InvalidValue`).
 - **Return types and value ranges** must match the spec exactly. RA is in hours (0-24), Dec in degrees (-90 to +90), angles in degrees, exposure in seconds, etc.
-- **Error codes** must use the correct ASCOM error numbers: `0x400` NotImplemented, `0x407` NotConnected, `0x401` InvalidValue, `0x408` InvalidWhileParked, `0x40B` InvalidOperation, etc. (see `AlpacaCore/include/alpacacore/alpaca_errors.h`).
+- **Error codes** must use the correct ASCOM error numbers: NotImplemented `0x400`, InvalidValue `0x401`, NotConnected `0x407`, InvalidWhileParked `0x408`, InvalidOperation `0x40B`, etc. (see `AlpacaCore/include/alpacacore/alpaca_errors.h`).
 - **`CanXxx` properties** must accurately reflect hardware capabilities. If `CanPulseGuide` returns true, `PulseGuide` must work. If the hardware doesn't support it, `CanPulseGuide` must return false and `PulseGuide` must throw `MethodNotImplemented`.
 - **Interface version** must match the current ASCOM spec version for the device type — AlpacaBridge advertises Platform 7 versions: Camera 4, Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2 (see `AGENTS.md`).
 - **Common methods** (`Action`, `CommandBlind`, `CommandBool`, `CommandString`, `SupportedActions`) must be implemented on every device.
