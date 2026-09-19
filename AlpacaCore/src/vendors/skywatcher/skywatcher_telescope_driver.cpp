@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <mutex>
 #include <numbers>
 #include <optional>
@@ -53,6 +54,10 @@ constexpr double kHomeHourAngleOffsetHours = 6.0;
 // pointing-model comment), 0 for every other board. The sense is wiring, not
 // latitude (the board is never told the latitude), and it decides which side
 // of the meridian the tube swings to for a positive dec-axis angle.
+// Caveat: indi-eqmod and GSServer apply eps = +1 to every board, and only the
+// EQM-35 Pro contradicts that here. If the cause turns out to be a driver-side
+// a2 zero or direction convention rather than per-board wiring, this table
+// has to be reworked, not extended (open-astro#579).
 constexpr int measured_dec_axis_sense(std::uint8_t mount_code) {
     switch (mount_code) {
         case 0x32:  // EQM-35 Pro: -37.2 on 2026-09-12, and at +37.2 on 2026-09-19
@@ -370,9 +375,10 @@ public:
             // northern pointing math: the #432 sky frame (both the a1 term and
             // dec), the RA tracking direction (#250, restored by #432) and the
             // Dec rate / pulse-guide sign (#253). NOT #261: the pier-side
-            // branch and label are picked from the sky hour angle and are
-            // hemisphere-independent, which is one of #432's findings. Refuse
-            // rather than point wrongly.
+            // label is picked from the sky hour angle and is
+            // hemisphere-independent (#432); the mechanical branch is
+            // `k * side` and mirrors with the hemisphere only on a board with
+            // a measured sense (#458). Refuse rather than point wrongly.
             if (!site_coordinates_known_locked()) {
                 throw AlpacaException(
                     "Site latitude and longitude must be set before connecting: this mount stores no site of its "
@@ -394,7 +400,11 @@ public:
                     firmware_cache_ = board.firmware_version;
                     model_cache_ = board.model_name;
                 }
-                ALPACA_LOG_INFO("SkyWatcher", "Motor board: " + board.model_name + " (mount code " +
+                // The code in hex as well: comments, docs and
+                // measured_dec_axis_sense() name boards as 0x32, 0x45, ...
+                char code_hex[8];
+                std::snprintf(code_hex, sizeof(code_hex), "0x%02X", static_cast<unsigned>(board.mount_code));
+                ALPACA_LOG_INFO("SkyWatcher", "Motor board: " + board.model_name + " (mount code " + code_hex + ", " +
                                                   std::to_string(static_cast<int>(board.mount_code)) + "), firmware " +
                                                   board.firmware_version);
                 dec_axis_sense_ = measured_dec_axis_sense(board.mount_code);  // open-astro#458
