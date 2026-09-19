@@ -40,7 +40,8 @@ Checks:
      download blocked on the same handle) -- and the forward sweep in
      test_qhy_fake_sdk.cpp drives all of them.
   7. Every relative path referenced in AGENTS.md, scoped instructions,
-     docs/agents/ agent-skills config, and docs/failures/ and docs/decisions/
+     docs/agents/ agent-skills config, .claude/skills/ Claude skills, and
+     docs/failures/ and docs/decisions/
      inline code spans (`` `AlpacaCore/...` ``, `` `scripts/...` ``,
      `` `docs/...` ``, etc.) that looks like a real repo path actually exists.
      First-party code-comment references to a failure or decision record must
@@ -746,6 +747,8 @@ CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 MIN_AGENTS_MD_PATH_REFS = 40
 # Tripwire for a docs/agents/ rename, not a target file count.
 MIN_AGENTS_DIR_FILES = 1
+# Tripwire for a .claude/skills/ rename, not a target file count.
+MIN_SKILL_FILES = 1
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
@@ -897,6 +900,20 @@ def check_agents_md_paths_exist():
     for path in agents_files:
         doc = str(path.relative_to(ROOT))
         doc_failures, _ = _check_doc_path_refs(doc, 0, "agent-skills doc floor")
+        failures.extend(doc_failures)
+    skill_files = sorted((ROOT / ".claude/skills").rglob("*.md"))
+    tracked_skills = _run_git(["-c", "core.quotePath=false", "ls-files", ".claude/skills/"]).stdout.splitlines()
+    tracked_skills = [p for p in tracked_skills if p.endswith(".md")]
+    if len(tracked_skills) < MIN_SKILL_FILES:
+        failures.append(
+            "only %d tracked file(s) found under .claude/skills/ (floor %d): "
+            "the directory may have been renamed, or check_agents_md_paths_exist "
+            "should be updated" % (len(tracked_skills), MIN_SKILL_FILES))
+    for missing in sorted(set(tracked_skills) - {str(p.relative_to(ROOT)) for p in skill_files}):
+        failures.append("%s is a tracked skill doc but is missing" % missing)
+    for path in skill_files:
+        doc = str(path.relative_to(ROOT))
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "skill doc floor")
         failures.extend(doc_failures)
     for directory in ("docs/failures", "docs/decisions"):
         paths = sorted((ROOT / directory).glob("*.md"))
