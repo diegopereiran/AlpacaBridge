@@ -399,9 +399,15 @@ public:
                                                   board.firmware_version);
                 dec_axis_sense_ = measured_dec_axis_sense(board.mount_code);  // open-astro#458
             } catch (...) {
-                // Identity is cosmetic; a board that will not answer ":e" is
-                // still usable, so never fail the connect over it -- but do
-                // not keep a previous connection's identity either.
+                // A board that will not answer ":e" is still usable, so never
+                // fail the connect over it -- but do not keep a previous
+                // connection's identity either. Identity is not cosmetic: it
+                // picks the measured dec-axis sense, and without it the session
+                // runs on the unmeasured model (open-astro#458).
+                ALPACA_LOG_WARN("SkyWatcher",
+                                "Motor board not identified; pointing falls back to the unmeasured-board model, "
+                                "which is 12 h out in hour angle on a board whose measured dec-axis sense differs "
+                                "(open-astro#458)");
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_.clear();
                 model_cache_.clear();

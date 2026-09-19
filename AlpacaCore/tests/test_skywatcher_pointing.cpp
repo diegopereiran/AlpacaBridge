@@ -43,9 +43,11 @@
 #ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -710,6 +712,68 @@ TEST_CASE("SkyWatcher pointing - the no-indexer FindHome lands on the positive b
     INFO("after FindHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
     CHECK(driver->get_side_of_pier() == 0);
     CHECK(std::abs(wrap_ha(driver->get_right_ascension() - (driver->get_sidereal_time() - 6.0))) < 0.05);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - FindHome on a k = -1 board reports the side its position implies (#458)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // The #459 home cases above all run where k = +1. On the EQM-35 Pro north
+    // of the equator k = -1, so the positive branch the home goto leaves in
+    // memory reads HA -6 h and pierWest. What must hold on either sense is that
+    // SideOfPier agrees with DestinationSideOfPier for the reported position.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 35.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    // Start on the other branch: west of the meridian is pierEast, a2 < 0 here.
+    const double lst = driver->get_sidereal_time();
+    const LandedFrame f = land(*driver, mount, std::fmod(lst + 22.0, 24.0), 50.0);  // HA +2 h, west
+    REQUIRE(f.side_of_pier == 0);
+    REQUIRE(f.a2 < -1.0);
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return driver->get_at_home(); }, 60000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    const double ra = driver->get_right_ascension();
+    const double dec = driver->get_declination();
+    INFO("after FindHome a2=" << mount.physical_degrees(2) << " reported RA " << ra << " dec " << dec);
+    REQUIRE(std::abs(dec - 90.0) < 0.2);
+    CHECK(driver->get_side_of_pier() == driver->get_destination_side_of_pier(ra, dec));
+    CHECK(driver->get_side_of_pier() == 1);
+    CHECK(std::abs(wrap_ha(ra - (driver->get_sidereal_time() + 6.0))) < 0.05);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - an unidentified board warns that it lost its measured sense (#458)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // The dec-axis sense is looked up by the ":e" mount code, so a board whose
+    // identify fails on connect runs the session on the unmeasured model: an
+    // EQM-35 Pro north of the equator is then 12 h out. The connect must still
+    // succeed (a board that will not identify is usable), but it must say so.
+    std::atomic<int> warns{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn &&
+                message.find("Motor board not identified") != std::string::npos) {
+                ++warns;
+            }
+        });
+
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    mount.set_garbled_version_replies(true);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 35.0, 11.0, 100.0);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(warns.load() == 1);
 
     driver->set_connected(false);
 }
