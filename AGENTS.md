@@ -7,6 +7,9 @@ Resolved incident records live in `docs/failures/`; design rationale lives in
 `docs/decisions/`. Keep current rules here and in scoped instruction files, with
 short pointers to those records rather than copying their history into new rules.
 
+Issues live in GitHub Issues on `open-astro/AlpacaBridge`, via the `gh` CLI —
+see `docs/agents/issue-tracker.md` for conventions.
+
 ## Load the complete instructions before working
 
 Read this entire file before planning, reviewing, or editing, even if the client
@@ -915,7 +918,7 @@ Every new driver **must** ship with at least the following 8 unit test cases, pl
 
 9. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test. This is an `AlpacaHTTP`-level integration test, additional to the 8 vendor unit tests above, not a substitute for cases 6-8.
 
-### Hardware-free driver tests via the SDK seam (ToupTek and QHY — extend to other vendors)
+### Hardware-free driver tests via the SDK seam (ToupTek, QHY and gphoto — extend to other vendors)
 
 The ToupTek drivers take the SDK through the abstract `ToupTekSDK` interface
 (`touptek_sdk_wrapper.h`): production factories pass the `ToupTekSDKWrapper`
@@ -932,7 +935,9 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   test reproducing the failure (throw from the exact call that regressed).
 - When touching another vendor's wrapper significantly, adopt the same seam
   shape there (one abstract interface + factory overload + scripted fake) —
-  the reusable pattern from issue #104. The two existing seams differ in one
+  the reusable pattern from issue #104. The gphoto camera has the same seam since
+  #546 (`GPhotoSDK` / `FakeGPhotoSDK` / `LockedGPhotoSDK`, plus a `RawDecoder`
+  seam for libraw). The two original seams differ in one
   detail worth copying deliberately rather than by accident: `ToupTekSDK` has
   a public virtual destructor, `QHYSDK` a protected non-virtual one. **Prefer
   the QHY form for a new seam.** Nothing owns a seam pointer in either design
@@ -1095,17 +1100,3 @@ Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.
 - Do not add vendor SDK usage to AlpacaHTTP.
 - Do not add desktop GUI frameworks (Qt, GTK, wxWidgets, etc.). The web UI in `AlpacaHTTP/web/` is the only user interface.
 - Do not invent device types outside the ASCOM Alpaca standard set (Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope). Shutter control is part of the **Dome** interface (`OpenShutter`/`CloseShutter`/`ShutterStatus`), not a standalone device. A non-standard `Shutter` device type existed as unused scaffolding and was removed 2026-06-09 — clients (NINA, ConformU) cannot consume non-standard types, so they break interoperability.
-
-## Agent skills
-
-### Issue tracker
-
-Issues live in GitHub Issues on `open-astro/AlpacaBridge`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context layout at repo root (created lazily by `/domain-modeling`). See `docs/agents/domain.md`.

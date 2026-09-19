@@ -17,3 +17,7 @@ EQMOD-style support uses the `skywatcher` direct motor-controller driver:
 - [Classic-board detection and baud failures](0006-eqmod-board-detection.md)
 - [Pointing validation and southern direction failures](0007-eqmod-pointing-validation.md)
 - [Cross-axis stop and tracking failures](0008-eqmod-cross-axis-motion.md)
+
+GPhoto DSLR/mirrorless cameras:
+
+- [Nikon bulb close failed after a full config-tree walk](0009-gphoto-nikon-bulb-full-config-walk.md)
