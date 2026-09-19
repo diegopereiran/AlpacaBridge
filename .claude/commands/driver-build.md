@@ -395,13 +395,14 @@ Key compliance rules:
 
 When in doubt about a public behavior, the official spec decides. Existing drivers in this project show local structure, and INDI/INDIGO can inform undocumented vendor wire protocols, but neither defines ASCOM behavior.
 
-### Use an existing driver as a template (cross-driver consistency)
+### Match existing driver structure (cross-driver consistency)
 
 Always study the existing drivers of the **same device type** before writing a new one, and
-match their structure, naming, and behavior so every driver of a given type behaves the same
-way. The ASCOM spec defines the public contract; the existing drivers define *how this
-project* structures its code to satisfy it. Do not copy a driver's capability choices,
-error codes, units, or endpoint semantics without checking them against the spec. New drivers must not invent a divergent shape.
+match their structure, naming, shared infrastructure, and test patterns so every driver of a
+given type is built the same way. Derive public ASCOM behavior (capabilities, error codes,
+units, value ranges, and state transitions) from the official spec, not from another driver.
+If an existing driver disagrees with the spec, follow the spec and flag the driver. New
+drivers must not invent a divergent shape.
 
 Find the closest matching existing driver for the same device type:
 
