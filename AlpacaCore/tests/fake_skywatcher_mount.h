@@ -184,6 +184,16 @@ public:
         stop_ramp_ms_ = ms;
     }
 
+    /// While @p on, answer every ":e" identity request with a reply of the
+    /// right length that is not hex, so the driver's identify fails
+    /// (open-astro#458 review: an unidentified board loses its measured
+    /// dec-axis sense). Every one, not a count: the UDP link check sends its
+    /// own ":e1" first and accepts any OK-shaped reply.
+    void set_garbled_version_replies(bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        garbled_version_replies_ = on;
+    }
+
     /// Acknowledge but silently DROP the next @p n ":I" step-period writes on
     /// an axis (regression: the ":i" readback logs the mismatch but the write
     /// is NOT resent and the call does NOT throw -- the INDI/EQMod contract).
@@ -426,6 +436,9 @@ private:
         bool was_running_on_start = false;  // ":J" only; declared here to not cross case labels
         switch (cmd) {
             case 'e':
+                if (garbled_version_replies_) {
+                    return "=ZZZZZZ";  // right length (no mis-pair resend), not hex
+                }
                 return "=" + profile_.version_reply;
             case 'a':
                 return "=" + u24(kCpr);
@@ -580,6 +593,7 @@ private:
     std::thread thread_;
     std::mutex mutex_;
     int stop_ramp_ms_ = 0;
+    bool garbled_version_replies_ = false;  // ":e" replies made unparseable (test knob)
     Axis axes_[2];
 };
 
