@@ -244,6 +244,10 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // driver aimed at HA -3 h, dec +30 (alt 52, az 87) and the saddle ended
     // pointing front-left and slightly down (SE, about -8 deg), which is
     // HA +9 h: the 6 h term had to flip with the hemisphere.
+    // What row 5 refutes is the OLD model, which reported the tube 52 deg UP
+    // while it pointed below the horizon; the alt tolerance below compares
+    // this oracle against itself, so it is not the evidence. No azimuth was
+    // read that night (expect_az < 0), unlike rows 1 and 3.
     struct Row {
         const char* what;
         double latitude;
