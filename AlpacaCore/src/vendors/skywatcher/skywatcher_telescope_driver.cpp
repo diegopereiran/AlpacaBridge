@@ -44,8 +44,9 @@ constexpr uint32_t kHomeCounts = 0x800000;
 // along the HA = +/-6 h circle (see the pointing-model comment in the driver).
 constexpr double kHomeHourAngleOffsetHours = 6.0;
 
-// The signed home term itself is `kHomeHourAngleOffsetHours * branch`, with
-// the branch read back through branch_from_axis_locked() (open-astro#459).
+// The signed home term itself is `sky_sign * dec_home_sense_locked() *
+// kHomeHourAngleOffsetHours * branch` (open-astro#458), with the branch read
+// back through branch_from_axis_locked() (open-astro#459).
 constexpr uint32_t kCountsMask = 0xFFFFFF;
 constexpr double kSiderealDegPerSec = 360.0 / 86164.0905;
 constexpr double kDefaultGuideRateDegPerSec = 0.5 * kSiderealDegPerSec;
@@ -376,6 +377,7 @@ public:
                     firmware_cache_ = board.firmware_version;
                     model_cache_ = board.model_name;
                 }
+                mount_code_ = board.mount_code;
                 ALPACA_LOG_INFO("SkyWatcher", "Motor board: " + board.model_name + " (mount code " +
                                                   std::to_string(static_cast<int>(board.mount_code)) + "), firmware " +
                                                   board.firmware_version);
@@ -386,6 +388,7 @@ public:
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_.clear();
                 model_cache_.clear();
+                mount_code_ = 0;
             }
 
             // open-astro#445: the sequence below is the first thing the board
@@ -779,14 +782,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refresh_position_cache_locked(false);
-        // ASCOM convention derived from the dec-axis branch: the branch chosen
-        // for HA >= 0 targets is pierEast (0), the mirror branch pierWest (1).
-        // The same rule in both hemispheres: the goto picks the a2 >= 0
-        // branch for a target at HA >= 0 (see ra_dec_to_axis_degrees_locked),
-        // so reading the branch back off the axis reproduces the side that
-        // get_destination_side_of_pier() computes from hour angle. At the
-        // pole the axis cannot say which branch it is on; the remembered
-        // one answers (open-astro#459).
+        // ASCOM convention derived from the dec-axis branch: the branch
+        // pierEast (0) is +1, pierWest (1) is -1. Reading the branch back off
+        // the axis reproduces whatever branch the goto actually commanded
+        // for that target (see ra_dec_to_axis_degrees_locked, #458, on why
+        // that branch is not simply "HA >= 0" once the board's dec-axis home
+        // sense enters), so this agrees with get_destination_side_of_pier()
+        // by construction. At the pole the axis cannot say which branch it
+        // is on; the remembered one answers (open-astro#459).
         return branch_from_axis_locked(cached_dec_axis_deg_) > 0 ? 0 : 1;
     }
 
@@ -801,7 +804,14 @@ public:
         check_connected();
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ha = wrap_hour_angle(lst - ra);
-        return ha >= 0.0 ? 0 : 1;
+        // Must match the branch ra_dec_to_axis_degrees_locked() actually
+        // commands (#458): home_term_sign = sky_sign * eps flips which
+        // branch a given hour angle lands on for a board whose dec-axis home
+        // sense disagrees with its hemisphere (see that function's comment).
+        const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
+        const double home_term_sign = sky_sign * dec_home_sense_locked();
+        const double branch = home_term_sign * (ha >= 0.0 ? 1.0 : -1.0);
+        return branch > 0.0 ? 0 : 1;
     }
 
     EquatorialSystem get_equatorial_system() const override {
@@ -2348,6 +2358,24 @@ private:
     // applies this: a signed axis rate means the same thing everywhere.
     double ra_axis_sign_locked() const { return hemisphere_south_locked() ? -1.0 : 1.0; }
 
+    // open-astro#458: which mechanical direction of the dec axis the 6 h
+    // home term's sign follows. This is a board-wiring fact -- it does NOT
+    // vary with hemisphere, unlike ra_axis_sign_locked() above. Two board
+    // families are measured: the Wave (mount code 0x44/0x45) is +1, and the
+    // EQM-35 Pro (0x32) is -1. The EQM-35 is a classic Synta EQ command-set
+    // board, the exact family open-astro#230 targets, and every other mount
+    // code in mount_code_to_name() is that same classic EQ line (HEQ5, EQ6,
+    // EQ5, EQ8, the AZ-EQ series, ...) sharing one motor-controller command
+    // set with it -- so classic-family boards default to the EQM-35's -1
+    // pending a direct reading from another one (the ":e" mount code already
+    // distinguishes them; a new reading only has to update the boundary
+    // here, not restructure this method). An identity read that fails
+    // (mount_code_ left at its default 0, "EQ6") falls into the same classic
+    // bucket, which is the safer default since Wave boards have always
+    // answered ":e" reliably in practice. See the pointing-model comment
+    // above compute_ra_dec_locked() for the derivation.
+    double dec_home_sense_locked() const { return (mount_code_ == 0x44 || mount_code_ == 0x45) ? 1.0 : -1.0; }
+
     // Drops a client offset the host clock has moved out from under. The
     // offset is a snapshot delta against the host clock at the time of the
     // UTCDate write; if the host clock is stepped afterwards (Sync Time, NTP,
@@ -2451,23 +2479,39 @@ private:
     // south of it the two differ by 12 h, see the SKY frame note below.
     //
     // SKY frame: the mount faces the visible pole, so south of the equator
-    // the same RA-axis rotation runs the sky's hour angle the other way,
-    // while the 6 h home term does NOT flip -- it is fixed by which side of
-    // the dec axis the OTA is on, not by which pole the mount faces:
-    //   HA = s * (a1/15) + (a2 >= 0 ? +6 : -6),  dec = s * (90 - |a2|),
-    //   with s = +1 north, -1 south. Tracking therefore DEcreases a1 south of
-    //   the equator, which ra_axis_sign_locked() applies to the drive rate.
+    // the same RA-axis rotation runs the sky's hour angle the other way. The
+    // 6 h home term's sign follows two independent things: which side of the
+    // dec axis the OTA is on (branch), which does NOT flip with hemisphere,
+    // and which mechanical direction of the dec axis that side actually is
+    // in this board's wiring (dec_home_sense_locked(), #458) -- a rigid-body
+    // fact that does not flip with hemisphere either, but is not the same
+    // for every board:
+    //   HA = s * (a1/15) + s * eps * (a2 >= 0 ? +6 : -6),  dec = s * (90 - |a2|),
+    //   with s = +1 north / -1 south, eps = dec_home_sense_locked().
+    // Tracking therefore DEcreases a1 south of the equator, which
+    // ra_axis_sign_locked() applies to the drive rate -- eps plays no part
+    // in that: it only touches the a1/HA offset, never which way a1 runs.
     //
-    // KNOWN LIMIT (#458): the 6 h term not flipping with s holds for the two
-    // configurations this was measured on -- an EQM-35 Pro in the south and
-    // the Wave 150i in the north -- and those two cannot tell a hemisphere
-    // effect apart from a per-board dec-axis count sense. Rigid-body geometry
-    // says the term must flip, which makes the general form
-    // `s * eps_board * 6 * branch`. A Synta board in the north or a Wave in
-    // the south is 12 h out until that is settled with a reading per board.
-    //   The ASCOM pier side stays (a2 >= 0) -> pierEast in both hemispheres:
-    //   the branch is chosen from the sky hour angle, so the two agree by
-    //   construction (open-astro#261).
+    // FIXED (#458): before this, the code hardcoded `s * eps = +1`, which
+    // happens to be exactly right for the two configurations this was
+    // measured on (EQM-35 Pro south, eps -1; Wave 150i north, eps +1) and
+    // wrong by 12 h for the other two cells (a classic Synta board in the
+    // north, or a Wave in the south) -- those two mounts alone could not
+    // separate a hemisphere effect from a per-board dec-axis count sense.
+    // eps is now read from the mount code (dec_home_sense_locked()).
+    // **The branch itself also has to account for eps** (issue #458's own
+    // text warned of this: "the pier-side branch rule inherits the same eps
+    // factor"): keeping |a1| <= 90 for every target requires branch =
+    // (s * eps) * sign(HA), not plain sign(HA) -- see
+    // ra_dec_to_axis_degrees_locked() for the derivation. When s * eps = +1
+    // (both mounts this model was fitted to) that reduces to the original
+    // sign(HA) rule and pierEast is still "HA >= 0"; when s * eps = -1 (a
+    // classic Synta board in the north, or a Wave in the south) it is the
+    // MIRROR: HA >= 0 lands on the a2 < 0 branch, and get_destination_side_of_pier()
+    // applies the same eps-scaled rule so it and get_side_of_pier() (which
+    // reads the branch back off the commanded axis) still agree by
+    // construction (open-astro#261 remains open on whether pierEast is the
+    // true physical east side in the south).
     //
     // History: until open-astro#432 the model read HA = a1/15 (branch A) and
     // a1/15 - 12 (branch B). That is six hours out in the north and, away
@@ -2524,8 +2568,11 @@ private:
         const double ha_mech_hours = a1 / kHoursToDegrees;
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec = sky_sign * dec_mech;
-        const double ha_hours =
-            wrap_hour_angle(sky_sign * ha_mech_hours + kHomeHourAngleOffsetHours * branch_from_axis_locked(a2));
+        // Home-term sign is s * eps (#458): s from hemisphere, eps from the
+        // board's dec-axis wiring (dec_home_sense_locked()), never s alone.
+        const double home_term_sign = sky_sign * dec_home_sense_locked();
+        const double ha_hours = wrap_hour_angle(sky_sign * ha_mech_hours + home_term_sign * kHomeHourAngleOffsetHours *
+                                                                               branch_from_axis_locked(a2));
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ra = wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
@@ -2537,17 +2584,44 @@ private:
         double ha = wrap_hour_angle(lst - ra);
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec_mech = sky_sign * dec;
-        // The branch is chosen from the SKY hour angle in both hemispheres:
-        // HA >= 0 (target west of the meridian) puts the OTA on the east side
-        // of the pier, which is the a2 >= 0 branch. get_side_of_pier() reads
-        // the same rule back off the axis, and get_destination_side_of_pier()
-        // states it directly, so all three agree by construction.
-        const double branch = ha >= 0.0 ? 1.0 : -1.0;
+        // The branch that keeps the counterweight below horizontal (#458):
+        // home_term_sign = sky_sign * eps is exactly the sign multiplying the
+        // 6 h term in the forward formula, so it is also exactly the sign
+        // that has to flip the branch choice to keep it cancelling the a1/15
+        // term back into +/-90 -- see the derivation below. When
+        // home_term_sign is +1 (both mounts this model was fitted to) this
+        // reduces to the pre-#458 rule, branch = sign(HA). When it is -1 (a
+        // classic Synta board in the north, or a Wave in the south) the
+        // branch must be the MIRROR of that: HA >= 0 puts the OTA on the
+        // a2 < 0 branch, not a2 >= 0. get_destination_side_of_pier() applies
+        // the identical home_term_sign, and get_side_of_pier() reads the
+        // branch back off the commanded axis, so all three still agree by
+        // construction -- but the ASCOM "pierEast" label these three agree
+        // on is no longer simply "a2 >= 0" once eps enters; it is
+        // "branch > 0" using THIS branch.
+        const double home_term_sign = sky_sign * dec_home_sense_locked();
+        const double branch = home_term_sign * (ha >= 0.0 ? 1.0 : -1.0);
         const double a2 = branch * (90.0 - dec_mech);
-        // HA = sky_sign * a1/15 + 6 * branch, inverted. |a1| <= 90 for every
-        // reachable target, which is the counterweight-never-above-horizontal
-        // rule falling out of the geometry rather than being enforced.
-        const double a1 = sky_sign * (ha - kHomeHourAngleOffsetHours * branch) * kHoursToDegrees;
+        // HA = sky_sign * a1/15 + sky_sign * eps * 6 * branch, inverted for
+        // a1 (#458). Solving for a1 leaves a BARE eps here, not sky_sign *
+        // eps: HA - sky_sign*eps*6*branch = sky_sign*a1/15, multiply both
+        // sides by sky_sign (sky_sign^2 = 1) to get
+        // a1/15 = sky_sign*HA - eps*6*branch. This is not a typo -- the
+        // sky_sign that multiplies the eps term cancels against the one
+        // already multiplying a1/15 in the forward formula, and does not
+        // reappear in front of eps here. This a1 formula is agnostic to how
+        // branch itself was chosen; it is the eps-dependent branch choice
+        // above, not this formula, that keeps |a1| <= 90 for every reachable
+        // target (the counterweight-never-above-horizontal rule). Plugging
+        // branch = home_term_sign * sign(HA) back in collapses this to
+        // sky_sign*15*(HA - eps*home_term_sign*6*sign(HA)), and
+        // eps*home_term_sign = eps*sky_sign*eps = sky_sign (eps^2 = 1), which
+        // is exactly the bounded form the original (eps = sky_sign) case
+        // already relied on -- confirming the new branch rule reduces every
+        // (sky_sign, eps) combination to the same bounded shape, not just
+        // the two this model was fitted to.
+        const double a1 =
+            (sky_sign * ha - dec_home_sense_locked() * kHomeHourAngleOffsetHours * branch) * kHoursToDegrees;
         return {a1, a2};
     }
 
@@ -4345,6 +4419,12 @@ private:
     mutable std::mutex firmware_mutex_;
     std::string model_cache_;  // guarded by firmware_mutex_
     std::string firmware_cache_;
+
+    // Mount-code byte of the ":e" reply. Guarded by mutex_ (unlike the
+    // firmware/model cache above): dec_home_sense_locked() reads it from
+    // inside the pointing math, which always runs under mutex_. Default 0
+    // ("EQ6") is the classic-board bucket -- see dec_home_sense_locked().
+    std::uint8_t mount_code_ = 0;
 
     // Background task threads; task_mutex_ only guards handles + cv, never
     // held across protocol I/O.

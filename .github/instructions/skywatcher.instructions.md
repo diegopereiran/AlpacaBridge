@@ -97,24 +97,35 @@ datagrams before each send so replies cannot get off-by-one.
   NOT on a `Connected=true`-while-connected no-op, or a client that re-sends both would get a
   line per poll; probe seam `set_host_synchronized_probe()` for tests; #409). A new driver that caches a client-set time
   the same way calls it too.
-- Pointing convention (#432): home = counterweight down, tube parallel to the polar axis
-  pointing at the visible pole, counts offset `0x800000`, axis angles `a1`/`a2` in degrees
-  from home in the increasing-count direction. **`HA = s * (a1/15) + (branch * 6 h)`
-  and `dec = s * (90 - |a2|)`, with `s = +1` north and `-1` south**, where `branch` is the
-  sign of `a2` away from the pole and, inside a two-count deadband of `a2 = 0` where the
-  encoder cannot say, the branch the last goto or sync commanded
-  (`branch_from_axis_locked()`, #459). The 6 h term is the
+- Pointing convention (#432, #458): home = counterweight down, tube parallel to the polar
+  axis pointing at the visible pole, counts offset `0x800000`, axis angles `a1`/`a2` in
+  degrees from home in the increasing-count direction. **`HA = s * (a1/15) + s * eps *
+  (branch * 6 h)` and `dec = s * (90 - |a2|)`, with `s = +1` north and `-1` south**, where
+  `branch` is the sign of `a2` away from the pole and, inside a two-count deadband of
+  `a2 = 0` where the encoder cannot say, the branch the last goto or sync commanded
+  (`branch_from_axis_locked()`, #459), and `eps = dec_home_sense_locked()` is which
+  mechanical direction of the dec axis the counterweight-down home's 6 h sweep is on --
+  a board-wiring fact, not a hemisphere effect (see below). The 6 h term is the
   counterweight-down home: the dec axis lies in the meridian plane there, so a dec-only
   rotation sweeps the HA = ±6 h circle and the meridian needs the bar horizontal
   (`a1 = ±90`); every reachable target keeps `|a1| <= 90`, which is the
-  counterweight-never-above-horizontal rule falling out of the geometry. Its SIGN follows
-  which side of the dec axis the tube is on and does NOT flip with hemisphere; the `a1`
-  term does, because the mount faces the other pole. **That asymmetry is measured, not
-  derived, and #458 is open on it**: geometry says the 6 h term must flip too, and the
-  two mounts it was fitted to (EQM-35 Pro south, Wave 150i north) cannot separate a
-  hemisphere effect from a per-board dec-axis count sense. Pier side is hemisphere-independent
-  (`branch > 0` -> pierEast, the same reader), since the goto picks the branch from the sky
-  hour angle.
+  counterweight-never-above-horizontal rule falling out of the geometry.
+  **#458 (fixed): the 6 h term's sign does not flip with hemisphere by itself** (that part
+  was always right) **but it does depend on `eps`, which the code used to hardcode at
+  `s * eps = +1`.** That is exactly right for the two mounts it was fitted to (EQM-35 Pro
+  south, Wave 150i north) and 12 h out for the other two (hemisphere, board) cells -- a
+  classic Synta board in the north, or a Wave in the south -- because those two mounts
+  alone cannot separate a hemisphere effect from a per-board dec-axis count sense.
+  `dec_home_sense_locked()` now reads `eps` from the `":e"` mount code: `+1` for the Wave
+  (0x44/0x45), `-1` for every other code, on the working assumption that the classic Synta
+  EQ line (HEQ5, EQ6, EQ5, EQ8, the AZ-EQ series, ...) shares the EQM-35 Pro's wiring --
+  it is the same command-set family and the open-astro#230 audience this driver targets,
+  but no board besides the EQM-35 has a hardware reading confirming it. A direct reading
+  from another classic board (drive to `a1 = 0, a2 = +90` and note whether the tube ends up
+  level pointing east or west) only has to move the `mount_code_ == 0x44 || 0x45` boundary
+  in `dec_home_sense_locked()`, not restructure the formula. Pier side is
+  hemisphere-and-eps-independent (`branch > 0` -> pierEast, the same reader), since the
+  goto picks the branch from the sky hour angle and eps never enters that choice.
   Tracking, `RightAscensionRate` and East/West pulses go through `ra_axis_sign_locked()`
   (counts up north, down south); `MoveAxis`, goto deltas and AutoHome are mechanical and
   never apply it. This matches `indi-eqmod`'s `EncodersToRADec()` exactly in the north;
