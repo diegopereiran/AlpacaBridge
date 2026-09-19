@@ -305,9 +305,10 @@ TEST_CASE("SkyWatcher pointing - a goto west of the meridian lands on the sky, s
     REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 0);
 
     const LandedFrame f = land(*driver, mount, target_ra, target_dec);
-    check_landing(f, latitude, target_ra, target_dec, 0);
-    // HA >= 0 takes the a2 >= 0 branch in both hemispheres; south of the
-    // equator the RA axis then runs the other way: a1 = -(3 - 6) * 15 = +45.
+    check_landing(f, latitude, target_ra, target_dec, 0, -1);
+    // HA >= 0 takes the a2 >= 0 branch here because k = s * eps = +1 for
+    // this board in the south (#458); south of the equator the RA axis then
+    // runs the other way: a1 = -(3 - 6) * 15 = +45.
     CHECK(f.a2 > 0.0);
     CHECK(std::abs(f.a1 - 45.0) < 1.0);
 
@@ -330,7 +331,7 @@ TEST_CASE("SkyWatcher pointing - a goto east of the meridian lands on the sky, s
     REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
 
     const LandedFrame f = land(*driver, mount, target_ra, target_dec);
-    check_landing(f, latitude, target_ra, target_dec, 1);
+    check_landing(f, latitude, target_ra, target_dec, 1, -1);
     CHECK(f.a2 < 0.0);
     CHECK(std::abs(f.a1 + 45.0) < 1.0);
 
@@ -775,6 +776,64 @@ TEST_CASE("SkyWatcher pointing - an unidentified board warns that it lost its me
     REQUIRE(driver->get_connected());
     CHECK(warns.load() == 1);
 
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a reconnect that fails to identify forgets the measured sense (#458)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // The sense belongs to the board that answered ":e" on THIS connect. An
+    // EQM-35 Pro north of the equator runs k = -1; when the same driver
+    // reconnects and the identify fails, the session must fall back to the
+    // unmeasured model (k = +1), not keep the previous connection's -1.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = 37.2;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 174.88, 80.0);
+    driver->set_connected(true);
+    driver->set_connected(false);
+    mount.set_garbled_version_replies(true);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 3.0, 24.0);  // HA -3 h
+    const double target_dec = 30.0;
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
+
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, target_ra, target_dec, 1, 0);
+    // The unmeasured branch; the stale -1 would have put a2 at +60.
+    CHECK(f.a2 < 0.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - an unidentified board points on the unmeasured model, south (#458)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    // With no mount code there is no measured sense, so k = +1 in both
+    // hemispheres, the model every unmeasured board shipped with. South of the
+    // equator that differs from k = s, the answer for a measured eps = +1, so
+    // this is the hemisphere where a wrong fallback shows.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    mount.set_garbled_version_replies(true);
+    const double latitude = -35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 3.0, 24.0);  // HA -3 h
+    const double target_dec = -30.0;
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 1);
+
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, target_ra, target_dec, 1, 0);
+
+    driver->set_tracking(false);
     driver->set_connected(false);
 }
 

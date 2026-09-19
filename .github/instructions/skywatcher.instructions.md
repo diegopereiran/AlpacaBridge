@@ -478,7 +478,10 @@ against its checklist, 2026-09-06:
   in `ra_dec_to_axis_degrees_locked()`. Since #432 that function consults
   `hemisphere_south_locked()` twice -- `sky_sign` multiplies both `dec_mech` (the a2
   magnitude) and the `a1` term -- but still never for which branch is picked or which
-  side it is labelled, which is the half this audit rests on.
+  side it is labelled, which is the half this audit rests on. (Superseded in part by
+  #458: the branch is now `k * side`, and `k = s * eps` does consult the hemisphere on a
+  board with a measured sense; the side label is still the sign of HA alone, so the
+  flip contract below is unchanged.)
   So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
   OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
   a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
