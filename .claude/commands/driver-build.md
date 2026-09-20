@@ -77,6 +77,21 @@ fi
   docs/AlpacaDeviceAPI_v1.yaml` command so it stays content-identical to upstream (LF-normalized),
   but note it as non-breaking.
 
+**Whenever you overwrite the vendored copy — major or cosmetic — update the skill's pin in the
+same commit.** The `ascom-alpaca-protocol` skill's endpoint catalog was generated from one
+snapshot of this schema, and
+`.claude/skills/ascom-alpaca-protocol/references/version-and-sources.md` pins that snapshot's
+LF-normalized SHA-256. `scripts/check_docs_drift.py` check 11 fails the build when the two
+disagree, so a refresh that leaves the pin alone turns the docs-drift gate red:
+
+```bash
+sha256sum docs/AlpacaDeviceAPI_v1.yaml
+```
+
+Put that digest in `version-and-sources.md`, move its verification date, and regenerate the
+skill's `references/device-api-catalog.md` from the new schema if the endpoint set changed.
+The pin exists so the catalog cannot keep describing a schema the repo no longer carries.
+
 ### Step 0b — Probe for a newer major spec version (v2+)
 
 The diff above only proves our v1 copy matches upstream's v1 file. ASCOM revises the spec
