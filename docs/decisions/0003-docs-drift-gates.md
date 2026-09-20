@@ -6,7 +6,7 @@ Several repo facts were written twice and silently diverged: build options and t
 
 ## Decision
 
-`scripts/check_docs_drift.py` derives or compares each fact from its owning files and runs in CI and pre-flight. Its path-reference check covers `AGENTS.md`, scoped instruction files, agent-skills docs in `docs/agents/`, and the records in `docs/failures/` and `docs/decisions/`. References to decision records in first-party code comments must resolve. Extractor logic has literal self-test fixtures where a regex or pairing error could otherwise make a check vacuously green.
+`scripts/check_docs_drift.py` derives or compares each fact from its owning files and runs in CI and pre-flight. Its path-reference check covers `AGENTS.md`, scoped instruction files, agent-skills docs in `docs/agents/`, Claude skill docs in `.claude/skills/`, and the records in `docs/failures/` and `docs/decisions/`. References to decision records in first-party code comments must resolve. A vendored reference doc that is generated from a repo file pins that file's hash so the two cannot diverge: the `ascom-alpaca-protocol` skill pins the LF-normalized SHA-256 of `docs/AlpacaDeviceAPI_v1.yaml`, which `/driver-build` Step 0 refreshes from upstream. Extractor logic has literal self-test fixtures where a regex or pairing error could otherwise make a check vacuously green.
 
 ## Alternatives rejected
 
