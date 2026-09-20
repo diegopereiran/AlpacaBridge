@@ -88,6 +88,12 @@ disagree, so a refresh that leaves the pin alone turns the docs-drift gate red:
 sha256sum docs/AlpacaDeviceAPI_v1.yaml
 ```
 
+That digest is the pinned one only while the vendored copy is LF, which the `tr -d '\r'`
+refresh above guarantees -- check 11 hashes the file with CRLF normalized away. If the
+working copy ever holds CRLF, hash the normalized bytes instead
+(`tr -d '\r' < docs/AlpacaDeviceAPI_v1.yaml | sha256sum`), or the gate rejects a digest
+that looks correct.
+
 Put that digest in `version-and-sources.md`, move its verification date, and regenerate the
 skill's `references/device-api-catalog.md` from the new schema if the endpoint set changed.
 The pin exists so the catalog cannot keep describing a schema the repo no longer carries.
