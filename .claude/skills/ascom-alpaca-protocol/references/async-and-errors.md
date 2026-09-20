@@ -70,7 +70,7 @@ A valid, understood request whose ASCOM operation fails returns HTTP 200 with ca
 
 Driver-specific errors occupy `0x500` through `0xFFF`. Prefer an accurate reserved error. Keep custom meanings stable and documented.
 
-The table is the full reserved range, so a code absent from it is driver-specific. AlpacaBridge defines exactly these in `AlpacaCore/include/alpacacore/alpaca_errors.h`, where the first driver-specific code, `DriverException` (`0x500`), is the generic one.
+These are the codes AlpacaBridge defines (`AlpacaCore/include/alpacacore/alpaca_errors.h`), where the first driver-specific code, `DriverException` (`0x500`), is the generic one. The table is not the whole reserved range: ASCOM reserves all of `0x400`-`0x4FF`, including codes this project does not use, such as `0x40A` `SettingsProviderError` and the unassigned `0x403`-`0x406`. Never take an unused code from that range for a driver-specific meaning -- start at `0x500`.
 
 ## Selection rules
 
