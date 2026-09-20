@@ -65,8 +65,12 @@ A valid, understood request whose ASCOM operation fails returns HTTP 200 with ca
 | Invalid while slaved | `0x409` | 1033 |
 | Invalid operation | `0x40B` | 1035 |
 | Action not implemented | `0x40C` | 1036 |
+| Not in cache | `0x40D` | 1037 |
+| Unspecified error | `0x4FF` | 1279 |
 
 Driver-specific errors occupy `0x500` through `0xFFF`. Prefer an accurate reserved error. Keep custom meanings stable and documented.
+
+The table is the full reserved range, so a code absent from it is driver-specific. AlpacaBridge defines exactly these in `AlpacaCore/include/alpacacore/alpaca_errors.h`, where the first driver-specific code, `DriverException` (`0x500`), is the generic one.
 
 ## Selection rules
 

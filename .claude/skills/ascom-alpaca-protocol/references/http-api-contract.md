@@ -99,8 +99,11 @@ The HTTP status describes whether the transaction layer understood and attempted
 | --- | --- | --- |
 | 200 | Valid, understood request; ASCOM operation was attempted | Alpaca JSON envelope, even when `ErrorNumber` is nonzero |
 | 3xx/4xx | Redirected or rejected before ASCOM execution | Protocol-level response; V12 describes 400 as text rather than the normal Alpaca envelope |
-| 400 | Invalid URL, method, device number, missing/invalid required parameter, rejected access, or otherwise uninterpretable request | Text error message under the V12 decision model |
+| 400 | Invalid method, device number, missing/invalid required parameter, rejected access, or otherwise uninterpretable request | Text error message under the V12 decision model |
+| 404 | The URL matched no route at all (see the AlpacaBridge note below) | Protocol-level response |
 | 500 | Catastrophic internal failure prevented normal transaction processing | Text diagnostic; do not use for ordinary device errors |
+
+**AlpacaBridge splits "invalid URL" deliberately, and this is not a defect to correct.** An Alpaca-shaped URL the server cannot satisfy -- unknown device type, misspelt member, unregistered device number -- is a 400, matching V12. A URL that matches no device or management route at all stays 404 (`AlpacaHTTP/src/http/router.cpp:1489`, asserted in `AlpacaHTTP/tests/test_routing.cpp`). `.github/instructions/alpaca-http-conformance.instructions.md` is the authority for this project; treat the split as settled rather than applying the Conflicts rule in `alpacabridge-integration.md` to it.
 
 Decision sequence:
 

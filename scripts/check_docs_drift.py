@@ -1310,8 +1310,12 @@ def check_skill_spec_hash(root=ROOT):
                     % path.relative_to(root)]
     pins = SKILL_SPEC_PIN_RE.findall(sources.read_text(encoding="utf-8"))
     if len(pins) != 1:
-        return ["%s has no pinned Device API SHA-256 (found %d `SHA-256:` pins, expected 1)"
-                % (SKILL_SOURCES_PATH, len(pins))]
+        return ["%s %s (found %d `SHA-256:` pins, expected 1)"
+                % (SKILL_SOURCES_PATH,
+                   "has no pinned Device API SHA-256" if not pins
+                   else "pins more than one Device API SHA-256, so which one is "
+                        "authoritative is ambiguous",
+                   len(pins))]
     actual = hashlib.sha256(spec.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
     if actual != pins[0]:
         return ["%s (LF-normalized SHA-256 %s) does not match the snapshot pinned in %s (%s): "
@@ -1551,6 +1555,10 @@ def self_test():
               any("does not match" in f for f in write_fixture(spec + "x: 1\n", sources)))
         check("skill spec hash: a skill doc with no pinned hash is reported",
               any("no pinned" in f for f in write_fixture(spec, "no hash here\n")))
+        # Two pins is ambiguity, not absence: the old message said "no pinned"
+        # for both and sent the reader looking for a hash that is really there.
+        check("skill spec hash: a skill doc pinning two hashes is reported as ambiguous",
+              any("ambiguous" in f for f in write_fixture(spec, sources + sources)))
         check("skill spec hash: a missing schema file is reported",
               any("does not exist" in f for f in write_fixture(None, sources)))
 
