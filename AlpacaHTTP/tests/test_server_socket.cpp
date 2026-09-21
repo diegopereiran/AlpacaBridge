@@ -1402,23 +1402,23 @@ int main() {
         alpacahttp::Config logging_config;
         logging_config.set_log_level(alpacahttp::LogLevel::INFO);
         alpacahttp::util::init_logging(logging_config);
-        alpacahttp::util::set_external_log_sink([&](alpacacore::logging::LogLevel level, std::string_view,
-                                                     std::string_view message) {
-            if (message == "Server stopped") {
-                // run_server()'s very last statement before it returns. Once
-                // this fires, the (possibly detached, see below) thread
-                // running it is done touching the Server object and it is
-                // safe to let `server` go out of scope.
-                std::lock_guard<std::mutex> lock(stopped_mutex);
-                stopped_seen = true;
-                stopped_cv.notify_all();
-            }
-            if (level != alpacacore::logging::LogLevel::Error) {
-                return;
-            }
-            std::lock_guard<std::mutex> lock(captured_mutex);
-            captured.emplace_back(message);
-        });
+        alpacahttp::util::set_external_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (message == "Server stopped") {
+                    // run_server()'s very last statement before it returns. Once
+                    // this fires, the (possibly detached, see below) thread
+                    // running it is done touching the Server object and it is
+                    // safe to let `server` go out of scope.
+                    std::lock_guard<std::mutex> lock(stopped_mutex);
+                    stopped_seen = true;
+                    stopped_cv.notify_all();
+                }
+                if (level != alpacacore::logging::LogLevel::Error) {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(message);
+            });
 
         alpacahttp::Config config;
         config.set_http_port(0);
