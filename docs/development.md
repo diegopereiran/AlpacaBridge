@@ -147,6 +147,15 @@ cmake --build . --parallel
 ./run_all_tests.sh
 ```
 
+The build runs at `nproc`, but `ctest` runs at twice that: most of the suite
+waits on fake hardware in real time rather than computing, so tying it to the
+core count leaves the machine idle. Override with `CTEST_PARALLEL` on a machine
+where that is too aggressive:
+
+```sh
+CTEST_PARALLEL=4 ./run_all_tests.sh
+```
+
 Or manually:
 
 ```sh
