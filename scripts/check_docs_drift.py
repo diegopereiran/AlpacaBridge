@@ -1605,12 +1605,14 @@ def self_test():
     def make_repo(base, agents_dir=True, extra=None):
         root = Path(base)
         files = {
-            "AGENTS.md": "".join("See `scripts/f%d.py`.\n" % (i % 5) for i in range(MIN_AGENTS_MD_PATH_REFS + 2)),
+            "AGENTS.md": "".join("See `scripts/f%d.py`.\n" % (i % MIN_MEMORY_COMMENT_FILES) for i in range(MIN_AGENTS_MD_PATH_REFS + 2)),
             ".github/instructions/a.instructions.md": "# a\n",
             ".claude/skills/s/SKILL.md": "# s\n",
             ".gitignore": "scripts/gen/\n",
         }
-        for i in range(5):
+        # Two spare files above MIN_MEMORY_COMMENT_FILES (check 7 ends with the
+        # memory-comment check), so raising that floor by one is not a failure here.
+        for i in range(MIN_MEMORY_COMMENT_FILES + 2):
             files["scripts/f%d.py" % i] = "# first-party source\n"
         if agents_dir:
             files["docs/agents/x.md"] = "# x\n"
