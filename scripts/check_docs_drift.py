@@ -92,8 +92,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def read(path):
-    return (ROOT / path).read_text(encoding="utf-8", errors="replace")
+def read(path, root=ROOT):
+    return (root / path).read_text(encoding="utf-8", errors="replace")
 
 
 # --- check 1: CMake options vs docs/development.md --------------------------
@@ -760,13 +760,13 @@ MIN_SKILL_FILES = 1
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
 
-def _run_git(args, check=True):
+def _run_git(args, check=True, root=ROOT):
     return subprocess.run(
-        ["git"] + args, cwd=ROOT, capture_output=True, text=True, check=check
+        ["git"] + args, cwd=root, capture_output=True, text=True, check=check
     )
 
 
-def _is_gitignored(path):
+def _is_gitignored(path, root=ROOT):
     """True if git would ignore this path (e.g. a generated file/dir).
 
     Used instead of a plain filesystem exists() check: a generated file like
@@ -775,49 +775,54 @@ def _is_gitignored(path):
     from every clean checkout, including CI's. A path git ignores is
     expected to be absent and isn't a documentation error.
     """
-    return _run_git(["check-ignore", "-q", path], check=False).returncode == 0
+    return _run_git(["check-ignore", "-q", path], check=False, root=root).returncode == 0
 
 
-_TRACKED_PATHS_CACHE = None
+# Keyed by root so a fixture repository never sees the real tree's listing (or
+# another fixture's); the real run uses one root, so it is still computed once.
+_TRACKED_PATHS_CACHE = {}
 
 
-def _tracked_paths():
+def _tracked_paths(root=ROOT):
     """(tracked files, tracked directories with a trailing slash), computed once
-    per invocation: six documents share it and the listing walks the vendored
-    SDK trees."""
-    global _TRACKED_PATHS_CACHE
-    if _TRACKED_PATHS_CACHE is not None:
-        return _TRACKED_PATHS_CACHE
+    per root: six documents share it and the listing walks the vendored SDK
+    trees. `root` is a parameter so the self-test can drive this over a
+    fixture repository; the real run passes nothing."""
+    key = str(root)
+    if key in _TRACKED_PATHS_CACHE:
+        return _TRACKED_PATHS_CACHE[key]
     # core.quotePath=false: a tracked path with non-ASCII bytes must not
     # come back quoted, or it would never match a span.
-    tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines())
+    tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"], root=root).stdout.splitlines())
     # A migration creates instruction files before they are staged. Include
     # those files so references to them can be checked in the working tree.
     for pattern in (".github/instructions/*.instructions.md", "docs/failures/*.md", "docs/decisions/*.md"):
-        tracked.update(str(p.relative_to(ROOT)) for p in ROOT.glob(pattern))
+        tracked.update(p.relative_to(root).as_posix() for p in root.glob(pattern))
     tracked_dirs = set()
     for f in tracked:
         parts = f.split("/")
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]) + "/")
-    _TRACKED_PATHS_CACHE = (tracked, tracked_dirs)
-    return _TRACKED_PATHS_CACHE
+    _TRACKED_PATHS_CACHE[key] = (tracked, tracked_dirs)
+    return _TRACKED_PATHS_CACHE[key]
 
 
-def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefixes=()):
+def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefixes=(), root=ROOT):
     """Every backticked path span in `doc` names a tracked file or directory.
 
     `component` (e.g. "AlpacaCore/") is where a span starting with one of
     `relative_prefixes` ("src/", "external/", ...) is resolved: the Cursor
     rule files write paths relative to the component they live under, not
     to the repo root. Repo-root spans (PATH_PREFIXES) are accepted in every
-    document. Returns (failures, checked).
+    document. Returns (failures, checked). `root` is a parameter so the
+    self-test can drive this over a fixture repository; the real run passes
+    nothing.
     """
     failures = []
-    if not (ROOT / doc).is_file():
+    if not (root / doc).is_file():
         return (["%s is listed for path checking but does not exist -- it was renamed or deleted; "
                  "update the list" % doc], 0)
-    text = FENCED_BLOCK_RE.sub("", read(doc))
+    text = FENCED_BLOCK_RE.sub("", read(doc, root))
     text = DOUBLE_BACKTICK_SPAN_RE.sub("", text)
     # With fences gone every backtick must pair up; one stray backtick would
     # invert every span after it, and the count floor below only catches a
@@ -826,7 +831,7 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
         return ["%s has an unbalanced backtick outside fenced blocks; "
                 "the path-reference check cannot pair code spans reliably" % doc], 0
     seen = set()
-    tracked, tracked_dirs = _tracked_paths()
+    tracked, tracked_dirs = _tracked_paths(root)
 
     checked = 0
     for m in CODE_SPAN_RE.finditer(text):
@@ -868,7 +873,7 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
         # Not a tracked file or the directory of one: a generated/ignored
         # path (debian/changelog, a `.../build/` output dir) is expected to
         # be absent from a clean checkout, so it isn't a documentation error.
-        if _is_gitignored(path):
+        if _is_gitignored(path, root):
             continue
         failures.append("%s references a path that does not exist: %s" % (doc, path))
     if checked < floor:
@@ -879,20 +884,28 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
     return failures, checked
 
 
-def check_agents_md_paths_exist():
-    failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS")
-    instruction_dir = ROOT / ".github/instructions"
+def check_agents_md_paths_exist(root=ROOT):
+    """`root` is a parameter so the self-test can drive this over a fixture
+    repository; the real run passes nothing.
+
+    The `ls-files` pathspecs are `:(glob)dir/*.md`: a bare `dir/*.md` lets git's
+    `*` cross `/`, so a tracked `docs/agents/sub/y.md` was listed by git but
+    never found by the one-level `Path.glob` below and reported as "missing".
+    `.claude/skills/` is recursive on both sides and stays a directory spec.
+    """
+    failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS", root=root)
+    instruction_dir = root / ".github/instructions"
     files = sorted(instruction_dir.glob("*.instructions.md"))
-    tracked = _run_git(["-c", "core.quotePath=false", "ls-files", ".github/instructions/*.instructions.md"]).stdout.splitlines()
-    for missing in sorted(set(tracked) - {str(p.relative_to(ROOT)) for p in files}):
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob).github/instructions/*.instructions.md"], root=root).stdout.splitlines()
+    for missing in sorted(set(tracked) - {p.relative_to(root).as_posix() for p in files}):
         failures.append("%s is a tracked instruction file but is missing" % missing)
     for path in files:
-        doc = str(path.relative_to(ROOT))
-        doc_failures, _ = _check_doc_path_refs(doc, 0, "instruction file floor")
+        doc = path.relative_to(root).as_posix()
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "instruction file floor", root=root)
         failures.extend(doc_failures)
-    agents_dir = ROOT / "docs/agents"
+    agents_dir = root / "docs/agents"
     agents_files = sorted(agents_dir.glob("*.md"))
-    tracked_agents = _run_git(["-c", "core.quotePath=false", "ls-files", "docs/agents/*.md"]).stdout.splitlines()
+    tracked_agents = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob)docs/agents/*.md"], root=root).stdout.splitlines()
     # A directory rename would make both the glob and ls-files go empty and
     # this whole block would silently pass nothing -- the vacuity class
     # decision record 0003 calls out. Floor is today's file count (1); it is
@@ -902,36 +915,36 @@ def check_agents_md_paths_exist():
             "only %d tracked file(s) found under docs/agents/*.md (floor %d): "
             "the directory may have been renamed, or check_agents_md_paths_exist "
             "should be updated" % (len(tracked_agents), MIN_AGENTS_DIR_FILES))
-    for missing in sorted(set(tracked_agents) - {str(p.relative_to(ROOT)) for p in agents_files}):
+    for missing in sorted(set(tracked_agents) - {p.relative_to(root).as_posix() for p in agents_files}):
         failures.append("%s is a tracked agent-skills doc but is missing" % missing)
     for path in agents_files:
-        doc = str(path.relative_to(ROOT))
-        doc_failures, _ = _check_doc_path_refs(doc, 0, "agent-skills doc floor")
+        doc = path.relative_to(root).as_posix()
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "agent-skills doc floor", root=root)
         failures.extend(doc_failures)
-    skill_files = sorted((ROOT / ".claude/skills").rglob("*.md"))
-    tracked_skills = _run_git(["-c", "core.quotePath=false", "ls-files", ".claude/skills/"]).stdout.splitlines()
+    skill_files = sorted((root / ".claude/skills").rglob("*.md"))
+    tracked_skills = _run_git(["-c", "core.quotePath=false", "ls-files", ".claude/skills/"], root=root).stdout.splitlines()
     tracked_skills = [p for p in tracked_skills if p.endswith(".md")]
     if len(tracked_skills) < MIN_SKILL_FILES:
         failures.append(
             "only %d tracked file(s) found under .claude/skills/ (floor %d): "
             "the directory may have been renamed, or check_agents_md_paths_exist "
             "should be updated" % (len(tracked_skills), MIN_SKILL_FILES))
-    for missing in sorted(set(tracked_skills) - {str(p.relative_to(ROOT)) for p in skill_files}):
+    for missing in sorted(set(tracked_skills) - {p.relative_to(root).as_posix() for p in skill_files}):
         failures.append("%s is a tracked skill doc but is missing" % missing)
     for path in skill_files:
-        doc = str(path.relative_to(ROOT))
-        doc_failures, _ = _check_doc_path_refs(doc, 0, "skill doc floor")
+        doc = path.relative_to(root).as_posix()
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "skill doc floor", root=root)
         failures.extend(doc_failures)
     for directory in ("docs/failures", "docs/decisions"):
-        paths = sorted((ROOT / directory).glob("*.md"))
-        tracked_memory = _run_git(["-c", "core.quotePath=false", "ls-files", directory + "/*.md"]).stdout.splitlines()
-        for missing in sorted(set(tracked_memory) - {str(p.relative_to(ROOT)) for p in paths}):
+        paths = sorted((root / directory).glob("*.md"))
+        tracked_memory = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob)" + directory + "/*.md"], root=root).stdout.splitlines()
+        for missing in sorted(set(tracked_memory) - {p.relative_to(root).as_posix() for p in paths}):
             failures.append("%s is a tracked memory record but is missing" % missing)
         for path in paths:
-            doc = str(path.relative_to(ROOT))
-            doc_failures, _ = _check_doc_path_refs(doc, 0, "memory record floor")
+            doc = path.relative_to(root).as_posix()
+            doc_failures, _ = _check_doc_path_refs(doc, 0, "memory record floor", root=root)
             failures.extend(doc_failures)
-    failures.extend(check_memory_comment_paths_exist())
+    failures.extend(check_memory_comment_paths_exist(root))
     return failures
 
 
@@ -1008,20 +1021,23 @@ RULE_FILE_PATH_CHECKS = (
 )
 
 
-def check_rule_file_paths_exist():
+def check_rule_file_paths_exist(root=ROOT):
+    """`root` is a parameter so the self-test can drive this over a fixture
+    repository; the real run passes nothing."""
     failures = []
     # The tuple is hand-written; every tracked rule file must be in it, or a
     # fifth .mdc added later is silently unchecked -- the drift class this
     # check exists for (review note on PR #474).
     listed = {doc for doc, _, _ in RULE_FILE_PATH_CHECKS}
     tracked_rule_files = [f for f in _run_git(["-c", "core.quotePath=false", "ls-files",
-                                               "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"]).stdout.splitlines() if f]
+                                               "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"],
+                                              root=root).stdout.splitlines() if f]
     for f in sorted(set(tracked_rule_files) - listed):
         failures.append("%s is a tracked Cursor rule file but is not in RULE_FILE_PATH_CHECKS -- add it "
                         "with its component and a floor" % f)
     for doc, component, floor in RULE_FILE_PATH_CHECKS:
         doc_failures, _ = _check_doc_path_refs(
-            doc, floor, "its RULE_FILE_PATH_CHECKS floor", component, RULE_FILE_RELATIVE_PREFIXES)
+            doc, floor, "its RULE_FILE_PATH_CHECKS floor", component, RULE_FILE_RELATIVE_PREFIXES, root=root)
         failures.extend(doc_failures)
     return failures
 
@@ -1561,6 +1577,102 @@ def self_test():
               any("ambiguous" in f for f in write_fixture(spec, sources + sources)))
         check("skill spec hash: a missing schema file is reported",
               any("does not exist" in f for f in write_fixture(None, sources)))
+
+    # check 7 (check_agents_md_paths_exist) over fixture git repositories. The
+    # check shells out to git, so each fixture is a real repository; every
+    # scenario builds its own, so no scenario sees another's cached listing.
+    import os
+    import tempfile
+
+    def attempt(label, fn):
+        # A signature that cannot take a root yet raises TypeError; record that
+        # as a FAIL rather than crashing the whole self-test.
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - any crash is a failed check
+            check("%s (raised %s: %s)" % (label, type(exc).__name__, exc), False)
+            return None
+
+    # Isolated git: no user config or hooks, and no GIT_DIR from an enclosing
+    # hook pointing the fixture's git at the real repository.
+    git_env = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    stripped = ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+    saved_env = {k: os.environ.get(k) for k in list(git_env) + list(stripped)}
+    os.environ.update(git_env)
+    for name in stripped:
+        os.environ.pop(name, None)
+
+    def make_repo(base, agents_dir=True, extra=None):
+        root = Path(base)
+        files = {
+            "AGENTS.md": "".join("See `scripts/f%d.py`.\n" % (i % 5) for i in range(MIN_AGENTS_MD_PATH_REFS + 2)),
+            ".github/instructions/a.instructions.md": "# a\n",
+            ".claude/skills/s/SKILL.md": "# s\n",
+            ".gitignore": "scripts/gen/\n",
+        }
+        for i in range(5):
+            files["scripts/f%d.py" % i] = "# first-party source\n"
+        if agents_dir:
+            files["docs/agents/x.md"] = "# x\n"
+        files.update(extra or {})
+        for name, text in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text, encoding="utf-8")
+        for args in (["init", "-q"], ["add", "-A"],
+                     ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "fixture"]):
+            subprocess.run(["git"] + args, cwd=root, check=True, capture_output=True)
+        return root
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            def fixture(name, **kwargs):
+                (Path(tmp) / name).mkdir()
+                return make_repo(Path(tmp) / name, **kwargs)
+
+            def run_check(root):
+                return attempt("agents md check: accepts a root", lambda: check_agents_md_paths_exist(root))
+
+            found = run_check(fixture("clean"))
+            check("agents md check: a clean fixture repository reports nothing", found == [])
+
+            drift = fixture("drift")
+            with open(drift / "AGENTS.md", "a", encoding="utf-8") as f:
+                f.write("Also `scripts/nope.py` and `scripts/gen/out.py`.\n")
+            found = run_check(drift)
+            check("agents md check: a drifted span is reported",
+                  found is not None and any("scripts/nope.py" in f for f in found))
+            check("agents md check: a gitignored span is not reported",
+                  found is not None and not any("scripts/gen/out.py" in f for f in found))
+
+            gone = fixture("gone")
+            (gone / ".github/instructions/a.instructions.md").unlink()
+            found = run_check(gone)
+            check("agents md check: a deleted tracked instruction file is reported as missing",
+                  found is not None and any("a.instructions.md" in f and "missing" in f for f in found))
+
+            nested = fixture("nested", extra={"docs/agents/sub/y.md": "# y\n"})
+            found = run_check(nested)
+            check("agents md check: a nested docs/agents file is not reported as missing",
+                  found is not None and found == [])
+
+            first = fixture("first")
+            second = fixture("second", extra={"scripts/only_second.py": "# only here\n"})
+            listed_first = attempt("tracked paths: accepts a root", lambda: _tracked_paths(first))
+            listed_second = attempt("tracked paths: accepts a root", lambda: _tracked_paths(second))
+            check("tracked paths: two roots in one process do not share a cache",
+                  listed_first is not None and listed_second is not None
+                  and "scripts/only_second.py" not in listed_first[0]
+                  and "scripts/only_second.py" in listed_second[0])
+
+            found = run_check(fixture("noagents", agents_dir=False))
+            check("agents md check: an empty docs/agents trips the floor",
+                  found is not None and any("docs/agents" in f and "floor" in f for f in found))
+    finally:
+        for name, value in saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

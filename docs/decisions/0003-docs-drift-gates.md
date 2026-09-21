@@ -14,7 +14,7 @@ Maintain prose-only reminders: the blocking-getter roster and TSan commands alre
 
 ## Consequences
 
-New instruction or memory files must be included in path validation; new duplicated facts need an explicit comparison or one authoritative owner. Checker changes should include a fixture that fails for the drift they claim to catch.
+New instruction or memory files must be included in path validation; new duplicated facts need an explicit comparison or one authoritative owner. Checker changes should include a fixture that fails for the drift they claim to catch. Path-reference check 7 and the instruction-structure link check have fixtures and floors (issue #452); the other checks still lack a root seam and floor, which is deferred, not decided against.
 
 ## Links
 
