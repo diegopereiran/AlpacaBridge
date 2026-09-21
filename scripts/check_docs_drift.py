@@ -796,7 +796,12 @@ def _tracked_paths(root=ROOT):
     tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"], root=root).stdout.splitlines())
     # A migration creates instruction files before they are staged. Include
     # those files so references to them can be checked in the working tree.
-    for pattern in (".github/instructions/*.instructions.md", "docs/failures/*.md", "docs/decisions/*.md"):
+    # Every directory check_agents_md_paths_exist scans must appear here, or a
+    # doc written but not yet `git add`ed is reported as drift (issue #556a);
+    # the skills tree is nested, so its pattern is recursive to match the
+    # rglob that scans it.
+    for pattern in (".github/instructions/*.instructions.md", "docs/failures/*.md", "docs/decisions/*.md",
+                    "docs/agents/*.md", ".claude/skills/**/*.md"):
         tracked.update(p.relative_to(root).as_posix() for p in root.glob(pattern))
     tracked_dirs = set()
     for f in tracked:
@@ -1627,17 +1632,17 @@ def self_test():
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            def fixture(name, **kwargs):
+            def repo_fixture(name, **kwargs):
                 (Path(tmp) / name).mkdir()
                 return make_repo(Path(tmp) / name, **kwargs)
 
             def run_check(root):
                 return attempt("agents md check: accepts a root", lambda: check_agents_md_paths_exist(root))
 
-            found = run_check(fixture("clean"))
+            found = run_check(repo_fixture("clean"))
             check("agents md check: a clean fixture repository reports nothing", found == [])
 
-            drift = fixture("drift")
+            drift = repo_fixture("drift")
             with open(drift / "AGENTS.md", "a", encoding="utf-8") as f:
                 f.write("Also `scripts/nope.py` and `scripts/gen/out.py`.\n")
             found = run_check(drift)
@@ -1646,19 +1651,31 @@ def self_test():
             check("agents md check: a gitignored span is not reported",
                   found is not None and not any("scripts/gen/out.py" in f for f in found))
 
-            gone = fixture("gone")
+            gone = repo_fixture("gone")
             (gone / ".github/instructions/a.instructions.md").unlink()
             found = run_check(gone)
             check("agents md check: a deleted tracked instruction file is reported as missing",
                   found is not None and any("a.instructions.md" in f and "missing" in f for f in found))
 
-            nested = fixture("nested", extra={"docs/agents/sub/y.md": "# y\n"})
+            nested = repo_fixture("nested", extra={"docs/agents/sub/y.md": "# y\n"})
             found = run_check(nested)
             check("agents md check: a nested docs/agents file is not reported as missing",
                   found is not None and found == [])
 
-            first = fixture("first")
-            second = fixture("second", extra={"scripts/only_second.py": "# only here\n"})
+            # A file written but not yet staged is in the working tree, so a
+            # reference to it is not drift (issue #556a). The fallback tuple in
+            # _tracked_paths has to cover every directory check 7 scans.
+            unstaged = repo_fixture("unstaged")
+            (unstaged / "docs/agents/foo.md").write_text("# foo\n", encoding="utf-8")
+            (unstaged / ".claude/skills/s/NOTES.md").write_text("# notes\n", encoding="utf-8")
+            with open(unstaged / "AGENTS.md", "a", encoding="utf-8") as f:
+                f.write("Also `docs/agents/foo.md` and `.claude/skills/s/NOTES.md`.\n")
+            found = run_check(unstaged)
+            check("agents md check: an unstaged agent or skill doc is not reported as drift",
+                  found is not None and found == [])
+
+            first = repo_fixture("first")
+            second = repo_fixture("second", extra={"scripts/only_second.py": "# only here\n"})
             listed_first = attempt("tracked paths: accepts a root", lambda: _tracked_paths(first))
             listed_second = attempt("tracked paths: accepts a root", lambda: _tracked_paths(second))
             check("tracked paths: two roots in one process do not share a cache",
@@ -1666,7 +1683,7 @@ def self_test():
                   and "scripts/only_second.py" not in listed_first[0]
                   and "scripts/only_second.py" in listed_second[0])
 
-            found = run_check(fixture("noagents", agents_dir=False))
+            found = run_check(repo_fixture("noagents", agents_dir=False))
             check("agents md check: an empty docs/agents trips the floor",
                   found is not None and any("docs/agents" in f and "floor" in f for f in found))
     finally:
