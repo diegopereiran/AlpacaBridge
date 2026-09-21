@@ -18,12 +18,10 @@
 // #129), HTTP/1.1 persistence and its bounds, the framing gate that decides
 // whether a connection may stay open, and the graceful close path.
 
-#include "http/thread_join.h"
-
+#include <alpacacore/util/logging.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/server.h>
 #include <alpacahttp/util/logging_adapter.h>
-#include <alpacacore/util/logging.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -45,6 +43,7 @@
 #include <thread>
 #include <vector>
 
+#include "http/thread_join.h"
 #include "test_assert.h"
 
 namespace {
@@ -63,12 +62,10 @@ constexpr std::uint64_t kMaxRequestsPerConnection = 1000;
 class Watchdog {
 public:
     explicit Watchdog(std::chrono::milliseconds budget, std::string label)
-        : label_(std::move(label)),
-          thread_([this, budget] {
+        : label_(std::move(label)), thread_([this, budget] {
               std::unique_lock<std::mutex> lock(mutex_);
               if (!cv_.wait_for(lock, budget, [this] { return disarmed_; })) {
-                  std::fprintf(stderr, "WATCHDOG TIMEOUT: %s did not complete within budget\n",
-                               label_.c_str());
+                  std::fprintf(stderr, "WATCHDOG TIMEOUT: %s did not complete within budget\n", label_.c_str());
                   std::abort();
               }
           }) {}
@@ -1397,15 +1394,15 @@ int main() {
         std::mutex captured_mutex;
         std::vector<std::string> captured;
         alpacahttp::util::init_logging(alpacahttp::Config{});
-        alpacahttp::util::set_external_log_sink(
-            [&captured_mutex, &captured](alpacacore::logging::LogLevel level, std::string_view,
-                                          std::string_view message) {
-                if (level != alpacacore::logging::LogLevel::Error) {
-                    return;
-                }
-                std::lock_guard<std::mutex> lock(captured_mutex);
-                captured.emplace_back(message);
-            });
+        alpacahttp::util::set_external_log_sink([&captured_mutex, &captured](alpacacore::logging::LogLevel level,
+                                                                             std::string_view,
+                                                                             std::string_view message) {
+            if (level != alpacacore::logging::LogLevel::Error) {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            captured.emplace_back(message);
+        });
 
         {
             Watchdog watchdog(std::chrono::seconds(10), "case a2 (join_server_thread fallback)");
@@ -1430,10 +1427,10 @@ int main() {
             if (!server.is_running()) {
                 std::cerr << "WARNING: join-fallback case SKIPPED -- could not bind an ephemeral port\n";
             } else {
-                server.stop();   // Must return despite the injected join() throw.
-                server.wait();   // Must also return -- both funnel through join_server_thread().
+                server.stop();  // Must return despite the injected join() throw.
+                server.wait();  // Must also return -- both funnel through join_server_thread().
                 EXPECT(!server.is_running());
-                server.stop();   // Second stop() is a no-op; must not re-throw or hang.
+                server.stop();  // Second stop() is a no-op; must not re-throw or hang.
             }
             // hooks (and its process-wide override) must be destroyed before
             // `server` goes out of scope, in case any later teardown path

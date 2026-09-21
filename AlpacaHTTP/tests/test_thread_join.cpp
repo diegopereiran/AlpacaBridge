@@ -16,11 +16,9 @@
 // server.cpp could name join_or_abandon(), and nothing could make
 // thread.join()/thread.detach() throw. See http/thread_join.h.
 
-#include "http/thread_join.h"
-
+#include <alpacacore/util/logging.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/util/logging_adapter.h>
-#include <alpacacore/util/logging.h>
 
 #include <iostream>
 #include <mutex>
@@ -29,6 +27,7 @@
 #include <thread>
 #include <vector>
 
+#include "http/thread_join.h"
 #include "test_assert.h"
 
 namespace {
@@ -36,8 +35,7 @@ namespace {
 std::mutex g_captured_mutex;
 std::vector<std::string> g_captured;
 
-void capture_sink(alpacacore::logging::LogLevel level, std::string_view component,
-                   std::string_view message) {
+void capture_sink(alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
     if (level != alpacacore::logging::LogLevel::Error) {
         return;
     }

@@ -14,7 +14,6 @@
 #include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/util/socket_utils.h>
 #include <alpacahttp/version.h>
-#include "thread_join.h"
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
@@ -30,6 +29,8 @@
 #include <system_error>
 #include <utility>
 
+#include "thread_join.h"
+
 namespace alpacahttp {
 
 namespace {
@@ -42,9 +43,7 @@ using detail::join_or_abandon;
 
 }  // namespace
 
-Server::Server(const Config& config)
-    : config_(config)
-{
+Server::Server(const Config& config) : config_(config) {
     router_.set_shutdown_callback([this]() { handle_shutdown_request(); });
     router_.set_restart_callback([this]() { handle_restart_request(); });
     router_.set_server_info(config_.server_name(), config_.manufacturer(), alpacahttp::kVersion, config_.location(),
@@ -707,13 +706,13 @@ void Server::run_server() {
         fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(server_fd, &read_fds);
-        
+
         struct timeval timeout;
         timeout.tv_sec = 0;
         timeout.tv_usec = 500000;  // 500ms timeout
-        
+
         int select_result = util::socket_select(server_fd, &read_fds, nullptr, nullptr, &timeout);
-        
+
         if (select_result < 0) {
             // Error in select
             int err = util::socket_get_last_error();
@@ -739,7 +738,7 @@ void Server::run_server() {
             // Timeout - check running_ flag and continue
             continue;
         }
-        
+
         // Connection available - accept it
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_storage client_address {};
@@ -1517,4 +1516,4 @@ void Server::handle_restart_request() {
     restart_requested_ = false;
 }
 
-} // namespace alpacahttp
+}  // namespace alpacahttp

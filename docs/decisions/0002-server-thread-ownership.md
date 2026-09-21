@@ -22,5 +22,5 @@ A failed bind remains a recoverable start failure. A stop caller returns only af
 
 - Issue [#402](https://github.com/open-astro/AlpacaBridge/issues/402); PR [#428](https://github.com/open-astro/AlpacaBridge/pull/428).
 - Issue [#507](https://github.com/open-astro/AlpacaBridge/issues/507); PR [#541](https://github.com/open-astro/AlpacaBridge/pull/541) (the `join_or_abandon()` fallback and the `wait()`-race test).
-- Implementation: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/include/alpacahttp/server.h`.
-- Regression tests: `AlpacaHTTP/tests/test_server_socket.cpp` port-conflict, same-object retry, concurrent-stop, and stop()/wait() race cases.
+- Implementation: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/include/alpacahttp/server.h`, `AlpacaHTTP/src/http/thread_join.h` (`join_or_abandon()` and `abandoned_threads()` moved here, issue #561).
+- Regression tests: `AlpacaHTTP/tests/test_server_socket.cpp` port-conflict, same-object retry, concurrent-stop, stop()/wait() race, and `join_or_abandon()`-fallback (issue #561) cases; `AlpacaHTTP/tests/test_thread_join.cpp` for the fallback in isolation.

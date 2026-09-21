@@ -38,9 +38,8 @@ void join_or_abandon(std::thread& thread, const char* context);
 // through the process-wide hook override. The one-arg form above forwards to
 // this with real join()/detach() as the two callables (or the installed
 // override, if any).
-void join_or_abandon(std::thread& thread, const char* context,
-                      const std::function<void(std::thread&)>& joiner,
-                      const std::function<void(std::thread&)>& detacher);
+void join_or_abandon(std::thread& thread, const char* context, const std::function<void(std::thread&)>& joiner,
+                     const std::function<void(std::thread&)>& detacher);
 
 // Number of std::thread objects currently parked because both join() and
 // detach() failed on them. Test-only observation point; never touches the

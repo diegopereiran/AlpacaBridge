@@ -71,9 +71,8 @@ std::size_t abandoned_thread_count() {
 // also throws (both calls failing on the same OS handle is not reachable in
 // practice), the thread object is parked in abandoned_threads() rather than
 // left to destruct joinable, which would call std::terminate().
-void join_or_abandon(std::thread& thread, const char* context,
-                      const std::function<void(std::thread&)>& joiner,
-                      const std::function<void(std::thread&)>& detacher) {
+void join_or_abandon(std::thread& thread, const char* context, const std::function<void(std::thread&)>& joiner,
+                     const std::function<void(std::thread&)>& detacher) {
     try {
         joiner(thread);
         return;
@@ -101,13 +100,11 @@ void join_or_abandon(std::thread& thread, const char* context) {
     }
     if (joiner_hook && detacher_hook) {
         join_or_abandon(
-            thread, context,
-            [&joiner_hook, context](std::thread& t) { joiner_hook(t, context); },
+            thread, context, [&joiner_hook, context](std::thread& t) { joiner_hook(t, context); },
             [&detacher_hook, context](std::thread& t) { detacher_hook(t, context); });
         return;
     }
-    join_or_abandon(
-        thread, context, [](std::thread& t) { t.join(); }, [](std::thread& t) { t.detach(); });
+    join_or_abandon(thread, context, [](std::thread& t) { t.join(); }, [](std::thread& t) { t.detach(); });
 }
 
 ScopedJoinHooksForTest::ScopedJoinHooksForTest(Hook joiner, Hook detacher) {
