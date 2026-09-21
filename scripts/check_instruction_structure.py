@@ -6,6 +6,14 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+# Tripwire for a renamed documents directory, not a target count: the tree has
+# ~44 linked Markdown documents, so a scan that reads a handful means a glob or
+# a root regressed and the link check is passing over nothing.
+MIN_LINKED_DOCUMENTS = 20
+# The skills tree is the one source whose entire contribution (~10 files) fits
+# inside the aggregate floor's margin, so a renamed `.claude/skills` would scan
+# nothing and still clear MIN_LINKED_DOCUMENTS. Tripwire, not a target count.
+MIN_SKILL_DOCUMENTS = 5
 
 
 def matches(path, pattern):
@@ -72,15 +80,22 @@ def check(root=ROOT):
     documents = canonical + [root / 'docs/agent-instructions.md']
     documents += list((root / 'docs/failures').glob('*.md'))
     documents += list((root / 'docs/decisions').glob('*.md'))
-    documents += list((root / '.claude/skills').rglob('*.md'))
+    skill_documents = [path for path in (root / '.claude/skills').rglob('*.md') if path.is_file()]
+    require(len(skill_documents) >= MIN_SKILL_DOCUMENTS,
+            'only %d Markdown document(s) found under .claude/skills/ (floor %d): the directory '
+            'was renamed or the rglob regressed' % (len(skill_documents), MIN_SKILL_DOCUMENTS))
+    documents += skill_documents
+    documents = [path for path in documents if path.is_file()]
+    require(len(documents) >= MIN_LINKED_DOCUMENTS,
+            'only %d Markdown document(s) found for the link check (floor %d): a document '
+            'directory was renamed or a glob regressed' % (len(documents), MIN_LINKED_DOCUMENTS))
     for path in documents:
-        if not path.is_file():
-            continue
         for target in re.findall(r'\]\(([^\s)]+)\)', path.read_text(encoding="utf-8", errors="replace")):
             if target.startswith(('#', 'http:', 'https:', 'mailto:')):
                 continue
             file = target.split('#', 1)[0]
-            require((path.parent / file).exists(), '%s: broken relative link %s' % (path.name, target))
+            require((path.parent / file).exists(), '%s: broken relative link %s'
+                    % (path.relative_to(root).as_posix(), target))
     return failures
 
 
@@ -94,7 +109,8 @@ def self_test():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         for directory in ('.github/instructions', '.claude/rules', 'docs', 'AlpacaCore/src/vendors',
-                          'AlpacaCore/include/alpacacore/vendor', 'AlpacaCore/tests'):
+                          'AlpacaCore/include/alpacacore/vendor', 'AlpacaCore/tests',
+                          '.claude/skills'):
             shutil.copytree(ROOT / directory, root / directory)
         for file in ('CLAUDE.md', 'AGENTS.md'):
             shutil.copy(ROOT / file, root / file)
@@ -113,7 +129,29 @@ def self_test():
             path.write_text(mutate(original))
             assert set(check(root)) - baseline, 'Mutation escaped detection: ' + file
             path.write_text(original)
-    print('Instruction structure: glob assertions and 4 negative fixtures passed')
+        # A broken link is reported with its repo-relative path: two files
+        # named README.md (or two records with one name) must be told apart.
+        broken = root / 'docs/decisions/zz-broken-link.md'
+        broken.write_text('[gone](missing-target.md)\n')
+        new_findings = set(check(root)) - baseline
+        broken.unlink()
+        assert any('docs/decisions/zz-broken-link.md' in f and 'missing-target.md' in f
+                   for f in new_findings), 'Broken link is not reported with its repo-relative path'
+        # A renamed skills tree loses ~10 documents, which fits inside the
+        # aggregate floor's margin: only the per-source floor catches it.
+        skills = root / '.claude/skills'
+        skills.rename(root / '.claude/skillz')
+        new_findings = set(check(root)) - baseline
+        (root / '.claude/skillz').rename(skills)
+        assert any('.claude/skills/' in f and 'floor' in f for f in new_findings), \
+            'A renamed .claude/skills escaped the per-source floor'
+    # A root with no Markdown documents to scan must trip the floor rather than
+    # report a clean pass having read nothing.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / 'AlpacaCore/src/vendors').mkdir(parents=True)
+        assert any('floor' in f for f in check(root)), 'An empty documents set escaped the floor'
+    print('Instruction structure: glob assertions, 4 negative fixtures, link path and 2 floors passed')
 
 
 if __name__ == '__main__':
