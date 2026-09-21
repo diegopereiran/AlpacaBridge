@@ -290,7 +290,7 @@ Vendor code must be behind build options.
 ## 12. Testing Rules
 
 - All non-trivial code must have unit tests in `tests/`.
-- Use Catch2 or doctest.
+- Use Catch2 (v2 or v3).
 - CI must build on:
   - Linux **arm64 only** (no amd64/x86_64, no macOS, no Windows)
 - Use clang-tidy + warnings-as-errors.
