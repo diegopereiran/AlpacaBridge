@@ -213,6 +213,13 @@ std::string mount_code_to_name(std::uint8_t mount_code) {
             return "AZ-EQ6";
         case 0x06:
             return "AZ-EQ5";
+        // EQ-AL55i Pro: reported by its owner on 2026-09-20 (open-astro#306),
+        // ":e1" = "=032E09", firmware 3.46. Like 0x32 it is in neither INDI's
+        // table nor Sky-Watcher's published SynScan model list. One unit: it is
+        // not known whether 0x09 is specific to the AL55i or shared with a
+        // family, so treat the name as this board's report, not a range.
+        case 0x09:
+            return "EQ-AL55i Pro";
         case 0x0A:
             return "Star Adventurer";
         case 0x0C:

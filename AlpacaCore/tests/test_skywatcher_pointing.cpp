@@ -248,6 +248,27 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // while it pointed below the horizon; the alt tolerance below compares
     // this oracle against itself, so it is not the evidence. No azimuth was
     // read that night (expect_az < 0), unlike rows 1 and 3.
+    // Row 6 (open-astro#579): a Sky-Watcher EQ-AL55i Pro (mount code 0x09,
+    // firmware 3.46) belonging to a reporter none of us can reach, read on
+    // 2026-09-20 at about +40 (the site is rounded on purpose). Bare mount at
+    // count home, tracking off, then a dec-only MoveAxis raised a2 by 893,663
+    // counts = +89.37 deg on the board's own :a2 of 3,600,000. The owner read
+    // the DOVETAIL POINTING WEST by eye against the horizon, which is HA +6 h
+    // at this latitude, so eps = +1 on this board -- the indi-eqmod sense, and
+    // the opposite of the EQM-35 Pro. Unlike rows 1-5 this row constrains the
+    // model only in the north, where s * eps = +1 is also the unmeasured
+    // default: what it buys is the SOUTH, where the entry now says -1 and the
+    // default would be 12 h out. That southern consequence is geometry, not a
+    // measurement, exactly as for the Wave 150i.
+    // "West by eye" is coarser evidence than rows 1-5's readings, but the two
+    // alternatives here are 12 h apart, so it separates them.
+    // Read this row's columns for what they are: the DOVETAIL BEARING is the
+    // only measured quantity in it. expect_ha, expect_dec, expect_alt and
+    // expect_az are this oracle's own output for the reported axis angles, so
+    // the alt/az checks below compare the oracle against itself here, exactly
+    // as row 5's comment says of its own altitude. What the row pins is that
+    // the model, given a2 = +89.37 at +40, puts the tube WEST -- which the
+    // owner saw -- rather than 12 h away to the east.
     struct Row {
         const char* what;
         double latitude;
@@ -268,6 +289,8 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, +1, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
         {"EQM-35 Pro at a northern latitude", 37.2, 45.0, -60.0, -1, 9.00, 30.0, -10.7, -1.0,
          "front-left and slightly down on the south-facing rig, i.e. SE, about -8 deg"},
+        {"EQ-AL55i Pro, the #579 reading", 40.0, 0.0, 89.37, +1, 6.00, 0.63, 0.41, 270.5,
+         "dovetail west, level, after a dec-only move of +89.37 deg from home"},
     };
     for (const Row& r : rows) {
         const SkyPoint sky = sky_from_axes(r.latitude, r.a1, r.a2, r.board_sense);
@@ -338,6 +361,53 @@ TEST_CASE("SkyWatcher pointing - a goto east of the meridian lands on the sky, s
     check_landing(f, latitude, target_ra, target_dec, 1, -1);
     CHECK(f.a2 < 0.0);
     CHECK(std::abs(f.a1 + 45.0) < 1.0);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// open-astro#306/#579: the same site and target as the first EQM-35 Pro case
+// above, on the EQ-AL55i Pro instead. Its eps is +1 against the EQM-35's -1,
+// so south of the equator k = s * eps is -1 rather than +1, and the goto
+// reaches the SAME sky target with the dec axis on the mirrored branch:
+// a2 = -70 here where the EQM-35 lands a2 = +70. a1 is +45 on both, because
+// `branch = k * side` makes k cancel out of the a1 inversion.
+//
+// What it must NOT change is the pier side. The side is read off the sky hour
+// angle in both hemispheres and on every board (driver L2610-2616), so both
+// boards answer pierEast (0) here; an earlier draft of this case asserted the
+// opposite and the driver was right. The board-dependent quantity is the
+// mechanical branch, not the ASCOM side, and that is what is pinned below.
+//
+// This is also the only loopback coverage of a board whose two axes report
+// different counts per revolution (:a1 4,032,000, :a2 3,600,000). The dec
+// landing is what catches it: a driver that used the RA figure for the dec
+// axis would miss the declination by about 8 degrees.
+TEST_CASE("SkyWatcher pointing - the EQ-AL55i Pro reaches a southern target on the mirrored dec branch (#579)",
+          "[skywatcher][telescope][pointing][al55i][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eq_al55i());
+    REQUIRE(mount.ok());
+    REQUIRE(mount.kCprDec != mount.kCpr);
+    const double latitude = -35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst - 3.0 + 24.0, 24.0);  // HA +3 h
+    const double target_dec = -20.0;
+    // Board-independent: the EQM-35 Pro answers 0 for this target too.
+    REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == 0);
+
+    const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+    check_landing(f, latitude, target_ra, target_dec, 0, +1);
+    // k = -1 here, so the a2 >= 0 branch would need a1 = -135 and is out of
+    // reach; the goto takes the other branch. The EQM-35 Pro case above lands
+    // the same a1 with a2 ON THE OTHER SIDE, which is the whole effect of the
+    // mount code on this target.
+    CHECK(f.a2 < 0.0);
+    CHECK(std::abs(f.a2 + 70.0) < 0.2);
+    CHECK(std::abs(f.a1 - 45.0) < 1.0);
 
     driver->set_tracking(false);
     driver->set_connected(false);
