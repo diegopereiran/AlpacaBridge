@@ -33,13 +33,24 @@
 
 #ifndef _WIN32
 
-// Set when this translation unit is built under ASan/TSan, by either gcc's
-// predefined macro or clang's __has_feature. Used by the EMFILE case below,
-// which cannot run under a sanitizer that needs a descriptor of its own.
+// Set when this translation unit is built under a sanitizer, by either gcc's
+// predefined macro or __has_feature. Used by the EMFILE case below, which
+// cannot run under a sanitizer that needs a descriptor of its own.
+//
+// UBSan is the one that actually kills that case (its vptr check on Catch2's
+// expression decomposer -- see the case's own note), and it is the one with
+// no predefined macro: gcc has __SANITIZE_ADDRESS__/__SANITIZE_THREAD__ but
+// no __SANITIZE_UNDEFINED__. It is detectable all the same --
+// __has_feature(undefined_behavior_sanitizer) answers 1 under gcc 14's
+// -fsanitize=undefined (measured on Debian 13, gcc 14.2) -- so the
+// __has_feature branch covers it. The predefined-macro branch above stays
+// first for gcc < 14, which has no __has_feature at all; a UBSan-only build
+// on such a compiler is still undetectable, but every build this repo runs
+// pairs address with undefined and so trips the first branch anyway.
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #define ALPACACORE_TESTS_SANITIZED 1
 #elif defined(__has_feature)
-#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(undefined_behavior_sanitizer)
 #define ALPACACORE_TESTS_SANITIZED 1
 #endif
 #endif
