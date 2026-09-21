@@ -251,6 +251,7 @@ set(ALPACAHTTP_SOURCES
     src/core/json_utils.cpp
     src/http/router.cpp
     src/http/server.cpp
+    src/http/thread_join.cpp
     src/util/threading.cpp
     src/util/logging_adapter.cpp
     src/util/error_mapping.cpp
@@ -287,6 +288,13 @@ endif()
 # Create library
 add_library(alpacahttp STATIC ${ALPACAHTTP_SOURCES})
 target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${PROJECT_VERSION}\")
+# The join test hook (ScopedJoinHooksForTest) is process-wide mutable state and
+# sits on every production stop()/wait() join path, so it is compiled only into
+# test builds. debian/rules configures with ALPACAHTTP_BUILD_TESTS=OFF, so no
+# shipped package contains it. PUBLIC because the tests include the header.
+if(ALPACAHTTP_BUILD_TESTS)
+    target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_ENABLE_TEST_HOOKS)
+endif()
 target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_GIT_BRANCH="${ALPACAHTTP_GIT_BRANCH}" ALPACAHTTP_GIT_COMMIT="${ALPACAHTTP_GIT_COMMIT}" ALPACAHTTP_GIT_DIRTY=${ALPACAHTTP_GIT_DIRTY} ALPACAHTTP_GIT_IS_RELEASE=${ALPACAHTTP_GIT_IS_RELEASE} ALPACAHTTP_GIT_REMOTE_URL=\"${ALPACAHTTP_GIT_REMOTE_URL}\")
 
 # zlib: gzip framing for the combined log download endpoint
@@ -357,9 +365,19 @@ if(ALPACAHTTP_BUILD_TESTS)
     
     # Socket-level tests for the Server request-read path (read_request), which
     # test_routing.cpp bypasses. Covers the header-size (431) boundary (#129).
+    # Both this target and test_thread_join need src/ on the include path
+    # because http/thread_join.h is an internal seam, not public API under
+    # include/.
     add_executable(test_server_socket tests/test_server_socket.cpp)
     target_link_libraries(test_server_socket alpacahttp)
+    target_include_directories(test_server_socket PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test_server_socket COMMAND test_server_socket)
+
+    # Unit tests for the join_or_abandon() fallback seam (issue #561).
+    add_executable(test_thread_join tests/test_thread_join.cpp)
+    target_link_libraries(test_thread_join alpacahttp)
+    target_include_directories(test_thread_join PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME test_thread_join COMMAND test_thread_join)
 
     add_executable(test_json tests/test_json.cpp)
     target_link_libraries(test_json alpacahttp)
