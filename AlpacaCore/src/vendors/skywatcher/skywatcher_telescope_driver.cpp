@@ -2007,13 +2007,19 @@ public:
             // counter and silently skipped this restore, even though nothing
             // touched this axis at all (found via a loopback regression test
             // during EQM-35 Pro bring-up, 2026-09-06). `tracking_`/
-            // `dec_rate_arcsec_per_sec_` below already guard the specific
-            // regression the generation check was originally added for (PR
-            // #216 round-5: SetTracking(false) racing this restore) --
-            // SetTracking(false) sets tracking_ = false under the SAME mutex_
-            // this task also holds here, so there is no interleaving where
-            // this reads tracking_ == true while a completed SetTracking(false)
-            // meant otherwise. What the generation check still needs to catch
+            // `dec_rate_arcsec_per_sec_` below guard a COMPLETED
+            // SetTracking(false) -- that path publishes tracking_ = false
+            // under the SAME mutex_ this task also holds here. They do NOT
+            // guard one still IN FLIGHT: set_tracking_locked(false) bumps
+            // motion_generation_ first, then releases mutex_ inside
+            // stop_axis_and_wait_locked()'s poll loop, and assigns tracking_
+            // only after that wait returns -- so a restore tail waking inside
+            // that window reads tracking_ == true, restores the drive, and the
+            // caller throws "Tracking change superseded by a concurrent motion
+            // command" with the mount left tracking. That is issue #535
+            // (open); its regression case is quarantined [!mayfail] in
+            // test_skywatcher_async.cpp, so nothing gates this path until #535
+            // lands. What the generation check still needs to catch
             // is a goto/park/home/pulse-guide that took over THIS axis, none
             // of which necessarily touch tracking_/dec_rate_arcsec_per_sec_ --
             // hence the same same_axis_owner idiom already used by the duty-

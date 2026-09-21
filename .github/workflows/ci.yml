@@ -65,12 +65,16 @@ jobs:
           persist-credentials: false
 
       - name: Install build dependencies
+        # catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
+        # returns early, ctest finds no tests and exits 0, and this job
+        # green-lights while running none of the core suite (issue #586).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             g++ \
+            catch2 \
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
@@ -105,12 +109,16 @@ jobs:
         # ships libgpiod 1.6, but the ZWO switch/GPIO drivers need >= 2.0. We
         # build v2 from source in the next step instead (matches the Debian
         # Trixie production target).
+        # catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
+        # returns early, ctest finds no tests and exits 0, and this job
+        # green-lights while running none of the core suite (issue #586).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             g++ \
+            catch2 \
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
@@ -189,12 +197,16 @@ jobs:
           persist-credentials: false
 
       - name: Install build dependencies
+        # catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
+        # returns early, ctest finds no tests and exits 0, and this job
+        # green-lights while running none of the core suite (issue #586).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             g++ \
+            catch2 \
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
