@@ -318,6 +318,16 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   or an EQDIR cable where available; PC Direct Mode is a working no-extra-hardware fallback
   for classic mounts that have neither (the #230 audience). Docs line for
   `SUPPORTED-DRIVERS.md` lands with the post-ConformU direct-driver docs PR.
+- **EQM-35 Pro over an EQDIR cable (FTDI FT232R), 2026-09-21** (Raspberry Pi 3 Model B, Debian 13
+  arm64, no handset in the chain): the cable enumerates as `usb-FTDI_FT232R_USB_UART_<serial>-if00-port0`
+  (`/dev/ttyUSB0`) and, unlike the mount's built-in Prolific port, answers at **9600 baud**. Auto-detect
+  found it unaided in 27 ms -- `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0 (MC firmware 3.39, 9600
+  baud)` -- with the same identity as over the built-in port (`EQM-35 Pro (mount code 50), firmware
+  3.39`). With an explicit `connectionType: serial`, `baudRate: 9600`: `FindHome`, a 30 s slew to
+  RA 17.249 h / Dec +60 deg, and `FindHome` back returned both axes to the exact home count
+  (`:j1`/`:j2` = `=000080` before and after), and one session of 7146 motor-controller transactions
+  logged no serial timeout, checksum or EIO error. The TRACE log spaces back-to-back commands about
+  16 ms apart at 9600 baud, against about 2 ms over the built-in port at 115200.
 
 #### Goto landing, tracking restart and the dev-VM clock (EQM-35 Pro) — 2026-09-12
 
