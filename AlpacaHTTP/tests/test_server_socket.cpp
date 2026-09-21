@@ -18,8 +18,12 @@
 // #129), HTTP/1.1 persistence and its bounds, the framing gate that decides
 // whether a connection may stay open, and the graceful close path.
 
+#include "http/thread_join.h"
+
 #include <alpacahttp/config.h>
 #include <alpacahttp/server.h>
+#include <alpacahttp/util/logging_adapter.h>
+#include <alpacacore/util/logging.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -29,11 +33,15 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -46,6 +54,44 @@ constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
 
 // Must match kMaxRequestsPerConnection in AlpacaHTTP/src/http/server.cpp (not exported).
 constexpr std::uint64_t kMaxRequestsPerConnection = 1000;
+
+// Aborts the process if not disarmed within `budget` -- turns a regression
+// that HANGS (a join that never returns) into a failed test with a clear
+// message instead of a test binary that never exits and just times out the
+// CI job. Construct at the top of a scope that must complete within budget;
+// destructor disarms it.
+class Watchdog {
+public:
+    explicit Watchdog(std::chrono::milliseconds budget, std::string label)
+        : label_(std::move(label)),
+          thread_([this, budget] {
+              std::unique_lock<std::mutex> lock(mutex_);
+              if (!cv_.wait_for(lock, budget, [this] { return disarmed_; })) {
+                  std::fprintf(stderr, "WATCHDOG TIMEOUT: %s did not complete within budget\n",
+                               label_.c_str());
+                  std::abort();
+              }
+          }) {}
+
+    ~Watchdog() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            disarmed_ = true;
+        }
+        cv_.notify_all();
+        thread_.join();
+    }
+
+    Watchdog(const Watchdog&) = delete;
+    Watchdog& operator=(const Watchdog&) = delete;
+
+private:
+    std::string label_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool disarmed_ = false;
+    std::thread thread_;
+};
 
 // Send `data` to 127.0.0.1:port in two writes — the terminator-bearing tail
 // goes in the second write so we exercise the fixed path (the chunk that finds
@@ -1338,6 +1384,73 @@ int main() {
             restarting.stop();
             EXPECT(!restarting.is_running());
         }
+    }
+
+    {
+        // (issue #561, case a2) join_or_abandon()'s fallback is unreachable
+        // from a real Server through ordinary testing -- nothing can make
+        // join_server_thread()'s join() throw. ScopedJoinHooksForTest makes
+        // the ONE production call site named "join_server_thread" throw,
+        // while every other call site (worker/reactor/rtc-probe joins) still
+        // really joins, so this proves the fallback fires end-to-end and
+        // stop() still returns rather than propagating or hanging.
+        std::mutex captured_mutex;
+        std::vector<std::string> captured;
+        alpacahttp::util::init_logging(alpacahttp::Config{});
+        alpacahttp::util::set_external_log_sink(
+            [&captured_mutex, &captured](alpacacore::logging::LogLevel level, std::string_view,
+                                          std::string_view message) {
+                if (level != alpacacore::logging::LogLevel::Error) {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(message);
+            });
+
+        {
+            Watchdog watchdog(std::chrono::seconds(10), "case a2 (join_server_thread fallback)");
+
+            alpacahttp::detail::ScopedJoinHooksForTest hooks(
+                [](std::thread& t, const char* context) {
+                    if (std::strcmp(context, "join_server_thread") == 0) {
+                        throw std::system_error(EDEADLK, std::generic_category());
+                    }
+                    t.join();
+                },
+                [](std::thread& t, const char*) { t.detach(); });
+
+            alpacahttp::Config config;
+            config.set_http_port(0);
+            config.set_discovery_enabled(false);
+            config.set_server_name("TestServerJoinFallback");
+
+            alpacahttp::Server server(config);
+            server.start_async();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (!server.is_running()) {
+                std::cerr << "WARNING: join-fallback case SKIPPED -- could not bind an ephemeral port\n";
+            } else {
+                server.stop();   // Must return despite the injected join() throw.
+                server.wait();   // Must also return -- both funnel through join_server_thread().
+                EXPECT(!server.is_running());
+                server.stop();   // Second stop() is a no-op; must not re-throw or hang.
+            }
+            // hooks (and its process-wide override) must be destroyed before
+            // `server` goes out of scope, in case any later teardown path
+            // still calls join_or_abandon() on this Server.
+        }
+
+        alpacahttp::util::set_external_log_sink(nullptr);
+        std::lock_guard<std::mutex> lock(captured_mutex);
+        bool saw_fallback_error = false;
+        for (const auto& line : captured) {
+            if (line.find("join_server_thread") != std::string::npos &&
+                line.find("pthread_join failed") != std::string::npos) {
+                saw_fallback_error = true;
+                break;
+            }
+        }
+        EXPECT(saw_fallback_error);
     }
 
     std::cout << "All server socket tests passed!\n";
