@@ -600,12 +600,18 @@ channel-scoped `same_axis_owner` (`goto_in_progress_ || parking_ || homing_ ||
 slewing_cached_ || manual_axis_slewing_[axis] || (pulse_guiding_active_ &&
 pulse_axis_ == channel)`), the exact idiom the duty-cycle worker already uses, and only
 treats a `motion_generation_` mismatch as a real supersession when `same_axis_owner`
-is true. Verified the historical regression this guards against (PR #216 round-5:
-`SetTracking(false)` racing the restore) is still covered independently: that path sets
-`tracking_ = false` under the SAME `mutex_` this task also holds, so there is no
-interleaving where the restore reads `tracking_ == true` while a completed
-`SetTracking(false)` meant otherwise -- the `tracking_ &&`/`dec_rate_arcsec_per_sec_ !=
-0.0 &&` guards already ahead of the generation check cover that case on their own.
+is true. The historical regression this guards against (PR #216 round-5:
+`SetTracking(false)` racing the restore) is covered only for a COMPLETED
+`SetTracking(false)`: that path publishes `tracking_ = false` under the SAME `mutex_`
+this task also holds, so the `tracking_ &&`/`dec_rate_arcsec_per_sec_ != 0.0 &&` guards
+ahead of the generation check see it. They do NOT cover one still IN FLIGHT.
+`set_tracking_locked(false)` bumps `motion_generation_` first, then releases `mutex_`
+inside `stop_axis_and_wait_locked()`'s poll loop, and assigns `tracking_` only after that
+wait returns -- so a restore tail waking inside that window reads `tracking_ == true`,
+restores the drive, and the caller throws `Tracking change superseded by a concurrent
+motion command` with the mount left tracking. That is issue #535, still open; its
+regression case is quarantined `[!mayfail]` in `test_skywatcher_async.cpp` (see #586 /
+#587), so nothing gates this path until #535 lands.
 Extended the regression test from the first bug to assert the RA axis actually resumes
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.
