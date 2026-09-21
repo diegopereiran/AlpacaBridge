@@ -27,6 +27,12 @@ else
   PARALLEL="4"
 fi
 
+# PROBE (throwaway branch, do not merge): the SkyWatcher fake-mount cases wait
+# on simulated motion in real time -- the slowest measured 110.5s wall for
+# 0.13s user + 0.32s sys -- so ctest is sleep-bound and tying its -j to nproc
+# leaves the runner idle. Build stays at nproc (compiling IS cpu-bound).
+CTEST_PARALLEL="${CTEST_PARALLEL:-16}"
+
 echo "== AlpacaCore =="
 cmake -S "${CORE_DIR}" -B "${CORE_DIR}/build" \
   -DALPACACORE_BUILD_TESTS=ON \
@@ -36,7 +42,7 @@ cmake --build "${CORE_DIR}/build" --parallel "${PARALLEL}"
 # silently failed to configure (Catch2 missing => AlpacaCore/tests/
 # CMakeLists.txt returns early) passed vacuously here, in CI and in
 # ci_preflight.sh alike (issue #586). Requires CMake >= 3.18.
-ctest --test-dir "${CORE_DIR}/build" --output-on-failure --no-tests=error -j "${PARALLEL}"
+ctest --test-dir "${CORE_DIR}/build" --output-on-failure --no-tests=error -j "${CTEST_PARALLEL}"
 
 echo "== AlpacaHTTP =="
 # AlpacaHTTP adds AlpacaCore as a subdirectory (AlpacaHTTP/CMakeLists.txt),
@@ -48,4 +54,4 @@ cmake -S "${HTTP_DIR}" -B "${HTTP_DIR}/build" \
   -DALPACACORE_BUILD_TESTS=OFF \
   -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
 cmake --build "${HTTP_DIR}/build" --parallel "${PARALLEL}"
-ctest --test-dir "${HTTP_DIR}/build" --output-on-failure --no-tests=error -j "${PARALLEL}"
+ctest --test-dir "${HTTP_DIR}/build" --output-on-failure --no-tests=error -j "${CTEST_PARALLEL}"
