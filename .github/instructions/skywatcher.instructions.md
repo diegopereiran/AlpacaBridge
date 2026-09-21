@@ -327,7 +327,11 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   RA 17.249 h / Dec +60 deg, and `FindHome` back returned both axes to the exact home count
   (`:j1`/`:j2` = `=000080` before and after), and one session of 7146 motor-controller transactions
   logged no serial timeout, checksum or EIO error. The TRACE log spaces back-to-back commands about
-  16 ms apart at 9600 baud, against about 2 ms over the built-in port at 115200.
+  16 ms apart at 9600 baud, against about 2 ms over the built-in port at 115200. Two limits on
+  what this proves: the EQM-35 has no HOME_INDEXER bit (feature word 0x7000), so that `FindHome`
+  exercised the count-frame goto fallback, not home-sensor AutoHome; and open-loop `MoveAxis`
+  timing was not measured over EQDIR, so the PC Direct Mode latency caveat above is neither
+  confirmed nor ruled out for this path.
 
 #### Goto landing, tracking restart and the dev-VM clock (EQM-35 Pro) — 2026-09-12
 
