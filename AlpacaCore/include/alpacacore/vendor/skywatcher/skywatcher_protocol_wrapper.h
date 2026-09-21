@@ -38,7 +38,6 @@ struct MotorBoardInfo {
     std::string model_name = "";  // e.g. "EQM-35 Pro", or "Mount (code 0xNN)"
 };
 
-// Map a ":e" mount-code byte to a human-readable model name.
 std::string mount_code_to_name(std::uint8_t mount_code);
 
 struct SkyWatcherPortInfo {
@@ -88,7 +87,6 @@ struct ConnectionInfo {
     std::string host;
     int udp_port = 11880;
 
-    // Per-command response timeout
     int response_timeout_ms = 1000;
 };
 
@@ -96,7 +94,6 @@ struct ConnectionInfo {
 inline constexpr int kAxisRa = 1;
 inline constexpr int kAxisDec = 2;
 
-// Decoded ":f" status reply.
 struct AxisStatus {
     bool speed_mode = false;  // true = Speed(Tracking) mode, false = GOTO mode
     bool ccw = false;         // true = rotating in the decreasing-counts direction

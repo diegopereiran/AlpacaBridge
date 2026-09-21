@@ -1108,10 +1108,10 @@ public:
             check_connected();
             check_not_parked_locked("FindHome");
             if (homing_) {
-                return;  // already homing
+                return;
             }
             if (at_home_ && !get_hardware_slewing_locked()) {
-                return;  // already at home
+                return;
             }
             invalidate_position_cache_locked();
             slewing_cached_ = true;
@@ -3120,7 +3120,6 @@ private:
         cmd_axis_rate_deg_s_[channel - 1] = rate;
     }
 
-    // Base drive rate for the selected ASCOM DriveRate.
     double base_tracking_rate_locked() const {
         switch (tracking_rate_) {
             case 1:
@@ -4355,7 +4354,6 @@ private:
     // Terminal for the session — only a reconnect re-sends ":F" — and mutable
     // because it is latched from the read path. Empty means no such fault.
     mutable std::string board_reset_fault_;
-    // Last protocol-side recovery epoch this driver has validated.
     mutable std::uint64_t seen_recovery_epoch_ = 0;
     mutable std::chrono::steady_clock::time_point last_position_update_{};
 
@@ -4404,11 +4402,11 @@ private:
     mutable double last_goto_dist_deg_ = 0.0;
     mutable std::chrono::steady_clock::time_point last_landing_time_{};
     bool has_home_indexer_ = false;
-    int tracking_rate_ = 0;                      // ASCOM DriveRate (0/1/2)
-    double ra_rate_sec_per_sidereal_sec_ = 0.0;  // RightAscensionRate
-    double dec_rate_arcsec_per_sec_ = 0.0;       // DeclinationRate
-    double ra_duty_rate_deg_s_ = 0.0;            // sub-floor effective RA rate (duty-cycled)
-    double dec_duty_rate_deg_s_ = 0.0;           // sub-floor Dec rate (duty-cycled)
+    int tracking_rate_ = 0;  // ASCOM DriveRate (0/1/2)
+    double ra_rate_sec_per_sidereal_sec_ = 0.0;
+    double dec_rate_arcsec_per_sec_ = 0.0;
+    double ra_duty_rate_deg_s_ = 0.0;   // sub-floor effective RA rate (duty-cycled)
+    double dec_duty_rate_deg_s_ = 0.0;  // sub-floor Dec rate (duty-cycled)
     bool dec_offset_running_ = false;
     std::thread duty_thread_;
     std::atomic<bool> duty_cancel_{false};
