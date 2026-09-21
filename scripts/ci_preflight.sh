@@ -49,13 +49,13 @@ fi
 # covers run_all_tests.sh's configures and the clang-tidy compile DB without
 # editing each cmake line. Guarded on ccache being present so this is a no-op
 # where it is absent, leaving CI parity unchanged. A sanitized build's objects
-# have distinct cache keys and won't share with the normal builds -- the
-# -fsanitize flags reach the compile line through CXXFLAGS, which is part of
-# the ccache hash -- so neither the ASan+UBSan pass nor the TSan one is made
-# cheaper by the ordinary builds, though successive runs of each still hit;
-# that build dir is reused across runs and the launcher is only a
-# cache-variable DEFAULT, so it
-# is also passed explicitly there (CCACHE_CMAKE_ARGS) or an older build-tsan/
+# have distinct cache keys and won't share with the normal builds -- CMake seeds
+# CMAKE_CXX_FLAGS from the environment's CXXFLAGS at configure time, so the
+# -fsanitize flags land on the compile line, and ccache hashes that line -- so
+# neither the ASan+UBSan pass nor the TSan one is made cheaper by the ordinary
+# builds, though successive runs of each still hit; that build dir is reused
+# across runs and the launcher is only a cache-variable DEFAULT, so it is also
+# passed explicitly there (CCACHE_CMAKE_ARGS) or an older build-tsan/
 # would never pick it up. Invariant: every OTHER build dir is deleted before
 # it is configured (run_all_tests.sh rm -rf's build/ and AlpacaHTTP/build/),
 # which is the only reason the env var alone is enough there; a future gate
@@ -480,7 +480,7 @@ if [ "${RUN_SANITIZERS:-1}" = "1" ]; then
     record FAIL "sanitizers"
   fi
 else
-  record SKIP "sanitizers (RUN_SANITIZERS=0)"
+  record SKIP "sanitizers (RUN_SANITIZERS=${RUN_SANITIZERS})"
 fi
 
 # --- optional: ThreadSanitizer concurrency stress ---------------------------

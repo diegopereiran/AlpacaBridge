@@ -188,7 +188,7 @@ Knobs:
 - `RUN_SANITIZERS=0 ./scripts/ci_preflight.sh` — skip the ASan+UBSan `sanitizers` reproduction (a third rebuild, about 1m12s on arm64). The pass is **on by default** since #588, because it was the one configuration neither CI nor a human ran; opt out only for docs/CI-only changes.
 - `PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh` — never apt-install; missing tools are reported `[SKIP]` instead.
 
-**Gate:** the script exits non-zero if any mandatory check failed. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed) or `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled — in the latter case, surface it so the user knows CI will still enforce that gate.
+**Gate:** the script exits non-zero if any mandatory check failed. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed), when `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled, or when `RUN_SANITIZERS=0` opted out of the ASan+UBSan pass — in the last two cases, surface it so the user knows CI will still enforce that gate.
 
 ## Step 5 — Push the branch
 
