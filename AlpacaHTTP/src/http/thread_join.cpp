@@ -46,11 +46,14 @@ std::vector<std::thread>& abandoned_threads() {
     return *threads;
 }
 
+#ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
 // Process-wide test-only override of the one-arg join_or_abandon() form. Null
-// in every ordinary run; installed only by ScopedJoinHooksForTest.
+// in every ordinary run, and absent entirely from a shipped build: this block
+// and its cost on the production join path compile only when tests are built.
 std::mutex g_hook_mutex;
 ScopedJoinHooksForTest::Hook g_test_joiner;
 ScopedJoinHooksForTest::Hook g_test_detacher;
+#endif
 
 }  // namespace
 
@@ -91,6 +94,7 @@ void join_or_abandon(std::thread& thread, const char* context, const std::functi
 }
 
 void join_or_abandon(std::thread& thread, const char* context) {
+#ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
     ScopedJoinHooksForTest::Hook joiner_hook;
     ScopedJoinHooksForTest::Hook detacher_hook;
     {
@@ -104,9 +108,11 @@ void join_or_abandon(std::thread& thread, const char* context) {
             [&detacher_hook, context](std::thread& t) { detacher_hook(t, context); });
         return;
     }
+#endif
     join_or_abandon(thread, context, [](std::thread& t) { t.join(); }, [](std::thread& t) { t.detach(); });
 }
 
+#ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
 ScopedJoinHooksForTest::ScopedJoinHooksForTest(Hook joiner, Hook detacher) {
     std::lock_guard<std::mutex> guard(g_hook_mutex);
     g_test_joiner = std::move(joiner);
@@ -118,5 +124,6 @@ ScopedJoinHooksForTest::~ScopedJoinHooksForTest() {
     g_test_joiner = nullptr;
     g_test_detacher = nullptr;
 }
+#endif  // ALPACAHTTP_ENABLE_TEST_HOOKS
 
 }  // namespace alpacahttp::detail

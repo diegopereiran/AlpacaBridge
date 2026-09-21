@@ -706,13 +706,13 @@ void Server::run_server() {
         fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(server_fd, &read_fds);
-
+        
         struct timeval timeout;
         timeout.tv_sec = 0;
         timeout.tv_usec = 500000;  // 500ms timeout
-
+        
         int select_result = util::socket_select(server_fd, &read_fds, nullptr, nullptr, &timeout);
-
+        
         if (select_result < 0) {
             // Error in select
             int err = util::socket_get_last_error();
@@ -738,7 +738,7 @@ void Server::run_server() {
             // Timeout - check running_ flag and continue
             continue;
         }
-
+        
         // Connection available - accept it
         if (FD_ISSET(server_fd, &read_fds)) {
             struct sockaddr_storage client_address {};
@@ -1516,4 +1516,4 @@ void Server::handle_restart_request() {
     restart_requested_ = false;
 }
 
-}  // namespace alpacahttp
+} // namespace alpacahttp

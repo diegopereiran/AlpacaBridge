@@ -288,6 +288,13 @@ endif()
 # Create library
 add_library(alpacahttp STATIC ${ALPACAHTTP_SOURCES})
 target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${PROJECT_VERSION}\")
+# The join test hook (ScopedJoinHooksForTest) is process-wide mutable state and
+# sits on every production stop()/wait() join path, so it is compiled only into
+# test builds. debian/rules configures with ALPACAHTTP_BUILD_TESTS=OFF, so no
+# shipped package contains it. PUBLIC because the tests include the header.
+if(ALPACAHTTP_BUILD_TESTS)
+    target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_ENABLE_TEST_HOOKS)
+endif()
 target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_GIT_BRANCH="${ALPACAHTTP_GIT_BRANCH}" ALPACAHTTP_GIT_COMMIT="${ALPACAHTTP_GIT_COMMIT}" ALPACAHTTP_GIT_DIRTY=${ALPACAHTTP_GIT_DIRTY} ALPACAHTTP_GIT_IS_RELEASE=${ALPACAHTTP_GIT_IS_RELEASE} ALPACAHTTP_GIT_REMOTE_URL=\"${ALPACAHTTP_GIT_REMOTE_URL}\")
 
 # zlib: gzip framing for the combined log download endpoint

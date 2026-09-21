@@ -28,9 +28,10 @@ namespace alpacahttp::detail {
 // Join `thread`, falling back to detach() if join() throws, and parking the
 // thread object in an internal leaked container if detach() also throws.
 // This is the production entry point; all call sites in server.cpp use this
-// one-arg form unchanged. It transparently consults a test-only override
-// installed via ScopedJoinHooksForTest (see below); the override is null in
-// every ordinary run.
+// one-arg form unchanged. In a test build it transparently consults a
+// test-only override installed via ScopedJoinHooksForTest (see below); in a
+// shipped build ALPACAHTTP_ENABLE_TEST_HOOKS is undefined, the override does
+// not exist, and this calls real join()/detach() directly.
 void join_or_abandon(std::thread& thread, const char* context);
 
 // Test-visible overload: the caller supplies the join/detach implementations
@@ -46,6 +47,7 @@ void join_or_abandon(std::thread& thread, const char* context, const std::functi
 // container itself.
 std::size_t abandoned_thread_count();
 
+#ifdef ALPACAHTTP_ENABLE_TEST_HOOKS
 // RAII installer for a process-wide override of the one-arg join_or_abandon()
 // form, used by tests that exercise real Server call sites (which only ever
 // call the one-arg form and so cannot be reached by the two-callable
@@ -68,5 +70,6 @@ public:
     ScopedJoinHooksForTest(const ScopedJoinHooksForTest&) = delete;
     ScopedJoinHooksForTest& operator=(const ScopedJoinHooksForTest&) = delete;
 };
+#endif  // ALPACAHTTP_ENABLE_TEST_HOOKS
 
 }  // namespace alpacahttp::detail
