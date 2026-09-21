@@ -789,6 +789,27 @@ TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher]
     CHECK(*firmware == "3.39");
 }
 
+TEST_CASE("SkyWatcher EQM-35 - the connect log names the mount code in hex (#458)", "[skywatcher][telescope][eqm35]") {
+    // measured_dec_axis_sense(), the instructions and #579 name boards as
+    // 0x32, 0x45, ...; a bench reading taken from the log must not need a
+    // decimal-to-hex conversion to find its row.
+    std::atomic<int> hits{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink([&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+        if (message.find("Motor board: EQM-35 Pro (mount code 0x32, 50)") != std::string_view::npos) {
+            ++hits;
+        }
+    });
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    CHECK(hits.load() == 1);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher EQM-35 - FindHome uses the count-frame fallback", "[skywatcher][telescope][eqm35]") {
     // ":q" 0x000001 answers 0x7000 on this board: POLAR_LED |
     // COMMON_SLEW_START | HALF_CURRENT_TRACKING, with NO HOME_INDEXER (0x04).
@@ -1365,10 +1386,12 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
 // ConformU-validated fix above requires: "WE", not constant). Which
 // MECHANICAL branch realises each side is the #261 question, and #432
 // settled it: the goto picks the branch from the SKY hour angle, so
-// HA >= 0 takes the a2 >= 0 branch and get_side_of_pier() reads pierEast
-// (0) back off it. That rule is the same in both hemispheres -- the branch
-// does NOT mirror south of the equator -- which is why the labels below are
-// identical to the northern case.
+// HA >= 0 takes the branch with k * branch > 0, and get_side_of_pier() reads
+// pierEast (0) back off it. Both profiles below run with k = +1 (EQM-35 Pro
+// south, Wave 100i unmeasured), so that is the a2 >= 0 branch in both
+// hemispheres, which is why the labels match the northern case. A board with
+// a measured sense mirrors the branch where s * eps = -1 (#458); the label
+// does not change.
 
 TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and agrees with destination",
           "[skywatcher][telescope][eqm35][hemisphere]") {
@@ -1413,8 +1436,8 @@ TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and
 TEST_CASE("SkyWatcher northern hemisphere - SideOfPier flips with hour angle and agrees with destination",
           "[skywatcher][telescope][hemisphere]") {
     // Mirrors the southern-hemisphere test above with an unchanged (Wave)
-    // profile: the branch/HA-sign rule is not conditioned on hemisphere at
-    // all, so this must behave identically.
+    // profile: the side label follows the sky HA in both hemispheres, and both
+    // profiles here run with k = +1, so the branch is the same too.
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
     REQUIRE(mount.ok());
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
