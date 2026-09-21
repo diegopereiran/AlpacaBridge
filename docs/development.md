@@ -165,13 +165,16 @@ cd build && ctest
 Filter by tag: `./build/tests/alpacacore_tests [zwo][camera]`
 Exclude hardware tests: `./build/tests/alpacacore_tests ~[hardware]`
 
+Both assume the `build` directory `run_all_tests.sh` just made. A pre-flight leaves a different
+one there (see below), so after one, rebuild rather than filtering against what is left.
+
 Before pushing, reproduce the full CI gate set locally:
 
 ```sh
 ./scripts/ci_preflight.sh
 ```
 
-This runs clang-format, the Unicode/Trojan-Source scan, both build+test configurations (vendors OFF and ON), clang-tidy, cppcheck, and — when the relevant files changed — shellcheck, the web UI JavaScript gate (`node --check` for syntax plus `node --test` for the pure formatters in `AlpacaHTTP/web/format.js`, triggered by changes under `AlpacaHTTP/web/` or `AlpacaHTTP/tests/web/`), and zizmor. `/submit-pr` runs it automatically.
+This runs clang-format, the Unicode/Trojan-Source scan, both build+test configurations (vendors OFF and ON), clang-tidy, cppcheck, and — when the relevant files changed — shellcheck, the web UI JavaScript gate (`node --check` for syntax plus `node --test` for the pure formatters in `AlpacaHTTP/web/format.js`, triggered by changes under `AlpacaHTTP/web/` or `AlpacaHTTP/tests/web/`), and zizmor. It finishes with the ASan+UBSan pass, which is on by default since #588 and runs last of the default gates, after zizmor; `RUN_SANITIZERS=0` opts out, and the opt-in `RUN_TSAN=1` and `RUN_SCAN_BUILD=1` passes run after it when set. `/submit-pr` runs it automatically.
 
 ## Writing tests
 
