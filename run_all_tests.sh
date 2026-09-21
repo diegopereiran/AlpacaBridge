@@ -32,11 +32,20 @@ cmake -S "${CORE_DIR}" -B "${CORE_DIR}/build" \
   -DALPACACORE_BUILD_TESTS=ON \
   -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
 cmake --build "${CORE_DIR}/build" --parallel "${PARALLEL}"
-ctest --test-dir "${CORE_DIR}/build" --output-on-failure -j "${PARALLEL}"
+# --no-tests=error: ctest exits 0 when it finds NO tests, so a suite that
+# silently failed to configure (Catch2 missing => AlpacaCore/tests/
+# CMakeLists.txt returns early) passed vacuously here, in CI and in
+# ci_preflight.sh alike (issue #586). Requires CMake >= 3.18.
+ctest --test-dir "${CORE_DIR}/build" --output-on-failure --no-tests=error -j "${PARALLEL}"
 
 echo "== AlpacaHTTP =="
+# AlpacaHTTP adds AlpacaCore as a subdirectory (AlpacaHTTP/CMakeLists.txt),
+# and ALPACACORE_BUILD_TESTS defaults ON -- so without this the whole core
+# suite is configured, built and run a SECOND time here (issue #586 made
+# that visible: 802 cases in the core run, then 809 = 802 + 7 again).
 cmake -S "${HTTP_DIR}" -B "${HTTP_DIR}/build" \
   -DALPACAHTTP_BUILD_TESTS=ON \
+  -DALPACACORE_BUILD_TESTS=OFF \
   -DALPACACORE_ENABLE_ALL_VENDORS="${CORE_VENDORS}"
 cmake --build "${HTTP_DIR}/build" --parallel "${PARALLEL}"
-ctest --test-dir "${HTTP_DIR}/build" --output-on-failure -j "${PARALLEL}"
+ctest --test-dir "${HTTP_DIR}/build" --output-on-failure --no-tests=error -j "${PARALLEL}"

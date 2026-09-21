@@ -33,6 +33,17 @@
 
 #ifndef _WIN32
 
+// Set when this translation unit is built under ASan/TSan, by either gcc's
+// predefined macro or clang's __has_feature. Used by the EMFILE case below,
+// which cannot run under a sanitizer that needs a descriptor of its own.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define ALPACACORE_TESTS_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define ALPACACORE_TESTS_SANITIZED 1
+#endif
+#endif
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -202,6 +213,21 @@ TEST_CASE("PtyPair - a keep-alive open that fails throws, with the master closed
     // syscalls wide and the limit is restored on every exit path; if it ever
     // flakes under the ASan/TSan jobs, gate this case out there rather than
     // loosening the check.
+    //
+    // Taking that instruction (issue #586, which made the `sanitizers` job
+    // actually run this suite): under -fsanitize=address,undefined this case
+    // fails DETERMINISTICALLY, not flakily. UBSan's vptr check on Catch2's
+    // expression decomposer has to reach the runtime the first time a
+    // REQUIRE is decomposed inside the EMFILE window, and cannot, so the
+    // case dies on `member access within address ... does not point to an
+    // object of type 'BinaryExpr'` with no stack trace -- the symbolizer
+    // needs a descriptor too. That is the sanitizer being unable to observe
+    // the case, not the case finding a defect. It still runs for real in
+    // build-test and build-vendors, which is where its coverage lives.
+#if defined(ALPACACORE_TESTS_SANITIZED)
+    WARN("built with sanitizers; the EMFILE setup-failure check is skipped (see the note above)");
+    return;
+#endif
     const FdTable start = fd_table();
     if (start.count < 0) {
         WARN("/proc/self/fd is not available on this host; the setup-failure check is skipped");
