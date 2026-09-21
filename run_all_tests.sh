@@ -35,13 +35,20 @@ fi
 # vendors, 802 cases: -j 4 => 488.9s, -j 8 => 252.0s.
 #
 # Twice the core count rather than a fixed number, because what governs is the
-# oversubscription RATIO, not the absolute -j. At 2x (8 on the 4-core runner)
-# the suite is green; at 4x (16 there) `HostClock - readers in flight survive a
-# concurrent set_hooks` fails its `reads > 0` vacuity guard -- its reader
-# threads check the stop flag before their first read, so under that much
-# contention the main thread finishes all 200 iterations before a reader is
-# scheduled. A fixed 8 would carry that 4x ratio onto any 2-core box; 2x nproc
-# does not. Going beyond 2x wants that guard made scheduling-independent first.
+# oversubscription RATIO, not the absolute -j: a fixed 8 would carry a 4x ratio
+# onto any 2-core box, while 2x nproc does not.
+#
+# Oversubscription is what surfaces a test whose assertion depends on the
+# scheduler rather than on behaviour. `HostClock - readers in flight survive a
+# concurrent set_hooks` was one: its reader threads checked the stop flag before
+# their first read, so under enough contention the writer loop finished before
+# any reader was scheduled and the `reads > 0` vacuity guard went red on an
+# otherwise healthy tree -- 3 runs in 10 at -j 8 under ASan+UBSan on a 4-core
+# box. That case now starts each reader with one unconditional read and waits
+# for all four before the writer loop, which is a property of the case and not
+# of the -j it runs at. Raising this multiplier further is a separate change
+# and wants its own measurement: the numbers above are all-vendors and the
+# -j 8 evidence for that fix is vendors-OFF under sanitizers.
 #
 # CTEST_PARALLEL overrides, so a slower or busier machine can dial it back
 # without a code change. The BUILD stays at nproc below: compiling is CPU-bound.
