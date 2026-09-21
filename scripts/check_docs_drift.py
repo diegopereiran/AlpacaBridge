@@ -1651,6 +1651,20 @@ def self_test():
             check("agents md check: a gitignored span is not reported",
                   found is not None and not any("scripts/gen/out.py" in f for f in found))
 
+            # AGENTS.md is one of five document loops in this check; a root
+            # threaded into that one only proves nothing about the other four,
+            # so drift a skill doc and an agent doc too (issue #583).
+            loops = repo_fixture("loops")
+            with open(loops / ".claude/skills/s/SKILL.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/skill_nope.py`.\n")
+            with open(loops / "docs/agents/x.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/agent_nope.py`.\n")
+            found = run_check(loops)
+            check("agents md check: a drifted span in a skill doc is reported",
+                  found is not None and any("SKILL.md" in f and "scripts/skill_nope.py" in f for f in found))
+            check("agents md check: a drifted span in an agent doc is reported",
+                  found is not None and any("docs/agents/x.md" in f and "scripts/agent_nope.py" in f for f in found))
+
             gone = repo_fixture("gone")
             (gone / ".github/instructions/a.instructions.md").unlink()
             found = run_check(gone)
