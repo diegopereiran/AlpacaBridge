@@ -179,12 +179,13 @@ The script reproduces, in order, the CI jobs that can run on this arm64 host and
 7. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
 8. **javascript** — `node --check` of web UI JS AND `node --test AlpacaHTTP/tests/web/*.test.js` (the file form -- the directory form breaks on Node 22), if either `AlpacaHTTP/web/*.js` or `AlpacaHTTP/tests/web/*.js` changed (CI `javascript`)
 9. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
+10. **Sanitizers (ASan + UBSan, vendors OFF)** — `run_all_tests.sh` under `-fsanitize=address,undefined` (CI `sanitizers`); on by default, skip with `RUN_SANITIZERS=0` for docs/CI-only changes
 
-It **auto-installs** every missing tool so each gate actually runs rather than being skipped: `clang-tidy`/`cppcheck`/`shellcheck`/`clang-format`/`nodejs` via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The two `run_all_tests.sh` invocations are full rebuilds and are the slow part — that's expected.
+It **auto-installs** every missing tool so each gate actually runs rather than being skipped: `clang-tidy`/`cppcheck`/`shellcheck`/`clang-format`/`nodejs` via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The three `run_all_tests.sh` invocations (vendors OFF, vendors ON, and the sanitized pass) are full rebuilds and are the slow part — that's expected.
 
 Knobs:
 - `PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh` — fork contributors whose PR base is the upstream remote.
-- `RUN_SANITIZERS=1 ./scripts/ci_preflight.sh` — also reproduce the ASan+UBSan `sanitizers` job (a third rebuild). Recommended when the branch changes C++ runtime logic; skip for docs/CI-only changes.
+- `RUN_SANITIZERS=0 ./scripts/ci_preflight.sh` — skip the ASan+UBSan `sanitizers` reproduction (a third rebuild, about 1m12s on arm64). The pass is **on by default** since #588, because it was the one configuration neither CI nor a human ran; opt out only for docs/CI-only changes.
 - `PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh` — never apt-install; missing tools are reported `[SKIP]` instead.
 
 **Gate:** the script exits non-zero if any mandatory check failed. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed) or `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled — in the latter case, surface it so the user knows CI will still enforce that gate.
