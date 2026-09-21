@@ -226,6 +226,10 @@ TEST_CASE("PtyPair - a keep-alive open that fails throws, with the master closed
     // build-test and build-vendors, which is where its coverage lives.
 #if defined(ALPACACORE_TESTS_SANITIZED)
     WARN("built with sanitizers; the EMFILE setup-failure check is skipped (see the note above)");
+    // Keep the case from ending with zero assertions: WARN is not one, so a
+    // runner started with -w NoAssertions would fail a case we skipped on
+    // purpose.
+    SUCCEED("skipped under sanitizers");
     return;
 #endif
     const FdTable start = fd_table();
