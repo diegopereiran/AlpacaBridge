@@ -31,7 +31,7 @@ fi
 # on simulated motion in real time -- the slowest measured 110.5s wall for
 # 0.13s user + 0.32s sys -- so ctest is sleep-bound and tying its -j to nproc
 # leaves the runner idle. Build stays at nproc (compiling IS cpu-bound).
-CTEST_PARALLEL="${CTEST_PARALLEL:-16}"
+CTEST_PARALLEL="${CTEST_PARALLEL:-8}"
 
 echo "== AlpacaCore =="
 cmake -S "${CORE_DIR}" -B "${CORE_DIR}/build" \
