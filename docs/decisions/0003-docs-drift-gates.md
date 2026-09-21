@@ -14,7 +14,7 @@ Maintain prose-only reminders: the blocking-getter roster and TSan commands alre
 
 ## Consequences
 
-New instruction or memory files must be included in path validation; new duplicated facts need an explicit comparison or one authoritative owner. Checker changes should include a fixture that fails for the drift they claim to catch. Path-reference check 7 and the instruction-structure link check have fixtures and floors (issue #452); the other checks still lack a root seam and floor, which is deferred, not decided against.
+New instruction or memory files must be included in path validation; new duplicated facts need an explicit comparison or one authoritative owner. Checker changes should include a fixture that fails for the drift they claim to catch. Path-reference check 7 and the instruction-structure link check take a `root` and are fixture-driven (issue #452). Floors are still partial and the residue is deferred, not decided against: inside check 7 the `.github/instructions/` loop and the `docs/failures`/`docs/decisions` loop have no `MIN_*` of their own (only `docs/agents/` and `.claude/skills/` do), and the other docs-drift checks have neither a root seam nor a floor.
 
 ## Links
 
