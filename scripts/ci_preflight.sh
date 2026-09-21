@@ -8,7 +8,7 @@
 #
 #   ./scripts/ci_preflight.sh                 # base = main
 #   PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh   # fork contributors
-#   RUN_SANITIZERS=1 ./scripts/ci_preflight.sh # also run the ASan+UBSan job
+#   RUN_SANITIZERS=0 ./scripts/ci_preflight.sh # SKIP the ASan+UBSan job (on by default)
 #   RUN_TSAN=1 ./scripts/ci_preflight.sh       # also run the TSan concurrency stress job
 #   RUN_SCAN_BUILD=1 ./scripts/ci_preflight.sh # also run Clang Static Analyzer (advisory)
 #   PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh         # never apt-install
@@ -41,17 +41,22 @@ fi
 # --- ccache (issue #529) ---------------------------------------------------
 #
 # run_all_tests.sh does `rm -rf build` and a full clean rebuild, and this
-# script runs it twice (vendors OFF, then ON) plus a third clean build for the
-# TSan pass, so every pre-flight recompiles the whole tree 2-3 times from
-# scratch. Route those compiles through ccache when it is available: CMake reads
+# script runs it twice (vendors OFF, then ON) plus the ASan+UBSan pass, which
+# is on by default, plus a fourth clean build when RUN_TSAN=1, so every
+# pre-flight recompiles the whole tree 3-4 times from scratch. Route those
+# compiles through ccache when it is available: CMake reads
 # CMAKE_{C,CXX}_COMPILER_LAUNCHER at configure time, so exporting them here
 # covers run_all_tests.sh's configures and the clang-tidy compile DB without
 # editing each cmake line. Guarded on ccache being present so this is a no-op
-# where it is absent, leaving CI parity unchanged. The TSan build's
-# -fsanitize=thread objects have distinct cache keys and won't share with the
-# normal builds, but successive runs of each still hit; that build dir is
-# reused across runs and the launcher is only a cache-variable DEFAULT, so it
-# is also passed explicitly there (CCACHE_CMAKE_ARGS) or an older build-tsan/
+# where it is absent, leaving CI parity unchanged. A sanitized build's objects
+# have distinct cache keys and won't share with the normal builds -- CMake seeds
+# CMAKE_CXX_FLAGS from the environment's CXXFLAGS at configure time, so the
+# -fsanitize flags land on the compile line, and ccache hashes that line -- so
+# neither the ASan+UBSan pass nor the TSan one is made cheaper by the ordinary
+# builds, though successive runs of each still hit. The TSan build dir is the
+# one reused across runs (the ASan pass goes through run_all_tests.sh, which
+# wipes build/ every time), and there the launcher is only a cache-variable
+# DEFAULT, so it is also passed explicitly (CCACHE_CMAKE_ARGS) or an older build-tsan/
 # would never pick it up. Invariant: every OTHER build dir is deleted before
 # it is configured (run_all_tests.sh rm -rf's build/ and AlpacaHTTP/build/),
 # which is the only reason the env var alone is enough there; a future gate
@@ -462,9 +467,9 @@ else
   fi
 fi
 
-# --- optional: sanitizers --------------------------------------------------
+# --- sanitizers (ASan+UBSan, on by default; RUN_SANITIZERS=0 opts out) -----
 
-if [ "${RUN_SANITIZERS:-0}" = "1" ]; then
+if [ "${RUN_SANITIZERS:-1}" = "1" ]; then
   section "Sanitizers (ASan + UBSan, vendors OFF)"
   if CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
      LDFLAGS="-fsanitize=address,undefined" \
@@ -475,6 +480,8 @@ if [ "${RUN_SANITIZERS:-0}" = "1" ]; then
   else
     record FAIL "sanitizers"
   fi
+else
+  record SKIP "sanitizers (RUN_SANITIZERS=${RUN_SANITIZERS})"
 fi
 
 # --- optional: ThreadSanitizer concurrency stress ---------------------------
