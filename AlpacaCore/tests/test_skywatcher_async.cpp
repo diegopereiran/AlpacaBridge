@@ -202,6 +202,50 @@ TEST_CASE("SkyWatcher async - pulse guide north physically moves Dec and ends cl
     driver->set_connected(false);
 }
 
+// open-astro#306: the CONTROL for the hardware measurement on that issue.
+// An EQ-AL55i Pro delivers 99.0% of a 5000 ms Dec pulse but only 47.6% of a
+// 500 ms one, which fits a fixed per-start cost rather than a rate error.
+// This fake has no start ramp -- Axis::advance() moves at rate_counts for
+// the whole time the axis is running -- so a correct driver on a perfect
+// board must deliver the same fraction at EVERY duration. That is what makes
+// the hardware numbers attributable to the board rather than to the driver's
+// dispatch, and it is where a compensation would be pinned: when the fake
+// learns a start ramp, this case is what says the driver corrects for it.
+// Tolerance is 5%: the driver's own dispatch costs a few ms per pulse (2-3 ms
+// on the wire in the #306 TRACE log), which is 0.6% of the shortest pulse here.
+TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a board with no start cost (#306)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch, as the cases above
+
+    const double rate_deg_per_sec = driver->get_guide_rate().dec;
+    REQUIRE(rate_deg_per_sec > 0.0);
+
+    for (int duration : {500, 1000, 2000, 5000}) {
+        for (int direction : {0, 1}) {  // North, South -- alternating, so the axis stays put
+            const double before = mount.axis_degrees(2);
+            driver->pulse_guide(direction, duration);
+            // Both edges, not just the trailing one: a bare "not running" wait
+            // is satisfied at t=0, before the task thread commands motion.
+            REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+            REQUIRE(wait_until([&] { return !mount.axis_running(2); }, duration + 5000));
+            REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, duration + 5000));
+
+            const double moved_deg = std::abs(mount.axis_degrees(2) - before);
+            const double expected_deg = rate_deg_per_sec * duration / 1000.0;
+            const double fraction = moved_deg / expected_deg;
+            INFO("duration " << duration << " ms, direction " << direction << ": moved " << moved_deg * 3600.0
+                             << " arcsec of " << expected_deg * 3600.0 << " expected = " << fraction * 100.0 << "%");
+            CHECK(fraction > 0.95);
+            CHECK(fraction < 1.05);
+        }
+    }
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tracking", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());

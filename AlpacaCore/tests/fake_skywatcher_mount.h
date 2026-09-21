@@ -289,6 +289,7 @@ private:
         uint32_t cpr = 4147200;
         int64_t counts = kHome;
         double rate_counts = 0.0;  // signed counts/sec while running
+        double count_frac = 0.0;   // sub-count remainder carried between advance() calls
         bool running = false;
         bool speed_mode = true;
         bool fast = false;
@@ -373,7 +374,18 @@ private:
                     counts += static_cast<int64_t>(std::llround(dir_sign * step));
                 }
             } else {
-                counts += static_cast<int64_t>(std::llround(rate_counts * dt));
+                // Carry the sub-count remainder across calls. Rounding each
+                // increment on its own and still advancing `last` by the whole
+                // dt threw the fraction away every time advance() ran, so the
+                // modelled rate depended on how often a test polled: at a guide
+                // rate of ~24 counts/s a 50 ms poll adds llround(1.2) = 1, and a
+                // pulse delivered ~79% of its counts (open-astro#306). Slew rates
+                // were unaffected (~19,000 counts/s), which is why only the guide
+                // and tracking regime showed it.
+                const double exact = rate_counts * dt + count_frac;
+                const double whole = std::trunc(exact);
+                count_frac = exact - whole;
+                counts += static_cast<int64_t>(whole);
             }
             latch_indexer(before);
         }
@@ -507,6 +519,7 @@ private:
                     return "!2";  // refused: nothing applied
                 }
                 ++a.start_count;
+                a.count_frac = 0.0;  // fresh motion: no remainder carried in from the last run
                 was_running_on_start = a.running;
                 a.coasting = false;  // a fresh command supersedes any coast
                 a.running = true;
