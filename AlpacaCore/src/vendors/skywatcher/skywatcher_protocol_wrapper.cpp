@@ -55,7 +55,7 @@ constexpr char kFrameEnd = '\r';
 constexpr char kReplyOk = '=';
 constexpr char kReplyError = '!';
 // UDP datagrams can be silently dropped (spec: one command per datagram, one
-// response per datagram) — retransmit a bounded number of times on timeout.
+// response per datagram), so retransmit a bounded number of times on timeout.
 constexpr int kUdpRetries = 3;
 
 // open-astro#505: consecutive failed exchanges before the link fault latches.
@@ -750,12 +750,12 @@ public:
         }
         // open-astro#505: this is the one place both transports converge, so
         // the consecutive-failure latch lives here and covers serial and UDP
-        // alike (UDP has no other health signal at all — link_alive() reports
+        // alike (UDP has no other health signal at all; link_alive() reports
         // the flag as-is there).
         //
         // The latch detects SILENCE, so ONLY a genuine no-reply timeout counts.
-        // Any frame from the board — mis-paired, malformed, stale or over-long
-        // — proves it is alive and talking, which is exactly the condition this
+        // Any frame from the board (mis-paired, malformed, stale or over-long)
+        // proves it is alive and talking, which is exactly the condition this
         // must NOT fire on, so it RESETS the counter and leaves the
         // protocol-level problem to the machinery that already owns it (the
         // dirty/settle/resync path and send_command's shape check). A write or
@@ -1092,7 +1092,7 @@ private:
     std::string exchange_serial(const std::string& frame, int timeout_ms) {
 #ifndef _WIN32
         // Leftover bytes from a timed-out earlier exchange would be parsed as
-        // this command's reply — drain them first. A plain flush only catches
+        // this command's reply, so drain them first. A plain flush only catches
         // bytes that have ALREADY arrived; after a timeout the reply may still
         // be in flight, so settle (wait for the line to go quiet) before the
         // write. Otherwise the stale frame lands after the flush and is read
@@ -1175,11 +1175,11 @@ private:
             if (link_dirty_) {
                 // A previous exchange timed out, so its reply may still be in
                 // flight and would otherwise be consumed as THIS command's
-                // reply — the mis-pairing that garbled positions and made the
+                // reply: the mis-pairing that garbled positions and made the
                 // mount swing erratically over Wi-Fi. Soak up late arrivals
                 // for a settle window, then RESYNC: probe with ":e1" (whose
                 // reply value is fixed and known from connect) and require the
-                // known answer before trusting the stream — a same-length
+                // known answer before trusting the stream; a same-length
                 // stale reply to a different command cannot fake that.
                 settle_drain(300);
                 if (!resync_udp()) {
@@ -1208,7 +1208,7 @@ private:
                 auto remaining =
                     std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
                 if (remaining.count() <= 0) {
-                    break;  // timeout — retransmit
+                    break;  // timeout: retransmit
                 }
                 timeval tv{};
                 tv.tv_sec = static_cast<time_t>(remaining.count() / 1000);
@@ -1246,7 +1246,7 @@ private:
                     continue;
                 }
                 if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-                    break;  // timeout — retransmit
+                    break;  // timeout: retransmit
                 }
                 if (n < 0) {
                     link_dirty_ = true;
@@ -1347,7 +1347,7 @@ private:
             if (reply == fw_reply_) {
                 return true;  // stream aligned on the known probe answer
             }
-            // Stale reply from an earlier command — keep draining until the
+            // Stale reply from an earlier command: keep draining until the
             // probe's answer arrives or the window closes.
         }
         return false;
@@ -1380,7 +1380,7 @@ private:
     std::string registered_port_;  // canonical path marked open in the cross-vendor registry
     // open-astro#445: the configured path and the node it reached at connect.
     // open-astro#505: own leaf mutex, for the same reason link_id_mutex_ has
-    // one — a driver read path asking whether the link is faulted must not
+    // one: a driver read path asking whether the link is faulted must not
     // block behind an exchange in flight.
     mutable std::mutex health_mutex_;
     util::PolledLinkHealth link_health_;

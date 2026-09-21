@@ -117,7 +117,7 @@ constexpr auto kConnectStopConfirmBudget = std::chrono::seconds(2);
 // mount driving into the tripod, so this rounds DOWN rather than up.
 //
 // Issue #547 (the client-silence motion watchdog) will need a timer for the
-// other link — the one where the driver keeps command authority the whole
+// other link, the one where the driver keeps command authority the whole
 // time. The two should read as one policy rather than two unrelated numbers:
 // prefer extending this constant's home over introducing a second one.
 constexpr auto kRelinkMotionPreserveWindow = std::chrono::seconds(5);
@@ -160,7 +160,7 @@ constexpr int kMinPulseForRateVerifyMs = 1500;
 constexpr auto kRateVerifySettle = std::chrono::milliseconds(150);
 constexpr auto kRateVerifyMinWindow = std::chrono::milliseconds(300);
 constexpr auto kRateVerifyMaxWindow = std::chrono::milliseconds(3000);
-// AutoHome (home index sensor) constants — SynScan/EQMod ":q"/":W" extended
+// AutoHome (home index sensor) constants: SynScan/EQMod ":q"/":W" extended
 // commands. Indexer reads: 0 = armed below the index, 0xFFFFFF = armed above,
 // anything else = the count at which the sensor edge latched.
 constexpr uint32_t kFeatureInquiry = 0x000001;
@@ -629,7 +629,7 @@ public:
     // (~0.26 arcsec/s, ":I" clamps at 0xFFFFFF) are produced by duty-cycling.
     // Issue #214 re-attempt: the previously-suspected hardware anomalies were
     // bench-disproven (axis tracks 5-320 as/s within 0.2%; no ":I" read
-    // glitches) — both were artifacts of the pre-#216 refinement-goto races.
+    // glitches); both were artifacts of the pre-#216 refinement-goto races.
     void set_declination_rate(double rate) override {
         {
             // Idempotence check BEFORE reaping: a same-value rewrite must not
@@ -696,7 +696,7 @@ public:
             }
             if (tracking == tracking_) {
                 // Keep-alive reassertion (many clients poll-set Tracking):
-                // the requested state already holds — do not stop/restart
+                // the requested state already holds, so do not stop/restart
                 // the axes or churn the duty worker. MoveAxis restore needs
                 // the restart and calls set_tracking_locked directly.
                 return;
@@ -713,7 +713,7 @@ public:
     // with no mutexes held. The whole reap+create sequence is serialized by
     // duty_lifecycle_mutex_ so two concurrent setters can never reassign a
     // still-joinable std::thread (std::terminate). The join itself must NOT
-    // happen under task_mutex_ — the worker's task_wait_for reacquires it on
+    // happen under task_mutex_: the worker's task_wait_for reacquires it on
     // wake, so joining while holding it deadlocks; the lifecycle mutex is
     // never taken by the worker, only by setters.
     void start_duty_thread() {
@@ -775,7 +775,7 @@ public:
         }
         if (axis_busy_locked(kAxisRa)) {
             // An operation that owns the RA AXIS is in flight: store the rate
-            // only — its restore path re-applies the effective (offset-folded)
+            // only; its restore path re-applies the effective (offset-folded)
             // drive rate when it releases the axis. Per axis, not the
             // whole-mount axes_busy_locked() this used to ask: a Dec pulse or
             // a Dec MoveAxis owns only the Dec axis and its restore never
@@ -841,7 +841,7 @@ public:
     }
 
     EquatorialSystem get_equatorial_system() const override {
-        // Coordinates are derived from local sidereal time — topocentric
+        // Coordinates are derived from local sidereal time: topocentric
         // apparent (JNow), not J2000.
         return EquatorialSystem::Topocentric;
     }
@@ -1287,13 +1287,13 @@ public:
             const auto now = std::chrono::steady_clock::now();
             pulse_axis_ = direction <= 1 ? kAxisDec : kAxisRa;
 
-            // Reads are live (dead-reckoned) during pulses — no frozen-target
+            // Reads are live (dead-reckoned) during pulses, with no frozen-target
             // accumulation, and pulses never rewrite the slew Target
             // properties. The pier-side sign for Dec needs a fresh position.
             refresh_position_cache_locked(false);
 
             if (direction == 0 || direction == 1) {
-                // North/South: DEC axis speed-mode nudge. Freeze the RA value —
+                // North/South: DEC axis speed-mode nudge. Freeze the RA value:
                 // the RA axis keeps tracking, so only DEC accumulates.
                 axis = kAxisDec;
                 dec_rate_deg_per_sec = direction == 0 ? guide_rate_.dec : -guide_rate_.dec;
@@ -1340,7 +1340,7 @@ public:
             invalidate_position_cache_locked();
         }
 
-        // Stop-the-pulse timer thread — joinable member thread, never detached.
+        // Stop-the-pulse timer thread: a joinable member thread, never detached.
         reap_pulse_task();
         // Join any task that raced in between the reap above and this lock,
         // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
@@ -1460,7 +1460,7 @@ public:
                     // The pulse runs against the axis's own tracking sense
                     // (the guard is on axis_sign * rate, so this is a rate <= 0
                     // north of the equator and >= 0 south of it): a live ":I"
-                    // write cannot reverse the axis — stop and restart in the
+                    // write cannot reverse the axis, so stop and restart in the
                     // pulse direction instead.
                     start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate);
                 } else {
@@ -1745,7 +1745,7 @@ public:
             goto_in_progress_ = true;
             try {
                 dispatch_predicted_goto_locked(lock, ra, dec);
-                // Poll for completion so tracking restarts after the goto —
+                // Poll for completion so tracking restarts after the goto,
                 // releasing the mutex between polls so GETs stay responsive.
                 wait_for_slew_complete(lock);
                 refine_goto_landing(lock, ra, dec);
@@ -1808,12 +1808,12 @@ public:
 
         auto& protocol = *protocol_;
 
-        // ":E" requires the motors fully stopped — pause tracking around the
+        // ":E" requires the motors fully stopped, so pause tracking around the
         // position write, then resume. This is the mount's native sync (the
         // controller's own position register moves), never a driver offset.
         //
         // ORDER MATTERS: the axis frame must be computed AFTER the axis has
-        // stopped, aimed at the moment tracking RESUMES — the sky keeps
+        // stopped, aimed at the moment tracking RESUMES. The sky keeps
         // moving while the counts are frozen, and a frame computed before the
         // stop is stale by the whole pause (stop ramp + writes + restart,
         // ~1-3 s = 15-45 arcsec of RA; seen by ConformU as a constant
@@ -1941,7 +1941,7 @@ public:
                 // The stop is a motion command: bump and capture the
                 // generation so the background restore-tracking task can tell
                 // whether a newer motion command took over while it polled
-                // (PR #216 round-5 finding — the restore otherwise re-starts
+                // (PR #216 round-5 finding: the restore otherwise re-starts
                 // tracking a concurrent SetTracking(false) just stopped).
                 stop_task_generation = ++motion_generation_;
                 need_stop_task = true;
@@ -1999,7 +1999,7 @@ public:
                 ALPACA_LOG_WARN("SkyWatcher", "MoveAxis stop: axis " + std::to_string(channel) +
                                                   " still reported running at timeout");
             }
-            // ASCOM: MoveAxis(axis, 0) restores the previous tracking state —
+            // ASCOM: MoveAxis(axis, 0) restores the previous tracking state,
             // but only if no newer command took over THIS axis while the task
             // polled. motion_generation_ is bumped by every motion command on
             // EITHER axis (see its declaration), so a raw equality check here
@@ -2073,7 +2073,7 @@ public:
     void abort_slew() override {
         reap_pulse_task();
         // Cancel an in-flight async slew/refinement (the task joins later via
-        // reap; the flag makes its waits and the refine loop exit promptly —
+        // reap; the flag makes its waits and the refine loop exit promptly;
         // without this, the refinement re-slews after the abort's stop).
         slew_task_cancel_.store(true);
         task_cv_.notify_all();
@@ -2726,7 +2726,7 @@ private:
         return ra_rate_sec_per_sidereal_sec_ != 0.0 || dec_rate_arcsec_per_sec_ != 0.0;
     }
 
-    // open-astro#505: refuse to serve the cache — or the dead-reckoned model —
+    // open-astro#505: refuse to serve the cache, or the dead-reckoned model,
     // while the link fault is latched, and surface the board-reset case the
     // latch alone cannot catch. Callers are the read paths; a faulted link is
     // NOT a disconnection, so this is DriverException and Connected stays true.
@@ -2734,7 +2734,7 @@ private:
         throw AlpacaException("Sky-Watcher mount communications compromised: " + reason, AlpacaError::DriverException);
     }
 
-    // Terminal until reconnect, so it is checked BEFORE any hardware attempt —
+    // Terminal until reconnect, so it is checked BEFORE any hardware attempt,
     // unlike a link fault, which must not short-circuit the read that would
     // clear it.
     void throw_if_board_reset_locked() const {
@@ -2808,7 +2808,7 @@ private:
         // the dt clamp and the reported position would silently freeze, so
         // fall through and take a fresh hardware anchor instead.
         // open-astro#505: the 30-minute hold is the longest-lived stale window
-        // in this driver and the one the hardware run caught — a board powered
+        // in this driver and the one the hardware run caught: a board powered
         // off mid-offset-session is not noticed for the whole of it. A latched
         // fault ends the hold.
         if (!faulted && !force && position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
@@ -2884,11 +2884,11 @@ private:
     // "PulseGuide East ... RA change 0.00, expected 2.51s" with the ":i"
     // readback matching what was written (6b4988b's fix did not help) and
     // count-sampling showing the axis held exactly sidereal through the
-    // whole pulse — the board stored the preset but never applied it to the
+    // whole pulse: the board stored the preset but never applied it to the
     // spinning motor. Not reproducible in isolation; a bare ":I" is the
     // common thread across the three live-rate-change call sites (PulseGuide
     // dispatch/restore, RightAscensionRate). Must run with mutex_ NOT held
-    // (see stop_axis_and_wait_locked) — it sleeps across the sample window,
+    // (see stop_axis_and_wait_locked); it sleeps across the sample window,
     // via task_wait_for on the OWNING task's cancel flag (pulse task or the
     // one-shot rate-verify task) so a reap aborts it promptly instead of
     // stalling teardown.
@@ -2949,7 +2949,7 @@ private:
         uint32_t after = 0;
         try {
             if (!task_wait_for(kRateVerifySettle, cancel)) {
-                return;  // cancelled by a reaper — it owns the axis now
+                return;  // cancelled by a reaper: it owns the axis now
             }
             before = protocol.inquire_position(channel);
             if (!task_wait_for(window, cancel)) {
@@ -3053,14 +3053,14 @@ private:
     // longer ours to finish.
     // Returns true when the axis stopped and the caller's motion command is
     // still the current one; false when the wait was superseded (a newer
-    // motion command bumped the generation — AbortSlew included — or the
-    // slew task was cancelled) — the caller MUST NOT issue further motor
+    // motion command bumped the generation (AbortSlew included) or the
+    // slew task was cancelled); the caller MUST NOT issue further motor
     // commands for its now-stale operation (PR #216 review: an AbortSlew
     // landing in the unlock window otherwise saw its goto re-dispatched).
     [[nodiscard]] bool stop_axis_and_wait_locked(std::unique_lock<std::mutex>& lock, int channel, uint64_t gen) {
         // Never emit a stop for a STALE generation (PR #216 round-6): when a
         // dispatch's first axis wait was superseded, a newer command may have
-        // legitimately started motion on the second axis — a stale stop here
+        // legitimately started motion on the second axis; a stale stop here
         // would silently kill it while its bookkeeping says it is running.
         // The newer generation owns the axes now, whatever their state.
         if (motion_generation_ != gen) {
@@ -3236,8 +3236,8 @@ private:
     // while tracking is off or a slew/park/home owns the axes.
     // Duty-cycle worker for sub-floor offset rates on EITHER axis: floor-rate
     // bursts sized so the average matches the requested rate, one interleaved
-    // state machine per axis on a 50 ms tick (the axes' bursts overlap freely
-    // — a near-stationary satellite can need both at once). Exits when both
+    // state machine per axis on a 50 ms tick (the axes' bursts overlap freely;
+    // a near-stationary satellite can need both at once). Exits when both
     // duty rates return to zero; idles an axis while tracking is off or a
     // slew/park/home/pulse/manual motion owns the axes.
     void duty_loop() {
@@ -3379,10 +3379,10 @@ private:
     // stopped/reversed axis) needs a full stop-and-restart.
     // Drive the RA axis at the current effective rate, handling all three
     // regimes: continuous speed motion at/above the slow-mode floor, a
-    // duty-cycled sub-floor rate (":I" clamps at 0xFFFFFF — issuing a
+    // duty-cycled sub-floor rate (":I" clamps at 0xFFFFFF, so issuing a
     // sub-floor rate directly would silently creep at the floor rate), and
     // an exact zero (offset cancels the drive: the axis must STOP, not
-    // creep). The duty worker must be running when this sets a duty rate —
+    // creep). The duty worker must be running when this sets a duty rate;
     // callers check duty rates after and start it outside the mutex.
     void apply_ra_drive_locked(std::unique_lock<std::mutex>& lock) {
         double eff = effective_ra_rate_locked();
@@ -3404,7 +3404,7 @@ private:
         if (std::abs(eff) >= floor_rate && std::abs(previous_effective) >= floor_rate &&
             (eff > 0.0) == (previous_effective > 0.0)) {
             // Same direction, both continuous: change the step period in
-            // place — the axis never stops. ":J" kick for the same reason
+            // place; the axis never stops. ":J" kick for the same reason
             // as the PulseGuide live-rate change (see
             // verify_live_rate_or_rekick): a bare ":I" here is not always
             // enough on this firmware. The sampled rate-applied check cannot
@@ -3455,7 +3455,7 @@ private:
             const uint64_t gen = ++motion_generation_;
             if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
                 // A newer motion command took the axes while the mutex was
-                // released: it owns the tracking state now — do not stomp it.
+                // released: it owns the tracking state now, so do not stomp it.
                 throw AlpacaException("Tracking change superseded by a concurrent motion command");
             }
             if (dec_offset_running_) {
@@ -3484,7 +3484,7 @@ private:
         // generation too), the whole dispatch aborts before any new motor
         // command is sent.
         // Evaluate BOTH waits unconditionally (round-4 finding: a short-
-        // circuit skipped the second axis entirely) — while the stale-
+        // circuit skipped the second axis entirely), while the stale-
         // generation gate inside the wait ensures a superseded dispatch
         // never emits stops that could clobber the superseding command's
         // fresh motion (round-6 finding).
@@ -3896,7 +3896,7 @@ private:
     // or the latched count; ":W" data 0x000008 re-arms it. The procedure hunts
     // the sensor edge on both axes, always makes the final approach from below
     // (consistent direction kills backlash), then re-stamps the position
-    // registers to kHomeCounts at the sensed mark — re-anchoring the count
+    // registers to kHomeCounts at the sensed mark, re-anchoring the count
     // frame to the physical home regardless of where the mount was powered on.
     // TODO: Validate AutoHome direction conventions in the southern hemisphere.
     // (start_speed_motion_locked no longer flips the RA sign there -- see
@@ -3982,7 +3982,7 @@ private:
 
         // Phase 3: any axis above the index hunts downward at the coarse rate
         // until the indexer reports the below side, runs 3 s further, stops,
-        // and re-arms — every axis now sits below its index.
+        // and re-arms; every axis now sits below its index.
         if (!up[0] || !up[1]) {
             ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 3: coarse hunt below the index");
             bool hunting[2] = {!up[0], !up[1]};
@@ -4169,7 +4169,7 @@ private:
 
     // A slew/park/home task that dies CANCELLED may have launched its goto
     // before the cancel landed (abort in the pre-dispatch window): the goto
-    // must not keep running. Best effort — an aborting reaper re-commands or
+    // must not keep running. Best effort: an aborting reaper re-commands or
     // has already stopped the axes; running this before the reaper's join
     // returns keeps the two orderings consistent.
     void stop_axes_if_cancelled_locked() {
@@ -4352,7 +4352,7 @@ private:
     mutable bool position_cache_valid_ = false;
     // open-astro#505: set when a recovered link turned out to belong to a
     // board that had restarted (init_done cleared, position registers reset).
-    // Terminal for the session — only a reconnect re-sends ":F" — and mutable
+    // Terminal for the session (only a reconnect re-sends ":F") and mutable
     // because it is latched from the read path. Empty means no such fault.
     mutable std::string board_reset_fault_;
     // Last protocol-side recovery epoch this driver has validated.
