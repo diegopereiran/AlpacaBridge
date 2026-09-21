@@ -369,8 +369,10 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
     // Under TSan/ASan this case is the one that would report it. Without a
     // sanitizer it still pins that the swap neither crashes nor deadlocks,
     // and that a blocking probe cannot park a concurrent set_hooks().
+    constexpr int kReaders = 4;
     std::atomic<bool> stop{false};
     std::atomic<int> reads{0};
+    std::atomic<int> started{0};
     // A hang here (set_hooks() starved on the mutex, a reader wedged) would
     // otherwise run to the CI job timeout; the deadline turns it into a red
     // CHECK instead.
@@ -380,15 +382,24 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
                                   [](std::chrono::system_clock::time_point, std::string&) { return true; });
 
     std::vector<std::thread> readers;
-    for (int i = 0; i < 4; ++i) {
+    readers.reserve(kReaders);
+    for (int i = 0; i < kReaders; ++i) {
         readers.emplace_back([&] {
-            while (!stop.load() && !expired()) {
+            started.fetch_add(1);
+            // do/while, not while: a reader first scheduled after the writer
+            // loop below has already stored stop would read nothing at all,
+            // and the reads > 0 guard at the end would then be reporting the
+            // scheduler rather than the behaviour it exists to pin. That is
+            // not hypothetical -- at -j 8 on a 4-core box under ASan+UBSan it
+            // was a 3-in-10 red (PR #594, which took ctest from nproc to twice
+            // nproc and so supplied the oversubscription that exposed it).
+            do {
                 // The three reads the router actually makes on a request path.
                 static_cast<void>(c.source());
                 static_cast<void>(c.enabled());
                 static_cast<void>(c.has_rtc());
                 reads.fetch_add(1);
-            }
+            } while (!stop.load() && !expired());
         });
     }
     // A stand-in for the server's RTC probe thread, which is not a request path.
@@ -397,6 +408,14 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
             c.refresh_rtc();
         }
     });
+
+    // Let every reader reach its loop before the swaps start, so they race
+    // live readers rather than possibly all landing before the first one is
+    // scheduled. This is what makes the case test overlap; the do/while above
+    // is what makes the reads > 0 guard independent of the scheduler.
+    while (started.load() < kReaders && !expired()) {
+        std::this_thread::yield();
+    }
 
     for (int i = 0; i < 200 && !expired(); ++i) {
         const bool synced = (i % 2) == 0;
