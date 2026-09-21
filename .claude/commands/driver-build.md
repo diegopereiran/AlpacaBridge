@@ -735,10 +735,19 @@ cat AlpacaCore/tests/CMakeLists.txt
 After writing the tests, build and run them immediately. Do not defer this:
 
 ```bash
-cd AlpacaCore && cmake -B build -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests "[<vendor>]"
+cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests "[<vendor>]"
 ```
 
 If any test fails, fix it before proceeding. The test tag filter `"[<vendor>]"` runs only the new vendor's tests for faster iteration.
+
+Build into `build-vendors`, not `build`. The `-D` alone is not enough after a pre-flight: since
+#588 the sanitized pass is the last thing to configure `AlpacaCore/build`, and CMake seeds
+`CMAKE_CXX_FLAGS` from `CXXFLAGS` on a directory's first configure and then caches it -- so
+reconfiguring `build` keeps `-fsanitize=address,undefined` no matter what you pass, and you
+iterate against a slow, LSan-enabled binary with the `ALPACACORE_TESTS_SANITIZED` cases skipped.
+(The `-D` is belt-and-braces on a fresh directory, where `ALPACACORE_ENABLE_ALL_VENDORS` defaults
+ON anyway -- `AlpacaCore/CMakeLists.txt:22`. It earns its keep on a `build-vendors` left from an
+earlier vendors-OFF configure, where the umbrella option is cached OFF.)
 
 ### Assertion count target
 
@@ -749,10 +758,12 @@ Aim for **at least 30 assertions** across the 8 test cases. The ASCOM contract t
 Build the complete test suite (not just the new vendor) to catch any regressions:
 
 ```bash
-cd AlpacaCore && cmake -B build -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests
+cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests
 ```
 
-All tests must pass — not just the new driver's tests.
+All tests must pass — not just the new driver's tests. `build-vendors` rather than `build` for the
+reason given in Step 7: this is the regression check, so it is the last place you want it run
+against a leftover sanitized binary that skips the `ALPACACORE_TESTS_SANITIZED` cases.
 
 Then run the registration gate locally, exactly as CI and the pre-flight do, so a missing or misplaced `[stress]` case is caught here rather than in review:
 
@@ -762,7 +773,7 @@ cd "$(git rev-parse --show-toplevel)" && python3 scripts/check_stress_registrati
 
 (The `cd` matters: the build block above leaves the shell in `AlpacaCore/`, and from there the script's `git ls-files` sees no driver and reports every ALLOWLIST entry as stale.)
 
-It must print `Stress-test registration OK` and the new (vendor, device type) pair must not be on the `ALLOWLIST` (Step 7b). Run the storm itself under ThreadSanitizer before opening the PR: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. A bare `./scripts/ci_preflight.sh` does NOT build a TSan binary (the TSan job is an opt-in, like `RUN_SANITIZERS=1`), so the `[stress]` cases would only have run in the ordinary test build.
+It must print `Stress-test registration OK` and the new (vendor, device type) pair must not be on the `ALLOWLIST` (Step 7b). Run the storm itself under ThreadSanitizer before opening the PR: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. A bare `./scripts/ci_preflight.sh` does NOT build a TSan binary (TSan is still an opt-in — unlike the ASan+UBSan pass, which runs by default since #588 and is skipped with `RUN_SANITIZERS=0`), so the `[stress]` cases would only have run in the ordinary test build.
 
 ## Step 9 — Vendor-specific notes
 
