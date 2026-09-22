@@ -2525,9 +2525,9 @@ private:
     //   drive rate. With eps = +1, k = s is exactly indi-eqmod in both
     //   hemispheres.
     //
-    // open-astro#458: eps is MEASURED for two boards only, -1 on the EQM-35
-    // Pro (0x32) and +1 on the Wave 150i (0x45); see
-    // measured_dec_axis_sense(). Every other board keeps k = +1, the model it
+    // open-astro#458: eps is MEASURED for three boards only, -1 on the EQM-35
+    // Pro (0x32) and +1 on the Wave 150i (0x45) and the EQ-AL55i Pro (0x09);
+    // see measured_dec_axis_sense(). Every other board keeps k = +1, the model it
     // shipped with, which is right wherever s * eps = +1 and 12 h out in hour
     // angle wherever s * eps = -1; which of the two applies to an unmeasured
     // board takes one reading on that board (drive to a1 = 0, a2 = +90 and

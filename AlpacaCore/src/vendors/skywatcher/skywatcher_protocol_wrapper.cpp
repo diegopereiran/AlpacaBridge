@@ -194,9 +194,9 @@ bool trace_enabled() { return alpacacore::logging::get_log_level() <= alpacacore
 }  // namespace
 
 // Mount-code byte of the ":e" reply. Values follow INDI's skywatcherAPI.cpp
-// MountType enum, plus 0x32 for the EQM-35 Pro, which appears in neither INDI's
-// table nor Sky-Watcher's published SynScan model list but is what the hardware
-// reports on both protocols.
+// MountType enum, plus 0x32 for the EQM-35 Pro and 0x09 for the EQ-AL55i Pro,
+// which appear in neither INDI's table nor Sky-Watcher's published SynScan model
+// list but are what the hardware reports (0x32 on both protocols).
 std::string mount_code_to_name(std::uint8_t mount_code) {
     switch (mount_code) {
         case 0x00:

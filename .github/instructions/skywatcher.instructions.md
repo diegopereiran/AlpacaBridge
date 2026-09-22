@@ -299,8 +299,8 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   AutoHome on the 0x04 bit, never on `":q"` failing: an EQM-35 takes the count-frame
   `FindHome` fallback, and running the sensor hunt on a mount with no index sensors
   would drive the axes looking for an edge that never arrives.
-- Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
-  `eqm35_pro()`, so loopback tests run against real captured geometry.
+- The three presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
+  `eqm35_pro()` / `eq_al55i()`, so loopback tests run against real captured geometry.
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain): auto-detect found
   it unaided -- `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0 (MC firmware 3.39, 115200

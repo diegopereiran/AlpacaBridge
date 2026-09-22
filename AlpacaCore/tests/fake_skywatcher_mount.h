@@ -46,7 +46,7 @@
 
 namespace alpacacore::test {
 
-// A simulated board's identity and geometry. Both presets are REAL hardware
+// A simulated board's identity and geometry. The presets are REAL hardware
 // captures, so the loopback tests exercise the same numbers the driver sees on
 // the bench rather than idealised ones.
 struct FakeMountProfile {

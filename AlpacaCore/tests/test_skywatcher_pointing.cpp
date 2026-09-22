@@ -391,6 +391,14 @@ TEST_CASE("SkyWatcher pointing - the EQ-AL55i Pro reaches a southern target on t
     const double latitude = -35.0;
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
     driver->set_connected(true);
+
+    // ":e" -> "=032E09": firmware 3.46, mount code 0x09. The name comes from
+    // mount_code_to_name(), so this is the only thing that pins `case 0x09`.
+    CHECK(driver->get_name() == "Sky-Watcher EQ-AL55i Pro (EQMOD)");
+    const auto firmware = driver->get_device_firmware();
+    REQUIRE(firmware.has_value());
+    CHECK(*firmware == "3.46");
+
     driver->set_tracking(true);
 
     const double lst = driver->get_sidereal_time();
