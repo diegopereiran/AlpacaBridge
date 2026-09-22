@@ -552,8 +552,17 @@ private:
                     return "!2";  // refused: nothing applied
                 }
                 ++a.start_count;
-                a.count_frac = 0.0;  // fresh motion: no remainder carried in from the last run
                 was_running_on_start = a.running;
+                if (!was_running_on_start) {
+                    // Only a genuinely fresh start (from stopped) has no
+                    // remainder to carry. An in-place re-kick on an already-
+                    // running axis -- the RA pulse path re-sends ":I"/":J" at
+                    // dispatch AND at restore -- must keep the fraction, or it
+                    // silently discards up to one count each time (open-astro#603
+                    // review, mirroring the same bug this branch fixed for the
+                    // cadence-independent Dec/speed-mode path).
+                    a.count_frac = 0.0;
+                }
                 a.coasting = false;  // a fresh command supersedes any coast
                 a.running = true;
                 a.stopping = false;

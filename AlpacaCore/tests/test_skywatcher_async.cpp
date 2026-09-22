@@ -236,11 +236,21 @@ TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a b
 
             const double moved_deg = std::abs(mount.axis_degrees(2) - before);
             const double expected_deg = rate_deg_per_sec * duration / 1000.0;
-            const double fraction = moved_deg / expected_deg;
-            INFO("duration " << duration << " ms, direction " << direction << ": moved " << moved_deg * 3600.0
-                             << " arcsec of " << expected_deg * 3600.0 << " expected = " << fraction * 100.0 << "%");
-            CHECK(fraction > 0.95);
-            CHECK(fraction < 1.05);
+            const double counts_per_deg = mount.kCpr / 360.0;
+            const double moved_counts = moved_deg * counts_per_deg;
+            const double expected_counts = expected_deg * counts_per_deg;
+            INFO("duration " << duration << " ms, direction " << direction << ": moved " << moved_counts
+                             << " counts of " << expected_counts << " expected (" << moved_deg * 3600.0 << " arcsec of "
+                             << expected_deg * 3600.0 << ")");
+            // Within +-1 count of rate x duration, not a percentage: at 500 ms
+            // (~12 counts here) a 5% band admits exactly one integer count
+            // value, which pins real axis-on time to a ~40 ms window and turns
+            // ordinary scheduling jitter into a flaky failure. +-1 count is
+            // the fake's own quantisation floor (Axis::advance()'s remainder
+            // carry keeps drift under one count at any duration), so it holds
+            // short and long pulses to the same real tolerance instead of an
+            // increasingly generous one (open-astro#603 review).
+            CHECK(std::abs(moved_counts - expected_counts) <= 1.0);
         }
     }
     driver->set_connected(false);
