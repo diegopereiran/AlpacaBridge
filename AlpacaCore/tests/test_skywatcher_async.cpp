@@ -260,6 +260,52 @@ TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a b
     driver->set_connected(false);
 }
 
+// open-astro#306, hardware row: the case above proves the fake has no
+// per-start cost using the DEFAULT profile (Wave 100i, 4,147,200 cpr,
+// 14 MHz timer) -- geometry that has never belonged to the board the #306
+// hardware numbers (48% at 500 ms, 99% at 5 s) were measured on. This repeats
+// it against FakeMountProfile::eq_al55i(): 4,032,000 cpr RA / 3,600,000 Dec
+// (the only profile here where the two axes differ), 16 MHz timer, mount
+// code 0x09. Different cpr changes how many counts a given arcsecond of
+// motion quantises to, so a rounding-driven bug in Axis::advance() could
+// pass on one profile's numbers and fail on the other's -- this closes that
+// gap rather than trusting the default profile to stand in for every board.
+TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on the EQ-AL55i Pro's own geometry (#306)",
+          "[skywatcher][async][pulseguide][al55i]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eq_al55i());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch, as the cases above
+
+    const double rate_deg_per_sec = driver->get_guide_rate().dec;
+    REQUIRE(rate_deg_per_sec > 0.0);
+
+    for (int duration : {500, 1000, 2000, 5000}) {
+        for (int direction : {0, 1}) {  // North, South -- alternating, so the axis stays put
+            const double before = mount.axis_degrees(2);
+            driver->pulse_guide(direction, duration);
+            REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+            REQUIRE(wait_until([&] { return !mount.axis_running(2); }, duration + 5000));
+            REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, duration + 5000));
+
+            const double moved_deg = std::abs(mount.axis_degrees(2) - before);
+            const double expected_deg = rate_deg_per_sec * duration / 1000.0;
+            // Dec-axis cpr, NOT mount.kCpr (that's RA's) -- this is the one
+            // profile here where the two differ.
+            const double counts_per_deg = mount.kCprDec / 360.0;
+            const double moved_counts = moved_deg * counts_per_deg;
+            const double expected_counts = expected_deg * counts_per_deg;
+            INFO("duration " << duration << " ms, direction " << direction << ": moved " << moved_counts
+                             << " counts of " << expected_counts << " expected (" << moved_deg * 3600.0 << " arcsec of "
+                             << expected_deg * 3600.0 << ")");
+            // Same +-1 count rationale as the default-profile case above.
+            CHECK(std::abs(moved_counts - expected_counts) <= 1.0);
+        }
+    }
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tracking", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
