@@ -211,8 +211,12 @@ TEST_CASE("SkyWatcher async - pulse guide north physically moves Dec and ends cl
 // the hardware numbers attributable to the board rather than to the driver's
 // dispatch, and it is where a compensation would be pinned: when the fake
 // learns a start ramp, this case is what says the driver corrects for it.
-// Tolerance is 5%: the driver's own dispatch costs a few ms per pulse (2-3 ms
-// on the wire in the #306 TRACE log), which is 0.6% of the shortest pulse here.
+// Tolerance is +-1 count of rate x duration, not a percentage: a percentage
+// band admits exactly one integer count value at 500 ms (see the CHECK below),
+// pinning real axis-on time to a ~40 ms window and turning ordinary scheduling
+// jitter into a flaky failure. +-1 count is the fake's own quantisation floor
+// (Axis::advance()'s remainder carry keeps drift under one count at any
+// duration) -- changed during review from an original 5% band (open-astro#603).
 TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a board with no start cost (#306)",
           "[skywatcher][async][pulseguide]") {
     FakeSkyWatcherMount mount;
