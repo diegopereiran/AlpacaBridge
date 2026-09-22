@@ -69,7 +69,8 @@ struct FakeMountProfile {
     //   :e -> =032732   :a -> 9216000   :b -> 16000000   :g -> 01
     //   :s -> 68266 (9216000/68266 = 135 worm teeth)
     //   :q 0x000001 -> 0x7000  POLAR_LED | COMMON_SLEW_START | HALF_CURRENT_TRACKING
-    // No HOME_INDEXER bit (0x04) -> CanFindHome must be false on this board.
+    // No HOME_INDEXER bit (0x04) -> find_home() takes the count-frame fallback
+    // instead of AutoHome; get_can_find_home() stays true unconditionally.
     static FakeMountProfile eqm35_pro() {
         FakeMountProfile p;
         p.cpr = 9216000;
@@ -92,7 +93,8 @@ struct FakeMountProfile {
     // ":g" is recorded as read: the reporter could not confirm that 0x01 is
     // what this firmware is expected to return. It is inert either way -- the
     // driver already reads a high-speed ratio of 0 as 1.
-    // No HOME_INDEXER bit (0x04) -> CanFindHome must be false on this board.
+    // No HOME_INDEXER bit (0x04) -> find_home() takes the count-frame fallback
+    // instead of AutoHome; get_can_find_home() stays true unconditionally.
     static FakeMountProfile eq_al55i() {
         FakeMountProfile p;
         p.cpr = 4032000;
