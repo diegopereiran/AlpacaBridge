@@ -973,8 +973,10 @@ namespace {
 // open-astro#458: the Wave 100i capture with only the ":e" reply swapped for
 // the Wave 150i's (fw 3.59, mount code 0x45, from the TRACE log attached to
 // open-astro#230). Not a capture of the 150i: that board reports a different
-// CPR per axis (:a1 3878400, :a2 3525120), which the single-CPR fake cannot
-// model. The mount code is the only field these cases depend on.
+// CPR per axis (:a1 3878400, :a2 3525120). The fake can model that
+// (FakeMountProfile::cpr_dec, open-astro#579), but this profile doesn't set
+// it, so it stays a Wave 100i geometry with the 150i's mount code. The mount
+// code is the only field these cases depend on.
 alpacacore::test::FakeMountProfile wave_150i_mount_code() {
     alpacacore::test::FakeMountProfile p = alpacacore::test::FakeMountProfile::wave_100i();
     p.version_reply = "033B45";
