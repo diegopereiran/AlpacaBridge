@@ -114,10 +114,15 @@ datagrams before each send so replies cannot get off-by-one.
   vertical, and with the board's dec-axis count sense `eps`, which is wiring, not
   latitude (#458). `eps` is **measured, per mount code** (`measured_dec_axis_sense()`):
   -1 for the EQM-35 Pro (0x32; south 2026-09-12 and a +37.2 latitude on the same rig
-  2026-09-19), +1 for the Wave 150i (0x45; the #432 report, north). Every other board
-  keeps `k = +1`, the shipped model, which is 12 h out wherever that board's `s * eps`
-  is -1; adding a board takes one reading on it, not a derivation. The Wave 150i south of
-  the equator follows from geometry and has not been measured. Pier side is
+  2026-09-19), +1 for the Wave 150i (0x45; the #432 report, north), +1 for the
+  EQ-AL55i Pro (0x09; a reporter's mount at about +40, 2026-09-20, #579). Every other
+  board keeps `k = +1`, the shipped model, which is 12 h out wherever that board's
+  `s * eps` is -1; adding a board takes one reading on it, not a derivation. Two boards
+  read +1 and one reads -1, so `eps` is per board and not a family constant, and the
+  classic Synta boards (EQ6, HEQ5, AZ-EQ6, EQ5 Pro) are all still unmeasured (#579).
+  The Wave 150i and the EQ-AL55i Pro south of the equator follow from geometry and have
+  not been measured; a board measured only in the north constrains nothing there, because
+  `s * eps = +1` in the north is also the unmeasured default. Pier side is
   `k * branch > 0` -> pierEast, the same reader, since the goto picks the side from the
   sky hour angle; the Dec rate and guide signs read `branch` alone, because dec does not
   involve `eps`.
@@ -294,8 +299,8 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   AutoHome on the 0x04 bit, never on `":q"` failing: an EQM-35 takes the count-frame
   `FindHome` fallback, and running the sensor hunt on a mount with no index sensors
   would drive the axes looking for an edge that never arrives.
-- Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
-  `eqm35_pro()`, so loopback tests run against real captured geometry.
+- The three presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
+  `eqm35_pro()` / `eq_al55i()`, so loopback tests run against real captured geometry.
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain): auto-detect found
   it unaided -- `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0 (MC firmware 3.39, 115200

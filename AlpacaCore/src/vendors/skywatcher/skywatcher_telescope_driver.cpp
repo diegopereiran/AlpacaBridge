@@ -55,11 +55,16 @@ constexpr double kHomeHourAngleOffsetHours = 6.0;
 // latitude (the board is never told the latitude), and it decides which side
 // of the meridian the tube swings to for a positive dec-axis angle.
 // Caveat: indi-eqmod and GSServer apply eps = +1 to every board, and only the
-// EQM-35 Pro contradicts that here. If the cause turns out to be a driver-side
-// a2 zero or direction convention rather than per-board wiring, this table
-// has to be reworked, not extended (open-astro#579).
+// EQM-35 Pro contradicts that here -- the EQ-AL55i Pro, measured independently
+// on a reporter's mount, agrees with them (open-astro#306), so the EQM-35 Pro
+// is the outlier among three boards rather than one of two readings. If the
+// cause turns out to be a driver-side a2 zero or direction convention rather
+// than per-board wiring, this table has to be reworked, not extended
+// (open-astro#579).
 constexpr int measured_dec_axis_sense(std::uint8_t mount_code) {
     switch (mount_code) {
+        case 0x09:  // EQ-AL55i Pro: dovetail west at a2 = +89.4, north (+40), 2026-09-20
+            return +1;
         case 0x32:  // EQM-35 Pro: -37.2 on 2026-09-12, and at +37.2 on 2026-09-19
             return -1;
         case 0x45:  // Wave 150i: the #432 report, +45.45
@@ -2520,9 +2525,9 @@ private:
     //   drive rate. With eps = +1, k = s is exactly indi-eqmod in both
     //   hemispheres.
     //
-    // open-astro#458: eps is MEASURED for two boards only, -1 on the EQM-35
-    // Pro (0x32) and +1 on the Wave 150i (0x45); see
-    // measured_dec_axis_sense(). Every other board keeps k = +1, the model it
+    // open-astro#458: eps is MEASURED for three boards only, -1 on the EQM-35
+    // Pro (0x32) and +1 on the Wave 150i (0x45) and the EQ-AL55i Pro (0x09);
+    // see measured_dec_axis_sense(). Every other board keeps k = +1, the model it
     // shipped with, which is right wherever s * eps = +1 and 12 h out in hour
     // angle wherever s * eps = -1; which of the two applies to an unmeasured
     // board takes one reading on that board (drive to a1 = 0, a2 = +90 and
