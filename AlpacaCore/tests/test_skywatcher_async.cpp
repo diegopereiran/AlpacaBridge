@@ -211,12 +211,23 @@ TEST_CASE("SkyWatcher async - pulse guide north physically moves Dec and ends cl
 // the hardware numbers attributable to the board rather than to the driver's
 // dispatch, and it is where a compensation would be pinned: when the fake
 // learns a start ramp, this case is what says the driver corrects for it.
-// Tolerance is +-1 count of rate x duration, not a percentage: a percentage
-// band admits exactly one integer count value at 500 ms (see the CHECK below),
-// pinning real axis-on time to a ~40 ms window and turning ordinary scheduling
-// jitter into a flaky failure. +-1 count is the fake's own quantisation floor
-// (Axis::advance()'s remainder carry keeps drift under one count at any
-// duration) -- changed during review from an original 5% band (open-astro#603).
+// Tolerance is asymmetric: at least (rate x duration) - 1 count, at most
+// + 3. A flat percentage band admits exactly one integer count value at
+// 500 ms, pinning real axis-on time to a ~40 ms window and turning ordinary
+// scheduling jitter into a flaky failure -- the first fix for that (a flat
+// +-1 count) was itself still spent entirely on overshoot, since undershoot
+// is structurally impossible here: task_wait_for(remaining) never returns
+// early and the fake starts integrating at ":J", before the driver's own
+// dispatch cost is paid, so delivered counts can only be AT LEAST
+// trunc(rate x duration) (Axis::advance()'s remainder carry keeps that
+// floor under one count at any duration) and can exceed it by however long
+// task_wait_for's wakeup, the ":K" round trip and stop_axis()'s mutex
+// acquisition take. A flat +-1 band therefore left ~70-90 ms of real budget
+// entirely on the overshoot side while still failing on a few ms of it --
+// four review rounds on open-astro#603 measured the same ~80 ms figure
+// independently. -1/+3 keeps the tight lower bound that actually catches
+// the regression this branch fixes (a ~21% shortfall does not survive -1)
+// while giving overshoot the room the timing actually needs.
 TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a board with no start cost (#306)",
           "[skywatcher][async][pulseguide]") {
     FakeSkyWatcherMount mount;
@@ -246,15 +257,15 @@ TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a b
             INFO("duration " << duration << " ms, direction " << direction << ": moved " << moved_counts
                              << " counts of " << expected_counts << " expected (" << moved_deg * 3600.0 << " arcsec of "
                              << expected_deg * 3600.0 << ")");
-            // Within +-1 count of rate x duration, not a percentage: at 500 ms
-            // (~12 counts here) a 5% band admits exactly one integer count
-            // value, which pins real axis-on time to a ~40 ms window and turns
-            // ordinary scheduling jitter into a flaky failure. +-1 count is
-            // the fake's own quantisation floor (Axis::advance()'s remainder
-            // carry keeps drift under one count at any duration), so it holds
-            // short and long pulses to the same real tolerance instead of an
-            // increasingly generous one (open-astro#603 review).
-            CHECK(std::abs(moved_counts - expected_counts) <= 1.0);
+            // -1/+3 counts of rate x duration: undershoot is impossible (see
+            // the header comment), so the lower bound stays at the fake's own
+            // quantisation floor -- tight enough to catch the ~21% shortfall
+            // this branch fixes -- while the upper bound absorbs the real
+            // overshoot budget (task_wait_for wakeup + the ":K" round trip +
+            // stop_axis()'s mutex) instead of spending a flat +-1 band
+            // entirely on one side of a symmetric check.
+            CHECK(moved_counts >= expected_counts - 1.0);
+            CHECK(moved_counts <= expected_counts + 3.0);
         }
     }
     driver->set_connected(false);
@@ -299,8 +310,9 @@ TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on the
             INFO("duration " << duration << " ms, direction " << direction << ": moved " << moved_counts
                              << " counts of " << expected_counts << " expected (" << moved_deg * 3600.0 << " arcsec of "
                              << expected_deg * 3600.0 << ")");
-            // Same +-1 count rationale as the default-profile case above.
-            CHECK(std::abs(moved_counts - expected_counts) <= 1.0);
+            // Same -1/+3 count rationale as the default-profile case above.
+            CHECK(moved_counts >= expected_counts - 1.0);
+            CHECK(moved_counts <= expected_counts + 3.0);
         }
     }
     driver->set_connected(false);
