@@ -202,6 +202,122 @@ TEST_CASE("SkyWatcher async - pulse guide north physically moves Dec and ends cl
     driver->set_connected(false);
 }
 
+// open-astro#306: the CONTROL for the hardware measurement on that issue.
+// An EQ-AL55i Pro delivers 99.0% of a 5000 ms Dec pulse but only 47.6% of a
+// 500 ms one, which fits a fixed per-start cost rather than a rate error.
+// This fake has no start ramp -- Axis::advance() moves at rate_counts for
+// the whole time the axis is running -- so a correct driver on a perfect
+// board must deliver the same fraction at EVERY duration. That is what makes
+// the hardware numbers attributable to the board rather than to the driver's
+// dispatch, and it is where a compensation would be pinned: when the fake
+// learns a start ramp, this case is what says the driver corrects for it.
+// Tolerance is asymmetric: at least (rate x duration) - 1 count, at most
+// + 3. A flat percentage band admits exactly one integer count value at
+// 500 ms, pinning real axis-on time to a ~40 ms window and turning ordinary
+// scheduling jitter into a flaky failure -- the first fix for that (a flat
+// +-1 count) was itself still spent entirely on overshoot, since undershoot
+// is structurally impossible here: task_wait_for(remaining) never returns
+// early and the fake starts integrating at ":J", before the driver's own
+// dispatch cost is paid, so delivered counts can only be AT LEAST
+// trunc(rate x duration) (Axis::advance()'s remainder carry keeps that
+// floor under one count at any duration) and can exceed it by however long
+// task_wait_for's wakeup, the ":K" round trip and stop_axis()'s mutex
+// acquisition take. A flat +-1 band therefore left ~70-90 ms of real budget
+// entirely on the overshoot side while still failing on a few ms of it --
+// four review rounds on open-astro#603 measured the same ~80 ms figure
+// independently. -1/+3 keeps the tight lower bound that actually catches
+// the regression this branch fixes (a ~21% shortfall does not survive -1)
+// while giving overshoot the room the timing actually needs.
+TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on a board with no start cost (#306)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch, as the cases above
+
+    const double rate_deg_per_sec = driver->get_guide_rate().dec;
+    REQUIRE(rate_deg_per_sec > 0.0);
+
+    for (int duration : {500, 1000, 2000, 5000}) {
+        for (int direction : {0, 1}) {  // North, South -- alternating, so the axis stays put
+            const double before = mount.axis_degrees(2);
+            driver->pulse_guide(direction, duration);
+            // Both edges, not just the trailing one: a bare "not running" wait
+            // is satisfied at t=0, before the task thread commands motion.
+            REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+            REQUIRE(wait_until([&] { return !mount.axis_running(2); }, duration + 5000));
+            REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, duration + 5000));
+
+            const double moved_deg = std::abs(mount.axis_degrees(2) - before);
+            const double expected_deg = rate_deg_per_sec * duration / 1000.0;
+            const double counts_per_deg = mount.kCpr / 360.0;
+            const double moved_counts = moved_deg * counts_per_deg;
+            const double expected_counts = expected_deg * counts_per_deg;
+            INFO("duration " << duration << " ms, direction " << direction << ": moved " << moved_counts
+                             << " counts of " << expected_counts << " expected (" << moved_deg * 3600.0 << " arcsec of "
+                             << expected_deg * 3600.0 << ")");
+            // -1/+3 counts of rate x duration: undershoot is impossible (see
+            // the header comment), so the lower bound stays at the fake's own
+            // quantisation floor -- tight enough to catch the ~21% shortfall
+            // this branch fixes -- while the upper bound absorbs the real
+            // overshoot budget (task_wait_for wakeup + the ":K" round trip +
+            // stop_axis()'s mutex) instead of spending a flat +-1 band
+            // entirely on one side of a symmetric check.
+            CHECK(moved_counts >= expected_counts - 1.0);
+            CHECK(moved_counts <= expected_counts + 3.0);
+        }
+    }
+    driver->set_connected(false);
+}
+
+// open-astro#306, hardware row: the case above proves the fake has no
+// per-start cost using the DEFAULT profile (Wave 100i, 4,147,200 cpr,
+// 14 MHz timer) -- geometry that has never belonged to the board the #306
+// hardware numbers (48% at 500 ms, 99% at 5 s) were measured on. This repeats
+// it against FakeMountProfile::eq_al55i(): 4,032,000 cpr RA / 3,600,000 Dec
+// (the only profile here where the two axes differ), 16 MHz timer, mount
+// code 0x09. Different cpr changes how many counts a given arcsecond of
+// motion quantises to, so a rounding-driven bug in Axis::advance() could
+// pass on one profile's numbers and fail on the other's -- this closes that
+// gap rather than trusting the default profile to stand in for every board.
+TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on the EQ-AL55i Pro's own geometry (#306)",
+          "[skywatcher][async][pulseguide][al55i]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eq_al55i());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch, as the cases above
+
+    const double rate_deg_per_sec = driver->get_guide_rate().dec;
+    REQUIRE(rate_deg_per_sec > 0.0);
+
+    for (int duration : {500, 1000, 2000, 5000}) {
+        for (int direction : {0, 1}) {  // North, South -- alternating, so the axis stays put
+            const double before = mount.axis_degrees(2);
+            driver->pulse_guide(direction, duration);
+            REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+            REQUIRE(wait_until([&] { return !mount.axis_running(2); }, duration + 5000));
+            REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, duration + 5000));
+
+            const double moved_deg = std::abs(mount.axis_degrees(2) - before);
+            const double expected_deg = rate_deg_per_sec * duration / 1000.0;
+            // Dec-axis cpr, NOT mount.kCpr (that's RA's) -- this is the one
+            // profile here where the two differ.
+            const double counts_per_deg = mount.kCprDec / 360.0;
+            const double moved_counts = moved_deg * counts_per_deg;
+            const double expected_counts = expected_deg * counts_per_deg;
+            INFO("duration " << duration << " ms, direction " << direction << ": moved " << moved_counts
+                             << " counts of " << expected_counts << " expected (" << moved_deg * 3600.0 << " arcsec of "
+                             << expected_deg * 3600.0 << ")");
+            // Same -1/+3 count rationale as the default-profile case above.
+            CHECK(moved_counts >= expected_counts - 1.0);
+            CHECK(moved_counts <= expected_counts + 3.0);
+        }
+    }
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tracking", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());

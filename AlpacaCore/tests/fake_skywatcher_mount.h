@@ -322,6 +322,7 @@ private:
         uint32_t cpr = 4147200;
         int64_t counts = kHome;
         double rate_counts = 0.0;  // signed counts/sec while running
+        double count_frac = 0.0;   // sub-count remainder carried between advance() calls
         bool running = false;
         bool speed_mode = true;
         bool fast = false;
@@ -406,7 +407,18 @@ private:
                     counts += static_cast<int64_t>(std::llround(dir_sign * step));
                 }
             } else {
-                counts += static_cast<int64_t>(std::llround(rate_counts * dt));
+                // Carry the sub-count remainder across calls. Rounding each
+                // increment on its own and still advancing `last` by the whole
+                // dt threw the fraction away every time advance() ran, so the
+                // modelled rate depended on how often a test polled: at a guide
+                // rate of ~24 counts/s a 50 ms poll adds llround(1.2) = 1, and a
+                // pulse delivered ~79% of its counts (open-astro#306). Slew rates
+                // were unaffected (~19,000 counts/s), which is why only the guide
+                // and tracking regime showed it.
+                const double exact = rate_counts * dt + count_frac;
+                const double whole = std::trunc(exact);
+                count_frac = exact - whole;
+                counts += static_cast<int64_t>(whole);
             }
             latch_indexer(before);
         }
@@ -541,6 +553,16 @@ private:
                 }
                 ++a.start_count;
                 was_running_on_start = a.running;
+                if (!was_running_on_start) {
+                    // Only a genuinely fresh start (from stopped) has no
+                    // remainder to carry. An in-place re-kick on an already-
+                    // running axis -- the RA pulse path re-sends ":I"/":J" at
+                    // dispatch AND at restore -- must keep the fraction, or it
+                    // silently discards up to one count each time (open-astro#603
+                    // review, mirroring the same bug this branch fixed for the
+                    // cadence-independent Dec/speed-mode path).
+                    a.count_frac = 0.0;
+                }
                 a.coasting = false;  // a fresh command supersedes any coast
                 a.running = true;
                 a.stopping = false;
