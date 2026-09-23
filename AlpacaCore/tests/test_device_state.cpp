@@ -72,7 +72,7 @@ public:
     std::string command_string(std::string_view, bool) override { return ""; }
 };
 
-class DisconnectedCamera final : public DisconnectedDriverBase<alpacacore::CameraDriver> {
+class DisconnectedCamera : public DisconnectedDriverBase<alpacacore::CameraDriver> {
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Camera; }
 
@@ -148,6 +148,17 @@ public:
     void pulse_guide(int, int) override { throw_not_connected(); }
     void start_exposure(double, bool) override { throw_not_connected(); }
     void stop_exposure() override { throw_not_connected(); }
+};
+
+// Mirrors zwo_camera_driver.cpp/gphoto_camera_driver.cpp et al.: these vendor
+// drivers answer CameraState and PercentCompleted with a default value while
+// disconnected instead of throwing NotConnected. get_device_state() must
+// still report the empty list for a disconnected driver regardless of what
+// an individual vendor getter does.
+class LeakyDisconnectedCamera final : public DisconnectedCamera {
+public:
+    alpacacore::CameraState get_camera_state() const override { return alpacacore::CameraState::Idle; }
+    double get_percent_completed() const override { return 0.0; }
 };
 
 class DisconnectedCoverCalibrator final : public DisconnectedDriverBase<alpacacore::CoverCalibratorDriver> {
@@ -304,7 +315,7 @@ public:
     double get_switch_step(int) const override { throw_not_connected(); }
 };
 
-class DisconnectedTelescope final : public DisconnectedDriverBase<alpacacore::TelescopeDriver> {
+class DisconnectedTelescope : public DisconnectedDriverBase<alpacacore::TelescopeDriver> {
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Telescope; }
 
@@ -390,6 +401,16 @@ public:
     void sync_to_alt_az(double, double) override { throw_not_connected(); }
 };
 
+// Mirrors bisque_telescope_driver.cpp/skywatcher_telescope_driver.cpp et al.:
+// these vendor drivers answer AtPark with a cached bool while disconnected
+// instead of throwing NotConnected. get_device_state() must still report the
+// empty list for a disconnected driver regardless of what an individual
+// vendor getter does.
+class LeakyDisconnectedTelescope final : public DisconnectedTelescope {
+public:
+    bool get_at_park() const override { return false; }
+};
+
 }  // namespace
 
 TEST_CASE("DeviceState is empty while disconnected - Camera", "[driver]") {
@@ -398,6 +419,13 @@ TEST_CASE("DeviceState is empty while disconnected - Camera", "[driver]") {
     REQUIRE_NOTHROW(state = driver.get_device_state());
     CHECK(state.empty());
     CHECK_FALSE(has_timestamp(state));
+}
+
+TEST_CASE("DeviceState is empty while disconnected even when a getter does not throw - Camera", "[driver]") {
+    LeakyDisconnectedCamera driver;
+    std::vector<alpacacore::DeviceState> state;
+    REQUIRE_NOTHROW(state = driver.get_device_state());
+    CHECK(state.empty());
 }
 
 TEST_CASE("DeviceState is empty while disconnected - CoverCalibrator", "[driver]") {
@@ -470,4 +498,11 @@ TEST_CASE("DeviceState is empty while disconnected - Telescope", "[driver]") {
     REQUIRE_NOTHROW(state = driver.get_device_state());
     CHECK(state.empty());
     CHECK_FALSE(has_timestamp(state));
+}
+
+TEST_CASE("DeviceState is empty while disconnected even when a getter does not throw - Telescope", "[driver]") {
+    LeakyDisconnectedTelescope driver;
+    std::vector<alpacacore::DeviceState> state;
+    REQUIRE_NOTHROW(state = driver.get_device_state());
+    CHECK(state.empty());
 }
