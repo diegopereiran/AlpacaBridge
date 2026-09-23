@@ -129,8 +129,8 @@ public:
      * needed to keep the client-silence watchdog fed.
      */
     void note_client_activity(std::chrono::steady_clock::time_point now) noexcept {
-        last_client_activity_.store(now.time_since_epoch().count(), std::memory_order_relaxed);
-        silence_check_pending_.store(true, std::memory_order_relaxed);
+        last_client_activity_.store(now.time_since_epoch().count());
+        silence_check_pending_.store(true);
     }
 
     /**
@@ -146,12 +146,12 @@ public:
      * can tell "nobody has addressed this device" apart from "a request to
      * this device is still in flight".
      */
-    void begin_client_request() noexcept { in_flight_requests_.fetch_add(1, std::memory_order_relaxed); }
+    void begin_client_request() noexcept { in_flight_requests_.fetch_add(1); }
 
     /**
      * @brief Pairs with begin_client_request(); see its comment.
      */
-    void end_client_request() noexcept { in_flight_requests_.fetch_sub(1, std::memory_order_relaxed); }
+    void end_client_request() noexcept { in_flight_requests_.fetch_sub(1); }
 
     /**
      * @brief The last time recorded by note_client_activity(), if any.
@@ -160,8 +160,7 @@ public:
      * through stop_motion_if_client_silent() instead of reading this back.
      */
     std::optional<std::chrono::steady_clock::time_point> last_client_activity() const {
-        if (!silence_check_pending_.load(std::memory_order_relaxed) &&
-            last_client_activity_.load(std::memory_order_relaxed) == 0) {
+        if (!silence_check_pending_.load() && last_client_activity_.load() == 0) {
             // Never stamped: time_since_epoch() == 0 is indistinguishable
             // from a real stamp at the epoch, but steady_clock's epoch is
             // unspecified and not wall-clock time, so a genuine stamp at
@@ -169,8 +168,7 @@ public:
             // practice. Treat it as "never stamped".
             return std::nullopt;
         }
-        return std::chrono::steady_clock::time_point(
-            std::chrono::steady_clock::duration(last_client_activity_.load(std::memory_order_relaxed)));
+        return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(last_client_activity_.load()));
     }
 
     /**
@@ -204,10 +202,10 @@ public:
         if (interval <= std::chrono::milliseconds::zero()) {
             return false;
         }
-        if (!silence_check_pending_.load(std::memory_order_relaxed)) {
+        if (!silence_check_pending_.load()) {
             return false;
         }
-        if (in_flight_requests_.load(std::memory_order_relaxed) > 0) {
+        if (in_flight_requests_.load() > 0) {
             // A request for this device (e.g. a synchronous
             // SlewToCoordinates) is being handled right now -- that IS
             // client activity for as long as it runs, however long the call
@@ -218,28 +216,28 @@ public:
             // aborted out from under the very client that issued it).
             // Refresh the timestamp and leave the pending flag set so the
             // next tick re-checks once the request completes.
-            last_client_activity_.store(now.time_since_epoch().count(), std::memory_order_relaxed);
+            last_client_activity_.store(now.time_since_epoch().count());
             return false;
         }
-        const auto last = std::chrono::steady_clock::time_point(
-            std::chrono::steady_clock::duration(last_client_activity_.load(std::memory_order_relaxed)));
+        const auto last =
+            std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(last_client_activity_.load()));
         if (now - last < interval) {
             return false;
         }
         // One probe per silence episode: clear the flag before doing any
         // mount I/O, so a burst of ticks while the check itself is running
         // does not re-enter.
-        silence_check_pending_.store(false, std::memory_order_relaxed);
+        silence_check_pending_.store(false);
         // A client that resumed talking (or a request that went in-flight)
         // between the elapsed check above and the clear just now would have
         // its re-arm overwritten by the store above -- re-read both signals
         // and put the flag back if either shows fresher activity than what
         // we based the elapsed-time decision on.
-        if (in_flight_requests_.load(std::memory_order_relaxed) > 0 ||
+        if (in_flight_requests_.load() > 0 ||
             now - std::chrono::steady_clock::time_point(
-                      std::chrono::steady_clock::duration(last_client_activity_.load(std::memory_order_relaxed))) <
+                      std::chrono::steady_clock::duration(last_client_activity_.load())) <
                 interval) {
-            silence_check_pending_.store(true, std::memory_order_relaxed);
+            silence_check_pending_.store(true);
             return false;
         }
         bool slewing = false;
@@ -251,13 +249,13 @@ public:
             // to stop. Re-arm so the NEXT tick retries this device instead
             // of leaving it unwatched until another client request happens
             // to land (which, mid-runaway, may never come).
-            silence_check_pending_.store(true, std::memory_order_relaxed);
+            silence_check_pending_.store(true);
             ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
                                               std::to_string(get_device_number()) +
                                               " failed, will retry: " + std::string(ex.what()));
             return false;
         } catch (...) {
-            silence_check_pending_.store(true, std::memory_order_relaxed);
+            silence_check_pending_.store(true);
             ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
                                               std::to_string(get_device_number()) +
                                               " failed with a non-standard exception, will retry.");
@@ -311,7 +309,7 @@ public:
             }
         }
         if (!any_stop_succeeded) {
-            silence_check_pending_.store(true, std::memory_order_relaxed);
+            silence_check_pending_.store(true);
             ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog could not stop " + get_name() + " #" +
                                               std::to_string(get_device_number()) +
                                               ": every stop call failed, will retry.");
@@ -766,8 +764,11 @@ private:
     // called from HTTP worker threads on the hot path, and
     // stop_motion_if_client_silent() from the server's timer thread; a new
     // lock here would sit outside the documented driver-mutex_ order
-    // (AGENTS.md concurrency checklist) for no benefit, since a plain
-    // timestamp store/load needs no synchronization beyond atomicity.
+    // (AGENTS.md concurrency checklist). The three watchdog atomics use the
+    // default sequentially consistent ordering, not relaxed: the timer
+    // thread's clear-then-recheck of silence_check_pending_ relies on
+    // seeing a request thread's timestamp store no later than its flag
+    // store, and relaxed ordering does not promise that on aarch64.
     // 0 means "never stamped" (see last_client_activity()'s comment).
     std::atomic<std::chrono::steady_clock::rep> last_client_activity_{0};
     // Set true by note_client_activity(), cleared by
