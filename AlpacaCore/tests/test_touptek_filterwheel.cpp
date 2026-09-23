@@ -79,7 +79,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - Platform 7 DeviceState", "[touptek]
     auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_index(0, 0);
 
     // While disconnected, Position throws and is omitted, and TimeStamp itself
-    // is withheld too, leaving the ASCOM-required empty list (issue #49); the
+    // is withheld too, leaving the ASCOM-required empty list; the
     // non-compliant "Connected" entry must not appear.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;

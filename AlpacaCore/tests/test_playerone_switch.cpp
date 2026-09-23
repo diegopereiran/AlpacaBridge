@@ -119,7 +119,7 @@ TEST_CASE("Player One Switch Driver - State machine", "[playerone][switch][unit]
     {
         // DeviceState is the empty list while disconnected: the SwitchDriver
         // base builds it from the public getters, which throw NotConnected and
-        // are omitted, and TimeStamp itself is withheld too (issue #49).
+        // are omitted, and TimeStamp itself is withheld too (ASCOM read-all FAQ).
         const auto state = driver->get_device_state();
         REQUIRE(state.empty());
     }

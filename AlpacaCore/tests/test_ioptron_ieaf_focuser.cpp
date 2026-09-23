@@ -127,7 +127,7 @@ TEST_CASE("iOptron iEAF Focuser Driver - State machine", "[ioptron][focuser][uni
 
     // Platform 7 DeviceState while disconnected: operational getters throw and
     // are omitted, and TimeStamp itself is withheld too, leaving the
-    // ASCOM-required empty list (issue #49); no non-compliant "Connected".
+    // ASCOM-required empty list; no non-compliant "Connected".
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {

@@ -50,7 +50,7 @@ TEST_CASE("Player One PW Filter Wheel Driver - Disconnected Behavior", "[playero
 
     // Platform 7 DeviceState: Position throws while disconnected and is
     // omitted, and TimeStamp itself is withheld too, leaving the
-    // ASCOM-required empty list (issue #49).
+    // ASCOM-required empty list.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {

@@ -140,7 +140,7 @@ TEST_CASE("ToupTek AAF Focuser Driver - State machine", "[touptek][focuser][unit
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
     // and are omitted, and TimeStamp itself is withheld too, leaving the
-    // ASCOM-required empty list (issue #49); the old non-compliant "Connected"
+    // ASCOM-required empty list; the old non-compliant "Connected"
     // entry is gone.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
