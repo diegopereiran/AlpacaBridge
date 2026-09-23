@@ -732,27 +732,12 @@ int main() {
         // 400 instead of wrapping (2^32 -> N) or surfacing as an internal
         // DRIVER_ERROR 200 (a digit string overflowing even a 64-bit parse).
         //
-        // The wrap case must be checked while a device IS registered at the
-        // number the old wrapping cast would have landed on (2^32 + 9574 =
-        // 4294976870, wraps to 9574 mod 2^32): 9574 is still registered here
-        // (unregistered just below). Without a live device at the wrapped
-        // number, this assertion cannot distinguish the fix from the old
-        // behavior -- the pre-fix router's std::stoul(...) cast wraps
-        // 4294976870 to 9574 and reaches Router::get_device(Telescope, 9574),
-        // and with no device 9574 registered, "Device not found" already
-        // returns 400 on its own (http-api-contract.md:20), same as a fresh
-        // 400 for an out-of-range device number. Confirmed by building this
-        // exact test file against the pre-#574 router.cpp/router.h (arm64
-        // Linux/GCC via the Lima trixie VM, run_all_tests_574_verify build
-        // tree): with only device_number's std::stoul(...)-and-cast reverted
-        // to the old one-liner (the NaN/verb-mismatch fixes left in place),
-        // GET .../4294967296/connected still returned 400 (device 0 not
-        // found) -- this assertion passed with or without the fix. The
-        // GET .../99999999999999999999/connected assertion below (a digit
-        // string overflowing even the 64-bit stoull parse) is unaffected:
-        // that one aborted the pre-fix test at EXPECT(status_code() == 400)
-        // (old code returned 200 DRIVER_ERROR via the generic exception
-        // handler), so it alone carried this criterion before the fix here.
+        // The wrap case needs a device registered at the number the old cast
+        // wraps to: 4294976870 is 2^32 + 9574, which wrapped to 9574, and
+        // 9574 is still registered here (it is unregistered just below), so
+        // the pre-fix router answered 200. The obvious 4294967296 would be
+        // vacuous: it wraps to device 0, which is not registered, and the
+        // old router already answered 400 "Device not found" for it.
         {
             const auto resp = route_request(router, "GET", "/api/v1/telescope/4294976870/connected");
             EXPECT(resp.status_code() == 400);

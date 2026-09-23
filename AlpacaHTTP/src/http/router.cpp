@@ -543,6 +543,11 @@ bool parse_bool_value(const std::string& raw, const std::string& param_name) {
     throw_invalid_value("Invalid value for parameter: " + param_name);
 }
 
+// The verb masks below mirror the GET/PUT branches of each dispatch_*_method,
+// not AlpacaDeviceAPI_v1.yaml. They include this repo's extensions: PUT on
+// filter wheel names/focusoffsets and rotator targetposition (GET-only in the
+// spec), and switch cancelasync (no path in the spec). Narrowing a mask to
+// match the spec would turn a call that works today into a 400.
 enum : std::uint8_t {
     kVerbGet = 1,
     kVerbPut = 2,
