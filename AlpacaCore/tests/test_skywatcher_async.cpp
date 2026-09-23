@@ -318,6 +318,36 @@ TEST_CASE("SkyWatcher async - Dec pulse delivery is flat across durations on the
     driver->set_connected(false);
 }
 
+// open-astro#306: the EQ-AL55i Pro's owner read ":s1"/":s2" through
+// CommandString(Raw=true) on 2026-09-22 and got "=000000" on both axes, twice
+// -- a real zero, not the "!0" the fixture used to send for every board whose
+// steps-per-worm is 0. A board that answers 0 and a board that rejects ":s"
+// are different captures; the fake has to be able to reproduce both.
+TEST_CASE("SkyWatcher async - ':s' replies match each captured board (#306)", "[skywatcher][async][al55i]") {
+    SECTION("EQ-AL55i Pro answers zero on both axes") {
+        FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eq_al55i());
+        REQUIRE(mount.ok());
+        auto driver = connected_driver(mount);
+        CHECK(driver->command_string(":s1", true) == "=000000");
+        CHECK(driver->command_string(":s2", true) == "=000000");
+        driver->set_connected(false);
+    }
+    SECTION("EQM-35 Pro answers 68266") {
+        FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+        REQUIRE(mount.ok());
+        auto driver = connected_driver(mount);
+        CHECK(driver->command_string(":s1", true) == "=AA0A01");  // 68266 = 0x010AAA
+        driver->set_connected(false);
+    }
+    SECTION("Wave 100i rejects the command") {
+        FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i());
+        REQUIRE(mount.ok());
+        auto driver = connected_driver(mount);
+        CHECK(driver->command_string(":s1", true) == "!0");
+        driver->set_connected(false);
+    }
+}
+
 TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tracking", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
