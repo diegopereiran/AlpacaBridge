@@ -67,6 +67,9 @@ public:
     // dependency. UTCDate is intentionally omitted to avoid format drift versus
     // the /utcdate endpoint; it is optional ("if known").
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
@@ -86,9 +89,7 @@ public:
         add("SiderealTime", [this] { return get_sidereal_time(); });
         add("Slewing", [this] { return get_slewing(); });
         add("Tracking", [this] { return get_tracking(); });
-        if (get_connected()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
-        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }
 

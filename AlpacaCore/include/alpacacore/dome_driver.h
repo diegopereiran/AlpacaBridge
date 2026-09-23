@@ -31,6 +31,9 @@ public:
     // ShutterStatus, Slewing plus a TimeStamp. Inline so the vtable stays weak;
     // values come from the same getters as the GET endpoints.
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
@@ -45,9 +48,7 @@ public:
         add("Azimuth", [this] { return get_azimuth(); });
         add("ShutterStatus", [this] { return get_shutter_status(); });
         add("Slewing", [this] { return get_slewing(); });
-        if (get_connected()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
-        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }
 

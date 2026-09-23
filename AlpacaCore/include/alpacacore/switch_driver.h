@@ -45,6 +45,9 @@ public:
      * but the public getters is exactly what desyncs DeviceState from the GETs.
      */
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         int count = 0;
         try {
@@ -68,9 +71,7 @@ public:
                 // Omit this id's members per the DeviceState contract.
             }
         }
-        if (get_connected()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
-        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }
 

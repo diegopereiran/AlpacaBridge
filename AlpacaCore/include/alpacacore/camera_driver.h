@@ -73,6 +73,9 @@ public:
     // vtable weak so the per-vendor static libraries link without a base-library
     // ordering dependency.
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
 
         auto add = [&state](const char* name, auto getter) {
@@ -94,9 +97,7 @@ public:
         // reports the property "not included in the DeviceState response".
         add("PercentCompleted", [this] { return static_cast<std::int32_t>(get_percent_completed()); });
 
-        if (get_connected()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
-        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }
 

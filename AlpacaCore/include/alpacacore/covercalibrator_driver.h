@@ -67,6 +67,9 @@ public:
      * atomicity and ConformU only checks per-property GET consistency.
      */
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
@@ -80,9 +83,7 @@ public:
         add("CoverState", [this] { return static_cast<std::int32_t>(get_cover_state()); });
         add("CalibratorChanging", [this] { return get_calibrator_changing(); });
         add("CoverMoving", [this] { return get_cover_moving(); });
-        if (get_connected()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
-        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }
 

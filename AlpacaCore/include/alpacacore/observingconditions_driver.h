@@ -35,6 +35,9 @@ public:
     // TimeStamp. Inline so the vtable stays weak; values come from the same
     // getters as the GET endpoints.
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
@@ -56,9 +59,7 @@ public:
         add("WindDirection", [this] { return get_wind_direction(); });
         add("WindGust", [this] { return get_wind_gust(); });
         add("WindSpeed", [this] { return get_wind_speed(); });
-        if (get_connected()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
-        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }
 

@@ -35,15 +35,16 @@ public:
     // plus a TimeStamp. Inline so the vtable stays weak; the value comes from
     // the same getter as the GET endpoint.
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         try {
             state.push_back({"Position", DeviceStateValue{static_cast<std::int32_t>(get_position())}});
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // Not currently known -- or an unwrapped vendor error -- so omit per the DeviceState contract.
         }
-        if (get_connected()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
-        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }
 

@@ -31,6 +31,9 @@ public:
     // Position plus a TimeStamp. Inline so the vtable stays weak; values come
     // from the same getters as the GET endpoints.
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
@@ -42,9 +45,7 @@ public:
         add("IsMoving", [this] { return get_is_moving(); });
         add("MechanicalPosition", [this] { return get_mechanical_position(); });
         add("Position", [this] { return get_position(); });
-        if (get_connected()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
-        }
+        state.push_back({"TimeStamp", device_state_timestamp()});
         return state;
     }
 
