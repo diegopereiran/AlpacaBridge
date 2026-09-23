@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -59,7 +60,9 @@ struct FakeMountProfile {
     std::string version_reply = "033A44";  // ":e" payload: fw 3.58, mount code 0x44
     std::string high_speed_ratio_reply = "01";
     uint32_t features = 0x100C;  // ":q" 0x000001: POLAR_LED | IS_AZEQ | HOME_INDEXER
-    uint32_t steps_per_worm = 0;
+    // ":s" (steps per worm). nullopt: the board rejects ":s" with "!0".
+    // A value, zero included, is answered as "=" + that value.
+    std::optional<uint32_t> steps_per_worm;
 
     // Wave 100i, MC firmware 3.58, mount code 0x44 (.github/instructions/skywatcher.instructions.md capture).
     static FakeMountProfile wave_100i() { return FakeMountProfile{}; }
@@ -88,8 +91,12 @@ struct FakeMountProfile {
     //   :e -> =032E09   :a1 -> 4032000   :a2 -> 3600000   :b -> 16000000
     //   :g -> 01        :q 0x000001 -> 0x9000
     // The two axes report DIFFERENT counts per revolution, the only board here
-    // that does. ":s" was not read, so steps_per_worm stays 0 (":s" answers
-    // "!0", as it does for the Wave).
+    // that does.
+    //   :s1 -> =000000  :s2 -> =000000   (2026-09-22, open-astro#306, read twice
+    //   per axis through CommandString Raw=true, mount stationary at home)
+    // That is a real zero reply, not the "!0" the Wave gives. Whether this
+    // firmware leaves the register unpopulated or 0x09 does not count worm
+    // steps the same way is not known from one reading.
     // ":g" is recorded as read: the reporter could not confirm that 0x01 is
     // what this firmware is expected to return. It is inert either way -- the
     // driver already reads a high-speed ratio of 0 as 1.
@@ -492,8 +499,8 @@ private:
             case 'g':
                 return "=" + profile_.high_speed_ratio_reply;
             case 's':
-                if (profile_.steps_per_worm == 0) return "!0";
-                return "=" + u24(profile_.steps_per_worm);
+                if (!profile_.steps_per_worm) return "!0";
+                return "=" + u24(*profile_.steps_per_worm);
             case 'j':
                 return "=" + u24(static_cast<uint32_t>(a.counts & 0xFFFFFF));
             case 'f': {
