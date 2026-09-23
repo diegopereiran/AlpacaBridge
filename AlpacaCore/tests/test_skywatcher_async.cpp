@@ -271,6 +271,93 @@ TEST_CASE("SkyWatcher async - a DeclinationRate write right after IsPulseGuiding
     driver->set_connected(false);
 }
 
+// open-astro#620 (regression, fixed below): pulse_guide() USED TO HAVE one
+// pulse task slot shared by both axes. reap_pulse_task() cancelled+joined
+// whatever pulse task was running regardless of axis, and a cancelled task's
+// cancel path deliberately does not touch the hardware (the reaper is
+// supposed to stop or re-command the axes itself -- see the #559 comment on
+// the pulse task lambda). Every other reaper (goto/park/home/abort/MoveAxis/
+// disconnect) re-commands or stops BOTH axes, but pulse_guide() only
+// dispatches its OWN axis: an RA pulse arriving mid-Dec pulse reaped the Dec
+// task and only commanded RA, leaving Dec running at guide rate with nothing
+// left to stop it. Pulse tasks are now per-axis (pulse_task_thread_[2]) and
+// reap_pulse_task(axis) reaps only its own axis's task.
+TEST_CASE("SkyWatcher async - an RA pulse does not leave a running Dec pulse's axis turning (#620)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch (a2 > 0)
+
+    driver->pulse_guide(0, 3000);  // Dec North, 3 s
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->pulse_guide(2, 300);  // RA East, 300 ms -- concurrent, different axis
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    INFO("IsPulseGuiding=" << driver->get_is_pulse_guiding() << " Slewing=" << driver->get_slewing());
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// open-astro#620 review W3: the mirror direction of the case above has no
+// coverage without this -- a Dec pulse arriving mid-RA-pulse must not strand
+// RA at the (in-place) guide-rate step period. This is the harder direction
+// to catch: a stuck RA axis is still `axis_running(1) == true` (it keeps
+// turning, just at the wrong rate), so only a step-period check can see it.
+TEST_CASE("SkyWatcher async - a Dec pulse does not leave a running RA pulse's axis at the guide rate (#620)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch, as the case above
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    driver->pulse_guide(2, 3000);  // RA East, 3 s -- default guide rate, in-place branch
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->pulse_guide(0, 300);  // Dec North, 300 ms -- concurrent, different axis
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    INFO("IsPulseGuiding=" << driver->get_is_pulse_guiding() << " step_period(1)=" << mount.step_period(1)
+                           << " sidereal=" << sidereal_preset);
+    CHECK(mount.step_period(1) == sidereal_preset);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// open-astro#620: two concurrent callers, one per axis, repeated -- both must
+// always end with their own axis released (RA back to the sidereal tracking
+// PERIOD, not merely "running" -- open-astro#620 review W2: RA stuck at the
+// East pulse rate is still `axis_running(1) == true`, so that check alone
+// cannot see the RA-stranded-at-guide-rate failure this case exists to
+// catch -- and Dec stopped), never leaving the other's pulse cancelled
+// without a replacement command.
+TEST_CASE("SkyWatcher async - concurrent RA and Dec PulseGuide callers both end with their axes released (#620)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    for (int round = 0; round < 10; ++round) {
+        std::thread ra_caller([&] { driver->pulse_guide(2, 300); });
+        std::thread dec_caller([&] { driver->pulse_guide(0, 300); });
+        ra_caller.join();
+        dec_caller.join();
+        REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 4000));
+        REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 3000));
+        REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 3000));
+        CHECK(mount.axis_running(1));  // RA restored to tracking, not stranded stopped
+    }
+    driver->set_connected(false);
+}
+
 // open-astro#306: the CONTROL for the hardware measurement on that issue.
 // An EQ-AL55i Pro delivers 99.0% of a 5000 ms Dec pulse but only 47.6% of a
 // 500 ms one, which fits a fixed per-start cost rather than a rate error.
