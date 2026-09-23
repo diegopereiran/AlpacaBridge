@@ -40,22 +40,29 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
 
 namespace alpacacore::test {
 
-// A simulated board's identity and geometry. Both presets are REAL hardware
+// A simulated board's identity and geometry. The presets are REAL hardware
 // captures, so the loopback tests exercise the same numbers the driver sees on
 // the bench rather than idealised ones.
 struct FakeMountProfile {
     uint32_t cpr = 4147200;
+    // Dec-axis counts per revolution when the board reports a different ":a2"
+    // from its ":a1"; 0 means "same as cpr", which is every board here but the
+    // EQ-AL55i Pro. Kept opt-in so the existing profiles are untouched.
+    uint32_t cpr_dec = 0;
     uint32_t timer_freq = 14000000;
     std::string version_reply = "033A44";  // ":e" payload: fw 3.58, mount code 0x44
     std::string high_speed_ratio_reply = "01";
     uint32_t features = 0x100C;  // ":q" 0x000001: POLAR_LED | IS_AZEQ | HOME_INDEXER
-    uint32_t steps_per_worm = 0;
+    // ":s" (steps per worm). nullopt: the board rejects ":s" with "!0".
+    // A value, zero included, is answered as "=" + that value.
+    std::optional<uint32_t> steps_per_worm;
 
     // Wave 100i, MC firmware 3.58, mount code 0x44 (.github/instructions/skywatcher.instructions.md capture).
     static FakeMountProfile wave_100i() { return FakeMountProfile{}; }
@@ -65,7 +72,8 @@ struct FakeMountProfile {
     //   :e -> =032732   :a -> 9216000   :b -> 16000000   :g -> 01
     //   :s -> 68266 (9216000/68266 = 135 worm teeth)
     //   :q 0x000001 -> 0x7000  POLAR_LED | COMMON_SLEW_START | HALF_CURRENT_TRACKING
-    // No HOME_INDEXER bit (0x04) -> CanFindHome must be false on this board.
+    // No HOME_INDEXER bit (0x04) -> find_home() takes the count-frame fallback
+    // instead of AutoHome; get_can_find_home() stays true unconditionally.
     static FakeMountProfile eqm35_pro() {
         FakeMountProfile p;
         p.cpr = 9216000;
@@ -74,6 +82,35 @@ struct FakeMountProfile {
         p.high_speed_ratio_reply = "01";
         p.features = 0x7000;
         p.steps_per_worm = 68266;
+        return p;
+    }
+
+    // Sky-Watcher EQ-AL55i Pro, MC firmware 3.46, mount code 0x09. Read from
+    // the board by its owner on 2026-09-20 (open-astro#306) over the mount's
+    // own USB port, an STM32 CDC-ACM port like the Wave's, not a PL2303:
+    //   :e -> =032E09   :a1 -> 4032000   :a2 -> 3600000   :b -> 16000000
+    //   :g -> 01        :q 0x000001 -> 0x9000
+    // The two axes report DIFFERENT counts per revolution, the only board here
+    // that does.
+    //   :s1 -> =000000  :s2 -> =000000   (2026-09-22, open-astro#306, read twice
+    //   per axis through CommandString Raw=true, mount stationary at home)
+    // That is a real zero reply, not the "!0" the Wave gives. Whether this
+    // firmware leaves the register unpopulated or 0x09 does not count worm
+    // steps the same way is not known from one reading.
+    // ":g" is recorded as read: the reporter could not confirm that 0x01 is
+    // what this firmware is expected to return. It is inert either way -- the
+    // driver already reads a high-speed ratio of 0 as 1.
+    // No HOME_INDEXER bit (0x04) -> find_home() takes the count-frame fallback
+    // instead of AutoHome; get_can_find_home() stays true unconditionally.
+    static FakeMountProfile eq_al55i() {
+        FakeMountProfile p;
+        p.cpr = 4032000;
+        p.cpr_dec = 3600000;
+        p.timer_freq = 16000000;
+        p.version_reply = "032E09";
+        p.high_speed_ratio_reply = "01";
+        p.features = 0x9000;
+        p.steps_per_worm = 0;
         return p;
     }
 };
@@ -85,13 +122,16 @@ public:
     static constexpr double kGotoDegPerSec = 800.0 * kSiderealDegPerSec;
 
     const uint32_t kCpr;
+    const uint32_t kCprDec;
     const uint32_t kTimerFreq;
 
     explicit FakeSkyWatcherMount(FakeMountProfile profile = FakeMountProfile::wave_100i())
-        : kCpr(profile.cpr), kTimerFreq(profile.timer_freq), profile_(std::move(profile)) {
-        for (Axis& a : axes_) {
-            a.cpr = kCpr;
-        }
+        : kCpr(profile.cpr),
+          kCprDec(profile.cpr_dec != 0 ? profile.cpr_dec : profile.cpr),
+          kTimerFreq(profile.timer_freq),
+          profile_(std::move(profile)) {
+        axes_[0].cpr = kCpr;
+        axes_[1].cpr = kCprDec;
         fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (fd_ < 0) {
             return;
@@ -136,7 +176,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
         a.advance(now());
-        return (static_cast<double>(a.counts + a.frame_shift) - static_cast<double>(kHome)) * 360.0 / kCpr;
+        return (static_cast<double>(a.counts + a.frame_shift) - static_cast<double>(kHome)) * 360.0 / a.cpr;
     }
 
     /// Signed axis angle in degrees from COUNT home (the controller's frame).
@@ -144,7 +184,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
         a.advance(now());
-        return (static_cast<double>(a.counts) - static_cast<double>(kHome)) * 360.0 / kCpr;
+        return (static_cast<double>(a.counts) - static_cast<double>(kHome)) * 360.0 / a.cpr;
     }
 
     /// Number of ":J" start commands received for an axis (regression: no
@@ -173,7 +213,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
         a.home_index_counts =
-            static_cast<int64_t>(kHome) - a.frame_shift + static_cast<int64_t>(std::llround(deg * kCpr / 360.0));
+            static_cast<int64_t>(kHome) - a.frame_shift + static_cast<int64_t>(std::llround(deg * a.cpr / 360.0));
     }
 
     /// Simulate deceleration: ":K" keeps the axis running (at its current
@@ -279,7 +319,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
         a.advance(now());
-        a.counts = static_cast<int64_t>(kHome) + static_cast<int64_t>(std::llround(deg * kCpr / 360.0));
+        a.counts = static_cast<int64_t>(kHome) + static_cast<int64_t>(std::llround(deg * a.cpr / 360.0));
     }
 
 private:
@@ -289,6 +329,7 @@ private:
         uint32_t cpr = 4147200;
         int64_t counts = kHome;
         double rate_counts = 0.0;  // signed counts/sec while running
+        double count_frac = 0.0;   // sub-count remainder carried between advance() calls
         bool running = false;
         bool speed_mode = true;
         bool fast = false;
@@ -373,7 +414,18 @@ private:
                     counts += static_cast<int64_t>(std::llround(dir_sign * step));
                 }
             } else {
-                counts += static_cast<int64_t>(std::llround(rate_counts * dt));
+                // Carry the sub-count remainder across calls. Rounding each
+                // increment on its own and still advancing `last` by the whole
+                // dt threw the fraction away every time advance() ran, so the
+                // modelled rate depended on how often a test polled: at a guide
+                // rate of ~24 counts/s a 50 ms poll adds llround(1.2) = 1, and a
+                // pulse delivered ~79% of its counts (open-astro#306). Slew rates
+                // were unaffected (~19,000 counts/s), which is why only the guide
+                // and tracking regime showed it.
+                const double exact = rate_counts * dt + count_frac;
+                const double whole = std::trunc(exact);
+                count_frac = exact - whole;
+                counts += static_cast<int64_t>(whole);
             }
             latch_indexer(before);
         }
@@ -441,14 +493,14 @@ private:
                 }
                 return "=" + profile_.version_reply;
             case 'a':
-                return "=" + u24(kCpr);
+                return "=" + u24(a.cpr);
             case 'b':
                 return "=" + u24(kTimerFreq);
             case 'g':
                 return "=" + profile_.high_speed_ratio_reply;
             case 's':
-                if (profile_.steps_per_worm == 0) return "!0";
-                return "=" + u24(profile_.steps_per_worm);
+                if (!profile_.steps_per_worm) return "!0";
+                return "=" + u24(*profile_.steps_per_worm);
             case 'j':
                 return "=" + u24(static_cast<uint32_t>(a.counts & 0xFFFFFF));
             case 'f': {
@@ -508,6 +560,16 @@ private:
                 }
                 ++a.start_count;
                 was_running_on_start = a.running;
+                if (!was_running_on_start) {
+                    // Only a genuinely fresh start (from stopped) has no
+                    // remainder to carry. An in-place re-kick on an already-
+                    // running axis -- the RA pulse path re-sends ":I"/":J" at
+                    // dispatch AND at restore -- must keep the fraction, or it
+                    // silently discards up to one count each time (open-astro#603
+                    // review, mirroring the same bug this branch fixed for the
+                    // cadence-independent Dec/speed-mode path).
+                    a.count_frac = 0.0;
+                }
                 a.coasting = false;  // a fresh command supersedes any coast
                 a.running = true;
                 a.stopping = false;

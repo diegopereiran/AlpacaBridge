@@ -272,13 +272,26 @@ For **every** Defect, in this order:
      present, else the pinned copy at
      `${XDG_CACHE_HOME:-$HOME/.cache}/alpacabridge-preflight/zizmor-<ZIZMOR_VER>` (the
      pre-flight downloads it on first use).
-   - driver code: rebuild with the vendor compiled in, then run the tagged suite:
-     `cmake -S AlpacaCore -B AlpacaCore/build -DALPACACORE_ENABLE_ALL_VENDORS=ON && cmake --build AlpacaCore/build --target alpacacore_tests`
-     then `AlpacaCore/build/tests/alpacacore_tests "[vendor][device]"`. `run_all_tests.sh`
+   - driver code: rebuild with the vendor compiled in **into a build directory of its own**,
+     then run the tagged suite:
+     `cmake -S AlpacaCore -B AlpacaCore/build-vendors -DALPACACORE_ENABLE_ALL_VENDORS=ON && cmake --build AlpacaCore/build-vendors --target alpacacore_tests`
+     then `AlpacaCore/build-vendors/tests/alpacacore_tests "[vendor][device]"`. `run_all_tests.sh`
      defaults vendors ON, but `ci_preflight.sh` gate 3 runs it as
      `ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh`, and a build from that pass compiles
      no driver: the tag filter matches nothing and Catch2 exits non-zero for "no tests ran"
-     (probed: rc 2), a failure that says nothing about the driver.
+     (probed: rc 2), a failure that says nothing about the driver. The separate directory is what
+     makes the `-D` sufficient: CMake seeds `CMAKE_CXX_FLAGS` from `CXXFLAGS` on the FIRST
+     configure and then caches it, so reconfiguring a directory the sanitized pass built would
+     keep `-fsanitize=address,undefined` from that cache and handed you a sanitized binary no
+     matter what you passed on the command line.
+     After a default pre-flight, `AlpacaCore/build` holds the ASan+UBSan vendors-OFF binary
+     rather than gate 4's vendors-ON one -- since #588 the sanitized pass is the last of the
+     three `run_all_tests.sh` invocations (`ci_preflight.sh:477`, after zizmor) and
+     `run_all_tests.sh:20` `rm -rf`s the build directory on entry. `ci_preflight.sh` sets no
+     `-e`, so it reaches that pass whether or not an earlier gate failed. (Under
+     `RUN_SANITIZERS=0` the pass is skipped and `AlpacaCore/build` does still hold gate 4's
+     vendors-ON build -- which is exactly why this is not worth reasoning about case by case.)
+     Never infer what is in `AlpacaCore/build`: build your own.
    The full `ci_preflight.sh` is for branches that change runtime C++ across vendors.
 6. **One commit per Defect, one push per round** (this `⚠️ Issues found` path only). Commits
    stay atomic so a wrong one can be reverted alone; the push stays batched because every push
@@ -410,8 +423,27 @@ beyond the PR as opened (PR #272 gained an unrelated cppcheck-scoping commit mid
 The loop ends only when every PR is merged or a **Hard stop** below applies. In particular:
 
 - **A gate failure in code this branch does not touch** is not a stop. Re-run the failed
-  test in isolation 5 times against the built binary (`AlpacaCore/build/tests/alpacacore_tests
-  "<test name>"`). If it passes in isolation and `git diff main...HEAD --name-only` shows no
+  test in isolation 5 times -- against a binary you built for the purpose, NOT whatever is
+  sitting in `AlpacaCore/build`:
+  `cmake -S AlpacaCore -B AlpacaCore/build-isolate -DALPACACORE_ENABLE_ALL_VENDORS=OFF && cmake --build AlpacaCore/build-isolate --target alpacacore_tests`,
+  then `AlpacaCore/build-isolate/tests/alpacacore_tests "<test name>"`.
+  **Match the vendor set to the test.** The probe needs exactly two properties -- not sanitized,
+  and the failing test compiled in -- and building every SDK in the tree to re-run one test for
+  five seconds is minutes of rebuild it does not need. `ALPACACORE_ENABLE_ALL_VENDORS` defaults
+  **ON** (`AlpacaCore/CMakeLists.txt:22`), so a bare `cmake -S AlpacaCore -B <dir>` builds all of
+  them: the `=OFF` above is doing real work and is not redundant. For a vendor-tagged test, add
+  `-DALPACACORE_ENABLE_<VENDOR>=ON` for that one vendor -- its tests are guarded by
+  `if(TARGET alpacacore_<vendor>)` in `AlpacaCore/tests/CMakeLists.txt`, so with vendors off and
+  no `-D` the case is absent and the filter matches nothing (rc 2, as below). If the gate-3 step
+  above already built `AlpacaCore/build-vendors` with the vendor you need, run the probe against
+  that binary instead of configuring a second tree. Nothing wipes either directory, so the
+  configure cost is paid once and later probes are incremental. Since #588 a default
+  pre-flight leaves `AlpacaCore/build` holding the ASan+UBSan, vendors-OFF binary from its last
+  pass (see the gate-3 note above), which breaks this probe two ways: a vendor test name matches nothing
+  and Catch2 exits rc 2, and -- the quiet one -- a sanitized binary has different timing, so a
+  concurrency flake can stop reproducing under it and get waved through as "passes in
+  isolation". A separate build directory also keeps the probe from destroying the artifacts of
+  the gate that failed. If it passes in isolation and `git diff main...HEAD --name-only` shows no
   file that could affect it, it is a flake: re-run the step 5 gate that failed once, push on
   green, and
   record the flake (test name, failure text, pass rate) in the wrap-up for the user. Two
