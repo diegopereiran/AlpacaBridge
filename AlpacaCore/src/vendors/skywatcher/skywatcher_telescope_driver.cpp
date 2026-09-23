@@ -590,7 +590,10 @@ public:
         if (pulse_guiding_active_ && std::chrono::steady_clock::now() >= pulse_guide_end_time_) {
             pulse_guiding_active_ = false;
         }
-        return pulse_guiding_active_;
+        // open-astro#559: the ASCOM property follows the pulse task's actual
+        // end, not the ownership deadline above, which runs a fixed second
+        // past the commanded duration and is now only a backstop.
+        return pulse_in_motion_;
     }
 
     bool get_can_set_declination_rate() const override { return true; }
@@ -1270,6 +1273,7 @@ public:
         double dec_rate_deg_per_sec = 0.0;
         double ra_pulse_rate_deg_per_sec = 0.0;
         double ra_restore_rate_deg_per_sec = kSiderealDegPerSec;
+        std::uint64_t my_seq = 0;  // this pulse's pulse_seq_, taken under the dispatch lock
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1333,6 +1337,8 @@ public:
             // dead-reckoned live reads report exactly that.
 
             pulse_guiding_active_ = true;
+            pulse_in_motion_ = true;
+            my_seq = ++pulse_seq_;
             pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
             invalidate_position_cache_locked();
         }
@@ -1357,7 +1363,17 @@ public:
         const double ra_pulse_rate = ra_pulse_rate_deg_per_sec;
         const bool pulse_restart = ra_pulse_restart;
         pulse_task_thread_ = std::thread([this, axis, duration, restore_tracking, direction, dec_rate, ra_pulse_rate,
-                                          ra_restore_rate_deg_per_sec, pulse_restart]() {
+                                          ra_restore_rate_deg_per_sec, pulse_restart, my_seq]() {
+            // open-astro#559: a task clears pulse state only while its pulse
+            // is still the current one. A superseding pulse sets both flags
+            // before it reaps this task, and this task's exit used to clear
+            // them from under it.
+            auto end_pulse_locked = [this, my_seq]() {
+                if (pulse_seq_ == my_seq) {
+                    pulse_guiding_active_ = false;
+                    pulse_in_motion_ = false;
+                }
+            };
             // PulseGuide is an asynchronous initiator (ITelescopeV4): the axis
             // dispatch (which can stop-and-wait a ramping axis, plus UDP
             // retries) runs here so pulse_guide() returns inside the STANDARD
@@ -1470,13 +1486,13 @@ public:
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
                 recover_ra_drive_rate();
                 std::lock_guard<std::mutex> lock(mutex_);
-                pulse_guiding_active_ = false;
+                end_pulse_locked();
                 return;
             } catch (...) {
                 ALPACA_LOG_WARN("SkyWatcher", "PulseGuide dispatch failed with unknown exception");
                 recover_ra_drive_rate();
                 std::lock_guard<std::mutex> lock(mutex_);
-                pulse_guiding_active_ = false;
+                end_pulse_locked();
                 return;
             }
             // Time spent verifying counts as pulse time: on this path the axis
@@ -1586,7 +1602,7 @@ public:
                 // operation (ConformU: "declination axis did not move" on the
                 // first pulse after a slew).
                 std::lock_guard<std::mutex> lock(mutex_);
-                pulse_guiding_active_ = false;
+                end_pulse_locked();
                 return;
             }
             // The stop/restore MUST land or the axis runs away at guide rate.
@@ -1625,12 +1641,22 @@ public:
                 // on (round-4 review note).
                 verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, applied_ra_restore_rate, pulse_task_cancel_);
             }
+            if (stopped) {
+                // open-astro#559: the property and the axis are released
+                // together, once the restore (and its verify) is done. If the
+                // ownership flag outlived IsPulseGuiding, a client that waited
+                // for false and then wrote DeclinationRate/RightAscensionRate
+                // took the busy-axis deferral and waited on a restore this
+                // task had already run: the write was stranded.
+                std::lock_guard<std::mutex> lock(mutex_);
+                end_pulse_locked();
+            }
             if (!stopped) {
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
                                                    " attempts on axis " + std::to_string(axis) +
                                                    " — axis may still be moving (mount runaway risk): " + last_error);
                 std::lock_guard<std::mutex> lock(mutex_);
-                pulse_guiding_active_ = false;
+                end_pulse_locked();
                 if (connected_) {
                     manual_axis_slewing_[axis - 1] = true;
                 }
@@ -2337,6 +2363,7 @@ private:
         tracking_ = false;
         restore_tracking_after_slew_ = false;
         pulse_guiding_active_ = false;
+        pulse_in_motion_ = false;
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
@@ -4369,6 +4396,15 @@ private:
     int slew_settle_time_seconds_ = 0;
     GuideRate guide_rate_{};
     mutable bool pulse_guiding_active_ = false;
+    // open-astro#559: the ASCOM IsPulseGuiding value, true from dispatch until
+    // the pulse task ends (stop landed, post-stop verify done). The task
+    // clears pulse_guiding_active_ above, the axis ownership, at the same
+    // point; its dispatch-time deadline remains only as a backstop. Both
+    // under mutex_.
+    bool pulse_in_motion_ = false;
+    // Incremented per pulse under mutex_, so a task can tell whether it has
+    // been superseded before clearing shared pulse state.
+    std::uint64_t pulse_seq_ = 0;
     mutable std::chrono::steady_clock::time_point pulse_guide_end_time_{};
 
     mutable bool parking_ = false;
