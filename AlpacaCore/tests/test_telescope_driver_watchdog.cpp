@@ -136,7 +136,14 @@ public:
     }
 
     std::atomic<int> move_axis_calls{0};
-    void move_axis(int, double) override { ++move_axis_calls; }
+    std::atomic<int> move_axis_throw_countdown{0};
+    void move_axis(int, double) override {
+        ++move_axis_calls;
+        if (move_axis_throw_countdown.load() > 0) {
+            move_axis_throw_countdown.fetch_sub(1);
+            throw std::runtime_error("simulated move_axis failure");
+        }
+    }
 
     double get_target_declination() const override { return 0.0; }
     void set_target_declination(double) override {}
@@ -205,6 +212,31 @@ TEST_CASE("TelescopeDriver watchdog - a throwing probe re-arms for the next tick
     // the first tick's exception would silently skip this forever.
     CHECK(driver.stop_motion_if_client_silent(t0 + std::chrono::seconds(32), std::chrono::seconds(30)));
     CHECK(driver.aborts.load() == 1);
+}
+
+// Red-team finding: when every stop call throws (a transient link fault at
+// the moment of the stop), nothing was stopped, so the watchdog must re-arm
+// and retry on the next tick -- the same reasoning as a throwing probe.
+// Otherwise the axis keeps running with the watchdog disarmed until another
+// client request lands, which during a runaway may never come.
+TEST_CASE("TelescopeDriver watchdog - a stop where every call throws re-arms for the next tick",
+          "[telescope][watchdog][unit]") {
+    WatchdogUnitStubDriver driver;
+    driver.slewing.store(true);
+    driver.abort_throw_countdown.store(1);      // abort_slew() throws once
+    driver.move_axis_throw_countdown.store(2);  // both per-axis stops throw once
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver.note_client_activity(t0);
+
+    // First tick: every stop call throws, so nothing was stopped.
+    CHECK_FALSE(driver.stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30)));
+    CHECK(driver.aborts.load() == 1);
+    CHECK(driver.move_axis_calls.load() == 2);
+
+    // Second tick, no further client activity: the stop now succeeds.
+    CHECK(driver.stop_motion_if_client_silent(t0 + std::chrono::seconds(32), std::chrono::seconds(30)));
+    CHECK(driver.aborts.load() == 2);
 }
 
 // Finding 1's mechanism, at the base-class level: a request the router

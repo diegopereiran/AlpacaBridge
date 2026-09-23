@@ -194,9 +194,10 @@ public:
      * @param interval The configured silence limit. <= 0 disables the
      *            watchdog entirely (no check, no atomic even touched).
      * @return true if this call found the mount slewing with no client
-     *         activity for at least @p interval and stopped it. false
-     *         covers every other outcome, including a failed probe that
-     *         will retry on the next tick.
+     *         activity for at least @p interval and at least one stop call
+     *         succeeded. false covers every other outcome, including a
+     *         failed probe or a stop where every call threw; both re-arm
+     *         and retry on the next tick.
      */
     bool stop_motion_if_client_silent(std::chrono::steady_clock::time_point now,
                                       std::chrono::milliseconds interval) noexcept {
@@ -272,8 +273,13 @@ public:
                                           std::to_string(elapsed.count()) + " s (limit " +
                                           std::to_string(limit_s.count()) +
                                           " s) while it was slewing; stopping motion, Connected left true.");
+        // Counts stop calls that returned normally. If none did, nothing was
+        // stopped and the watchdog re-arms to retry on the next tick, for
+        // the same reason a throwing probe does (red-team finding on #547).
+        bool any_stop_succeeded = false;
         try {
             abort_slew();
+            any_stop_succeeded = true;
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // The per-axis stop below is the actual backstop (issue #521
             // review: a MoveAxis(axis, 0) alone can be a silent no-op on
@@ -295,6 +301,7 @@ public:
             }
             try {
                 move_axis(axis, 0.0);
+                any_stop_succeeded = true;
             } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
                 // Swallow rather than let it escape from a background timer
                 // thread and terminate the process (AGENTS.md concurrency
@@ -302,6 +309,13 @@ public:
                 // inline).
             } catch (...) {
             }
+        }
+        if (!any_stop_succeeded) {
+            silence_check_pending_.store(true, std::memory_order_relaxed);
+            ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog could not stop " + get_name() + " #" +
+                                              std::to_string(get_device_number()) +
+                                              ": every stop call failed, will retry.");
+            return false;
         }
         return true;
     }
