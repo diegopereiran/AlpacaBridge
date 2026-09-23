@@ -283,7 +283,7 @@ public:
             // review: a MoveAxis(axis, 0) alone can be a silent no-op on
             // some vendors, which is why BOTH run) -- swallow so a throwing
             // abort_slew() does not skip it.
-        } catch (...) {
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
         }
         for (int axis = 0; axis < 2; ++axis) {
             bool can_move = false;
@@ -305,7 +305,7 @@ public:
                 // thread and terminate the process (AGENTS.md concurrency
                 // checklist: an async tail that can throw must be caught
                 // inline).
-            } catch (...) {
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
         }
         if (!any_stop_succeeded) {

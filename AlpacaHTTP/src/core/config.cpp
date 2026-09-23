@@ -237,7 +237,7 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 // value here (unlike the unsigned http: keys above).
                 try {
                     set_motion_watchdog_seconds(std::stoi(value));
-                } catch (...) {
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
                     // Unparseable: keep the default.
                 }
             }
@@ -372,7 +372,7 @@ void Config::apply_environment_overrides() {
     if (watchdog_env) {
         try {
             set_motion_watchdog_seconds(std::stoi(watchdog_env));
-        } catch (...) {
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
             // Unparseable: keep whatever the file (or the default) set.
         }
     }
