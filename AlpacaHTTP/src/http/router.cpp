@@ -497,10 +497,18 @@ std::uint32_t parse_client_transaction_id(const std::string& value) {
 
 double parse_double_value(const std::string& raw, const std::string& param_name) {
     try {
+        // #574: std::stod (libc strtod) accepts "nan", "inf", "-infinity" and
+        // hex-float notation ("0x1p3", finite but not an Alpaca decimal
+        // number); reject hex before parsing, and require the parsed result
+        // to be finite. Both fall into the catch below via
+        // std::invalid_argument, same as any other malformed value.
+        if (raw.find_first_of("xX") != std::string::npos) {
+            throw std::invalid_argument("hex float notation is not a valid Alpaca number");
+        }
         std::size_t pos = 0;
         double value = std::stod(raw, &pos);
-        if (pos != raw.size()) {
-            throw std::invalid_argument("trailing characters");
+        if (pos != raw.size() || !std::isfinite(value)) {
+            throw std::invalid_argument("trailing characters or non-finite value");
         }
         return value;
     } catch (const std::exception&) {
@@ -535,274 +543,231 @@ bool parse_bool_value(const std::string& raw, const std::string& param_name) {
     throw_invalid_value("Invalid value for parameter: " + param_name);
 }
 
-const std::unordered_set<std::string> kCommonMethods = {
-    "action",
-    "commandblind",
-    "commandbool",
-    "commandstring",
-    "connect",
-    "connected",
-    "connecting",
-    "description",
-    "devicestate",
-    "disconnect",
-    "driverinfo",
-    "driverversion",
-    "interfaceversion",
-    "name",
-    "supportedactions",
+enum : std::uint8_t {
+    kVerbGet = 1,
+    kVerbPut = 2,
 };
 
-const std::unordered_set<std::string> kTelescopeMethods = {
-    "abortslew",
-    "alignmentmode",
-    "altitude",
-    "aperturearea",
-    "aperturediameter",
-    "athome",
-    "atpark",
-    "axisrates",
-    "azimuth",
-    "canfindhome",
-    "canmoveaxis",
-    "canpark",
-    "canpulseguide",
-    "cansetdeclinationrate",
-    "cansetguiderates",
-    "cansetpark",
-    "cansetpierside",
-    "cansetrightascensionrate",
-    "cansettracking",
-    "canslew",
-    "canslewaltaz",
-    "canslewaltazasync",
-    "canslewasync",
-    "cansync",
-    "cansyncaltaz",
-    "canunpark",
-    "declination",
-    "declinationrate",
-    "destinationsideofpier",
-    "doesrefraction",
-    "equatorialsystem",
-    "findhome",
-    "focallength",
-    "guideratedeclination",
-    "guideraterightascension",
-    "ispulseguiding",
-    "moveaxis",
-    "park",
-    "pulseguide",
-    "rightascension",
-    "rightascensionrate",
-    "setpark",
-    "sideofpier",
-    "siderealtime",
-    "siteelevation",
-    "sitelatitude",
-    "sitelongitude",
-    "slewing",
-    "slewsettletime",
-    "slewtoaltaz",
-    "slewtoaltazasync",
-    "slewtocoordinates",
-    "slewtocoordinatesasync",
-    "slewtotarget",
-    "slewtotargetasync",
-    "synctoaltaz",
-    "synctocoordinates",
-    "synctotarget",
-    "targetdeclination",
-    "targetrightascension",
-    "tracking",
-    "trackingrate",
-    "trackingrates",
-    "unpark",
-    "utcdate",
+const std::unordered_map<std::string, unsigned> kCommonMethods = {
+    {"action", kVerbPut},           {"commandblind", kVerbPut}, {"commandbool", kVerbPut},
+    {"commandstring", kVerbPut},    {"connect", kVerbPut},      {"connected", kVerbGet | kVerbPut},
+    {"connecting", kVerbGet},       {"description", kVerbGet},  {"devicestate", kVerbGet},
+    {"disconnect", kVerbPut},       {"driverinfo", kVerbGet},   {"driverversion", kVerbGet},
+    {"interfaceversion", kVerbGet}, {"name", kVerbGet},         {"supportedactions", kVerbGet},
 };
 
-const std::unordered_set<std::string> kCameraMethods = {
-    "abortexposure",
-    "bayeroffsetx",
-    "bayeroffsety",
-    "binx",
-    "biny",
-    "camerastate",
-    "cameraxsize",
-    "cameraysize",
-    "canabortexposure",
-    "canasymmetricbin",
-    "canfastreadout",
-    "cangetcoolerpower",
-    "canpulseguide",
-    "cansetccdtemperature",
-    "canstopexposure",
-    "ccdtemperature",
-    "cooleron",
-    "coolerpower",
-    "electronsperadu",
-    "exposuremax",
-    "exposuremin",
-    "exposureresolution",
-    "fastreadout",
-    "fullwellcapacity",
-    "gain",
-    "gainmax",
-    "gainmin",
-    "gains",
-    "hasshutter",
-    "heatsinktemperature",
-    "imagearray",
-    "imagearrayvariant",
-    "imageready",
-    "ispulseguiding",
-    "lastexposureduration",
-    "lastexposurestarttime",
-    "maxadu",
-    "maxbinx",
-    "maxbiny",
-    "numx",
-    "numy",
-    "offset",
-    "offsetmax",
-    "offsetmin",
-    "offsets",
-    "percentcompleted",
-    "pixelsizex",
-    "pixelsizey",
-    "pulseguide",
-    "readoutmode",
-    "readoutmodes",
-    "sensorname",
-    "sensortype",
-    "setccdtemperature",
-    "startexposure",
-    "startx",
-    "starty",
-    "stopexposure",
-    "subexposureduration",
+const std::unordered_map<std::string, unsigned> kTelescopeMethods = {
+    {"abortslew", kVerbPut},
+    {"alignmentmode", kVerbGet},
+    {"altitude", kVerbGet},
+    {"aperturearea", kVerbGet},
+    {"aperturediameter", kVerbGet},
+    {"athome", kVerbGet},
+    {"atpark", kVerbGet},
+    {"axisrates", kVerbGet},
+    {"azimuth", kVerbGet},
+    {"canfindhome", kVerbGet},
+    {"canmoveaxis", kVerbGet},
+    {"canpark", kVerbGet},
+    {"canpulseguide", kVerbGet},
+    {"cansetdeclinationrate", kVerbGet},
+    {"cansetguiderates", kVerbGet},
+    {"cansetpark", kVerbGet},
+    {"cansetpierside", kVerbGet},
+    {"cansetrightascensionrate", kVerbGet},
+    {"cansettracking", kVerbGet},
+    {"canslew", kVerbGet},
+    {"canslewaltaz", kVerbGet},
+    {"canslewaltazasync", kVerbGet},
+    {"canslewasync", kVerbGet},
+    {"cansync", kVerbGet},
+    {"cansyncaltaz", kVerbGet},
+    {"canunpark", kVerbGet},
+    {"declination", kVerbGet},
+    {"declinationrate", kVerbGet | kVerbPut},
+    {"destinationsideofpier", kVerbGet},
+    {"doesrefraction", kVerbGet | kVerbPut},
+    {"equatorialsystem", kVerbGet},
+    {"findhome", kVerbPut},
+    {"focallength", kVerbGet},
+    {"guideratedeclination", kVerbGet | kVerbPut},
+    {"guideraterightascension", kVerbGet | kVerbPut},
+    {"ispulseguiding", kVerbGet},
+    {"moveaxis", kVerbPut},
+    {"park", kVerbPut},
+    {"pulseguide", kVerbPut},
+    {"rightascension", kVerbGet},
+    {"rightascensionrate", kVerbGet | kVerbPut},
+    {"setpark", kVerbPut},
+    {"sideofpier", kVerbGet | kVerbPut},
+    {"siderealtime", kVerbGet},
+    {"siteelevation", kVerbGet | kVerbPut},
+    {"sitelatitude", kVerbGet | kVerbPut},
+    {"sitelongitude", kVerbGet | kVerbPut},
+    {"slewing", kVerbGet},
+    {"slewsettletime", kVerbGet | kVerbPut},
+    {"slewtoaltaz", kVerbPut},
+    {"slewtoaltazasync", kVerbPut},
+    {"slewtocoordinates", kVerbPut},
+    {"slewtocoordinatesasync", kVerbPut},
+    {"slewtotarget", kVerbPut},
+    {"slewtotargetasync", kVerbPut},
+    {"synctoaltaz", kVerbPut},
+    {"synctocoordinates", kVerbPut},
+    {"synctotarget", kVerbPut},
+    {"targetdeclination", kVerbGet | kVerbPut},
+    {"targetrightascension", kVerbGet | kVerbPut},
+    {"tracking", kVerbGet | kVerbPut},
+    {"trackingrate", kVerbGet | kVerbPut},
+    {"trackingrates", kVerbGet},
+    {"unpark", kVerbPut},
+    {"utcdate", kVerbGet | kVerbPut},
 };
 
-const std::unordered_set<std::string> kFilterWheelMethods = {
-    "focusoffsets",
-    "names",
-    "position",
+const std::unordered_map<std::string, unsigned> kCameraMethods = {
+    {"abortexposure", kVerbPut},
+    {"bayeroffsetx", kVerbGet},
+    {"bayeroffsety", kVerbGet},
+    {"binx", kVerbGet | kVerbPut},
+    {"biny", kVerbGet | kVerbPut},
+    {"camerastate", kVerbGet},
+    {"cameraxsize", kVerbGet},
+    {"cameraysize", kVerbGet},
+    {"canabortexposure", kVerbGet},
+    {"canasymmetricbin", kVerbGet},
+    {"canfastreadout", kVerbGet},
+    {"cangetcoolerpower", kVerbGet},
+    {"canpulseguide", kVerbGet},
+    {"cansetccdtemperature", kVerbGet},
+    {"canstopexposure", kVerbGet},
+    {"ccdtemperature", kVerbGet},
+    {"cooleron", kVerbGet | kVerbPut},
+    {"coolerpower", kVerbGet},
+    {"electronsperadu", kVerbGet},
+    {"exposuremax", kVerbGet},
+    {"exposuremin", kVerbGet},
+    {"exposureresolution", kVerbGet},
+    {"fastreadout", kVerbGet | kVerbPut},
+    {"fullwellcapacity", kVerbGet},
+    {"gain", kVerbGet | kVerbPut},
+    {"gainmax", kVerbGet},
+    {"gainmin", kVerbGet},
+    {"gains", kVerbGet},
+    {"hasshutter", kVerbGet},
+    {"heatsinktemperature", kVerbGet},
+    {"imagearray", kVerbGet},
+    {"imagearrayvariant", kVerbGet},
+    {"imageready", kVerbGet},
+    {"ispulseguiding", kVerbGet},
+    {"lastexposureduration", kVerbGet},
+    {"lastexposurestarttime", kVerbGet},
+    {"maxadu", kVerbGet},
+    {"maxbinx", kVerbGet},
+    {"maxbiny", kVerbGet},
+    {"numx", kVerbGet | kVerbPut},
+    {"numy", kVerbGet | kVerbPut},
+    {"offset", kVerbGet | kVerbPut},
+    {"offsetmax", kVerbGet},
+    {"offsetmin", kVerbGet},
+    {"offsets", kVerbGet},
+    {"percentcompleted", kVerbGet},
+    {"pixelsizex", kVerbGet},
+    {"pixelsizey", kVerbGet},
+    {"pulseguide", kVerbPut},
+    {"readoutmode", kVerbGet | kVerbPut},
+    {"readoutmodes", kVerbGet},
+    {"sensorname", kVerbGet},
+    {"sensortype", kVerbGet},
+    {"setccdtemperature", kVerbGet | kVerbPut},
+    {"startexposure", kVerbPut},
+    {"startx", kVerbGet | kVerbPut},
+    {"starty", kVerbGet | kVerbPut},
+    {"stopexposure", kVerbPut},
+    {"subexposureduration", kVerbGet | kVerbPut},
 };
 
-const std::unordered_set<std::string> kFocuserMethods = {
-    "absolute",
-    "halt",
-    "ismoving",
-    "maxincrement",
-    "maxstep",
-    "move",
-    "position",
-    "stepsize",
-    "tempcomp",
-    "tempcompavailable",
-    "temperature",
+const std::unordered_map<std::string, unsigned> kFilterWheelMethods = {
+    {"focusoffsets", kVerbGet | kVerbPut},
+    {"names", kVerbGet | kVerbPut},
+    {"position", kVerbGet | kVerbPut},
 };
 
-const std::unordered_set<std::string> kRotatorMethods = {
-    "canreverse",
-    "halt",
-    "ismoving",
-    "mechanicalposition",
-    "move",
-    "moveabsolute",
-    "movemechanical",
-    "position",
-    "reverse",
-    "stepsize",
-    "sync",
-    "targetposition",
+const std::unordered_map<std::string, unsigned> kFocuserMethods = {
+    {"absolute", kVerbGet},          {"halt", kVerbPut},        {"ismoving", kVerbGet},
+    {"maxincrement", kVerbGet},      {"maxstep", kVerbGet},     {"move", kVerbPut},
+    {"position", kVerbGet},          {"stepsize", kVerbGet},    {"tempcomp", kVerbGet | kVerbPut},
+    {"tempcompavailable", kVerbGet}, {"temperature", kVerbGet},
 };
 
-const std::unordered_set<std::string> kDomeMethods = {
-    "abortslew",
-    "altitude",
-    "athome",
-    "atpark",
-    "azimuth",
-    "canfindhome",
-    "canpark",
-    "cansetaltitude",
-    "cansetazimuth",
-    "cansetpark",
-    "cansetshutter",
-    "canslave",
-    "canslew",
-    "cansyncazimuth",
-    "closeshutter",
-    "findhome",
-    "openshutter",
-    "park",
-    "setpark",
-    "shutterstatus",
-    "slaved",
-    "slewing",
-    "slewtoaltitude",
-    "slewtoazimuth",
-    "synctoazimuth",
+const std::unordered_map<std::string, unsigned> kRotatorMethods = {
+    {"canreverse", kVerbGet},         {"halt", kVerbPut},     {"ismoving", kVerbGet},
+    {"mechanicalposition", kVerbGet}, {"move", kVerbPut},     {"moveabsolute", kVerbPut},
+    {"movemechanical", kVerbPut},     {"position", kVerbGet}, {"reverse", kVerbGet | kVerbPut},
+    {"stepsize", kVerbGet},           {"sync", kVerbPut},     {"targetposition", kVerbGet | kVerbPut},
 };
 
-const std::unordered_set<std::string> kSwitchMethods = {
-    "cancelasync",
-    "canasync",
-    "canwrite",
-    "getswitch",
-    "getswitchdescription",
-    "getswitchname",
-    "getswitchvalue",
-    "maxswitch",
-    "maxswitchvalue",
-    "minswitchvalue",
-    "setasync",
-    "setasyncvalue",
-    "setswitch",
-    "setswitchname",
-    "setswitchvalue",
-    "statechangecomplete",
-    "switchstep",
+const std::unordered_map<std::string, unsigned> kDomeMethods = {
+    {"abortslew", kVerbPut},     {"altitude", kVerbGet},       {"athome", kVerbGet},
+    {"atpark", kVerbGet},        {"azimuth", kVerbGet},        {"canfindhome", kVerbGet},
+    {"canpark", kVerbGet},       {"cansetaltitude", kVerbGet}, {"cansetazimuth", kVerbGet},
+    {"cansetpark", kVerbGet},    {"cansetshutter", kVerbGet},  {"canslave", kVerbGet},
+    {"canslew", kVerbGet},       {"cansyncazimuth", kVerbGet}, {"closeshutter", kVerbPut},
+    {"findhome", kVerbPut},      {"openshutter", kVerbPut},    {"park", kVerbPut},
+    {"setpark", kVerbPut},       {"shutterstatus", kVerbGet},  {"slaved", kVerbGet | kVerbPut},
+    {"slewing", kVerbGet},       {"slewtoaltitude", kVerbPut}, {"slewtoazimuth", kVerbPut},
+    {"synctoazimuth", kVerbPut},
 };
 
-const std::unordered_set<std::string> kCoverCalibratorMethods = {
-    "brightness",
-    "calibratorchanging",
-    "calibratoroff",
-    "calibratoron",
-    "calibratorstate",
-    "closecover",
-    "covermoving",
-    "coverstate",
-    "haltcover",
-    "maxbrightness",
-    "opencover",
+const std::unordered_map<std::string, unsigned> kSwitchMethods = {
+    {"canasync", kVerbGet},
+    {"cancelasync", kVerbGet | kVerbPut},
+    {"canwrite", kVerbGet},
+    {"getswitch", kVerbGet},
+    {"getswitchdescription", kVerbGet},
+    {"getswitchname", kVerbGet},
+    {"getswitchvalue", kVerbGet},
+    {"maxswitch", kVerbGet},
+    {"maxswitchvalue", kVerbGet},
+    {"minswitchvalue", kVerbGet},
+    {"setasync", kVerbPut},
+    {"setasyncvalue", kVerbPut},
+    {"setswitch", kVerbPut},
+    {"setswitchname", kVerbPut},
+    {"setswitchvalue", kVerbPut},
+    {"statechangecomplete", kVerbGet},
+    {"switchstep", kVerbGet},
 };
 
-const std::unordered_set<std::string> kObservingConditionsMethods = {
-    "averageperiod",
-    "cloudcover",
-    "dewpoint",
-    "humidity",
-    "pressure",
-    "rainrate",
-    "refresh",
-    "seeing",
-    "sensordescription",
-    "skybrightness",
-    "skyquality",
-    "skytemperature",
-    "starfwhm",
-    "temperature",
-    "timesincelastupdate",
-    "winddirection",
-    "windgust",
-    "windspeed",
+const std::unordered_map<std::string, unsigned> kCoverCalibratorMethods = {
+    {"brightness", kVerbGet},    {"calibratorchanging", kVerbGet}, {"calibratoroff", kVerbPut},
+    {"calibratoron", kVerbPut},  {"calibratorstate", kVerbGet},    {"closecover", kVerbPut},
+    {"covermoving", kVerbGet},   {"coverstate", kVerbGet},         {"haltcover", kVerbPut},
+    {"maxbrightness", kVerbGet}, {"opencover", kVerbPut},
 };
 
-const std::unordered_set<std::string> kSafetyMonitorMethods = {
-    "issafe",
+const std::unordered_map<std::string, unsigned> kObservingConditionsMethods = {
+    {"averageperiod", kVerbGet | kVerbPut},
+    {"cloudcover", kVerbGet},
+    {"dewpoint", kVerbGet},
+    {"humidity", kVerbGet},
+    {"pressure", kVerbGet},
+    {"rainrate", kVerbGet},
+    {"refresh", kVerbPut},
+    {"seeing", kVerbGet},
+    {"sensordescription", kVerbGet},
+    {"skybrightness", kVerbGet},
+    {"skyquality", kVerbGet},
+    {"skytemperature", kVerbGet},
+    {"starfwhm", kVerbGet},
+    {"temperature", kVerbGet},
+    {"timesincelastupdate", kVerbGet},
+    {"winddirection", kVerbGet},
+    {"windgust", kVerbGet},
+    {"windspeed", kVerbGet},
+};
+
+const std::unordered_map<std::string, unsigned> kSafetyMonitorMethods = {
+    {"issafe", kVerbGet},
 };
 
 bool is_known_device_type_name(const std::string& type_name) {
@@ -813,33 +778,59 @@ bool is_known_device_type_name(const std::string& type_name) {
     return kDeviceTypes.count(type_name) > 0;
 }
 
-bool is_valid_method(alpacacore::DeviceType type, const std::string& method_name) {
-    if (kCommonMethods.count(method_name) > 0) {
-        return true;
+unsigned lookup_verbs(const std::unordered_map<std::string, unsigned>& table, const std::string& method_name) {
+    auto it = table.find(method_name);
+    return it != table.end() ? it->second : 0;
+}
+
+// Returns the bitmask (kVerbGet | kVerbPut) of HTTP verbs `method_name`
+// accepts for `type`, or 0 if the name is unknown for that device type.
+// #574: this used to be is_valid_method(), a bool with no verb information,
+// so a known name on the wrong verb (or POST/DELETE) fell through to one of
+// the "not yet implemented" fallbacks below instead of being rejected here.
+unsigned allowed_verbs(alpacacore::DeviceType type, const std::string& method_name) {
+    unsigned common = lookup_verbs(kCommonMethods, method_name);
+    if (common != 0) {
+        return common;
     }
     switch (type) {
         case alpacacore::DeviceType::Camera:
-            return kCameraMethods.count(method_name) > 0;
+            return lookup_verbs(kCameraMethods, method_name);
         case alpacacore::DeviceType::Telescope:
-            return kTelescopeMethods.count(method_name) > 0;
+            return lookup_verbs(kTelescopeMethods, method_name);
         case alpacacore::DeviceType::FilterWheel:
-            return kFilterWheelMethods.count(method_name) > 0;
+            return lookup_verbs(kFilterWheelMethods, method_name);
         case alpacacore::DeviceType::Focuser:
-            return kFocuserMethods.count(method_name) > 0;
+            return lookup_verbs(kFocuserMethods, method_name);
         case alpacacore::DeviceType::Rotator:
-            return kRotatorMethods.count(method_name) > 0;
+            return lookup_verbs(kRotatorMethods, method_name);
         case alpacacore::DeviceType::Dome:
-            return kDomeMethods.count(method_name) > 0;
+            return lookup_verbs(kDomeMethods, method_name);
         case alpacacore::DeviceType::Switch:
-            return kSwitchMethods.count(method_name) > 0;
+            return lookup_verbs(kSwitchMethods, method_name);
         case alpacacore::DeviceType::CoverCalibrator:
-            return kCoverCalibratorMethods.count(method_name) > 0;
+            return lookup_verbs(kCoverCalibratorMethods, method_name);
         case alpacacore::DeviceType::ObservingConditions:
-            return kObservingConditionsMethods.count(method_name) > 0;
+            return lookup_verbs(kObservingConditionsMethods, method_name);
         case alpacacore::DeviceType::SafetyMonitor:
-            return kSafetyMonitorMethods.count(method_name) > 0;
+            return lookup_verbs(kSafetyMonitorMethods, method_name);
         default:
-            return false;
+            return 0;
+    }
+}
+
+const char* http_method_name(alpacahttp::HttpMethod method) {
+    switch (method) {
+        case alpacahttp::HttpMethod::GET:
+            return "GET";
+        case alpacahttp::HttpMethod::POST:
+            return "POST";
+        case alpacahttp::HttpMethod::PUT:
+            return "PUT";
+        case alpacahttp::HttpMethod::DELETE_:
+            return "DELETE";
+        default:
+            return "UNKNOWN";
     }
 }
 
@@ -1618,7 +1609,26 @@ RouteMatch Router::parse_route(const std::string& path) {
     std::smatch matches;
     if (std::regex_match(path, matches, device_regex)) {
         match.device_type = matches[1].str();
-        match.device_number = static_cast<std::uint32_t>(std::stoul(matches[2].str()));
+        // #574: the yaml defines device_number as uint32 (0..4294967295).
+        // std::stoul is a 64-bit parse on LP64 (arm64 Linux, this build), so
+        // a digit string like "4294967296" (2^32) used to parse cleanly and
+        // then wrap to 0 on the cast below, silently addressing device 0
+        // instead of being rejected. Parse into an unsigned long long,
+        // require the whole digit string to be consumed, and range-check
+        // against uint32_t's max before narrowing. A digit string that
+        // overflows even a 64-bit parse (stoull throws out_of_range) is
+        // caught the same way as the range-check failure.
+        try {
+            std::size_t pos = 0;
+            unsigned long long device_number = std::stoull(matches[2].str(), &pos);
+            if (pos != matches[2].str().size() || device_number > std::numeric_limits<std::uint32_t>::max()) {
+                match.device_number_invalid = true;
+            } else {
+                match.device_number = static_cast<std::uint32_t>(device_number);
+            }
+        } catch (const std::exception&) {
+            match.device_number_invalid = true;
+        }
         match.method_name = matches[3].str();
         return match;
     }
@@ -2115,11 +2125,27 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         return response;
     }
 
+    // #574: a device-number digit string that doesn't fit in a uint32_t
+    // (overflowed to a wrapped value, or overflowed even a 64-bit parse)
+    // used to reach the device lookup as the wrapped/default number, or
+    // throw out_of_range and come back as an internal-error 200. Reject it
+    // the same way an unknown device type is rejected, above.
+    if (match.device_number_invalid) {
+        response.set_status(400, "Bad Request");
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                                "Invalid device number for device type: " + match.device_type);
+        response.set_body(alpaca_response);
+        return response;
+    }
+
     try {
         // Convert device type string to enum
         alpacacore::DeviceType device_type = string_to_device_type(match.device_type);
 
-        if (!is_lowercase_ascii(match.method_name) || !is_valid_method(device_type, match.method_name)) {
+        const unsigned method_verbs =
+            is_lowercase_ascii(match.method_name) ? allowed_verbs(device_type, match.method_name) : 0;
+        if (method_verbs == 0) {
             response.set_status(400, "Bad Request");
             AlpacaResponse alpaca_response = make_error_response(
                 client_tx_id, server_tx_id,
@@ -2129,7 +2155,32 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
             response.set_body(alpaca_response);
             return response;
         }
-        
+
+        // #574: reject a request whose verb the method does not accept (a PUT
+        // to a GET property, a GET to a PUT command, any POST or DELETE)
+        // before it reaches the ASCOM operation
+        // (.claude/skills/ascom-alpaca-protocol/references/http-api-contract.md)
+        // instead of letting it fall through to a "not yet implemented"
+        // dispatcher fallback that answered HTTP 200 with 0x400. A foreign
+        // Origin is refused with 403 first, so UTCDate's #401 guard (which
+        // runs for every verb) keeps its 403 for a forged POST; the Site*
+        // guards (#444) sit in their PUT branch only, so a forged POST there
+        // now gets 403 too, where it used to reach the 200/0x400 fallback.
+        const unsigned request_verb = request.method() == HttpMethod::GET   ? kVerbGet
+                                      : request.method() == HttpMethod::PUT ? kVerbPut
+                                                                            : 0U;
+        if ((method_verbs & request_verb) == 0) {
+            if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device method")) {
+                return *rejected;
+            }
+            response.set_status(400, "Bad Request");
+            AlpacaResponse alpaca_response = make_error_response(
+                client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                "Method '" + match.method_name + "' does not accept " + http_method_name(request.method()));
+            response.set_body(alpaca_response);
+            return response;
+        }
+
         // Get device from registry
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto device = registry.get_device(device_type, static_cast<int>(match.device_number));
