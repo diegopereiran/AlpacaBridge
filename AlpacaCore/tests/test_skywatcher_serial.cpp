@@ -875,4 +875,130 @@ TEST_CASE("SkyWatcher serial - a fast MoveAxis puts the fake's axis in speed mod
     driver->set_connected(false);
 }
 
+// ── open-astro#559: a lost ":K" on serial is retransmitted, not waited out ──
+//
+// The serial transport has no retransmit: exchange_serial() waits the whole
+// reply timeout (1000 ms by default) and throws, and only the driver's outer
+// stop loop resends, 100 ms later, after a 200 ms settle. A ":K" frame that
+// the board never decoded (a corrupted byte on an EQDIR link) therefore
+// leaves the axis running at guide rate for ~1.3 s past the pulse end -- the
+// +9.4 arcsec overshoot on a 37.6 arcsec pulse the issue measured. The UDP
+// transport already retransmits (kUdpRetries); the serial one must too, and
+// a stop -- idempotent by nature -- must not wait the full data-command
+// timeout before it does.
+
+namespace {
+
+// Production-shaped link: the 1000 ms default reply timeout the issue names,
+// on the pty-backed board. Reuses the SerialLink fixture's shape rather than
+// its 300 ms default so the bound below is the real one.
+constexpr int kIssue559ReplyTimeoutMs = 1000;
+
+}  // namespace
+
+TEST_CASE("SkyWatcher serial - a lost ':K' is retransmitted and the stop lands well inside the reply timeout (#559)",
+          "[skywatcher][serial][pulseguide]") {
+    SerialLink link(kIssue559ReplyTimeoutMs);
+    link.board.set_axis_running(sw::kAxisRa, true);
+    link.board.drop_next_frames('K');  // the board never sees the first ":K1"
+
+    const auto t0 = std::chrono::steady_clock::now();
+    // Before the fix: throws "Timeout waiting for motor controller reply"
+    // after the full 1000 ms with no second ":K1" on the wire.
+    REQUIRE_NOTHROW(link.proto.stop_motion(sw::kAxisRa));
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+
+    CHECK(link.board.count_frames('K') == 2);  // lost once, resent once
+    CHECK_FALSE(link.board.axis_running(sw::kAxisRa));
+    // The retransmit must fire on a stop-sized wait, not the data-command
+    // timeout: one short attempt + the 200 ms dirty-link settle + the resend
+    // is ~450 ms. 700 ms leaves scheduling room and still rules out a stop
+    // that only lands because the full 1000 ms elapsed.
+    CHECK(elapsed_ms < 700);
+}
+
+TEST_CASE("SkyWatcher serial - a raised response timeout also governs ':K' on a slow link (#559)",
+          "[skywatcher][serial]") {
+    // A user who raises responseTimeoutMs above the 1000 ms default is
+    // declaring a link that answers slowly. The 250 ms stop cap must not
+    // override that: a ":K" whose reply takes 400 ms on such a link would
+    // otherwise time out, and on a link that slow every attempt would, ending
+    // in "STOP FAILED" for a board that did stop.
+    SerialLink link(2000);
+    link.board.set_axis_running(sw::kAxisRa, true);
+    link.board.delay_next_reply(400, 'K');
+
+    REQUIRE_NOTHROW(link.proto.stop_motion(sw::kAxisRa));
+    CHECK(link.board.count_frames('K') == 1);  // answered inside the user's timeout: no resend
+    CHECK_FALSE(link.board.axis_running(sw::kAxisRa));
+}
+
+TEST_CASE("SkyWatcher serial - a state-latching command is NOT retransmitted after a lost frame (#559 guard)",
+          "[skywatcher][serial]") {
+    // The retransmit is for idempotent frames only. ":I" latches a step
+    // period the board may or may not have applied; blindly resending it
+    // (or ":E", ":S", ":G", ":J", ":F", ":W") after silence could double-apply
+    // a state change behind a late reply. Those keep the single attempt and
+    // the throw. GREEN before the fix as well: it pins the boundary the fix
+    // must not cross, it does not reproduce the issue.
+    SerialLink link(300);
+    link.board.drop_next_frames('I');
+    REQUIRE_THROWS_AS(link.proto.set_step_period(sw::kAxisRa, 0x001234, /*with_readback=*/false),
+                      alpacacore::AlpacaException);
+    CHECK(link.board.count_frames('I') == 1);
+}
+
+TEST_CASE("SkyWatcher serial - a Dec pulse whose ':K' is lost stops before the full reply timeout would expire (#559)",
+          "[skywatcher][serial][pulseguide]") {
+    // Driver-level shape of the same defect: the pulse task's stop goes out
+    // through proto.stop_motion(); when the board never decodes it, the axis
+    // stays running until the wrapper gives up (1000 ms), the outer stop
+    // loop waits 100 ms, settles 200 ms and resends. Measured from the pulse
+    // start, the axis then stops at ~duration + 1300 ms. With the serial
+    // retransmit it stops at ~duration + 450 ms. The bound is the reply
+    // timeout itself: a stop that only lands AFTER the full timeout is the
+    // overshoot the issue reports.
+    FakeSkyWatcherSerialBoard board;
+    sw::ConnectionInfo info = serial_info(board.slave_path());
+    info.response_timeout_ms = kIssue559ReplyTimeoutMs;
+    auto driver = sw::create_skywatcher_telescope(0, info, -37.0, 175.0, 50.0);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_FALSE(board.axis_running(sw::kAxisDec));
+
+    constexpr int kPulseMs = 500;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->pulse_guide(0, kPulseMs);  // North: Dec axis starts, ":K2" at the end
+    REQUIRE(driver->get_is_pulse_guiding());
+    // The axis must be running before we time its stop, or a pulse that
+    // never started would pass trivially. Dispatch sends its own ":K2"
+    // before ":J2", so the drop is armed only once the axis is running:
+    // the next ":K2" on the wire is then the pulse-ending one.
+    {
+        const auto start_deadline = t0 + std::chrono::milliseconds(kPulseMs);
+        while (!board.axis_running(sw::kAxisDec) && std::chrono::steady_clock::now() < start_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        REQUIRE(board.axis_running(sw::kAxisDec));
+    }
+    const int stops_before = board.count_frames('K');
+    board.drop_next_frames('K');  // the pulse-ending ":K2" is lost on the wire
+    // Poll the BOARD, not IsPulseGuiding: the driver's flag follows the
+    // deadline, not the axis (a separate defect noted on the issue).
+    const auto give_up = t0 + std::chrono::seconds(5);
+    while (board.axis_running(sw::kAxisDec) && std::chrono::steady_clock::now() < give_up) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const auto stopped_after_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+
+    REQUIRE_FALSE(board.axis_running(sw::kAxisDec));
+    CHECK(board.count_frames('K') - stops_before >= 2);  // the lost stop was resent
+    CHECK(stopped_after_ms < kPulseMs + kIssue559ReplyTimeoutMs);
+
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
