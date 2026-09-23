@@ -10,8 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include "catch2_compat.h"
-
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/dome_driver.h>
@@ -26,6 +24,8 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+
+#include "catch2_compat.h"
 
 // Issue diegopereiran/AlpacaBridge#49: a disconnected driver's DeviceState
 // must be the empty list (no TimeStamp) per the ASCOM read-all FAQ: "If no
@@ -230,8 +230,7 @@ public:
     void move(int) override { throw_not_connected(); }
 };
 
-class DisconnectedObservingConditions final
-    : public DisconnectedDriverBase<alpacacore::ObservingConditionsDriver> {
+class DisconnectedObservingConditions final : public DisconnectedDriverBase<alpacacore::ObservingConditionsDriver> {
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::ObservingConditions; }
 
