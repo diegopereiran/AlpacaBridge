@@ -316,7 +316,17 @@ public:
     void park() override {}
     void pulse_guide(int, int) override {}
     void set_park() override {}
-    void slew_to_coordinates(double, double) override {}
+    // open-astro#547 review finding: a synchronous SlewToCoordinates can
+    // block the HTTP worker for as long as the goto takes. slew_sleep_ms
+    // lets a test hold this call in flight past the watchdog interval, to
+    // prove the client's own request never gets aborted out from under it.
+    std::atomic<int> slew_sleep_ms{0};
+    void slew_to_coordinates(double, double) override {
+        const int ms = slew_sleep_ms.load();
+        if (ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        }
+    }
     void slew_to_coordinates_async(double, double) override {}
     void slew_to_target() override {}
     void slew_to_target_async() override {}
@@ -1119,6 +1129,58 @@ int main() {
         watchdog_server.stop();
         EXPECT(!watchdog_server.is_running());
         alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Telescope, 9547);
+    }
+
+    // --- Watchdog must not trip on the client's OWN in-flight synchronous
+    // request (open-astro#547 review finding) -------------------------------
+    // A synchronous SlewToCoordinates blocks the HTTP worker for the length
+    // of the goto. note_client_activity() only stamps once, at intake, so
+    // without begin_client_request()/end_client_request() bracketing the
+    // dispatch, the timer thread finds the interval elapsed while the
+    // client is still on the wire waiting on its own response -- and aborts
+    // the very slew that client just issued.
+    {
+        alpacahttp::Config watchdog_config;
+        watchdog_config.set_http_port(0);
+        watchdog_config.set_discovery_enabled(false);
+        watchdog_config.set_server_name("TestServerMotionWatchdogInFlight");
+        watchdog_config.set_motion_watchdog_seconds(1);
+
+        auto stub = std::make_shared<WatchdogStubTelescope>(9548);
+        stub->slew_sleep_ms.store(3000);  // 3 s in-flight, 3x the 1 s interval
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(stub));
+
+        alpacahttp::Server watchdog_server(watchdog_config);
+        watchdog_server.start_async();
+        const std::uint16_t port = watchdog_server.is_running() ? wait_for_bound_port(watchdog_server, 2000) : 0;
+        EXPECT(port != 0);
+        if (port != 0) {
+            std::thread client([&] {
+                int fd = connect_local(port);
+                if (fd < 0) {
+                    return;
+                }
+                std::string carry;
+                send_all(fd,
+                         "PUT /api/v1/telescope/9548/slewtocoordinates?RightAscension=5&Declination=10"
+                         " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+                const std::string resp = read_one_response(fd, carry);
+                EXPECT(resp.rfind("HTTP/1.1 200 ", 0) == 0);
+                ::close(fd);
+            });
+
+            // The request is now blocking inside slew_to_coordinates() for
+            // 3 s. Give the 1 s-interval timer thread two full ticks to find
+            // it "silent" if the in-flight guard is missing.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+            EXPECT(stub->aborts.load() == 0);
+
+            client.join();
+            EXPECT(stub->aborts.load() == 0);
+        }
+        watchdog_server.stop();
+        EXPECT(!watchdog_server.is_running());
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Telescope, 9548);
     }
 
     // stop() must not wait out an ACTIVE keep-alive client. Before the

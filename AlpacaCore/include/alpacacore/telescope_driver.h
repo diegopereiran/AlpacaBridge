@@ -134,6 +134,26 @@ public:
     }
 
     /**
+     * @brief Mark that a request addressed to this device is being handled
+     * right now, for as long as it takes (issue #547 review finding).
+     *
+     * note_client_activity() only stamps once, at intake, but a synchronous
+     * call the router dispatches after it -- SlewToCoordinates chief among
+     * them -- can block the HTTP worker for the length of a whole goto,
+     * well past the watchdog interval, while the client is actively
+     * waiting on its own response. Pair with end_client_request() around
+     * the dispatch (RAII at the call site), so stop_motion_if_client_silent()
+     * can tell "nobody has addressed this device" apart from "a request to
+     * this device is still in flight".
+     */
+    void begin_client_request() noexcept { in_flight_requests_.fetch_add(1, std::memory_order_relaxed); }
+
+    /**
+     * @brief Pairs with begin_client_request(); see its comment.
+     */
+    void end_client_request() noexcept { in_flight_requests_.fetch_sub(1, std::memory_order_relaxed); }
+
+    /**
      * @brief The last time recorded by note_client_activity(), if any.
      *
      * Test-only observability seam; production code drives the watchdog
@@ -160,9 +180,13 @@ public:
      * Called periodically (roughly once a second) by the server's existing
      * low-frequency timer thread -- see open-astro#314's rtc_probe_thread_,
      * which this rides rather than spawning a thread per device. Checks
-     * cheaply (one atomic load) on every call and only does mount I/O
-     * (get_slewing(), and on expiry abort_slew()/move_axis()) once per
-     * silence episode, guarded by silence_check_pending_.
+     * cheaply (a couple of atomic loads) on every call and only does mount
+     * I/O (get_slewing(), and on expiry abort_slew()/move_axis()) once per
+     * silence episode, guarded by silence_check_pending_. A request for
+     * this device still in flight (begin_client_request()/
+     * end_client_request()) counts as activity for its whole duration, not
+     * just at intake, so a slow synchronous call is never treated as
+     * silence while the client is actively waiting on its own response.
      *
      * @param now Caller-supplied clock reading (issue #105's injectable-
      *            clock precedent), so tests drive this with synthetic time
@@ -170,7 +194,9 @@ public:
      * @param interval The configured silence limit. <= 0 disables the
      *            watchdog entirely (no check, no atomic even touched).
      * @return true if this call found the mount slewing with no client
-     *         activity for at least @p interval and (attempted to) stop it.
+     *         activity for at least @p interval and stopped it. false
+     *         covers every other outcome, including a failed probe that
+     *         will retry on the next tick.
      */
     bool stop_motion_if_client_silent(std::chrono::steady_clock::time_point now,
                                        std::chrono::milliseconds interval) noexcept {
@@ -180,6 +206,20 @@ public:
         if (!silence_check_pending_.load(std::memory_order_relaxed)) {
             return false;
         }
+        if (in_flight_requests_.load(std::memory_order_relaxed) > 0) {
+            // A request for this device (e.g. a synchronous
+            // SlewToCoordinates) is being handled right now -- that IS
+            // client activity for as long as it runs, however long the call
+            // takes. note_client_activity() only stamped once, at intake,
+            // so without this the interval can elapse while the client is
+            // actively on the wire waiting on its own response (review
+            // finding for #547: a long synchronous goto was getting
+            // aborted out from under the very client that issued it).
+            // Refresh the timestamp and leave the pending flag set so the
+            // next tick re-checks once the request completes.
+            last_client_activity_.store(now.time_since_epoch().count(), std::memory_order_relaxed);
+            return false;
+        }
         const auto last = std::chrono::steady_clock::time_point(
             std::chrono::steady_clock::duration(last_client_activity_.load(std::memory_order_relaxed)));
         if (now - last < interval) {
@@ -187,44 +227,80 @@ public:
         }
         // One probe per silence episode: clear the flag before doing any
         // mount I/O, so a burst of ticks while the check itself is running
-        // does not re-enter, and so a client that resumes talking between
-        // this line and note_client_activity() during the same tick is not
-        // starved of it own re-arm.
+        // does not re-enter.
         silence_check_pending_.store(false, std::memory_order_relaxed);
+        // A client that resumed talking (or a request that went in-flight)
+        // between the elapsed check above and the clear just now would have
+        // its re-arm overwritten by the store above -- re-read both signals
+        // and put the flag back if either shows fresher activity than what
+        // we based the elapsed-time decision on.
+        if (in_flight_requests_.load(std::memory_order_relaxed) > 0 ||
+            now - std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(
+                      last_client_activity_.load(std::memory_order_relaxed))) < interval) {
+            silence_check_pending_.store(true, std::memory_order_relaxed);
+            return false;
+        }
+        bool slewing = false;
         try {
-            if (!get_connected() || !get_slewing()) {
-                return false;
-            }
-            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last);
-            const auto limit_s = std::chrono::duration_cast<std::chrono::seconds>(interval);
-            ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog: no request reached " + get_name() +
-                                               " #" + std::to_string(get_device_number()) + " for " +
-                                               std::to_string(elapsed.count()) + " s (limit " +
-                                               std::to_string(limit_s.count()) +
-                                               " s) while it was slewing; motion stopped, Connected left true.");
-            abort_slew();
-            for (int axis = 0; axis < 2; ++axis) {
-                if (!get_can_move_axis(axis)) {
-                    continue;
-                }
-                try {
-                    move_axis(axis, 0.0);
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                    // abort_slew() above is the unconditional stop (issue
-                    // #521 review: a MoveAxis(axis, 0) alone can be a
-                    // silent no-op on some vendors); this per-axis stop is
-                    // belt-and-braces on top of it, so a throwing driver
-                    // here does not change the outcome -- swallow it rather
-                    // than let it escape from a background timer thread and
-                    // terminate the process (AGENTS.md concurrency
-                    // checklist: an async tail that can throw must be
-                    // caught inline).
-                }
-            }
+            slewing = get_connected() && get_slewing();
         } catch (const std::exception& ex) {
-            ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog for " + get_name() + " #" +
+            // The probe itself failed (e.g. a transient link fault -- see
+            // open-astro#521's relink window) rather than finding anything
+            // to stop. Re-arm so the NEXT tick retries this device instead
+            // of leaving it unwatched until another client request happens
+            // to land (which, mid-runaway, may never come).
+            silence_check_pending_.store(true, std::memory_order_relaxed);
+            ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
                                                std::to_string(get_device_number()) +
-                                               " failed while stopping motion: " + std::string(ex.what()));
+                                               " failed, will retry: " + std::string(ex.what()));
+            return false;
+        } catch (...) {
+            silence_check_pending_.store(true, std::memory_order_relaxed);
+            ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
+                                               std::to_string(get_device_number()) +
+                                               " failed with a non-standard exception, will retry.");
+            return false;
+        }
+        if (!slewing) {
+            return false;
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last);
+        const auto limit_s = std::chrono::duration_cast<std::chrono::seconds>(interval);
+        ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog: no request reached " + get_name() + " #" +
+                                           std::to_string(get_device_number()) + " for " +
+                                           std::to_string(elapsed.count()) + " s (limit " +
+                                           std::to_string(limit_s.count()) +
+                                           " s) while it was slewing; stopping motion, Connected left true.");
+        try {
+            abort_slew();
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // The per-axis stop below is the actual backstop (issue #521
+            // review: a MoveAxis(axis, 0) alone can be a silent no-op on
+            // some vendors, which is why BOTH run) -- swallow so a throwing
+            // abort_slew() does not skip it.
+        } catch (...) {
+        }
+        for (int axis = 0; axis < 2; ++axis) {
+            bool can_move = false;
+            try {
+                can_move = get_can_move_axis(axis);
+            } catch (const std::exception&) {
+                continue;
+            } catch (...) {
+                continue;
+            }
+            if (!can_move) {
+                continue;
+            }
+            try {
+                move_axis(axis, 0.0);
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Swallow rather than let it escape from a background timer
+                // thread and terminate the process (AGENTS.md concurrency
+                // checklist: an async tail that can throw must be caught
+                // inline).
+            } catch (...) {
+            }
         }
         return true;
     }
@@ -684,6 +760,13 @@ private:
     // is what limits a live silence episode to one get_slewing()/
     // abort_slew() probe rather than one per timer tick.
     std::atomic<bool> silence_check_pending_{false};
+    // Count of requests for THIS device currently inside dispatch (issue
+    // #547 review finding). Incremented/decremented by the router's
+    // begin_client_request()/end_client_request() RAII guard around
+    // dispatch_device_method(), so a synchronous call that blocks past the
+    // watchdog interval (e.g. SlewToCoordinates) is never mistaken for
+    // silence while the client is actively waiting on it.
+    std::atomic<int> in_flight_requests_{0};
 };
 
 } // namespace alpacacore

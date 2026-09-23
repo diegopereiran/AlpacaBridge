@@ -112,13 +112,13 @@ This keeps Alpaca timestamps correct even with no NTP reachable. The hardware RT
 
 ### The mount stopped by itself mid-slew and the log says "Client-silence motion watchdog"
 
-**Symptom**: a goto or a `MoveAxis` command stops on its own, with an `ERROR`-level log line like `Client-silence motion watchdog: no request reached <name> #<n> for 34 s (limit 30 s) while it was slewing; motion stopped, Connected left true.` The device stays `Connected` — the client can still see and reconnect to it.
+**Symptom**: a goto or a `MoveAxis` command stops on its own, with an `ERROR`-level log line like `Client-silence motion watchdog: no request reached <name> #<n> for 34 s (limit 30 s) while it was slewing; stopping motion, Connected left true.` The device stays `Connected` — the client can still see and reconnect to it.
 
 **What happened**: no Alpaca request reached that telescope for longer than the configured limit while it was actively slewing (a goto, a park, a find-home, or a `MoveAxis` at a nonzero rate). AlpacaBridge treats that as a client that crashed, a host that went to sleep, or a network that dropped — with nobody left watching a moving axis, it stops the axes itself (`AbortSlew`, then `MoveAxis(axis, 0)` on each) rather than let the mount keep driving with no supervision. This is a safety feature (issue #547), not a bug — it exists specifically so a live mount does not keep slewing unattended after the thing that commanded the slew has gone away.
 
 **It will never fire on a mount that is only tracking or guiding.** The watchdog arms only while `Slewing` is true (a goto/park/home/MoveAxis in progress); ordinary sidereal tracking and `PulseGuide` never set `Slewing`, so a quietly tracking mount with a disconnected client is left alone.
 
-**Any request to the device resets the timer**, including a client's own routine `Slewing` polls — normal NINA/PHD2/ConformU polling (every few seconds) never comes close to the limit. A genuine trip means requests really did stop arriving for that long.
+**Any request to the device resets the timer**, including a client's own routine `Slewing` polls — normal NINA/PHD2/ConformU polling (every few seconds) never comes close to the limit. A synchronous request (a plain, non-async `SlewToCoordinates`) that itself blocks past the limit is also covered: it counts as activity for its whole duration, not just when it started, so a long deliberate goto does not get aborted out from under the very client that is waiting on it. A genuine trip means requests really did stop arriving for that long — which also means a request from any OTHER client still addressing the same telescope (a planetarium app polling position, say) keeps the watchdog disarmed even after the client that started the motion has gone away.
 
 **To change the limit or turn it off**: set `server.motion_watchdog_seconds` in your config (default 30; 0 disables it) or the `ALPACAHTTP_MOTION_WATCHDOG_SECONDS` environment variable. A slower-polling client may want a longer value; disabling it removes this backstop entirely, so only do that if you have another way to guarantee a hung client's slew gets stopped.
 

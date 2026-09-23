@@ -31,6 +31,7 @@ set(TEST_SOURCES
     test_serial_by_id_scan.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
+    test_telescope_driver_watchdog.cpp
     test_units.cpp
     test_version_format.cpp
 )

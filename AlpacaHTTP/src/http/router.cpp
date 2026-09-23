@@ -2184,9 +2184,35 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         // client-silence motion watchdog. Any request addressed to this
         // telescope -- including the client's own Slewing polls -- counts
         // as activity, with no per-endpoint list to keep in sync.
-        if (auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(device.get())) {
+        //
+        // A synchronous call (SlewToCoordinates chief among them) can block
+        // inside dispatch_device_method() below for the length of a whole
+        // goto, well past the watchdog interval, while THIS client is
+        // actively waiting on its own response -- note_client_activity()
+        // only stamps once, at intake, so on its own it does not cover that
+        // (review finding: the watchdog could abort a client's own in-flight
+        // slew). in_flight_guard keeps this request counted as activity for
+        // its whole duration via RAII, so it still decrements on an
+        // exception out of dispatch.
+        auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(device.get());
+        if (telescope != nullptr) {
             telescope->note_client_activity(std::chrono::steady_clock::now());
         }
+        struct InFlightGuard {
+            alpacacore::TelescopeDriver* driver;
+            explicit InFlightGuard(alpacacore::TelescopeDriver* d) : driver(d) {
+                if (driver != nullptr) {
+                    driver->begin_client_request();
+                }
+            }
+            ~InFlightGuard() {
+                if (driver != nullptr) {
+                    driver->end_client_request();
+                }
+            }
+            InFlightGuard(const InFlightGuard&) = delete;
+            InFlightGuard& operator=(const InFlightGuard&) = delete;
+        } in_flight_guard(telescope);
 
         // Dispatch the method call
         return dispatch_device_method(device, match.method_name, request, client_tx_id, server_tx_id);

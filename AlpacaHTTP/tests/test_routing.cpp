@@ -677,8 +677,10 @@ int main() {
         EXPECT(*stub->last_client_activity() == first_stamp);
 
         // The client's own Slewing poll counts too (no per-endpoint list).
+        // Strict '>' (not '>=') -- steady_clock is monotonic, so '>=' would
+        // pass even if this request never re-stamped anything.
         route_request(router, "GET", "/api/v1/telescope/9850/slewing");
-        EXPECT(*stub->last_client_activity() >= first_stamp);
+        EXPECT(*stub->last_client_activity() > first_stamp);
 
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9850);
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9851);
