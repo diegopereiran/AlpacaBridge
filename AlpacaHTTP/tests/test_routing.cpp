@@ -721,6 +721,11 @@ int main() {
             EXPECT(send("POST", "utcdate", "").status_code() == 400);
             EXPECT(send("POST", "utcdate", "http://evil.example").status_code() == 403);
             EXPECT(send("DELETE", "altitude", "http://evil.example").status_code() == 403);
+            // The Site* setters' #444 guard sits in their PUT branch only, so
+            // a forged POST reaches the router's verb check; it must be
+            // refused with 403 there, not answered 400 (or 200/0x400 before #574).
+            EXPECT(send("POST", "sitelatitude", "http://evil.example").status_code() == 403);
+            EXPECT(send("POST", "sitelatitude", "").status_code() == 400);
         }
 
         // 3. Device numbers that don't fit in a uint32_t are rejected with
