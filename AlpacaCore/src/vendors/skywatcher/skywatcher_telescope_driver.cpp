@@ -743,6 +743,9 @@ public:
     GuideRate get_guide_rate() const override { return guide_rate_; }
 
     void set_guide_rate(const GuideRate& rate) override {
+        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double ra_fraction = rate.ra / kSiderealDegPerSec;
@@ -874,7 +877,7 @@ public:
     double get_site_elevation() const override { return site_elevation_m_; }
 
     void set_site_elevation(double elevation) override {
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters", AlpacaError::InvalidValue);
         }
         site_elevation_m_ = elevation;
@@ -886,7 +889,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         // A latitude write that crosses the equator reverses the RA drive and
@@ -976,7 +979,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
