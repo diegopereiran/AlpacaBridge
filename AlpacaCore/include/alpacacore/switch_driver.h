@@ -68,7 +68,9 @@ public:
                 // Omit this id's members per the DeviceState contract.
             }
         }
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (get_connected()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 

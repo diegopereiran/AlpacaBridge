@@ -80,7 +80,9 @@ public:
         add("CoverState", [this] { return static_cast<std::int32_t>(get_cover_state()); });
         add("CalibratorChanging", [this] { return get_calibrator_changing(); });
         add("CoverMoving", [this] { return get_cover_moving(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (get_connected()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 

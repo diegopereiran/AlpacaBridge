@@ -86,7 +86,9 @@ public:
         add("SiderealTime", [this] { return get_sidereal_time(); });
         add("Slewing", [this] { return get_slewing(); });
         add("Tracking", [this] { return get_tracking(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (get_connected()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 

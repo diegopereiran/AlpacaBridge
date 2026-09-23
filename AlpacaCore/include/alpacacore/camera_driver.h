@@ -94,7 +94,9 @@ public:
         // reports the property "not included in the DeviceState response".
         add("PercentCompleted", [this] { return static_cast<std::int32_t>(get_percent_completed()); });
 
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (get_connected()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 
