@@ -187,8 +187,7 @@ TEST_CASE("TelescopeDriver watchdog - a throwing abort_slew still runs the per-a
 // permanently disarm the watchdog -- otherwise a transient link fault (the
 // exact case open-astro#521 exists for) silences this device until another
 // client request happens to land, which during a runaway may never come.
-TEST_CASE("TelescopeDriver watchdog - a throwing probe re-arms for the next tick",
-          "[telescope][watchdog][unit]") {
+TEST_CASE("TelescopeDriver watchdog - a throwing probe re-arms for the next tick", "[telescope][watchdog][unit]") {
     WatchdogUnitStubDriver driver;
     driver.slewing.store(true);
     driver.get_slewing_throw_countdown.store(1);  // get_slewing() throws exactly once

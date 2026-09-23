@@ -1420,8 +1420,8 @@ void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
     // router, and this loop must not hold any registry lock while it does
     // mount I/O (get_slewing()/abort_slew(), up to the transport timeout) --
     // see the header comment's lock-order note.
-    auto devices = alpacacore::management::DeviceRegistry::instance().get_devices_by_type(
-        alpacacore::DeviceType::Telescope);
+    auto devices =
+        alpacacore::management::DeviceRegistry::instance().get_devices_by_type(alpacacore::DeviceType::Telescope);
     for (const auto& device : devices) {
         auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(device.get());
         if (telescope == nullptr) {
@@ -1436,7 +1436,7 @@ void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
             // its loop (AGENTS.md concurrency checklist: an async tail that
             // can throw must be caught inline, or it terminates the server).
             util::log_error("Motion watchdog check failed for telescope #" +
-                             std::to_string(telescope->get_device_number()) + ": " + ex.what());
+                            std::to_string(telescope->get_device_number()) + ": " + ex.what());
         }
     }
 }

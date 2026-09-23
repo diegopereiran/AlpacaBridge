@@ -169,8 +169,8 @@ public:
             // practice. Treat it as "never stamped".
             return std::nullopt;
         }
-        return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(
-            last_client_activity_.load(std::memory_order_relaxed)));
+        return std::chrono::steady_clock::time_point(
+            std::chrono::steady_clock::duration(last_client_activity_.load(std::memory_order_relaxed)));
     }
 
     /**
@@ -199,7 +199,7 @@ public:
      *         will retry on the next tick.
      */
     bool stop_motion_if_client_silent(std::chrono::steady_clock::time_point now,
-                                       std::chrono::milliseconds interval) noexcept {
+                                      std::chrono::milliseconds interval) noexcept {
         if (interval <= std::chrono::milliseconds::zero()) {
             return false;
         }
@@ -235,8 +235,9 @@ public:
         // and put the flag back if either shows fresher activity than what
         // we based the elapsed-time decision on.
         if (in_flight_requests_.load(std::memory_order_relaxed) > 0 ||
-            now - std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(
-                      last_client_activity_.load(std::memory_order_relaxed))) < interval) {
+            now - std::chrono::steady_clock::time_point(
+                      std::chrono::steady_clock::duration(last_client_activity_.load(std::memory_order_relaxed))) <
+                interval) {
             silence_check_pending_.store(true, std::memory_order_relaxed);
             return false;
         }
@@ -251,14 +252,14 @@ public:
             // to land (which, mid-runaway, may never come).
             silence_check_pending_.store(true, std::memory_order_relaxed);
             ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
-                                               std::to_string(get_device_number()) +
-                                               " failed, will retry: " + std::string(ex.what()));
+                                              std::to_string(get_device_number()) +
+                                              " failed, will retry: " + std::string(ex.what()));
             return false;
         } catch (...) {
             silence_check_pending_.store(true, std::memory_order_relaxed);
             ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
-                                               std::to_string(get_device_number()) +
-                                               " failed with a non-standard exception, will retry.");
+                                              std::to_string(get_device_number()) +
+                                              " failed with a non-standard exception, will retry.");
             return false;
         }
         if (!slewing) {
@@ -267,10 +268,10 @@ public:
         const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last);
         const auto limit_s = std::chrono::duration_cast<std::chrono::seconds>(interval);
         ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog: no request reached " + get_name() + " #" +
-                                           std::to_string(get_device_number()) + " for " +
-                                           std::to_string(elapsed.count()) + " s (limit " +
-                                           std::to_string(limit_s.count()) +
-                                           " s) while it was slewing; stopping motion, Connected left true.");
+                                          std::to_string(get_device_number()) + " for " +
+                                          std::to_string(elapsed.count()) + " s (limit " +
+                                          std::to_string(limit_s.count()) +
+                                          " s) while it was slewing; stopping motion, Connected left true.");
         try {
             abort_slew();
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)

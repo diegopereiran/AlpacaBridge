@@ -467,8 +467,7 @@ TEST_CASE("SkyWatcher async - client-silence watchdog never trips a tracking-onl
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - client-silence watchdog never trips on a pulse guide",
-          "[skywatcher][async][watchdog]") {
+TEST_CASE("SkyWatcher async - client-silence watchdog never trips on a pulse guide", "[skywatcher][async][watchdog]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
