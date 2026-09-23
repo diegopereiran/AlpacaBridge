@@ -48,8 +48,9 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Disconnected Behavior", "[zwo][filterwh
     REQUIRE(driver->get_connected() == false);
     REQUIRE(driver->get_supported_actions().empty());
 
-    // Platform 7 DeviceState: Position throws while disconnected and is omitted,
-    // leaving just the TimeStamp (previously this returned an empty list).
+    // Platform 7 DeviceState: Position throws while disconnected and is
+    // omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list (issue #49).
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
@@ -58,7 +59,7 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Disconnected Behavior", "[zwo][filterwh
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 
     require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_position(0); }, alpacacore::AlpacaError::NotConnected);

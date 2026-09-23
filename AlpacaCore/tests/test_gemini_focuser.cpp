@@ -73,8 +73,9 @@ TEST_CASE("Gemini Focuser Driver - Disconnected Behavior", "[gemini][focuser][un
     REQUIRE(driver->get_supported_actions().empty());
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
-    // and are omitted, leaving just the TimeStamp; the old non-compliant
-    // "Connected" entry is gone.
+    // and are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list (issue #49); the old non-compliant "Connected"
+    // entry is gone.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
@@ -83,7 +84,7 @@ TEST_CASE("Gemini Focuser Driver - Disconnected Behavior", "[gemini][focuser][un
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 
     require_alpaca_error([&]() { driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_max_step(); }, alpacacore::AlpacaError::NotConnected);

@@ -67,8 +67,9 @@ TEST_CASE("ZWO Camera Driver - DeviceState is ICameraV4 compliant", "[zwo][camer
         return false;
     };
 
-    // Every Platform 7 DeviceState response carries a TimeStamp.
-    CHECK(has("TimeStamp"));
+    // A disconnected driver's DeviceState is the empty list -- no TimeStamp
+    // (ASCOM read-all FAQ; issue #49).
+    CHECK_FALSE(has("TimeStamp"));
     // The pre-Platform-7 implementation emitted these non-standard names; an
     // ICameraV4 DeviceState must not contain them.
     CHECK_FALSE(has("Connected"));

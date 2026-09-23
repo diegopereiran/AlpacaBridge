@@ -63,6 +63,9 @@ TEST_CASE("Astroasis Focuser Driver - Disconnected Behavior", "[astroasis][focus
     require_alpaca_error([&]() { (void)driver->get_temp_comp(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_supported_actions().empty());
 
+    // Platform 7 DeviceState: while disconnected the operational getters throw
+    // and are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list (issue #49).
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
@@ -71,7 +74,7 @@ TEST_CASE("Astroasis Focuser Driver - Disconnected Behavior", "[astroasis][focus
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 
     require_alpaca_error([&]() { driver->get_is_moving(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_max_step(); }, alpacacore::AlpacaError::NotConnected);

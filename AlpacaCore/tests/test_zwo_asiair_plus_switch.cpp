@@ -162,16 +162,15 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - State machine when disconnected",
         0, alpacacore::vendor::zwo::default_asiair_plus_rk3568_config());
 
     // ASCOM contract: a disconnected switch reports get_connected() = false,
-    // get_connecting() = false, and get_device_state() returns only a TimeStamp.
+    // get_connecting() = false, and get_device_state() returns the empty list.
     CHECK_FALSE(driver->get_connected());
     CHECK_FALSE(driver->get_connecting());
     {
-        // Only the TimeStamp survives while disconnected: the SwitchDriver base
-        // builds DeviceState from the public getters, which throw NotConnected
-        // and are omitted per the DeviceState contract.
+        // DeviceState is the empty list while disconnected: the SwitchDriver
+        // base builds it from the public getters, which throw NotConnected and
+        // are omitted, and TimeStamp itself is withheld too (issue #49).
         const auto state = driver->get_device_state();
-        REQUIRE(state.size() == 1);
-        CHECK(state[0].name == "TimeStamp");
+        REQUIRE(state.empty());
     }
 }
 

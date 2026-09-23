@@ -128,12 +128,11 @@ TEST_CASE("Gemini PDH Switch Driver - Value range validation", "[gemini][switch]
 TEST_CASE("Gemini PDH Switch Driver - Disconnected DeviceState", "[gemini][switch][unit]") {
     auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, "/dev/null");
 
-    // Only the TimeStamp survives while disconnected: the SwitchDriver base
-    // builds DeviceState from the public getters, which throw NotConnected
-    // and are omitted per the DeviceState contract.
+    // DeviceState is the empty list while disconnected: the SwitchDriver base
+    // builds it from the public getters, which throw NotConnected and are
+    // omitted, and TimeStamp itself is withheld too (issue #49).
     const auto state = driver->get_device_state();
-    REQUIRE(state.size() == 1);
-    CHECK(state[0].name == "TimeStamp");
+    REQUIRE(state.empty());
 }
 
 TEST_CASE("Gemini PDH Switch Driver - Connect failure on invalid port", "[gemini][switch][unit]") {
