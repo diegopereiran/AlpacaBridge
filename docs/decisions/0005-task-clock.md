@@ -4,7 +4,7 @@ Status: accepted
 
 ## Context
 
-Every driver timer waits on the wall clock, and so do its tests. At 62553d6, production code under `AlpacaCore/src/` and `AlpacaCore/include/` has 125 raw sleep lines across 34 files, and the tests have 141 lines that mention `sleep_for` (135 calls; the other 6 are comments), 57 of them in `AlpacaCore/tests/test_skywatcher_async.cpp`. A test that sleeps to wait for a driver timer is slow when the sleep is generous and flaky when it is not (#535). The SkyWatcher, Celestron and SynScan telescope drivers each carry a `task_wait_for` for their cancellable task waits, and SkyWatcher also sleeps directly in its poll, settle and autohome paths. Only `util::StreamLinkHealth` takes a `now` parameter today (`AlpacaCore/include/alpacacore/util/link_health.h`). `util::ConsecutiveSettle` (`AlpacaCore/include/alpacacore/util/poll_settle.h`) is clock-free by design, since its poll count is the elapsed time, and `PolledLinkHealth` counts failures.
+Every driver timer waits on the wall clock, and so do its tests. At f27c3e1, production code under `AlpacaCore/src/` and `AlpacaCore/include/` has 125 raw sleep lines across 34 files, and the tests have 149 lines that mention `sleep_for` (143 calls; the other 6 are comments), 57 of them in `AlpacaCore/tests/test_skywatcher_async.cpp`. A test that sleeps to wait for a driver timer is slow when the sleep is generous and flaky when it is not (#535). The SkyWatcher, Celestron and SynScan telescope drivers each carry a `task_wait_for` for their cancellable task waits, and SkyWatcher also sleeps directly in its poll, settle and autohome paths. Only `util::StreamLinkHealth` (`AlpacaCore/include/alpacacore/util/link_health.h`) and the client-silence watchdog's `note_client_activity` and `stop_motion_if_client_silent` (`AlpacaCore/include/alpacacore/telescope_driver.h`) take a `now` parameter today. `util::ConsecutiveSettle` (`AlpacaCore/include/alpacacore/util/poll_settle.h`) is clock-free by design, since its poll count is the elapsed time, and `PolledLinkHealth` counts failures.
 
 ## Decision
 
@@ -12,7 +12,7 @@ Every driver wait and deadline goes through an injected `TaskClock` with `now()`
 
 The fake's `advance()` takes each due waiter's mutex before notifying it, so a wakeup cannot fall between the waiter's predicate check and its block. The test thread that calls `advance()` holds no driver lock.
 
-Once a driver is on the clock, every wait in it goes through the clock: the task waits, the rate-verify window, the raw settle and poll sleeps, and, once #547 lands, its client-silence motion watchdog. A test that sleeps to wait for a driver timer on such a driver is a review-blocking regression. `StreamLinkHealth` callers take `now()` from the clock; `ConsecutiveSettle` and `PolledLinkHealth` stay clock-free.
+Once a driver is on the clock, every wait in it goes through the clock: the task waits, the rate-verify window, and the raw settle and poll sleeps. A test that sleeps to wait for a driver timer on such a driver is a review-blocking regression. `StreamLinkHealth` callers take `now()` from the clock; `ConsecutiveSettle` and `PolledLinkHealth` stay clock-free.
 
 Pointing time and clock-step detection stay on the seams of [decision 0001](0001-skywatcher-pointing-clock.md). This clock is for waits and deadlines, never for LST or UTCDate.
 
