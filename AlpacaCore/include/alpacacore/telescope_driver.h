@@ -62,11 +62,14 @@ public:
 
     // Platform 7 operational state (ITelescopeV4): built from the individual
     // property getters (omit-on-throw keeps DeviceState consistent with the GET
-    // endpoints) plus a TimeStamp. Inline so the vtable stays weak and the
-    // per-vendor static libraries link without a base-library ordering
-    // dependency. UTCDate is intentionally omitted to avoid format drift versus
+    // endpoints) plus a TimeStamp. A disconnected driver returns the empty list, with no TimeStamp.
+    // Inline so the vtable stays weak and the per-vendor static libraries link
+    // without a base-library ordering dependency. UTCDate is intentionally omitted to avoid format drift versus
     // the /utcdate endpoint; it is optional ("if known").
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
