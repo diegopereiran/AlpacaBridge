@@ -235,8 +235,13 @@ void Server::stop() {
         wake_reactor();
         // The RTC probe timer, woken out of its wait the same way. It holds
         // no connections and serves no request, so it can go first; a pass
-        // already inside the probe finishes its read before the flag is
-        // observed, which is bounded by the bus timeout (#314).
+        // already in flight finishes before the flag is observed. That pass
+        // can be an RTC read (bounded by the bus timeout, #314) or, since
+        // #547, a client-silence watchdog tick inside get_slewing()/
+        // abort_slew()/move_axis() on every registered telescope, each
+        // bounded by that mount's own transport timeouts (Sky-Watcher's stop
+        // confirm alone is kAxisStopTimeout = 5 s per axis). The join below
+        // has no deadline of its own.
         {
             std::lock_guard<std::mutex> lock(rtc_probe_mutex_);
             rtc_probe_stop_ = true;

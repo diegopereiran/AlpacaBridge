@@ -1426,11 +1426,11 @@ void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
         try {
             telescope->stop_motion_if_client_silent(now, interval);
         } catch (const std::exception& ex) {
-            // stop_motion_if_client_silent() is documented noexcept and
-            // already guards its own body; this is defense in depth for the
-            // timer thread, which must never propagate an exception out of
-            // its loop (AGENTS.md concurrency checklist: an async tail that
-            // can throw must be caught inline, or it terminates the server).
+            // stop_motion_if_client_silent() is declared noexcept, so an
+            // exception escaping it calls std::terminate() before this
+            // handler runs: this catch cannot fire today. It is kept only so
+            // the loop stays safe if that function ever loses noexcept; the
+            // real guard is the try/catch inside the function itself.
             util::log_error("Motion watchdog check failed for telescope #" +
                             std::to_string(telescope->get_device_number()) + ": " + ex.what());
         }
