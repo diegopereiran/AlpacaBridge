@@ -566,6 +566,29 @@ TEST_CASE("SkyWatcher async - AbortSlew during the dispatch stop-wait kills the 
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - NaN slew is rejected before any motion command (#574)", "[skywatcher][async]") {
+    // #574: validate_ra_dec used `x < min || x > max`, which is false for
+    // NaN, so a NaN declination reached the goto dispatch and started
+    // motion. Pin that it is rejected before slewing_cached_ is set and
+    // before any ":J" start command reaches the controller.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    int ra_starts_before = mount.start_count(1);
+    int dec_starts_before = mount.start_count(2);
+
+    expect_alpaca_error([&] { driver->slew_to_coordinates_async(std::nan(""), 0.0); },
+                        alpacacore::AlpacaError::InvalidValue);
+
+    REQUIRE_FALSE(driver->get_slewing());
+    REQUIRE(mount.start_count(1) == ra_starts_before);
+    REQUIRE(mount.start_count(2) == dec_starts_before);
+    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - superseded dispatch neither strands nor clobbers the other axis", "[skywatcher][async]") {
     // PR #216 rounds 4+6: when RA's stop-wait is superseded mid-dispatch,
     // the dispatch must abort without emitting stale stops — a MoveAxis that
