@@ -143,7 +143,8 @@ TEST_CASE("WandererAstro FilterWheel Driver - State machine", "[wandererastro][f
     REQUIRE(driver->get_connecting() == false);
 
     // Platform 7 DeviceState: while disconnected the Position getter throws and
-    // is omitted, leaving just the TimeStamp; there must be no non-compliant
+    // is omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list; there must be no non-compliant
     // "Connected" entry.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
@@ -154,7 +155,7 @@ TEST_CASE("WandererAstro FilterWheel Driver - State machine", "[wandererastro][f
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("WandererAstro FilterWheel Protocol Wrapper - Disconnected behavior", "[wandererastro][filterwheel][unit]") {

@@ -55,7 +55,8 @@ public:
      * @brief Platform 7 DeviceState snapshot for CoverCalibrator devices.
      *
      * Reports the operational properties (Brightness, CalibratorState,
-     * CoverState, CalibratorChanging, CoverMoving) plus a TimeStamp by calling
+     * CoverState, CalibratorChanging, CoverMoving) plus a TimeStamp (a
+     * disconnected driver returns the empty list, with no TimeStamp) by calling
      * this device's own property getters — the same ones the GET endpoints use,
      * which is what guarantees the DeviceState↔GET consistency ConformU checks.
      * Each getter is wrapped so a property that throws (e.g. NotConnected) is
@@ -67,6 +68,9 @@ public:
      * atomicity and ConformU only checks per-property GET consistency.
      */
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
