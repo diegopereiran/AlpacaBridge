@@ -1355,7 +1355,7 @@ def check_skill_spec_hash(root=ROOT):
 # Canon body was validated (PR #626 review). Gated by NAME, like check 5: a
 # model in the table that the paragraph does not mention is drift.
 
-GPHOTO_TABLE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*USB\s*\|\s*\u2713\s*\|", re.MULTILINE)
+GPHOTO_TABLE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*USB[^|]*\|\s*\u2713\s*\|", re.MULTILINE)
 
 
 def _gphoto_status_findings(supported, instructions):
@@ -1374,8 +1374,15 @@ def _gphoto_status_findings(supported, instructions):
         return ["gphoto.instructions.md has no '**STATUS:' paragraph"]
     status = m.group(0)
     for model in models:
-        # The paragraph writes the body designation ("D3300"), not the brand.
-        if model.split()[-1] not in status:
+        # The paragraph may write the whole model or just the body designation
+        # ("D3300"). A designation only counts as a whole token containing a
+        # digit, so "Sony A7 III" is not satisfied by an unrelated "Part III".
+        designation = model.split()[-1]
+        named = model in status or (
+            any(c.isdigit() for c in designation)
+            and re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(designation), status)
+        )
+        if not named:
             failures.append(
                 "SUPPORTED-DRIVERS.md lists %r as ConformU-validated but the STATUS paragraph "
                 "in .github/instructions/gphoto.instructions.md does not name it" % model
@@ -1755,6 +1762,12 @@ def self_test():
     gp_table = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB | \u2713 | x |\n\n### Next\n"
     check("gphoto status: a validated model the STATUS paragraph omits is flagged",
           len(_gphoto_status_findings(gp_table, "**STATUS: validated against the Nikon D3300.**\n\nrest\n")) == 1)
+    gp_mixed = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB (PTP) | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a row whose Connection cell is 'USB (PTP)' is still gated",
+          len(_gphoto_status_findings(gp_mixed, "**STATUS: validated: Nikon D3300.**\n\nrest\n")) == 1)
+    gp_roman = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Sony A7 III | USB | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a designation with no digit ('III') does not match by accident",
+          len(_gphoto_status_findings(gp_roman, "**STATUS: validated: Canon EOS 4000D, see Part III.**\n\nrest\n")) == 1)
     check("gphoto status: every validated model named passes",
           _gphoto_status_findings(gp_table, "**STATUS: validated: Nikon D3300, Canon EOS 4000D.**\n\nrest\n") == [])
 
