@@ -15,7 +15,9 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <cmath>
 #include <functional>
+#include <limits>
 
 #include "catch2_compat.h"
 
@@ -185,6 +187,19 @@ TEST_CASE("SkyWatcher Telescope Driver - Value range validation", "[skywatcher][
     require_alpaca_error([&] { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_aperture_diameter(-1.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_focal_length(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    // #574: a NaN or infinity passes `x < min || x > max` (both comparisons
+    // are false), so the driver's own range check must reject non-finite
+    // values explicitly rather than relying on the comparison to catch them.
+    const double nan_value = std::nan("");
+    const double pos_inf = std::numeric_limits<double>::infinity();
+    const double neg_inf = -std::numeric_limits<double>::infinity();
+    require_alpaca_error([&] { driver->set_target_right_ascension(nan_value); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_right_ascension(pos_inf); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_right_ascension(neg_inf); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(nan_value); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(pos_inf); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(neg_inf); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - State machine", "[skywatcher][telescope][unit]") {
