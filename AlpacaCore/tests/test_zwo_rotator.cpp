@@ -49,8 +49,9 @@ TEST_CASE("ZWO CAA Rotator Driver - Disconnected Behavior", "[zwo][rotator][unit
     REQUIRE(driver->get_supported_actions().empty());
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
-    // and are omitted, leaving just the TimeStamp; the old non-compliant
-    // "Connected" entry is gone.
+    // and are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list; the old non-compliant "Connected"
+    // entry is gone.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
@@ -59,7 +60,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Disconnected Behavior", "[zwo][rotator][unit
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 
     require_alpaca_error([&]() { driver->get_reverse(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_reverse(true); }, alpacacore::AlpacaError::NotConnected);

@@ -108,11 +108,10 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Disconnected DeviceState", "[zwo][swit
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0);
 
     {
-        // Only the TimeStamp survives while disconnected: the SwitchDriver base
-        // builds DeviceState from the public getters, which throw NotConnected
-        // and are omitted per the DeviceState contract.
+        // DeviceState is the empty list while disconnected: the SwitchDriver
+        // base builds it from the public getters, which throw NotConnected and
+        // are omitted, and TimeStamp itself is withheld too (ASCOM read-all FAQ).
         const auto state = driver->get_device_state();
-        REQUIRE(state.size() == 1);
-        CHECK(state[0].name == "TimeStamp");
+        REQUIRE(state.empty());
     }
 }
