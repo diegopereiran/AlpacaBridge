@@ -1,5 +1,7 @@
 # Keep documentation drift checks beside the facts they enforce
 
+Status: accepted
+
 ## Context
 
 Several repo facts were written twice and silently diverged: build options and their table, tool pins and suppressions, blocking `get_connected()` rosters, SDK seam method lists, TSan run/guard pairs, and path references. The checker records the issue history for each rule in its docstring and beside the implementation.
