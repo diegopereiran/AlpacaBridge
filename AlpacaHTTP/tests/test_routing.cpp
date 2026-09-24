@@ -686,6 +686,104 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Telescope, 9851);
     }
 
+    {
+        // #574: three router-level request-validation gaps, all vendor-free
+        // against a fresh TelescopeClockStubDriver (its set_target_declination
+        // is a no-op, so a NaN that reached the driver would return
+        // ErrorNumber 0 rather than throw — making the rejection here
+        // unambiguously the router's, not the driver's).
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9574);
+        EXPECT(registry.register_device(scope));
+        const std::string base = "/api/v1/telescope/9574";
+
+        // 1. Non-finite / hex-float doubles are rejected with InvalidValue
+        // before reaching the driver's setter.
+        for (const std::string& raw : {"nan", "inf", "-infinity", "0x1p3"}) {
+            const auto resp =
+                route_request(router, "PUT", base + "/targetdeclination", "TargetDeclination=" + raw + "&ClientID=1");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(resp.status_code() == 200);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
+        }
+
+        // 2. A valid method on the wrong verb is rejected with 400 before the
+        // ASCOM operation, not translated into a 200/0x400 NotImplemented.
+        {
+            // "altitude" is GET-only.
+            const auto resp = route_request(router, "PUT", base + "/altitude", "ClientID=1");
+            EXPECT(resp.status_code() == 400);
+        }
+        {
+            // "abortslew" is PUT-only.
+            const auto resp = route_request(router, "GET", base + "/abortslew");
+            EXPECT(resp.status_code() == 400);
+        }
+        {
+            // "action" (a common method) is PUT-only.
+            const auto resp = route_request(router, "GET", base + "/action");
+            EXPECT(resp.status_code() == 400);
+        }
+        {
+            // Positive control: GET altitude (the correct verb) still works.
+            const auto resp = route_request(router, "GET", base + "/altitude");
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(resp.status_code() == 200);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        }
+        // A verb no Alpaca endpoint accepts (POST, DELETE) is a wrong verb
+        // too; a foreign Origin is still refused with 403 first, so the
+        // cross-origin guard UTCDate carries (#401) stays in front.
+        {
+            const auto send = [&](const std::string& verb, const std::string& member, const std::string& origin) {
+                std::ostringstream raw;
+                raw << verb << " " << base << "/" << member << " HTTP/1.1\r\n"
+                    << "Host: localhost\r\n";
+                if (!origin.empty()) {
+                    raw << "Origin: " << origin << "\r\n";
+                }
+                raw << "\r\n";
+                alpacahttp::Request request;
+                EXPECT(request.parse(raw.str()));
+                return router.route(request, 1);
+            };
+            EXPECT(send("POST", "altitude", "").status_code() == 400);
+            EXPECT(send("DELETE", "abortslew", "").status_code() == 400);
+            EXPECT(send("POST", "utcdate", "").status_code() == 400);
+            EXPECT(send("POST", "utcdate", "http://evil.example").status_code() == 403);
+            EXPECT(send("DELETE", "altitude", "http://evil.example").status_code() == 403);
+            // The Site* setters' #444 guard sits in their PUT branch only, so
+            // a forged POST reaches the router's verb check; it must be
+            // refused with 403 there, not answered 400 (or 200/0x400 before #574).
+            EXPECT(send("POST", "sitelatitude", "http://evil.example").status_code() == 403);
+            EXPECT(send("POST", "sitelatitude", "").status_code() == 400);
+        }
+
+        // 3. Device numbers that don't fit in a uint32_t are rejected with
+        // 400 instead of wrapping (2^32 -> N) or surfacing as an internal
+        // DRIVER_ERROR 200 (a digit string overflowing even a 64-bit parse).
+        //
+        // The wrap case needs a device registered at the number the old cast
+        // wraps to: 4294976870 is 2^32 + 9574, which wrapped to 9574, and
+        // 9574 is still registered here (it is unregistered just below), so
+        // the pre-fix router answered 200. The obvious 4294967296 would be
+        // vacuous: it wraps to device 0, which is not registered, and the
+        // old router already answered 400 "Device not found" for it.
+        {
+            const auto resp = route_request(router, "GET", "/api/v1/telescope/4294976870/connected");
+            EXPECT(resp.status_code() == 400);
+        }
+
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9574);
+
+        {
+            const auto resp = route_request(router, "GET", "/api/v1/telescope/99999999999999999999/connected");
+            EXPECT(resp.status_code() == 400);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        }
+    }
+
 #ifdef ALPACACORE_ENABLE_ZWO
     // Ensure idempotent behavior across repeated test runs.
     {
@@ -2549,14 +2647,15 @@ int main() {
             EXPECT(std::fabs(driver_value("siteelevation") - 58.0) < 1e-9);
             EXPECT(std::fabs(persisted_file_entry(9640).value("siteElevation", 0.0) - 58.0) < 1e-9);
         }
-        // A NaN passes every driver's range check (both comparisons are
-        // false) and std::stod("nan") parses, so the setter accepts it for
-        // the session; nlohmann dumps a non-finite double as null, which the
-        // next start reads as "absent". The hook must never let that reach
-        // the persisted entry: the surveyed value stays on disk.
+        // A NaN passes most drivers' range checks (both comparisons are
+        // false), and nlohmann dumps a non-finite double as null, which the
+        // next start reads as "absent". Since #574 the router rejects "nan"
+        // with InvalidValue before the setter runs, so over HTTP it can no
+        // longer reach the persistence hook; the surveyed value stays on disk.
         {
             const auto resp = route_request(router, "PUT", base + "/sitelatitude", "SiteLatitude=nan&ClientID=1");
-            (void)resp;
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
             const auto on_disk = persisted_file_entry(9640);
             EXPECT(on_disk.is_object() && on_disk.contains("siteLatitude") && on_disk["siteLatitude"].is_number());
             EXPECT(std::fabs(on_disk.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);

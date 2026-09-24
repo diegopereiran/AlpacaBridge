@@ -670,7 +670,9 @@ independently broken the same way, before it was centralised:
   operational-property list by calling that device's own property getters inside a
   `try { … } catch (const std::exception&) {}` (a getter that throws — `AlpacaException`
   or any unwrapped vendor error — is omitted, never propagated) and
-  appending a `TimeStamp` via the inline `device_state_timestamp()` helper. Using the
+  appending a `TimeStamp` via the inline `device_state_timestamp()` helper. A disconnected
+  driver returns the empty list with no `TimeStamp` (each base class checks `get_connected()`
+  first). Using the
   same getters as the GET endpoints guarantees DeviceState ↔ GET consistency, which is
   what ConformU checks. A new vendor driver inherits the compliant DeviceState for free.
 - DeviceState is **not an atomic snapshot**: each getter locks the driver mutex

@@ -164,7 +164,10 @@ guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
 a UTCDate write steps the system clock (see the Clock section above), and
 `PUT /api/v1/telescope/{n}/sitelatitude`, `sitelongitude` and `siteelevation`,
 because since #444 they also rewrite the device's persisted configuration, the
-effect `configuredevice` guards. Every other device setter is unguarded.
+effect `configuredevice` guards. The guard also runs for any device method on
+a verb it does not accept (a POST or DELETE, or a PUT to a GET-only property):
+a foreign `Origin` gets 403 before the 400 that verb check would return. Every
+other device setter, on the verb it accepts, is unguarded.
 
 Since issue #348 this is not specific to the WiFi endpoints: every
 state-changing management endpoint carries the same guard — `synctime`,

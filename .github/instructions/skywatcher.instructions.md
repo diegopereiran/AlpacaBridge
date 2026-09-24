@@ -594,7 +594,7 @@ separate and correctly-scoped check).
 The codebase already has the right idiom for this elsewhere: the duty-cycle worker
 (`apply_ra_drive_locked`'s burst path, guarding sub-floor rate duty-cycling) computes a
 `same_axis_owner` flag from `goto_in_progress_ || parking_ || homing_ || slewing_cached_
-|| manual_axis_slewing_[i] || (pulse_guiding_active_ && pulse_axis_ == channel)` before
+|| manual_axis_slewing_[i] || pulse_axis_active_[channel - 1]` before
 trusting a generation mismatch as a real supersession, specifically BECAUSE "the global
 generation cannot tell a same-axis supersession from an unrelated other-axis command"
 (exact wording from that code's own comment). The MoveAxis stop-task tail does not apply
@@ -602,8 +602,8 @@ this idiom and should.
 
 **Fix (done).** Applied option (a): the stop-task restore tail now computes a
 channel-scoped `same_axis_owner` (`goto_in_progress_ || parking_ || homing_ ||
-slewing_cached_ || manual_axis_slewing_[axis] || (pulse_guiding_active_ &&
-pulse_axis_ == channel)`), the exact idiom the duty-cycle worker already uses, and only
+slewing_cached_ || manual_axis_slewing_[axis] ||
+pulse_axis_active_[channel - 1]`), the exact idiom the duty-cycle worker already uses, and only
 treats a `motion_generation_` mismatch as a real supersession when `same_axis_owner`
 is true. The historical regression this guards against (PR #216 round-5:
 `SetTracking(false)` racing the restore) is covered only for a COMPLETED
@@ -631,7 +631,7 @@ driver. Not hemisphere-specific in shape, only in trigger.
 hemisphere's direction indefinitely -- stars trail at 2x, the #250 signature, with
 nothing scheduled to correct it. Under an autoguider this is the common case, not the
 corner: roughly half of a session's corrections are declination, and PHD2 holds
-`pulse_guiding_active_` true for most of every guide cycle.
+`pulse_axis_active_[i]` true for most of every guide cycle.
 
 **Mechanism.** A setter that must re-command an axis skips when the axis is busy, on the
 grounds that the busy operation's own restore path re-derives the value. That contract
@@ -644,7 +644,7 @@ in-flight operation skipped RA, each expecting the other to do it.
 
 **Fix (done).** `axis_busy_locked(channel)` is now the primitive -- the same
 `goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[i]
-|| (pulse_guiding_active_ && pulse_axis_ == channel)` idiom the duty-cycle worker and the
+|| pulse_axis_active_[channel - 1]` idiom the duty-cycle worker and the
 MoveAxis stop tail already use -- and `axes_busy_locked()` is defined as the OR of the
 two, so every existing caller is unchanged. `set_site_latitude()` decides each half
 separately: re-apply the RA drive unless RA is busy, re-apply the Dec offset unless Dec

@@ -54,6 +54,13 @@ struct RouteMatch {
     std::string method_name;
     bool is_management = false;
     std::string management_endpoint;
+    // #574: set when the path's device-number digits don't fit in a valid
+    // uint32_t range (either overflowed to a wrapped value, or the digit
+    // string itself overflowed even a 64-bit parse). device_type and
+    // method_name are still populated from the match so handle_device can
+    // report a specific 400 instead of falling through to a device lookup
+    // against the wrapped/default device_number.
+    bool device_number_invalid = false;
 };
 
 class Router {
