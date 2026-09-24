@@ -20,6 +20,7 @@
 // (silence_check_pending_ stayed false after a throwing probe).
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/logging.h>
 
 #include <atomic>
 #include <chrono>
@@ -212,6 +213,47 @@ TEST_CASE("TelescopeDriver watchdog - a throwing probe re-arms for the next tick
     // the first tick's exception would silently skip this forever.
     CHECK(driver.stop_motion_if_client_silent(t0 + std::chrono::seconds(32), std::chrono::seconds(30)));
     CHECK(driver.aborts.load() == 1);
+}
+
+// Review finding (#628): a probe that keeps throwing (a connected-but-faulted
+// mount, e.g. iOptron's device_faulted_ state) must keep retrying every tick
+// but must not write one ERROR line per tick for the whole silence episode.
+TEST_CASE("TelescopeDriver watchdog - a persistently throwing probe retries every tick but logs once",
+          "[telescope][watchdog][unit]") {
+    struct ErrorCounter {
+        std::atomic<int> retry_lines{0};
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ErrorCounter() {
+            alpacacore::logging::set_log_sink(
+                [this](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                    if (level == alpacacore::logging::LogLevel::Error &&
+                        message.find("will retry") != std::string_view::npos) {
+                        ++retry_lines;
+                    }
+                });
+        }
+        ~ErrorCounter() { alpacacore::logging::set_log_sink(previous); }
+    } counter;
+
+    WatchdogUnitStubDriver driver;
+    driver.slewing.store(true);
+    driver.get_slewing_throw_countdown.store(1000);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver.note_client_activity(t0);
+
+    for (int tick = 1; tick <= 5; ++tick) {
+        CHECK_FALSE(
+            driver.stop_motion_if_client_silent(t0 + std::chrono::seconds(30 + tick), std::chrono::seconds(30)));
+    }
+    CHECK(driver.get_slewing_throw_countdown.load() == 1000 - 5);  // still probed on every tick
+    CHECK(counter.retry_lines.load() == 1);
+
+    // A new client request starts a new silence episode, which may log again.
+    const auto t1 = t0 + std::chrono::seconds(100);
+    driver.note_client_activity(t1);
+    CHECK_FALSE(driver.stop_motion_if_client_silent(t1 + std::chrono::seconds(31), std::chrono::seconds(30)));
+    CHECK(counter.retry_lines.load() == 2);
 }
 
 // Red-team finding: when every stop call throws (a transient link fault at

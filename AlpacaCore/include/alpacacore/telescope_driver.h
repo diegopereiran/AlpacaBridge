@@ -134,6 +134,7 @@ public:
     void note_client_activity(std::chrono::steady_clock::time_point now) noexcept {
         last_client_activity_.store(now.time_since_epoch().count());
         silence_check_pending_.store(true);
+        probe_failure_logged_.store(false);
     }
 
     /**
@@ -253,17 +254,25 @@ public:
             // of leaving it unwatched until another client request happens
             // to land (which, mid-runaway, may never come).
             silence_check_pending_.store(true);
-            ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
-                                              std::to_string(get_device_number()) +
-                                              " failed, will retry: " + std::string(ex.what()));
+            // Retry every tick, but log once per silence episode: a
+            // connected-but-faulted mount throws on every probe, and one
+            // ERROR line per second would flood the log (review of #628).
+            if (!probe_failure_logged_.exchange(true)) {
+                ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
+                                                  std::to_string(get_device_number()) +
+                                                  " failed, will retry: " + std::string(ex.what()));
+            }
             return false;
         } catch (...) {
             silence_check_pending_.store(true);
-            ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
-                                              std::to_string(get_device_number()) +
-                                              " failed with a non-standard exception, will retry.");
+            if (!probe_failure_logged_.exchange(true)) {
+                ALPACA_LOG_ERROR("telescope", "Client-silence motion watchdog probe for " + get_name() + " #" +
+                                                  std::to_string(get_device_number()) +
+                                                  " failed with a non-standard exception, will retry.");
+            }
             return false;
         }
+        probe_failure_logged_.store(false);
         if (!slewing) {
             return false;
         }
@@ -779,6 +788,9 @@ private:
     // is what limits a live silence episode to one get_slewing()/
     // abort_slew() probe rather than one per timer tick.
     std::atomic<bool> silence_check_pending_{false};
+    // True once this silence episode's probe failure has been logged; reset
+    // by note_client_activity() and by any probe that returns normally.
+    std::atomic<bool> probe_failure_logged_{false};
     // Count of requests for THIS device currently inside dispatch (issue
     // #547 review finding). Incremented/decremented by the router's
     // begin_client_request()/end_client_request() RAII guard around
