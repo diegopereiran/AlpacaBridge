@@ -988,6 +988,12 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // open-astro#575: surface a stored async-slew failure as an error
+        // instead of a silent false, until AbortSlew or a new slew initiator
+        // clears it (see last_slew_error_).
+        if (!last_slew_error_.empty()) {
+            throw AlpacaException(last_slew_error_);
+        }
         return get_slewing_locked();
     }
 
@@ -1129,6 +1135,10 @@ public:
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             homing_ = true;
+            // open-astro#575: a fresh initiator is a clean start -- a client
+            // that calls FindHome after a failed GOTO must not be told the
+            // OLD goto failed while it's homing.
+            clear_last_slew_error_locked();
         }
 
         // Join any task that raced in between the reap above and this lock,
@@ -1229,6 +1239,10 @@ public:
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             parking_ = true;
+            // open-astro#575: a fresh initiator is a clean start -- a client
+            // that calls Park after a failed GOTO must not be told the OLD
+            // goto failed while it's parking.
+            clear_last_slew_error_locked();
         }
 
         // Join any task that raced in between the reap above and this lock,
@@ -1747,6 +1761,7 @@ public:
         // a stale pulse timer firing mid-goto corrupts the slew.
         reap_slew_task();
         reap_pulse_task();
+        uint64_t slew_epoch = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1754,6 +1769,11 @@ public:
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             invalidate_position_cache_locked();
             slewing_cached_ = true;
+            // open-astro#575: a fresh initiator is a clean start -- a client
+            // that retries a rejected goto must not be told the OLD goto
+            // failed.
+            clear_last_slew_error_locked();
+            slew_epoch = slew_error_epoch_;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
@@ -1779,7 +1799,7 @@ public:
             slew_task_cancel_.store(false);
             tlock.lock();
         }
-        slew_task_thread_ = std::thread([this, ra, dec]() {
+        slew_task_thread_ = std::thread([this, ra, dec, slew_epoch]() {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!connected_ || slew_task_cancel_.load()) {
                 return;
@@ -1807,6 +1827,17 @@ public:
                 last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                // open-astro#575: a cancellation (AbortSlew, or a reap by a
+                // newer initiator) is not a failure -- the canceller already
+                // owns clearing/replacing last_slew_error_. Recording it here
+                // would poison the NEXT Slewing read with an artifact of the
+                // cancel, not a real fault. The epoch covers a supersession
+                // in the dispatch's unlock windows ("Slew superseded before
+                // dispatch" after a MoveAxis/AbortSlew already cleared the
+                // slot): any newer command that cleared it owns it now.
+                if (!slew_task_cancel_.load() && slew_error_epoch_ == slew_epoch) {
+                    last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + ex.what();
+                }
                 stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", std::string("Async slew failed: ") + ex.what());
             } catch (...) {
@@ -1815,6 +1846,9 @@ public:
                 last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
                 slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                if (!slew_task_cancel_.load() && slew_error_epoch_ == slew_epoch) {
+                    last_slew_error_ = "SlewToCoordinatesAsync failed with an unknown error";
+                }
                 stop_axes_if_cancelled_locked();
                 ALPACA_LOG_WARN("SkyWatcher", "Async slew failed with unknown exception");
             }
@@ -1995,6 +2029,10 @@ public:
             // poll failed ConformU over Wi-Fi, where the poll round-trip
             // outlasted the checker's window.
             invalidate_position_cache_locked();
+            // open-astro#575: a fresh initiator is a clean start -- a client
+            // that jogs an axis after a failed GOTO must not be told the OLD
+            // goto failed.
+            clear_last_slew_error_locked();
         }
         if (!need_stop_task) {
             return;
@@ -2140,6 +2178,10 @@ public:
         goto_in_progress_ = false;
         restoring_tracking_ = false;
         slewing_cached_ = false;
+        // open-astro#575: AbortSlew is a valid clearing command for a stored
+        // slew failure -- the client acted on the error, so the next Slewing
+        // read must answer normally again.
+        clear_last_slew_error_locked();
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -2367,6 +2409,13 @@ private:
                                            "stop-confirm budget; it may still be decelerating");
     }
 
+    // open-astro#575: every clear of the stored slew failure (new initiator,
+    // AbortSlew, reconnect) starts a new epoch; see slew_error_epoch_.
+    void clear_last_slew_error_locked() {
+        last_slew_error_.clear();
+        ++slew_error_epoch_;
+    }
+
     void reset_runtime_state_locked() {
         target_ra_set_ = false;
         target_dec_set_ = false;
@@ -2386,6 +2435,7 @@ private:
         pulse_axis_in_motion_[0] = false;
         pulse_axis_in_motion_[1] = false;
         slewing_cached_ = false;
+        clear_last_slew_error_locked();  // open-astro#575: a reconnect starts clean
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -3637,6 +3687,10 @@ private:
     void do_slew_to_ra_dec_locked(std::unique_lock<std::mutex>& lock, double ra, double dec) {
         invalidate_position_cache_locked();
         slewing_cached_ = true;
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that retries a rejected goto (even via the blocking
+        // SlewToCoordinates) must not be told the OLD goto failed.
+        clear_last_slew_error_locked();
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         restore_tracking_after_slew_ = tracking_;
         // open-astro#404: the target is what the client ASKED for, so it is
@@ -4440,6 +4494,18 @@ private:
     mutable bool parked_ = false;
     mutable bool at_home_ = false;
     mutable bool slewing_cached_ = false;
+    // open-astro#575: an async slew that fails AFTER slew_to_coordinates_async()
+    // returned used to be logged and forgotten, leaving Slewing read FALSE --
+    // indistinguishable from a landed goto. Set (under mutex_) by the slew
+    // task's catch block on a REAL failure (never on the task's own
+    // cancellation -- that is AbortSlew/a newer initiator reaping it, not a
+    // failure), cleared by the next slew initiator and by AbortSlew. Consulted
+    // by get_slewing() before the cached bool.
+    mutable std::string last_slew_error_;
+    // Bumped by every clear_last_slew_error_locked() (under mutex_): the slew
+    // task records a failure only if no newer command cleared the slot since
+    // its initiator did.
+    uint64_t slew_error_epoch_ = 0;
     mutable std::chrono::steady_clock::time_point last_slewing_poll_ = std::chrono::steady_clock::now();
     mutable std::chrono::steady_clock::time_point slew_force_until_ = std::chrono::steady_clock::time_point::min();
     mutable bool manual_axis_slewing_[2] = {false, false};
