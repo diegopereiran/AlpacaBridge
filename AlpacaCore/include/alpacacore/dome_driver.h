@@ -28,8 +28,9 @@ public:
     virtual ~DomeDriver() = default;
 
     // Platform 7 operational state (IDomeV3): Altitude, AtHome, AtPark, Azimuth,
-    // ShutterStatus, Slewing plus a TimeStamp. Inline so the vtable stays weak;
-    // values come from the same getters as the GET endpoints.
+    // ShutterStatus, Slewing plus a TimeStamp. A disconnected driver returns the empty list, with no TimeStamp.
+    // Inline so the vtable stays weak; values come from the same getters as the
+    // GET endpoints.
     std::vector<DeviceState> get_device_state() const override final {
         if (!get_connected()) {
             return {};

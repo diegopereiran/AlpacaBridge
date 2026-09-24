@@ -62,8 +62,13 @@ public:
     std::string get_driver_info() const override { return "test double"; }
     std::string get_driver_version() const override { return "0.0.0"; }
     int get_interface_version() const override { return 1; }
-    bool get_connected() const override { return false; }
-    void set_connected(bool) override {}
+    bool get_connected() const override { return connected_; }
+    void set_connected(bool value) override { connected_ = value; }
+
+private:
+    bool connected_ = false;
+
+public:
     std::vector<std::string> get_supported_actions() const override { return {}; }
     std::string action(std::string_view, std::string_view) override { return ""; }
     bool can_action(std::string_view) const override { return false; }
@@ -505,4 +510,34 @@ TEST_CASE("DeviceState is empty while disconnected even when a getter does not t
     std::vector<alpacacore::DeviceState> state;
     REQUIRE_NOTHROW(state = driver.get_device_state());
     CHECK(state.empty());
+}
+
+// The connected side of the contract: the early return must key on
+// get_connected(), not be unconditional. Each double's getters throw
+// NotConnected regardless (omitted by the per-getter try/catch), so a
+// connected double still reports the TimeStamp -- and only a base class whose
+// early return ignored get_connected() could report the empty list here.
+namespace {
+template <typename Driver>
+void require_timestamp_once_connected() {
+    Driver driver;
+    REQUIRE(driver.get_device_state().empty());
+    driver.set_connected(true);
+    std::vector<alpacacore::DeviceState> state;
+    REQUIRE_NOTHROW(state = driver.get_device_state());
+    CHECK(has_timestamp(state));
+}
+}  // namespace
+
+TEST_CASE("DeviceState carries the TimeStamp once connected, per base class", "[driver]") {
+    SECTION("Camera") { require_timestamp_once_connected<DisconnectedCamera>(); }
+    SECTION("CoverCalibrator") { require_timestamp_once_connected<DisconnectedCoverCalibrator>(); }
+    SECTION("Dome") { require_timestamp_once_connected<DisconnectedDome>(); }
+    SECTION("FilterWheel") { require_timestamp_once_connected<DisconnectedFilterWheel>(); }
+    SECTION("Focuser") { require_timestamp_once_connected<DisconnectedFocuser>(); }
+    SECTION("ObservingConditions") { require_timestamp_once_connected<DisconnectedObservingConditions>(); }
+    SECTION("Rotator") { require_timestamp_once_connected<DisconnectedRotator>(); }
+    SECTION("SafetyMonitor") { require_timestamp_once_connected<DisconnectedSafetyMonitor>(); }
+    SECTION("Switch") { require_timestamp_once_connected<DisconnectedSwitch>(); }
+    SECTION("Telescope") { require_timestamp_once_connected<DisconnectedTelescope>(); }
 }

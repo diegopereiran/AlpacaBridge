@@ -69,8 +69,8 @@ public:
     // individual property getters so the reported values always agree with the
     // corresponding GET endpoints (a consistency ConformU verifies). Properties
     // that throw (not implemented / not currently known) are omitted; a
-    // TimeStamp entry is always added. Defined inline to keep the CameraDriver
-    // vtable weak so the per-vendor static libraries link without a base-library
+    // TimeStamp entry is added when connected. A disconnected driver returns the empty list, with no TimeStamp. Defined
+    // inline to keep the CameraDriver vtable weak so the per-vendor static libraries link without a base-library
     // ordering dependency.
     std::vector<DeviceState> get_device_state() const override final {
         if (!get_connected()) {

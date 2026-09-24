@@ -28,8 +28,9 @@ public:
     virtual ~RotatorDriver() = default;
 
     // Platform 7 operational state (IRotatorV4): IsMoving, MechanicalPosition,
-    // Position plus a TimeStamp. Inline so the vtable stays weak; values come
-    // from the same getters as the GET endpoints.
+    // Position plus a TimeStamp. A disconnected driver returns the empty list, with no TimeStamp.
+    // Inline so the vtable stays weak; values come from the same getters as the
+    // GET endpoints.
     std::vector<DeviceState> get_device_state() const override final {
         if (!get_connected()) {
             return {};

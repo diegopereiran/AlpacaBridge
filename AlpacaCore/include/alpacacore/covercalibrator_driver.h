@@ -55,7 +55,8 @@ public:
      * @brief Platform 7 DeviceState snapshot for CoverCalibrator devices.
      *
      * Reports the operational properties (Brightness, CalibratorState,
-     * CoverState, CalibratorChanging, CoverMoving) plus a TimeStamp by calling
+     * CoverState, CalibratorChanging, CoverMoving) plus a TimeStamp (a
+     * disconnected driver returns the empty list, with no TimeStamp) by calling
      * this device's own property getters — the same ones the GET endpoints use,
      * which is what guarantees the DeviceState↔GET consistency ConformU checks.
      * Each getter is wrapped so a property that throws (e.g. NotConnected) is
