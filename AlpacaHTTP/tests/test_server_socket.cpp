@@ -1175,8 +1175,11 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(2200));
             EXPECT(stub->aborts.load() == 0);
 
+            // No abort check after the join: once the request ends, the stub
+            // still reports Slewing (it is a stub) and its timestamp is up to
+            // one interval old, so a tick landing right here legitimately
+            // aborts. The in-flight window above is what this case pins.
             client.join();
-            EXPECT(stub->aborts.load() == 0);
         }
         watchdog_server.stop();
         EXPECT(!watchdog_server.is_running());

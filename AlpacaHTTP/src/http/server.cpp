@@ -1330,8 +1330,8 @@ void Server::wake_reactor() {
 // here rather than spawning a thread per device). The loop wakes every
 // kTimerTick (1 s, the watchdog's cadence) and calls
 // Router::run_motion_watchdogs() on every pass; the RTC probe keeps its own,
-// longer period via a separate deadline checked on each tick, so its cadence
-// is unchanged.
+// longer period via a separate deadline checked on each tick and re-armed
+// from the probe time, so consecutive probes stay a full interval apart.
 void Server::rtc_probe_loop() {
     constexpr auto kTimerTick = std::chrono::seconds(1);
     const auto rtc_interval = std::chrono::seconds(config_.rtc_probe_interval_seconds());
@@ -1348,7 +1348,12 @@ void Server::rtc_probe_loop() {
         router_.run_motion_watchdogs(now);
         if (now >= next_rtc) {
             router_.refresh_rtc_probe();
-            next_rtc += rtc_interval;
+            // From now, not from the old deadline: each 1 s tick overshoots
+            // slightly, so `next_rtc += rtc_interval` lets the probe phase
+            // drift and, once per wrap, lands two probes only 30 ticks (just
+            // over 30 s) apart -- most of the +1 s margin over
+            // HostClock::kRtcProbeRateLimit gone.
+            next_rtc = now + rtc_interval;
         }
     }
 }
