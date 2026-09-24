@@ -1346,6 +1346,50 @@ def check_skill_spec_hash(root=ROOT):
     return []
 
 
+# --- check 13: the GPhoto STATUS paragraph names every validated body -------
+#
+# SUPPORTED-DRIVERS.md's GPhoto table is where a body becomes ConformU-validated;
+# .github/instructions/gphoto.instructions.md is the only file a scoped agent
+# reads for that vendor, and its STATUS paragraph restated the set by hand
+# ("three real Nikon bodies"). Adding the Canon EOS 4000D row left it saying no
+# Canon body was validated (PR #626 review). Gated by NAME, like check 5: a
+# model in the table that the paragraph does not mention is drift.
+
+GPHOTO_TABLE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*USB\s*\|\s*\u2713\s*\|", re.MULTILINE)
+
+
+def _gphoto_status_findings(supported, instructions):
+    failures = []
+    start = supported.find("### GPhoto")
+    if start < 0:
+        return ["SUPPORTED-DRIVERS.md has no '### GPhoto' section"]
+    end = supported.find("\n### ", start + 1)
+    section = supported[start:end if end >= 0 else len(supported)]
+    models = GPHOTO_TABLE_ROW_RE.findall(section)
+    if not models:
+        return ["SUPPORTED-DRIVERS.md GPhoto table lists no validated USB models"]
+
+    m = re.search(r"\*\*STATUS:.*?(?:\n\s*\n|\Z)", instructions, re.DOTALL)
+    if not m:
+        return ["gphoto.instructions.md has no '**STATUS:' paragraph"]
+    status = m.group(0)
+    for model in models:
+        # The paragraph writes the body designation ("D3300"), not the brand.
+        if model.split()[-1] not in status:
+            failures.append(
+                "SUPPORTED-DRIVERS.md lists %r as ConformU-validated but the STATUS paragraph "
+                "in .github/instructions/gphoto.instructions.md does not name it" % model
+            )
+    return failures
+
+
+def check_gphoto_status_names_validated_bodies():
+    return _gphoto_status_findings(
+        read("SUPPORTED-DRIVERS.md"),
+        read(".github/instructions/gphoto.instructions.md"),
+    )
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -1359,6 +1403,7 @@ CHECKS = [
     ("AGPL header form on every first-party source file", check_license_headers),
     ("Cursor rule file path references exist", check_rule_file_paths_exist),
     ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
+    ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
 ]
 
 
@@ -1706,6 +1751,12 @@ def self_test():
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+    gp_table = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a validated model the STATUS paragraph omits is flagged",
+          len(_gphoto_status_findings(gp_table, "**STATUS: validated against the Nikon D3300.**\n\nrest\n")) == 1)
+    check("gphoto status: every validated model named passes",
+          _gphoto_status_findings(gp_table, "**STATUS: validated: Nikon D3300, Canon EOS 4000D.**\n\nrest\n") == [])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
