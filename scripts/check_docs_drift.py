@@ -1363,8 +1363,10 @@ def _gphoto_status_findings(supported, instructions):
     start = supported.find("### GPhoto")
     if start < 0:
         return ["SUPPORTED-DRIVERS.md has no '### GPhoto' section"]
-    end = supported.find("\n### ", start + 1)
-    section = supported[start:end if end >= 0 else len(supported)]
+    # The section ends at the next heading of either level, so reordering the
+    # file cannot make the gate demand another vendor's models here.
+    ends = [i for i in (supported.find("\n### ", start + 1), supported.find("\n## ", start + 1)) if i >= 0]
+    section = supported[start:min(ends) if ends else len(supported)]
     models = GPHOTO_TABLE_ROW_RE.findall(section)
     if not models:
         return ["SUPPORTED-DRIVERS.md GPhoto table lists no validated USB models"]
@@ -1768,6 +1770,9 @@ def self_test():
     gp_roman = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Sony A7 III | USB | \u2713 | x |\n\n### Next\n"
     check("gphoto status: a designation with no digit ('III') does not match by accident",
           len(_gphoto_status_findings(gp_roman, "**STATUS: validated: Canon EOS 4000D, see Part III.**\n\nrest\n")) == 1)
+    gp_last = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n\n## Mounts\n\n| M | C | L | S |\n|--|--|--|--|\n| Other Mount 9000 | USB | \u2713 | x |\n"
+    check("gphoto status: the GPhoto section ends at the next '## ' heading, not only the next '### '",
+          _gphoto_status_findings(gp_last, "**STATUS: validated: Nikon D3300.**\n\nrest\n") == [])
     check("gphoto status: every validated model named passes",
           _gphoto_status_findings(gp_table, "**STATUS: validated: Nikon D3300, Canon EOS 4000D.**\n\nrest\n") == [])
 
