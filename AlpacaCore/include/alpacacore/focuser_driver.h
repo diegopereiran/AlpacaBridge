@@ -119,4 +119,4 @@ public:
     virtual void move(int position) = 0;
 };
 
-} // namespace alpacacore
+}  // namespace alpacacore

@@ -54,4 +54,4 @@ public:
     virtual bool get_is_safe() const = 0;
 };
 
-} // namespace alpacacore
+}  // namespace alpacacore
