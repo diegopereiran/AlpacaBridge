@@ -80,6 +80,12 @@ Checks:
      built from that snapshot; /driver-build Step 0 refreshes the schema
      from ascom-standards.org, and without this pin the catalog would keep
      describing the old one.
+ 12. Every model in SUPPORTED-DRIVERS.md's GPhoto table is named in the STATUS
+     paragraph of .github/instructions/gphoto.instructions.md, the only file a
+     scoped agent reads for that vendor, which restated the validated set by
+     hand and fell behind when the Canon EOS 4000D row was added (PR #626).
+     By name, one-directional, and only for rows whose Connection cell starts
+     with USB and whose status cell is a check mark.
 """
 
 import glob
@@ -1346,7 +1352,7 @@ def check_skill_spec_hash(root=ROOT):
     return []
 
 
-# --- check 13: the GPhoto STATUS paragraph names every validated body -------
+# --- check 12: the GPhoto STATUS paragraph names every validated body -------
 #
 # SUPPORTED-DRIVERS.md's GPhoto table is where a body becomes ConformU-validated;
 # .github/instructions/gphoto.instructions.md is the only file a scoped agent
