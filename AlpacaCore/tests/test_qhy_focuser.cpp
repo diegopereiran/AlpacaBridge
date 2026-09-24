@@ -135,13 +135,16 @@ TEST_CASE("QHY Q-Focuser Driver - State machine", "[qhy][focuser][unit]") {
     REQUIRE(driver->get_connecting() == false);
     REQUIRE(driver->get_connected() == false);
 
+    // Platform 7 DeviceState: while disconnected the operational getters throw
+    // and are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
         REQUIRE(entry.name != "Connected");
         if (entry.name == "TimeStamp") has_timestamp = true;
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("QHY Q-Focuser Driver - Connect applies settings and reports motion", "[qhy][focuser][unit]") {

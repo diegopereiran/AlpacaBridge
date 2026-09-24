@@ -54,31 +54,13 @@ TEST_CASE("ZWO Camera Driver - Device metadata", "[zwo][camera][unit]") {
     CHECK(driver->get_unique_id() == "ZWO_3");
 }
 
-TEST_CASE("ZWO Camera Driver - DeviceState is ICameraV4 compliant", "[zwo][camera][unit]") {
+TEST_CASE("ZWO Camera Driver - DeviceState is empty when disconnected", "[zwo][camera][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
 
-    auto state = driver->get_device_state();
-    auto has = [&state](const std::string& name) {
-        for (const auto& entry : state) {
-            if (entry.name == name) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    // Every Platform 7 DeviceState response carries a TimeStamp.
-    CHECK(has("TimeStamp"));
-    // The pre-Platform-7 implementation emitted these non-standard names; an
-    // ICameraV4 DeviceState must not contain them.
-    CHECK_FALSE(has("Connected"));
-    CHECK_FALSE(has("CoolerOn"));
-    // Every returned name must be a valid ICameraV4 operational property.
-    const std::set<std::string> valid = {"CameraState", "CCDTemperature", "CoolerPower",      "HeatSinkTemperature",
-                                         "ImageReady",  "IsPulseGuiding", "PercentCompleted", "TimeStamp"};
-    for (const auto& entry : state) {
-        CHECK(valid.count(entry.name) == 1);
-    }
+    // A disconnected driver's DeviceState is the empty list -- no TimeStamp
+    // (ASCOM read-all FAQ), and none of the getters that answer a default
+    // (CameraState, PercentCompleted) leak into it.
+    CHECK(driver->get_device_state().empty());
 }
 
 TEST_CASE("ZWO Camera Driver - Not connected throws", "[zwo][camera][unit]") {

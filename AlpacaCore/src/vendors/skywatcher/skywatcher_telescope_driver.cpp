@@ -16,6 +16,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_policy.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -112,20 +113,11 @@ constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
 // 2 s covers that with margin and still leaves the rest of the budget free.
 constexpr auto kConnectStopConfirmBudget = std::chrono::seconds(2);
 
-// open-astro#521: how long a link may be gone before motion that survived it
-// is treated as unattended rather than as a glitch to ride out. A USB
-// re-enumeration or a briefly disturbed connector recovers in about one to
-// three seconds, so five is comfortably clear of the common case while staying
-// short enough that a runaway is stopped early. The asymmetry decides the
-// value: stopping motion that was still wanted costs an aborted slew the
-// client can re-issue, while preserving motion nobody is watching costs a
-// mount driving into the tripod, so this rounds DOWN rather than up.
-//
-// Issue #547 (the client-silence motion watchdog) will need a timer for the
-// other link — the one where the driver keeps command authority the whole
-// time. The two should read as one policy rather than two unrelated numbers:
-// prefer extending this constant's home over introducing a second one.
-constexpr auto kRelinkMotionPreserveWindow = std::chrono::seconds(5);
+// open-astro#521's relink window now lives in util/motion_policy.h,
+// alongside open-astro#547's client-silence interval -- the two read as
+// one policy (see that header for the full rationale) rather than two
+// unrelated numbers.
+using alpacacore::util::kRelinkMotionPreserveWindow;
 // A goto the controller reports stopped can still be finishing its approach:
 // EQM-35 Pro (MC fw 3.39), 2026-09-12, the third landing refinement read 11
 // counts short of its target while ":f" already said stopped, and the
@@ -595,13 +587,18 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (pulse_guiding_active_ && std::chrono::steady_clock::now() >= pulse_guide_end_time_) {
-            pulse_guiding_active_ = false;
+        const auto now = std::chrono::steady_clock::now();
+        for (int i = 0; i < 2; ++i) {
+            if (pulse_axis_active_[i] && now >= pulse_guide_end_time_[i]) {
+                pulse_axis_active_[i] = false;
+            }
         }
-        // open-astro#559: the ASCOM property follows the pulse task's actual
-        // end, not the ownership deadline above, which runs a fixed second
-        // past the commanded duration and is now only a backstop.
-        return pulse_in_motion_;
+        // open-astro#559: the ASCOM property follows each pulse task's
+        // actual end, not the ownership deadline above, which runs a fixed
+        // second past the commanded duration and is now only a backstop.
+        // open-astro#620: IsPulseGuiding is true while EITHER axis pulses --
+        // ASCOM allows RA and Dec PulseGuide to run concurrently.
+        return pulse_axis_in_motion_[0] || pulse_axis_in_motion_[1];
     }
 
     bool get_can_set_declination_rate() const override { return true; }
@@ -910,8 +907,9 @@ public:
         // own, and its restore touches only that one -- the pulse end's
         // stop_axis() re-derives RA through effective_ra_rate_locked() (it
         // used to write the rate captured at dispatch, which made even the
-        // RA skip unsafe while autoguiding: PHD2 keeps pulse_guiding_active_
-        // true for most of every guide cycle), and the MoveAxis stop task
+        // RA skip unsafe while autoguiding: PHD2 kept the old whole-mount
+        // pulse_guiding_active_ flag (then shared by both axes) true for
+        // most of every guide cycle), and the MoveAxis stop task
         // re-applies the Dec offset for a Dec nudge. So a whole-mount skip
         // let a DEC-axis operation in flight (a North/South pulse, or
         // MoveAxis(Dec, r) -> MoveAxis(Dec, 0)) block the RA re-apply while
@@ -1007,7 +1005,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (dec < -90.0 || dec > 90.0) {
+        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1025,7 +1023,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (ra < 0.0 || ra >= 24.0) {
+        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1278,13 +1276,19 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
+        // open-astro#620: serialize against the other async initiators
+        // (Park, SlewToCoordinatesAsync) so PulseGuide's own
+        // check -> reap -> spawn sequence cannot interleave with theirs.
+        // Taken BEFORE mutex_ (precedent: park(), slew_to_coordinates_async()) --
+        // never taken while mutex_ is held (see initiator_mutex_'s comment).
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         int axis = -1;
         bool ra_rate_adjust = false;
         bool ra_pulse_restart = false;  // pulse opposes the tracking sense
         double dec_rate_deg_per_sec = 0.0;
         double ra_pulse_rate_deg_per_sec = 0.0;
         double ra_restore_rate_deg_per_sec = kSiderealDegPerSec;
-        std::uint64_t my_seq = 0;  // this pulse's pulse_seq_, taken under the dispatch lock
+        std::uint64_t my_seq = 0;  // this pulse's pulse_seq_[axis-1], taken under the dispatch lock
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1297,7 +1301,6 @@ public:
             }
 
             const auto now = std::chrono::steady_clock::now();
-            pulse_axis_ = direction <= 1 ? kAxisDec : kAxisRa;
 
             // Reads are live (dead-reckoned) during pulses — no frozen-target
             // accumulation, and pulses never rewrite the slew Target
@@ -1347,42 +1350,47 @@ public:
             // physical pulse displacement (Dec moved, RA unchanged), and the
             // dead-reckoned live reads report exactly that.
 
-            pulse_guiding_active_ = true;
-            pulse_in_motion_ = true;
-            my_seq = ++pulse_seq_;
-            pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
+            const int ai = axis - 1;  // 0=RA, 1=Dec (open-astro#620)
+            pulse_axis_active_[ai] = true;
+            pulse_axis_in_motion_[ai] = true;
+            my_seq = ++pulse_seq_[ai];
+            pulse_guide_end_time_[ai] = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
             invalidate_position_cache_locked();
         }
 
+        const int ai = axis - 1;  // 0=RA, 1=Dec (open-astro#620)
         // Stop-the-pulse timer thread — joinable member thread, never detached.
-        reap_pulse_task();
+        // Reaps only THIS axis's task: a Dec pulse must not cancel a running
+        // RA pulse's task (open-astro#620), unlike goto/park/home/abort/
+        // MoveAxis/disconnect, which own and re-command both axes.
+        reap_pulse_task(axis);
         // Join any task that raced in between the reap above and this lock,
         // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
         // to observe the cancel and exit, so joining under the lock deadlocks.
         std::unique_lock<std::mutex> tlock(task_mutex_);
-        while (pulse_task_thread_.joinable()) {
-            std::thread stale = std::move(pulse_task_thread_);
+        while (pulse_task_thread_[ai].joinable()) {
+            std::thread stale = std::move(pulse_task_thread_[ai]);
             tlock.unlock();
-            pulse_task_cancel_.store(true);
+            pulse_task_cancel_[ai].store(true);
             task_cv_.notify_all();
             stale.join();
-            pulse_task_cancel_.store(false);
+            pulse_task_cancel_[ai].store(false);
             tlock.lock();
         }
         const bool restore_tracking = ra_rate_adjust;
         const double dec_rate = dec_rate_deg_per_sec;
         const double ra_pulse_rate = ra_pulse_rate_deg_per_sec;
         const bool pulse_restart = ra_pulse_restart;
-        pulse_task_thread_ = std::thread([this, axis, duration, restore_tracking, direction, dec_rate, ra_pulse_rate,
-                                          ra_restore_rate_deg_per_sec, pulse_restart, my_seq]() {
+        pulse_task_thread_[ai] = std::thread([this, axis, ai, duration, restore_tracking, direction, dec_rate,
+                                              ra_pulse_rate, ra_restore_rate_deg_per_sec, pulse_restart, my_seq]() {
             // open-astro#559: a task clears pulse state only while its pulse
             // is still the current one. A superseding pulse sets both flags
             // before it reaps this task, and this task's exit used to clear
             // them from under it.
-            auto end_pulse_locked = [this, my_seq]() {
-                if (pulse_seq_ == my_seq) {
-                    pulse_guiding_active_ = false;
-                    pulse_in_motion_ = false;
+            auto end_pulse_locked = [this, ai, my_seq]() {
+                if (pulse_seq_[ai] == my_seq) {
+                    pulse_axis_active_[ai] = false;
+                    pulse_axis_in_motion_[ai] = false;
                 }
             };
             // PulseGuide is an asynchronous initiator (ITelescopeV4): the axis
@@ -1523,7 +1531,7 @@ public:
                 const auto dispatch_max_window = std::chrono::milliseconds(duration) > kRateVerifySettle
                                                      ? std::chrono::milliseconds(duration) - kRateVerifySettle
                                                      : std::chrono::milliseconds(0);
-                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, pulse_task_cancel_,
+                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, pulse_task_cancel_[ai],
                                            dispatch_max_window);
                 verify_elapsed = std::chrono::steady_clock::now() - verify_start;
             }
@@ -1605,7 +1613,7 @@ public:
                                        ? std::chrono::duration_cast<std::chrono::milliseconds>(
                                              std::chrono::milliseconds(duration) - verify_elapsed)
                                        : std::chrono::milliseconds(0);
-            if (!task_wait_for(remaining, pulse_task_cancel_)) {
+            if (!task_wait_for(remaining, pulse_task_cancel_[ai])) {
                 // Cancelled by a reaper (a new pulse/slew/park/home/moveaxis/
                 // abort/disconnect). DO NOT touch the hardware here: the
                 // reaper stops or re-commands the axes itself, and a stop or
@@ -1629,7 +1637,7 @@ public:
                 } catch (...) {
                     last_error = "unknown error";
                 }
-                if (!stopped && !task_wait_for(std::chrono::milliseconds(100), pulse_task_cancel_)) {
+                if (!stopped && !task_wait_for(std::chrono::milliseconds(100), pulse_task_cancel_[ai])) {
                     break;
                 }
             }
@@ -1650,7 +1658,7 @@ public:
                 // running. Narrow (East pulses, offset > ~0.25 s/s) but it is
                 // exactly the contract set_right_ascension_rate()'s skip rests
                 // on (round-4 review note).
-                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, applied_ra_restore_rate, pulse_task_cancel_);
+                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, applied_ra_restore_rate, pulse_task_cancel_[ai]);
             }
             if (stopped) {
                 // open-astro#559: the property and the axis are released
@@ -2063,8 +2071,8 @@ public:
             // NOT part of this check (unlike the duty-cycle worker's copy):
             // it was just unconditionally cleared under this same lock a few
             // lines above, so it can never be true here (PR #1 review).
-            const bool same_axis_owner = goto_in_progress_ || parking_ || homing_ || slewing_cached_ ||
-                                         (pulse_guiding_active_ && pulse_axis_ == channel);
+            const bool same_axis_owner =
+                goto_in_progress_ || parking_ || homing_ || slewing_cached_ || pulse_axis_active_[channel - 1];
             const bool generation_ok = motion_generation_ == stop_task_generation || !same_axis_owner;
             if (channel == kAxisRa && tracking_ && generation_ok) {
                 try {
@@ -2185,10 +2193,10 @@ private:
     }
 
     static void validate_ra_dec(double ra, double dec, const char* context) {
-        if (ra < 0.0 || ra >= 24.0) {
+        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
             throw AlpacaException(std::string(context) + ": RA out of range", AlpacaError::InvalidValue);
         }
-        if (dec < -90.0 || dec > 90.0) {
+        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
             throw AlpacaException(std::string(context) + ": Dec out of range", AlpacaError::InvalidValue);
         }
     }
@@ -2373,8 +2381,10 @@ private:
         at_home_ = false;
         tracking_ = false;
         restore_tracking_after_slew_ = false;
-        pulse_guiding_active_ = false;
-        pulse_in_motion_ = false;
+        pulse_axis_active_[0] = false;
+        pulse_axis_active_[1] = false;
+        pulse_axis_in_motion_[0] = false;
+        pulse_axis_in_motion_[1] = false;
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         manual_axis_slewing_[0] = false;
@@ -2748,7 +2758,7 @@ private:
     // tell a same-axis supersession from an unrelated other-axis command").
     bool axis_busy_locked(int channel) const {
         return goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[channel - 1] ||
-               (pulse_guiding_active_ && pulse_axis_ == channel);
+               pulse_axis_active_[channel - 1];
     }
 
     // True while a goto/park/home/pulse/manual motion owns EITHER axis: rate
@@ -3309,8 +3319,7 @@ private:
                         // fresh generation) rather than left creeping at the
                         // floor rate.
                         bool same_axis_owner = goto_in_progress_ || parking_ || homing_ || slewing_cached_ ||
-                                               manual_axis_slewing_[i] ||
-                                               (pulse_guiding_active_ && pulse_axis_ == channel);
+                                               manual_axis_slewing_[i] || pulse_axis_active_[i];
                         if (rate == 0.0 || (motion_generation_ != ax[i].gen && same_axis_owner)) {
                             // Zeroed by its owner, or a same-axis command took
                             // the axis: nothing left for this burst to stop.
@@ -4224,20 +4233,23 @@ private:
 
     void cancel_async_tasks() {
         slew_task_cancel_.store(true);
-        pulse_task_cancel_.store(true);
+        pulse_task_cancel_[0].store(true);
+        pulse_task_cancel_[1].store(true);
         stop_task_cancel_[0].store(true);
         stop_task_cancel_[1].store(true);
         rate_verify_cancel_.store(true);
         task_cv_.notify_all();
         std::thread slew_thread;
-        std::thread pulse_thread;
+        std::thread pulse_thread_ra;
+        std::thread pulse_thread_dec;
         std::thread stop_thread_ra;
         std::thread stop_thread_dec;
         std::thread rate_verify_thread;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
             slew_thread = std::move(slew_task_thread_);
-            pulse_thread = std::move(pulse_task_thread_);
+            pulse_thread_ra = std::move(pulse_task_thread_[0]);
+            pulse_thread_dec = std::move(pulse_task_thread_[1]);
             stop_thread_ra = std::move(stop_task_thread_[0]);
             stop_thread_dec = std::move(stop_task_thread_[1]);
             rate_verify_thread = std::move(rate_verify_thread_);
@@ -4245,8 +4257,11 @@ private:
         if (slew_thread.joinable()) {
             slew_thread.join();
         }
-        if (pulse_thread.joinable()) {
-            pulse_thread.join();
+        if (pulse_thread_ra.joinable()) {
+            pulse_thread_ra.join();
+        }
+        if (pulse_thread_dec.joinable()) {
+            pulse_thread_dec.join();
         }
         if (stop_thread_ra.joinable()) {
             stop_thread_ra.join();
@@ -4300,18 +4315,44 @@ private:
         slew_task_cancel_.store(false);
     }
 
-    void reap_pulse_task() {
-        pulse_task_cancel_.store(true);
+    // Per-axis (open-astro#620): a pulse on one axis must never cancel or
+    // join the other axis's pulse task -- ASCOM allows RA and Dec PulseGuide
+    // to run concurrently. Mirrors reap_stop_task(int) above.
+    void reap_pulse_task(int axis) {
+        if (axis != kAxisRa && axis != kAxisDec) {
+            return;  // pulse_guide() will reject this axis under the lock shortly.
+        }
+        const int ai = axis - 1;
+        pulse_task_cancel_[ai].store(true);
         task_cv_.notify_all();
         std::thread prev;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(pulse_task_thread_);
+            prev = std::move(pulse_task_thread_[ai]);
         }
         if (prev.joinable()) {
             prev.join();
         }
-        pulse_task_cancel_.store(false);
+        pulse_task_cancel_[ai].store(false);
+    }
+
+    // Both-axes wrapper for every reaper OTHER than pulse_guide() itself,
+    // same as before open-astro#620. goto/park/home/abort/disconnect
+    // re-command or stop both axes afterwards; move_axis() and
+    // sync_to_coordinates() also reap both tasks but re-command only their
+    // own axis (MoveAxis) or RA (sync), so nothing re-commands the other
+    // axis's reaped pulse -- pre-existing, not addressed by the per-axis
+    // split (which fixes pulse-vs-pulse). Cancel BOTH
+    // flags before joining either (mirrors cancel_async_tasks()): joining
+    // RA first would let the still-uncancelled Dec task run to completion
+    // (sending its own stop/offset-reapply I/O) while this reaper waits on
+    // RA, instead of both tasks unwinding in parallel.
+    void reap_pulse_task() {
+        pulse_task_cancel_[kAxisRa - 1].store(true);
+        pulse_task_cancel_[kAxisDec - 1].store(true);
+        task_cv_.notify_all();
+        reap_pulse_task(kAxisRa);
+        reap_pulse_task(kAxisDec);
     }
 
     // Safe with mutex_ held: the rate-verify task never takes mutex_ (see
@@ -4406,17 +4447,24 @@ private:
     bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
     GuideRate guide_rate_{};
-    mutable bool pulse_guiding_active_ = false;
-    // open-astro#559: the ASCOM IsPulseGuiding value, true from dispatch until
-    // the pulse task ends (stop landed, post-stop verify done). The task
-    // clears pulse_guiding_active_ above, the axis ownership, at the same
-    // point; its dispatch-time deadline remains only as a backstop. Both
+    // open-astro#620: one pulse task per axis (index = axis - 1, 0=RA,
+    // 1=Dec, same idiom as stop_task_thread_[2]) -- ASCOM allows RA and Dec
+    // PulseGuide to run concurrently, and a shared slot let an RA pulse reap
+    // (and thereby strand) a running Dec pulse. pulse_axis_active_[i] is the
+    // ownership flag (burst-stop / busy-axis gate, replaces the old
+    // pulse_guiding_active_ + pulse_axis_ pair).
+    mutable bool pulse_axis_active_[2] = {false, false};
+    // open-astro#559: the ASCOM IsPulseGuiding value, true from dispatch
+    // until that axis's pulse task ends (stop landed, post-stop verify
+    // done). The task clears pulse_axis_active_[i] above at the same point;
+    // the per-axis dispatch-time deadline remains only as a backstop.
+    // IsPulseGuiding is the OR of both axes (open-astro#620). Both arrays
     // under mutex_.
-    bool pulse_in_motion_ = false;
-    // Incremented per pulse under mutex_, so a task can tell whether it has
-    // been superseded before clearing shared pulse state.
-    std::uint64_t pulse_seq_ = 0;
-    mutable std::chrono::steady_clock::time_point pulse_guide_end_time_{};
+    bool pulse_axis_in_motion_[2] = {false, false};
+    // Incremented per pulse, per axis, under mutex_, so a task can tell
+    // whether it has been superseded before clearing its axis's pulse state.
+    std::uint64_t pulse_seq_[2] = {0, 0};
+    mutable std::chrono::steady_clock::time_point pulse_guide_end_time_[2]{};
 
     mutable bool parking_ = false;
     mutable bool homing_ = false;
@@ -4456,7 +4504,6 @@ private:
     bool dec_offset_running_ = false;
     std::thread duty_thread_;
     std::atomic<bool> duty_cancel_{false};
-    int pulse_axis_ = 0;                                  // axis owned by the in-flight pulse (burst-stop gate)
     std::mutex duty_lifecycle_mutex_;                     // serializes duty-worker reap+create
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
@@ -4471,19 +4518,20 @@ private:
 
     // Background task threads; task_mutex_ only guards handles + cv, never
     // held across protocol I/O.
-    // Serializes the async initiators (park, slew_to_coordinates_async) so
-    // their check -> reap -> spawn sequences cannot interleave. Never held
-    // by the task threads and never taken while mutex_ is held.
+    // Serializes the async initiators (park, slew_to_coordinates_async,
+    // pulse_guide -- open-astro#620) so their check -> reap -> spawn
+    // sequences cannot interleave. Never held by the task threads and never
+    // taken while mutex_ is held.
     std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;
-    std::thread pulse_task_thread_;
-    std::thread stop_task_thread_[2];  // indexed by axis (0=RA, 1=Dec)
-    std::thread rate_verify_thread_;   // one-shot RightAscensionRate/TrackingRate rate-applied check
+    std::thread pulse_task_thread_[2];  // indexed by axis (0=RA, 1=Dec) -- open-astro#620
+    std::thread stop_task_thread_[2];   // indexed by axis (0=RA, 1=Dec)
+    std::thread rate_verify_thread_;    // one-shot RightAscensionRate/TrackingRate rate-applied check
     mutable std::atomic<bool> slew_task_cancel_{false};
-    mutable std::atomic<bool> pulse_task_cancel_{false};
-    mutable std::atomic<bool> stop_task_cancel_[2]{false, false};  // indexed by axis
+    mutable std::atomic<bool> pulse_task_cancel_[2]{false, false};  // indexed by axis
+    mutable std::atomic<bool> stop_task_cancel_[2]{false, false};   // indexed by axis
     mutable std::atomic<bool> rate_verify_cancel_{false};
 };
 

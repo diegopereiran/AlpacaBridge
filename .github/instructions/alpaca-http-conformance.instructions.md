@@ -17,7 +17,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
 - **URLs are case-sensitive and lowercase.** Device type and method path segments must be lower-case; that check stays.
 - **HTTP status codes:**
   - `200` — request was interpreted and reached the driver. Driver exceptions (NotImplemented, InvalidValue, NotConnected, etc.) ride in the JSON `ErrorNumber`/`ErrorMessage` fields with a `200`. `apply_error_status` exists to keep these at 200 — never downgrade a driver error to 4xx/5xx.
-  - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
+  - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, a known method on a verb it does not accept (after the cross-origin 403), a device number outside 0..4294967295, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
   - `500` — unexpected internal error only.
 - **The Alpaca `Value` is structured JSON, never a re-parsed string.** `AlpacaResponse::value` is `std::optional<nlohmann::json>` and `to_json` emits it verbatim. Handlers assign the real type directly — scalar, string, array, or object (e.g. `alpaca_response.value = actions;` for `SupportedActions`, **not** `actions.dump()`; `make_success_response(..., gains)` where `gains` is a `nlohmann::json` array). Do NOT serialize a structured payload to a string and rely on it being re-parsed downstream. The old `to_json` ran `json::parse()` on every string `Value` and substituted the result if it parsed — which (a) corrupted scalar string properties whose text is valid JSON (`"12345"` → number, `"true"` → bool, wrong ASCOM type on the wire) and (b) forced every array/object endpoint to round-trip through `.dump()`. That heuristic bit `SupportedActions`/`DeviceState` (every device) plus camera `Gains`/`Offsets`/`ReadoutModes`, telescope `AxisRates`, and filter `Names`/`FocusOffsets` — ConformU rejected the stringified arrays ("could not be converted to IList`<String>`"). The web UI mirror (`web/app.js parseResponseValue`) only parses a string that begins with `{`/`[`, never a bare scalar. The large camera image payload uses its own `build_image_*_payload` path and never goes through `Value`.
 - **The router's `Connected=false` wait must poll `get_connecting()`, never
@@ -368,7 +368,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     destructor joins it. The threads this covers are the accept/server
     thread, the reactor, the worker pool and the RTC probe timer
     (`rtc_probe_thread_`, #314) -- the last spawns and joins alongside the
-    reactor and takes no lock `stop()` holds. So nothing can touch a
+    reactor and takes no lock `stop()` holds. Since #547 the same thread also
+    ticks the client-silence motion watchdog every second
+    (`Router::run_motion_watchdogs`); it rides this thread rather than the
+    reactor or a thread per device for the identical reason the RTC probe
+    does -- its mount I/O (`Slewing`/`AbortSlew`) must never block `poll()`.
+    So nothing can touch a
     `Server`'s members, the wake pipe included, after the destructor returns
     (review round 5). Destroying a `Server` from inside one of its own
     handlers is not supported.
@@ -401,6 +406,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     in `test_config.cpp`. At the bound the accept
     loop pauses and new clients wait in the listen backlog (64) rather than
     being refused; an idle connection expires within 15 s.
+  - `Config::motion_watchdog_seconds` (open-astro#547; 30 s default, matching
+    AlpacaCore's `kClientSilenceStopInterval` in `util/motion_policy.h`; 0
+    disables) is settable the same way, from the config file (`server:`
+    section) and the environment (`ALPACAHTTP_MOTION_WATCHDOG_SECONDS`),
+    routed through its clamping setter (negative -> 0); tested in
+    `test_config.cpp`.
   - Do not reintroduce a worker-side counter or reserve: the previous design
     counted busy workers as parked and pushed clients to close-per-request at
     exactly the busiest moments (review of #233).
