@@ -256,6 +256,7 @@ AlpacaBridge/
 +- debian/                            # Debian packaging
 +- docs/                              # Documentation
 +- AGENTS.md                          # AI driver development guide
++- CONTEXT.md                         # Domain glossary
 +- SUPPORTED-DRIVERS.md               # ConformU-validated driver matrix
 +- CHANGELOG.md                       # Release notes
 +- build_and_run.sh                   # Build and start server
