@@ -4341,9 +4341,13 @@ private:
         pulse_task_cancel_[ai].store(false);
     }
 
-    // Both-axes wrapper: every reaper OTHER than pulse_guide() itself owns
-    // and re-commands both axes (goto/park/home/abort/MoveAxis/sync), so it
-    // reaps both pulse tasks, same as before open-astro#620. Cancel BOTH
+    // Both-axes wrapper for every reaper OTHER than pulse_guide() itself,
+    // same as before open-astro#620. goto/park/home/abort/disconnect
+    // re-command or stop both axes afterwards; move_axis() and
+    // sync_to_coordinates() also reap both tasks but re-command only their
+    // own axis (MoveAxis) or RA (sync), so nothing re-commands the other
+    // axis's reaped pulse -- pre-existing, not addressed by the per-axis
+    // split (which fixes pulse-vs-pulse). Cancel BOTH
     // flags before joining either (mirrors cancel_async_tasks()): joining
     // RA first would let the still-uncancelled Dec task run to completion
     // (sending its own stop/offset-reapply I/O) while this reaper waits on
