@@ -3324,7 +3324,7 @@ private:
                         // fresh generation) rather than left creeping at the
                         // floor rate.
                         bool same_axis_owner = goto_in_progress_ || parking_ || homing_ || slewing_cached_ ||
-                                               manual_axis_slewing_[i] || pulse_axis_active_[channel - 1];
+                                               manual_axis_slewing_[i] || pulse_axis_active_[i];
                         if (rate == 0.0 || (motion_generation_ != ax[i].gen && same_axis_owner)) {
                             // Zeroed by its owner, or a same-axis command took
                             // the axis: nothing left for this burst to stop.

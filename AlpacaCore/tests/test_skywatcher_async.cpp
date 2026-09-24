@@ -1358,7 +1358,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW
     // Review finding: set_site_latitude() skips a busy RA axis on the grounds
     // that the restore paths recompute -- but the pulse path captured
     // ra_restore_rate_deg_per_sec at DISPATCH and wrote it back verbatim at
-    // pulse end. Autoguiding keeps pulse_guiding_active_ true for most of
+    // pulse end. Autoguiding keeps pulse_axis_active_[i] true for most of
     // every guide cycle (PHD2: duration + 1 s), so a site correction made
     // mid-session lands here rather than in the setter's re-apply, and the
     // pulse restored the pre-write direction. RA then ran backwards until
