@@ -16,6 +16,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_policy.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -112,20 +113,11 @@ constexpr auto kAxisStopTimeout = std::chrono::seconds(5);
 // 2 s covers that with margin and still leaves the rest of the budget free.
 constexpr auto kConnectStopConfirmBudget = std::chrono::seconds(2);
 
-// open-astro#521: how long a link may be gone before motion that survived it
-// is treated as unattended rather than as a glitch to ride out. A USB
-// re-enumeration or a briefly disturbed connector recovers in about one to
-// three seconds, so five is comfortably clear of the common case while staying
-// short enough that a runaway is stopped early. The asymmetry decides the
-// value: stopping motion that was still wanted costs an aborted slew the
-// client can re-issue, while preserving motion nobody is watching costs a
-// mount driving into the tripod, so this rounds DOWN rather than up.
-//
-// Issue #547 (the client-silence motion watchdog) will need a timer for the
-// other link — the one where the driver keeps command authority the whole
-// time. The two should read as one policy rather than two unrelated numbers:
-// prefer extending this constant's home over introducing a second one.
-constexpr auto kRelinkMotionPreserveWindow = std::chrono::seconds(5);
+// open-astro#521's relink window now lives in util/motion_policy.h,
+// alongside open-astro#547's client-silence interval -- the two read as
+// one policy (see that header for the full rationale) rather than two
+// unrelated numbers.
+using alpacacore::util::kRelinkMotionPreserveWindow;
 // A goto the controller reports stopped can still be finishing its approach:
 // EQM-35 Pro (MC fw 3.39), 2026-09-12, the third landing refinement read 11
 // counts short of its target while ":f" already said stopped, and the
@@ -748,6 +740,9 @@ public:
     GuideRate get_guide_rate() const override { return guide_rate_; }
 
     void set_guide_rate(const GuideRate& rate) override {
+        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double ra_fraction = rate.ra / kSiderealDegPerSec;
@@ -879,7 +874,7 @@ public:
     double get_site_elevation() const override { return site_elevation_m_; }
 
     void set_site_elevation(double elevation) override {
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters", AlpacaError::InvalidValue);
         }
         site_elevation_m_ = elevation;
@@ -891,7 +886,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         // A latitude write that crosses the equator reverses the RA drive and
@@ -982,7 +977,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);

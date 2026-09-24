@@ -30,9 +30,13 @@ public:
     virtual ~FocuserDriver() = default;
 
     // Platform 7 operational state (IFocuserV4): IsMoving, Position, Temperature
-    // (omitted if not implemented) plus a TimeStamp. Inline so the vtable stays
-    // weak; values come from the same getters as the GET endpoints.
+    // (omitted if not implemented) plus a TimeStamp. A disconnected driver returns the empty list, with no TimeStamp.
+    // Inline so the vtable stays weak; values come from the same getters as the
+    // GET endpoints.
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
@@ -115,5 +119,4 @@ public:
     virtual void move(int position) = 0;
 };
 
-} // namespace alpacacore
-
+}  // namespace alpacacore

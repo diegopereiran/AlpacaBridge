@@ -677,6 +677,9 @@ public:
     }
     
     void set_guide_rate(const GuideRate& rate) override {
+        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         
@@ -845,7 +848,7 @@ public:
     
     void set_site_elevation(double elevation) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException(
                 "Site elevation must be between -300 and 10000 meters",
                 AlpacaError::InvalidValue
@@ -865,7 +868,7 @@ public:
     void set_site_latitude(double latitude) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException(
                 "Site latitude must be between -90 and 90 degrees",
                 AlpacaError::InvalidValue
@@ -891,7 +894,7 @@ public:
     void set_site_longitude(double longitude) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException(
                 "Site longitude must be between -180 and 180 degrees",
                 AlpacaError::InvalidValue

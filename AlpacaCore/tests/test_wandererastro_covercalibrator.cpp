@@ -135,7 +135,8 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - State machine", "[wandererastr
     REQUIRE(driver->get_connected() == false);
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
-    // and are omitted, leaving just the TimeStamp. The non-compliant "Connected"
+    // and are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list. The non-compliant "Connected"
     // entry must never appear.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
@@ -147,7 +148,7 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - State machine", "[wandererastr
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("WandererAstro CoverCalibrator Driver - HaltCover is implemented", "[wandererastro][covercalibrator][unit]") {

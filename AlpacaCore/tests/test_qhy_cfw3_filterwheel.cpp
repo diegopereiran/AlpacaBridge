@@ -137,14 +137,15 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - State machine contracts", "[qhy][filte
     REQUIRE(driver->get_connecting() == false);
 
     // Platform 7 DeviceState: Position throws while disconnected and is
-    // omitted, leaving the TimeStamp; no non-compliant "Connected" entry.
+    // omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list; no non-compliant "Connected" entry.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
         REQUIRE(entry.name != "Connected");
         if (entry.name == "TimeStamp") has_timestamp = true;
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("QHY CFW3 Filter Wheel Driver - Unsupported methods", "[qhy][filterwheel][cfw3][unit]") {
