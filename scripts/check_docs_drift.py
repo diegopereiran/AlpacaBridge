@@ -80,6 +80,12 @@ Checks:
      built from that snapshot; /driver-build Step 0 refreshes the schema
      from ascom-standards.org, and without this pin the catalog would keep
      describing the old one.
+ 12. Every model in SUPPORTED-DRIVERS.md's GPhoto table is named in the STATUS
+     paragraph of .github/instructions/gphoto.instructions.md, the only file a
+     scoped agent reads for that vendor, which restated the validated set by
+     hand and fell behind when the Canon EOS 4000D row was added (PR #626).
+     By name, one-directional, and only for rows whose Connection cell starts
+     with USB and whose status cell is a check mark.
 """
 
 import glob
@@ -1346,6 +1352,59 @@ def check_skill_spec_hash(root=ROOT):
     return []
 
 
+# --- check 12: the GPhoto STATUS paragraph names every validated body -------
+#
+# SUPPORTED-DRIVERS.md's GPhoto table is where a body becomes ConformU-validated;
+# .github/instructions/gphoto.instructions.md is the only file a scoped agent
+# reads for that vendor, and its STATUS paragraph restated the set by hand
+# ("three real Nikon bodies"). Adding the Canon EOS 4000D row left it saying no
+# Canon body was validated (PR #626 review). Gated by NAME, like check 5: a
+# model in the table that the paragraph does not mention is drift.
+
+GPHOTO_TABLE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*USB[^|]*\|\s*\u2713\s*\|", re.MULTILINE)
+
+
+def _gphoto_status_findings(supported, instructions):
+    failures = []
+    start = supported.find("### GPhoto")
+    if start < 0:
+        return ["SUPPORTED-DRIVERS.md has no '### GPhoto' section"]
+    # The section ends at the next heading of either level, so reordering the
+    # file cannot make the gate demand another vendor's models here.
+    ends = [i for i in (supported.find("\n### ", start + 1), supported.find("\n## ", start + 1)) if i >= 0]
+    section = supported[start:min(ends) if ends else len(supported)]
+    models = GPHOTO_TABLE_ROW_RE.findall(section)
+    if not models:
+        return ["SUPPORTED-DRIVERS.md GPhoto table lists no validated USB models"]
+
+    m = re.search(r"\*\*STATUS:.*?(?:\n\s*\n|\Z)", instructions, re.DOTALL)
+    if not m:
+        return ["gphoto.instructions.md has no '**STATUS:' paragraph"]
+    status = m.group(0)
+    for model in models:
+        # The paragraph may write the whole model or just the body designation
+        # ("D3300"). A designation only counts as a whole token containing a
+        # digit, so "Sony A7 III" is not satisfied by an unrelated "Part III".
+        designation = model.split()[-1]
+        named = model in status or (
+            any(c.isdigit() for c in designation)
+            and re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(designation), status)
+        )
+        if not named:
+            failures.append(
+                "SUPPORTED-DRIVERS.md lists %r as ConformU-validated but the STATUS paragraph "
+                "in .github/instructions/gphoto.instructions.md does not name it" % model
+            )
+    return failures
+
+
+def check_gphoto_status_names_validated_bodies():
+    return _gphoto_status_findings(
+        read("SUPPORTED-DRIVERS.md"),
+        read(".github/instructions/gphoto.instructions.md"),
+    )
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -1359,6 +1418,7 @@ CHECKS = [
     ("AGPL header form on every first-party source file", check_license_headers),
     ("Cursor rule file path references exist", check_rule_file_paths_exist),
     ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
+    ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
 ]
 
 
@@ -1706,6 +1766,21 @@ def self_test():
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+    gp_table = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a validated model the STATUS paragraph omits is flagged",
+          len(_gphoto_status_findings(gp_table, "**STATUS: validated against the Nikon D3300.**\n\nrest\n")) == 1)
+    gp_mixed = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB (PTP) | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a row whose Connection cell is 'USB (PTP)' is still gated",
+          len(_gphoto_status_findings(gp_mixed, "**STATUS: validated: Nikon D3300.**\n\nrest\n")) == 1)
+    gp_roman = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Sony A7 III | USB | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a designation with no digit ('III') does not match by accident",
+          len(_gphoto_status_findings(gp_roman, "**STATUS: validated: Canon EOS 4000D, see Part III.**\n\nrest\n")) == 1)
+    gp_last = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n\n## Mounts\n\n| M | C | L | S |\n|--|--|--|--|\n| Other Mount 9000 | USB | \u2713 | x |\n"
+    check("gphoto status: the GPhoto section ends at the next '## ' heading, not only the next '### '",
+          _gphoto_status_findings(gp_last, "**STATUS: validated: Nikon D3300.**\n\nrest\n") == [])
+    check("gphoto status: every validated model named passes",
+          _gphoto_status_findings(gp_table, "**STATUS: validated: Nikon D3300, Canon EOS 4000D.**\n\nrest\n") == [])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
