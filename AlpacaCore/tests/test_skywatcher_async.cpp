@@ -202,6 +202,162 @@ TEST_CASE("SkyWatcher async - pulse guide north physically moves Dec and ends cl
     driver->set_connected(false);
 }
 
+// open-astro#559: IsPulseGuiding followed a deadline stamped at dispatch
+// (duration + 1000 ms) rather than the pulse task's actual stop, so it stayed
+// true about a second after the axis had stopped, and on a stalled stop it
+// could clear while the axis was still moving. It must track the real stop.
+TEST_CASE("SkyWatcher async - IsPulseGuiding clears when the pulse's axis stops, not a second later (#559)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 500);  // North
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 3000));
+    const auto stopped_at = std::chrono::steady_clock::now();
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 3000));
+    const auto lag_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - stopped_at).count();
+    // The bound is loose on purpose: the claim is not that the flag clears
+    // instantly, only that it does not carry a fixed extra second.
+    CHECK(lag_ms < 300);
+    driver->set_connected(false);
+}
+
+// open-astro#559 (thread): a new pulse sets the flag, then reaps the running
+// one, and the reaped task's cancel path cleared the flag the NEW pulse had
+// just set -- so an autoguider's back-to-back pulses read IsPulseGuiding
+// false while the second pulse was still moving the axis.
+TEST_CASE("SkyWatcher async - a pulse that supersedes another still reports IsPulseGuiding (#559)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 2000);  // North
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    driver->pulse_guide(0, 2000);  // supersedes the first mid-pulse
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(mount.axis_running(2));
+    CHECK(driver->get_is_pulse_guiding());
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 6000));
+    driver->set_connected(false);
+}
+
+// open-astro#559 (review): once IsPulseGuiding reads false the pulse must also
+// have released its axis. A client that waits for the property and then
+// writes DeclinationRate is following the ASCOM contract; if the pulse still
+// owned the Dec axis, the write took the busy-axis deferral and waited for a
+// restore the pulse had already run, so the offset was stranded.
+TEST_CASE("SkyWatcher async - a DeclinationRate write right after IsPulseGuiding clears is applied (#559)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 500);  // North
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 3000));
+    REQUIRE_FALSE(mount.axis_running(2));
+    driver->set_declination_rate(10.0);  // arcsec/s, continuous (above the floor)
+    CHECK(wait_until([&] { return mount.axis_running(2); }, 3000));
+    driver->set_declination_rate(0.0);
+    driver->set_connected(false);
+}
+
+// open-astro#620 (regression, fixed below): pulse_guide() USED TO HAVE one
+// pulse task slot shared by both axes. reap_pulse_task() cancelled+joined
+// whatever pulse task was running regardless of axis, and a cancelled task's
+// cancel path deliberately does not touch the hardware (the reaper is
+// supposed to stop or re-command the axes itself -- see the #559 comment on
+// the pulse task lambda). Every other reaper (goto/park/home/abort/MoveAxis/
+// disconnect) re-commands or stops BOTH axes, but pulse_guide() only
+// dispatches its OWN axis: an RA pulse arriving mid-Dec pulse reaped the Dec
+// task and only commanded RA, leaving Dec running at guide rate with nothing
+// left to stop it. Pulse tasks are now per-axis (pulse_task_thread_[2]) and
+// reap_pulse_task(axis) reaps only its own axis's task.
+TEST_CASE("SkyWatcher async - an RA pulse does not leave a running Dec pulse's axis turning (#620)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch (a2 > 0)
+
+    driver->pulse_guide(0, 3000);  // Dec North, 3 s
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->pulse_guide(2, 300);  // RA East, 300 ms -- concurrent, different axis
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    INFO("IsPulseGuiding=" << driver->get_is_pulse_guiding() << " Slewing=" << driver->get_slewing());
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// open-astro#620 review W3: the mirror direction of the case above has no
+// coverage without this -- a Dec pulse arriving mid-RA-pulse must not strand
+// RA at the (in-place) guide-rate step period. This is the harder direction
+// to catch: a stuck RA axis is still `axis_running(1) == true` (it keeps
+// turning, just at the wrong rate), so only a step-period check can see it.
+TEST_CASE("SkyWatcher async - a Dec pulse does not leave a running RA pulse's axis at the guide rate (#620)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);  // east-pointing branch, as the case above
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    driver->pulse_guide(2, 3000);  // RA East, 3 s -- default guide rate, in-place branch
+    REQUIRE(wait_until([&] { return mount.step_period(1) != sidereal_preset; }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->pulse_guide(0, 300);  // Dec North, 300 ms -- concurrent, different axis
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    INFO("IsPulseGuiding=" << driver->get_is_pulse_guiding() << " step_period(1)=" << mount.step_period(1)
+                           << " sidereal=" << sidereal_preset);
+    CHECK(mount.step_period(1) == sidereal_preset);
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// open-astro#620: two concurrent callers, one per axis, repeated -- both must
+// always end with their own axis released (RA back to the sidereal tracking
+// PERIOD, not merely "running" -- open-astro#620 review W2: RA stuck at the
+// East pulse rate is still `axis_running(1) == true`, so that check alone
+// cannot see the RA-stranded-at-guide-rate failure this case exists to
+// catch -- and Dec stopped), never leaving the other's pulse cancelled
+// without a replacement command.
+TEST_CASE("SkyWatcher async - concurrent RA and Dec PulseGuide callers both end with their axes released (#620)",
+          "[skywatcher][async][pulseguide]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    for (int round = 0; round < 10; ++round) {
+        std::thread ra_caller([&] { driver->pulse_guide(2, 300); });
+        std::thread dec_caller([&] { driver->pulse_guide(0, 300); });
+        ra_caller.join();
+        dec_caller.join();
+        REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 4000));
+        REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 3000));
+        REQUIRE(wait_until([&] { return mount.step_period(1) == sidereal_preset; }, 3000));
+        CHECK(mount.axis_running(1));  // RA restored to tracking, not stranded stopped
+    }
+    driver->set_connected(false);
+}
+
 // open-astro#306: the CONTROL for the hardware measurement on that issue.
 // An EQ-AL55i Pro delivers 99.0% of a 5000 ms Dec pulse but only 47.6% of a
 // 500 ms one, which fits a fixed per-start cost rather than a rate error.
@@ -494,6 +650,29 @@ TEST_CASE("SkyWatcher async - AbortSlew during the dispatch stop-wait kills the 
     REQUIRE_FALSE(driver->get_slewing());
     REQUIRE_FALSE(mount.axis_running(1));
     REQUIRE_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - NaN slew is rejected before any motion command (#574)", "[skywatcher][async]") {
+    // #574: validate_ra_dec used `x < min || x > max`, which is false for
+    // NaN, so a NaN declination reached the goto dispatch and started
+    // motion. Pin that it is rejected before slewing_cached_ is set and
+    // before any ":J" start command reaches the controller.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+
+    int ra_starts_before = mount.start_count(1);
+    int dec_starts_before = mount.start_count(2);
+
+    expect_alpaca_error([&] { driver->slew_to_coordinates_async(std::nan(""), 0.0); },
+                        alpacacore::AlpacaError::InvalidValue);
+
+    REQUIRE_FALSE(driver->get_slewing());
+    REQUIRE(mount.start_count(1) == ra_starts_before);
+    REQUIRE(mount.start_count(2) == dec_starts_before);
+    expect_alpaca_error([&] { driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
     driver->set_connected(false);
 }
 
@@ -1179,7 +1358,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW
     // Review finding: set_site_latitude() skips a busy RA axis on the grounds
     // that the restore paths recompute -- but the pulse path captured
     // ra_restore_rate_deg_per_sec at DISPATCH and wrote it back verbatim at
-    // pulse end. Autoguiding keeps pulse_guiding_active_ true for most of
+    // pulse end. Autoguiding keeps pulse_axis_active_[i] true for most of
     // every guide cycle (PHD2: duration + 1 s), so a site correction made
     // mid-session lands here rather than in the setter's re-apply, and the
     // pulse restored the pre-write direction. RA then ran backwards until

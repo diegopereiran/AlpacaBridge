@@ -135,6 +135,18 @@ public:
         delay_command_ = command;
     }
 
+    /// open-astro#559: LOSE the next @p times frames of @p command on the
+    /// wire -- the board neither applies them nor answers, as a frame that
+    /// arrived corrupted (or not at all) over a noisy EQDIR link. The frame
+    /// is still recorded, so count_frames() shows the wrapper's retransmits.
+    /// Distinct from delay_next_reply(): here a ":K" that is dropped leaves
+    /// the axis RUNNING, which is what turns a lost stop into pulse overshoot.
+    void drop_next_frames(char command, int times = 1) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        drop_command_ = command;
+        drop_left_ = times;
+    }
+
     /// Answer the next @p times frames with an OK reply of the wrong length
     /// ("=00"), i.e. a reply that belongs to some other command. If
     /// @p straggler is given, it is sent @p straggler_ms after the LAST
@@ -248,6 +260,10 @@ private:
         frames_.push_back(frame);
         if (frame.size() < 2) return "!3";
         const char cmd = frame[0];
+        if (drop_left_ > 0 && cmd == drop_command_) {
+            --drop_left_;
+            return "";  // lost on the wire: not applied, not answered (#559)
+        }
         const int axis = frame[1] == '2' ? 2 : 1;
         const std::string data = frame.substr(2);
         if (mispair_left_ > 0) {
@@ -393,6 +409,8 @@ private:
     std::string version_reply_ = "033A44";
     int answer_baud_ = 0;
     int mispair_left_ = 0;
+    char drop_command_ = 0;  // frames of this command to lose on the wire (#559)
+    int drop_left_ = 0;
     std::string straggler_;
     int straggler_ms_ = 0;
     bool straggler_pending_ = false;
