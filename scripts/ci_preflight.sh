@@ -286,6 +286,24 @@ else
   record FAIL "connect-error hook"
 fi
 
+# --- gate 2f: layering gate ------------------------------------------------
+
+section "Layering gate"
+if python3 scripts/check_layering.py --self-test && python3 scripts/check_layering.py; then
+  record PASS "layering gate"
+else
+  record FAIL "layering gate"
+fi
+
+# --- gate 2g: cross-driver contract sweep registration ---------------------
+
+section "Contract sweep registration"
+if python3 scripts/check_contract_sweep.py --self-test && python3 scripts/check_contract_sweep.py; then
+  record PASS "contract sweep registration"
+else
+  record FAIL "contract sweep registration"
+fi
+
 # --- gate 3: build + unit tests, vendor-neutral ----------------------------
 
 section "Build + tests (vendors OFF)"

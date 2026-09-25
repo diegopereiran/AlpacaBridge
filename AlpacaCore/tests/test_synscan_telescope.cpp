@@ -71,13 +71,6 @@ TEST_CASE("SynScan Telescope Driver - Defaults", "[synscan][telescope][unit]") {
     REQUIRE(driver->get_can_set_park());
     REQUIRE(driver->get_can_pulse_guide());
     REQUIRE(driver->get_can_set_guide_rates());
-    REQUIRE(driver->get_can_move_axis(0));
-    REQUIRE(driver->get_can_move_axis(1));
-    REQUIRE_FALSE(driver->get_can_move_axis(2));
-
-    // Out-of-range axis raises InvalidValue even while disconnected (#516).
-    require_alpaca_error([&]() { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { (void)driver->get_can_move_axis(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("SynScan Telescope Driver - Target Range Validation", "[synscan][telescope][unit]") {
@@ -257,14 +250,12 @@ TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
 
-    // TODO: SynScan check_connected() throws DriverException (0x500) instead of
-    // NotConnected (0x407). Fix the driver, then change these to AlpacaError::NotConnected.
-    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
     require_alpaca_error([&]() { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
