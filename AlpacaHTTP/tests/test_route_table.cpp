@@ -476,6 +476,8 @@ void check_rejections(alpacahttp::Router& router) {
 }
 
 // F. The device-type names: fixture vs router, both directions.
+// Limit: the scan reads only the kDeviceTypes initialiser in router.cpp. A name accepted some other way
+// (an extra `||` in is_known_device_type_name(), a second set, an alias) is not seen by the scan or the probes.
 std::set<std::string> scan_router_type_names() {
     std::ifstream in(std::filesystem::path(ALPACAHTTP_ROUTER_SRC_DIR) / "http" / "router.cpp");
     EXPECT(static_cast<bool>(in));

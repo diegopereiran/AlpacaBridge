@@ -1485,8 +1485,8 @@ def check_fake_roster_matches_disk(root=ROOT):
     return _fake_roster_findings(read("AlpacaCore/tests/contract_sweep.h", root), disk)
 
 
-STD_REGEX_TEMP_RE = re.compile(r"\bstd::regex\s*\(")
-STD_REGEX_NAMED_RE = re.compile(r"\bstd::regex\s+(\w+)\s*[({=]")
+STD_REGEX_TEMP_RE = re.compile(r"\bstd::regex\s*[({]")
+STD_REGEX_NAMED_RE = re.compile(r"\bstd::regex\s+(?:const\s+)?(\w+)\s*[({=]")
 
 
 def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
@@ -1959,6 +1959,14 @@ def self_test():
           _static_regex_findings('static\nconst std::regex kX(R"(a)");\n') == [])
     check("static regex: 'static' belonging to an earlier statement does not count",
           len(_static_regex_findings('static int n = 0;\nconst std::regex kX(R"(a)");\n')) == 1)
+    f = _static_regex_findings('auto r = std::regex{"a"};\n' + rx_ok)
+    check("static regex: a brace-built temporary is flagged",
+          len(f) == 1 and "temporary" in f[0])
+    f = _static_regex_findings('std::regex const kY("a");\n' + rx_ok)
+    check("static regex: 'std::regex const name' without static is flagged",
+          len(f) == 1 and "kY is not static" in f[0])
+    check("static regex: 'static std::regex const name' is clean",
+          _static_regex_findings('static std::regex const kY("a");\n') == [])
     f = _static_regex_findings("int x = 1;\n")
     check("static regex: no construction at all is a floor finding, not a pass",
           len(f) == 1 and "extractor is stale" in f[0])
