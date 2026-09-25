@@ -86,6 +86,14 @@ Checks:
      hand and fell behind when the Canon EOS 4000D row was added (PR #626).
      By name, one-directional, and only for rows whose Connection cell starts
      with USB and whose status cell is a check mark.
+ 13. The fake-connectable roster in AlpacaCore/tests/contract_sweep.h agrees
+     with the fake_*.h files on disk in both directions (issue #571): a fake
+     that is neither in the roster nor in HELPER_FAKES fails, and a roster row
+     whose fake no longer exists fails. The roster is the list the tier-2
+     (connected-over-a-fake) contract cases will iterate; those cases are a
+     follow-up PR to #571, so today this check pins the list, not any case. HELPER_FAKES names the
+     fakes that are not a driver's connect path, each with a reason, and a
+     helper that has since been given a roster row is itself a finding.
 """
 
 import glob
@@ -1407,6 +1415,69 @@ def check_gphoto_status_names_validated_bodies():
     )
 
 
+# Check 13 (issue #571): the tier-2 roster in contract_sweep.h names the drivers
+# that can connect to an in-process fake. Pinned to the fakes on disk the way
+# check 5 pins the blocking-get_connected() list to async_connectable.h.
+
+ROSTER_ROW_RE = re.compile(r'\{\s*"([a-z0-9]+)"\s*,\s*"([a-z0-9]+)"\s*,\s*"(fake_[a-z0-9_]+\.h)"\s*\}')
+ROSTER_ARRAY_RE = re.compile(r"kFakeConnectableRoster\[\]\s*=\s*\{(.*?)\n\};", re.DOTALL)
+
+# fake_*.h files that are helpers other fakes and tests build on, not a driver's
+# connect path, so they carry no roster row.
+HELPER_FAKES = {
+    "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
+    "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
+}
+
+
+ROSTER_REGISTRY_ID_RE = re.compile(r"\bX\(\s*([a-z0-9]+_[a-z0-9]+(?:_[a-z0-9]+)*)\s*\)")
+
+
+def _fake_roster_findings(header_text, disk_fakes, helpers=None):
+    helpers = HELPER_FAKES if helpers is None else helpers
+    failures = []
+    m = ROSTER_ARRAY_RE.search(_strip_comments(header_text))
+    rows = ROSTER_ROW_RE.findall(m.group(1)) if m else []
+    if not rows:
+        return ["AlpacaCore/tests/contract_sweep.h has no kFakeConnectableRoster rows (or the array moved): "
+                "the roster cannot be pinned to the fakes on disk"]
+    rostered = {fake for _, _, fake in rows}
+    # Each row's (vendor, type) must be a pair the registry sweeps: an id is
+    # <vendor>_<devicetype>[_<backend>], so the pair is its first two segments.
+    registry_pairs = {tuple(i.split("_")[:2]) for i in ROSTER_REGISTRY_ID_RE.findall(_strip_comments(header_text))}
+    for vendor, dtype, fake in rows:
+        if (vendor, dtype) not in registry_pairs:
+            failures.append(
+                "kFakeConnectableRoster row {%s, %s, %s} names a (vendor, type) pair with no registry entry: "
+                "correct the row or add the X(%s_%s) entry to CONTRACT_SWEEP_ENTRIES" % (vendor, dtype, fake, vendor, dtype))
+    for fake in sorted(disk_fakes):
+        if fake not in rostered and fake not in helpers:
+            failures.append(
+                "AlpacaCore/tests/%s is not in kFakeConnectableRoster (AlpacaCore/tests/contract_sweep.h) and is "
+                "not a HELPER_FAKES entry in scripts/check_docs_drift.py: add a roster row for the driver it "
+                "connects, or name it a helper with a reason" % fake)
+    for vendor, dtype, fake in rows:
+        if fake not in disk_fakes:
+            failures.append(
+                "kFakeConnectableRoster row {%s, %s, %s} names a fake that does not exist under "
+                "AlpacaCore/tests/: remove or repoint the row" % (vendor, dtype, fake))
+    for fake in sorted(helpers):
+        if fake in rostered:
+            failures.append(
+                "STALE HELPER_FAKES entry: %s now has a kFakeConnectableRoster row -- remove it from "
+                "HELPER_FAKES in scripts/check_docs_drift.py" % fake)
+        if fake not in disk_fakes:
+            failures.append(
+                "STALE HELPER_FAKES entry: %s does not exist under AlpacaCore/tests/ -- remove it from "
+                "HELPER_FAKES in scripts/check_docs_drift.py" % fake)
+    return failures
+
+
+def check_fake_roster_matches_disk(root=ROOT):
+    disk = {Path(p).name for p in glob.glob(str(root / "AlpacaCore" / "tests" / "fake_*.h"))}
+    return _fake_roster_findings(read("AlpacaCore/tests/contract_sweep.h", root), disk)
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -1421,6 +1492,7 @@ CHECKS = [
     ("Cursor rule file path references exist", check_rule_file_paths_exist),
     ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
     ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
+    ("Fake-connectable roster matches the fakes on disk", check_fake_roster_matches_disk),
 ]
 
 
@@ -1798,6 +1870,42 @@ def self_test():
           _gphoto_status_findings(gp_last, "**STATUS: validated: Nikon D3300.**\n\nrest\n") == [])
     check("gphoto status: every validated model named passes",
           _gphoto_status_findings(gp_table, "**STATUS: validated: Nikon D3300, Canon EOS 4000D.**\n\nrest\n") == [])
+
+    roster_hdr = ("#define CS_ZWO(X) X(zwo_telescope)\n"
+                  "#define CS_GEMINI(X) X(gemini_switch) X(gemini_switch_b)\n"
+                  "inline constexpr FakeRosterRow kFakeConnectableRoster[] = {\n"
+                  "    {\"zwo\", \"telescope\", \"fake_mount_server.h\"},\n"
+                  "    {\"gemini\", \"switch\", \"fake_gemini_pdh.h\"},\n"
+                  "};\n")
+    roster_disk = {"fake_mount_server.h", "fake_gemini_pdh.h", "fake_pty_write.h"}
+    roster_helpers = {"fake_pty_write.h": "helper"}
+    check("fake roster: a matching roster and disk produce no finding",
+          _fake_roster_findings(roster_hdr, roster_disk, roster_helpers) == [])
+    f = _fake_roster_findings(roster_hdr, roster_disk | {"fake_new_sdk.h"}, roster_helpers)
+    check("fake roster: a fake on disk with no roster row is flagged by name",
+          len(f) == 1 and "fake_new_sdk.h is not in kFakeConnectableRoster" in f[0])
+    f = _fake_roster_findings(roster_hdr, {"fake_mount_server.h", "fake_pty_write.h"}, roster_helpers)
+    check("fake roster: a roster row whose fake is gone is flagged",
+          len(f) == 1 and "fake_gemini_pdh.h" in f[0] and "does not exist" in f[0])
+    f = _fake_roster_findings(roster_hdr, roster_disk, {"fake_mount_server.h": "now rostered"})
+    check("fake roster: a helper that gained a roster row is a stale helper",
+          any("STALE HELPER_FAKES entry: fake_mount_server.h now has" in x for x in f))
+    f = _fake_roster_findings(roster_hdr, roster_disk, {"fake_pty_write.h": "h", "fake_gone.h": "h"})
+    check("fake roster: a helper whose file is gone is a stale helper",
+          any("STALE HELPER_FAKES entry: fake_gone.h does not exist" in x for x in f))
+    f = _fake_roster_findings(roster_hdr.replace('{"zwo", "telescope"', '{"zwoo", "telescope"'), roster_disk, roster_helpers)
+    check("fake roster: a row naming an unknown vendor is flagged",
+          any("zwoo" in x and "no registry entry" in x for x in f))
+    f = _fake_roster_findings(roster_hdr.replace('{"gemini", "switch"', '{"gemini", "focuser"'), roster_disk, roster_helpers)
+    check("fake roster: a row naming a pair the registry lacks is flagged",
+          any("gemini, focuser" in x and "no registry entry" in x for x in f))
+    only_backend = roster_hdr.replace("X(gemini_switch) X(gemini_switch_b)", "X(gemini_switch_b)")
+    check("fake roster: a pair covered only by a second-backend id (three segments) is a registry pair",
+          "X(gemini_switch)" not in only_backend and _fake_roster_findings(only_backend, roster_disk, roster_helpers) == [])
+    check("fake roster: a missing roster array is a finding, not a silent pass",
+          len(_fake_roster_findings("// nothing here\n", roster_disk, roster_helpers)) == 1)
+    check("fake roster: a row inside a comment is not a row",
+          len(_fake_roster_findings("// {\"a\", \"b\", \"fake_x.h\"},\n" + roster_hdr, roster_disk, roster_helpers)) == 0)
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

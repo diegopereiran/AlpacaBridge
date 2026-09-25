@@ -444,7 +444,7 @@ public:
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
         (void)action_parameters;
-        throw AlpacaException("Action not supported: " + std::string(action_name));
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
     bool can_action(std::string_view action_name) const override {
@@ -1718,7 +1718,7 @@ public:
 private:
     void check_connected() const {
         if (!connected_) {
-            throw AlpacaException("Not connected to Celestron mount");
+            throw AlpacaException("Not connected to Celestron mount", AlpacaError::NotConnected);
         }
     }
 
