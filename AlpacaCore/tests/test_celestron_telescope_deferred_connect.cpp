@@ -99,4 +99,16 @@ TEST_CASE("Celestron telescope auto-detect - re-scans when the resolved endpoint
     alpacacore::test::check_deferred_connect_re_resolves<Info>(make_driver(), [&fake] { return spawn(fake); });
 }
 
+TEST_CASE("Celestron telescope auto-detect - the production factory constructs with no hardware",
+          "[celestron][telescope][unit]") {
+    {
+        // Construction must not scan: a scan at start-up is the #659 bug. The
+        // resolver runs only inside Connected=true, which this case never issues.
+        std::unique_ptr<alpacacore::AlpacaDriver> driver;
+        REQUIRE_NOTHROW(driver = alpacacore::vendor::celestron::create_celestron_telescope_auto(0, 0));
+        REQUIRE(driver != nullptr);
+        CHECK_FALSE(driver->get_connected());
+    }
+}
+
 #endif  // _WIN32

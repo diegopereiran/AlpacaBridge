@@ -43,4 +43,16 @@ TEST_CASE("Astroasis focuser auto-detect - a failed scan refuses the connect, no
     alpacacore::test::check_deferred_connect_refused<Info>(make_driver(), "No Astroasis Oasis Focuser detected");
 }
 
+TEST_CASE("Astroasis focuser auto-detect - the production factory constructs with no hardware",
+          "[astroasis][focuser][unit]") {
+    {
+        // Construction must not scan: a scan at start-up is the #659 bug. The
+        // resolver runs only inside Connected=true, which this case never issues.
+        std::unique_ptr<alpacacore::AlpacaDriver> driver;
+        REQUIRE_NOTHROW(driver = alpacacore::vendor::astroasis::create_astroasis_focuser_by_index(0, 0));
+        REQUIRE(driver != nullptr);
+        CHECK_FALSE(driver->get_connected());
+    }
+}
+
 #endif  // _WIN32

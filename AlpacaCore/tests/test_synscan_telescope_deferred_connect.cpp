@@ -93,4 +93,17 @@ TEST_CASE("SynScan telescope auto-detect - re-scans when the resolved endpoint d
     alpacacore::test::check_deferred_connect_re_resolves<Info>(make_driver(), [&fake] { return spawn(fake); });
 }
 
+TEST_CASE("SynScan telescope auto-detect - the production factory constructs with no hardware",
+          "[synscan][telescope][unit]") {
+    {
+        // Construction must not scan: a scan at start-up is the #659 bug. The
+        // resolver runs only inside Connected=true, which this case never issues.
+        std::unique_ptr<alpacacore::AlpacaDriver> driver;
+        REQUIRE_NOTHROW(driver = alpacacore::vendor::synscan::create_synscan_telescope_auto(
+                            0, 0, alpacacore::vendor::synscan::SynScanVersion::V4));
+        REQUIRE(driver != nullptr);
+        CHECK_FALSE(driver->get_connected());
+    }
+}
+
 #endif  // _WIN32

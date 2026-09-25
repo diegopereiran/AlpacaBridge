@@ -112,7 +112,11 @@ void check_deferred_connect_reuses_endpoint(const DeferredFactory<Info>& make, c
     REQUIRE(settle_connected(*driver, true, kSlowBudget));
     CHECK(calls == 1);
     REQUIRE(settle_connected(*driver, false));
-    REQUIRE(settle_connected(*driver, true, kSlowBudget));
+    // One direct connect, not settle_connected(): its retry loop swallows a
+    // transient failure and re-runs the resolver, which would turn a healthy
+    // reuse into a spurious second scan. A failure here is a real failure.
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    REQUIRE(driver->get_connected());
     CHECK(calls == 1);  // the resolved endpoint answered: no second scan
     REQUIRE(settle_connected(*driver, false));
 }

@@ -43,6 +43,8 @@ Info endpoint(const std::string& path) {
 
 // Construct the replacement BEFORE the old fake dies so the two never share a pty.
 Info spawn(std::unique_ptr<Fake>& fake) {
+    // No ok() check as the socket fakes have: PtyPair throws from the fake's
+    // constructor when the pty cannot be set up (fake_pty_write.h, #387).
     auto next = std::make_unique<Fake>();
     fake = std::move(next);
     return endpoint(fake->slave_path());
@@ -69,6 +71,18 @@ TEST_CASE("Gemini focuser auto-detect - resolves at connect and reuses the endpo
 TEST_CASE("Gemini focuser auto-detect - re-scans when the resolved endpoint dies", "[gemini][focuser][unit]") {
     std::unique_ptr<Fake> fake;
     alpacacore::test::check_deferred_connect_re_resolves<Info>(make_driver(), [&fake] { return spawn(fake); });
+}
+
+TEST_CASE("Gemini focuser auto-detect - the production factory constructs with no hardware",
+          "[gemini][focuser][unit]") {
+    {
+        // Construction must not scan: a scan at start-up is the #659 bug. The
+        // resolver runs only inside Connected=true, which this case never issues.
+        std::unique_ptr<alpacacore::AlpacaDriver> driver;
+        REQUIRE_NOTHROW(driver = alpacacore::vendor::gemini::create_gemini_focuser_by_index(0, 0));
+        REQUIRE(driver != nullptr);
+        CHECK_FALSE(driver->get_connected());
+    }
 }
 
 #endif  // _WIN32
