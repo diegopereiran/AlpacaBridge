@@ -105,8 +105,9 @@ TEST_CASE("WandererAstro Rotator Driver - State machine", "[wandererastro][rotat
     REQUIRE(driver->get_connecting() == false);
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
-    // and are omitted, leaving just the TimeStamp; there must be no
-    // non-compliant "Connected" entry.
+    // and are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list; there must be no non-compliant
+    // "Connected" entry.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
@@ -116,7 +117,7 @@ TEST_CASE("WandererAstro Rotator Driver - State machine", "[wandererastro][rotat
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("WandererAstro Rotator Protocol Wrapper - Value range validation", "[wandererastro][rotator][unit]") {

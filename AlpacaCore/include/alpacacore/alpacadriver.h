@@ -208,9 +208,10 @@ public:
  * @brief Current UTC time formatted for a DeviceState "TimeStamp" entry.
  *
  * Returns an ISO 8601 / round-trippable string (YYYY-MM-DDTHH:MM:SS.mmmZ).
- * Every Platform 7 DeviceState response includes a TimeStamp recording when the
- * state snapshot was taken; this is the shared helper the device base classes
- * use to produce it. Defined inline so it is available in every translation
+ * Every Platform 7 DeviceState response from a connected device includes a
+ * TimeStamp recording when the state snapshot was taken; a disconnected device
+ * returns the empty list instead, with no TimeStamp. This is the shared helper
+ * the device base classes use to produce it. Defined inline so it is available in every translation
  * unit (including the per-vendor static libraries) without a link-order
  * dependency on the core library.
  */
