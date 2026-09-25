@@ -639,8 +639,9 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   sweep, up to two boots for the CFW3 probe) inside the Platform 7 `Connecting`
   window, so before a ConformU run against a freshly restarted service connect
   the device once from the web UI, or give it an explicit port or host.
-- **Every driver exposes a `create_*_deferred(device_number, resolver, ...)`
-  seam** and ships the cases in `tests/deferred_connect_cases.h` over its fake:
+- **Every driver converted from a construction-time scan (the ten in #660)
+  exposes a `create_*_deferred(device_number, resolver, ...)` seam** and ships
+  the cases in `tests/deferred_connect_cases.h` over its fake:
   refused (construction succeeds, the refusal is the connect error, sync and
   async), reused (one scan across a reconnect), re-resolved (the fake behind the
   resolved endpoint dies, a new one appears, the driver reaches it). A driver

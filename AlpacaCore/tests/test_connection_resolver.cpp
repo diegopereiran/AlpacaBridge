@@ -20,7 +20,9 @@
 
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <unistd.h>
 
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -158,4 +160,43 @@ TEST_CASE("connect_resolved - device_node_missing is false for an empty or prese
     CHECK_FALSE(alpacacore::util::device_node_missing(""));
     CHECK_FALSE(alpacacore::util::device_node_missing("/dev/null"));
     CHECK(alpacacore::util::device_node_missing("/dev/alpacabridge-no-such-node-659"));
+    // ENOTDIR: a path component that exists but is not a directory. The node
+    // cannot exist under it, so it is gone, not unreadable.
+    CHECK(alpacacore::util::device_node_missing("/dev/null/ttyUSB0"));
+}
+
+TEST_CASE("connect_resolved - device_node_missing is false for a stat error other than absence", "[util][unit]") {
+    // Review of #660: an EACCES on a parent directory used to read as
+    // "missing", which would have sent a Gemini or QHYCFW3 reconnect into the
+    // DTR-resetting probe. Build the case for real: a directory with no
+    // permission bits, and a path beneath it. Root ignores mode bits, so the
+    // probe is meaningless there and is skipped rather than passed vacuously.
+    if (::geteuid() == 0) {
+        WARN("running as root: directory permissions do not apply, EACCES probe skipped");
+        return;
+    }
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path base = fs::temp_directory_path(ec) / ("alpacabridge-node-missing-" + std::to_string(::getpid()));
+    REQUIRE_FALSE(ec);
+    REQUIRE(fs::create_directory(base, ec));
+    struct Cleanup {
+        fs::path p;
+        ~Cleanup() {
+            std::error_code ignored;
+            fs::permissions(p, fs::perms::owner_all, fs::perm_options::replace, ignored);
+            fs::remove_all(p, ignored);
+        }
+    } cleanup{base};
+    fs::permissions(base, fs::perms::none, fs::perm_options::replace, ec);
+    REQUIRE_FALSE(ec);
+
+    const std::string inside = (base / "ttyUSB0").string();
+    // Sanity: the probe really is a permission error, not absence, or the
+    // assertion below would test nothing.
+    std::error_code probe;
+    (void)fs::status(inside, probe);
+    REQUIRE(probe == std::errc::permission_denied);
+
+    CHECK_FALSE(alpacacore::util::device_node_missing(inside));
 }

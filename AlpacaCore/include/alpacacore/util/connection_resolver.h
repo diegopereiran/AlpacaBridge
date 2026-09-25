@@ -85,12 +85,17 @@ public:
 
 /// True when a serial or HID device node that was resolved earlier no longer
 /// exists (unplugged, or re-enumerated under another name). An empty path is
-/// never "missing"; a stat error other than absence counts as missing too,
-/// since the node cannot be opened either way.
+/// never "missing", and neither is a node whose status cannot be read for a
+/// reason other than absence (EACCES on a parent directory, ELOOP, a path too
+/// long): only ENOENT / ENOTDIR say the node is gone, and any other error
+/// must NOT route a Gemini or QHYCFW3 reconnect into the DTR-resetting probe
+/// the rest of the policy exists to avoid (review of #660).
 inline bool device_node_missing(const std::string& path) {
     if (path.empty()) return false;
     std::error_code ec;
-    return !std::filesystem::exists(path, ec);
+    const auto status = std::filesystem::status(path, ec);
+    if (status.type() == std::filesystem::file_type::not_found) return true;
+    return ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory;
 }
 
 template <typename Info, typename TryConnect>
