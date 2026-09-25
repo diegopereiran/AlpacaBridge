@@ -207,7 +207,8 @@ PersistedAttempt persisted_attempt(const nlohmann::json& entry, const std::strin
         original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     }
     // Only this entry: the Router below registers EVERY entry in the file, and
-    // some vendors touch hardware eagerly.
+    // an entry left behind by an earlier block (or a real one on a dev box)
+    // would be re-registered here as a side effect.
     nlohmann::json entries = nlohmann::json::array();
     entries.push_back(entry);
     std::filesystem::create_directories(persisted.parent_path());
@@ -3153,10 +3154,11 @@ int main() {
         }
         // Only this entry, rather than appending to whatever is on disk: the
         // second Router below re-registers EVERY entry in the file and builds
-        // that vendor's driver, and some vendors touch hardware eagerly (the
-        // astroasis by-index path .github/instructions/astroasis.instructions.md warns about). Appending would make
-        // this case depend on every earlier block having removed what it added,
-        // which nothing enforces. The original contents are restored below.
+        // that vendor's driver (construction is hardware-free for every arm
+        // since #659, but an SDK-index vendor still opens its SDK). Appending
+        // would make this case depend on every earlier block having removed
+        // what it added, which nothing enforces. The original contents are
+        // restored below.
         nlohmann::json entries = nlohmann::json::array();
         entries.push_back({{"vendor", "skywatcher"},
                            {"deviceType", "telescope"},
@@ -4143,8 +4145,9 @@ int main() {
 
         // #508 item 1, the arms that fall through to by-index auto-detect on an
         // empty portPath: registered from both sources, no WARN, and the entry
-        // keeps connectionType "serial" with the empty portPath. (The other
-        // three such arms probe hardware while constructing; see below.)
+        // keeps connectionType "serial" with the empty portPath. (Since #659
+        // no arm probes hardware while constructing; the mount and focuser
+        // auto arms are round-tripped in the #647 table below.)
         const auto silent_pin = [&](const std::string& vendor, const std::string& device_type,
                                     const std::string& alpaca_type, const std::string& extra) {
             const std::string body = obj({R"("connectionType":"serial","portPath":"")", extra});
