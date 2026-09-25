@@ -12,6 +12,9 @@
 
 // #646: pins the router's accepted surface and its rejection responses.
 //
+// Run order: F, A, B, C, D. F runs first so a fixture/router mismatch reports
+// as F's message instead of as A's per-method failures.
+//
 //  A. Route table: for every device type name and every method name in the
 //     committed snapshot (router_route_table_fixture.h), the verb mask the live
 //     router derives for it equals the snapshot. The mask is read off the
@@ -543,9 +546,9 @@ void check_type_names(alpacahttp::Router& router) {
 int main() {
     alpacahttp::Router router;
 
+    check_type_names(router);
     check_route_table(router);
     check_source_tables();
-    check_type_names(router);
 
     auto& registry = alpacacore::management::DeviceRegistry::instance();
     const auto stubs = make_stubs();
