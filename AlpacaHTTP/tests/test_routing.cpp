@@ -2275,6 +2275,19 @@ int main() {
         EXPECT(cfg.value("hidPath", "") == "/dev/hidraw3");
         remove_device(router, "astroasis", "focuser", 9621);
     }
+    {
+        // astroasis / focuser, focuserIndex form (#659): the by-index factory
+        // no longer scans the USB bus at construction, so a persisted
+        // auto-detect device registers with no hardware attached instead of
+        // becoming "(failed to load)", and focuserIndex survives the round-trip.
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "astroasis"}, {"deviceType", "focuser"}, {"deviceNumber", 9622}, {"focuserIndex", 1}},
+            "Focuser", 9622);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("focuserIndex", -1) == 1);
+        EXPECT(cfg.value("hidPath", "") == "");
+        remove_device(router, "astroasis", "focuser", 9622);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO

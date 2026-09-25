@@ -305,26 +305,30 @@ public:
         auto& protocol = SynScanProtocolWrapper::instance();
         if (connected) {
             // An auto-detected mount resolves its port here, not in the factory (#659).
-            util::connect_resolved(connection_info_, connection_resolved_, connection_resolver_,
-                                   [&protocol](const ConnectionInfo& info) {
-                                       if (!protocol.connect(info)) {
-                                           throw AlpacaException("Failed to connect to SynScan mount");
-                                       }
-                                   });
-            if (!protocol.echo_test()) {
-                // connect() only opens the port. Without this gate a link
-                // with nothing listening came up as Connected=true once every
-                // query below had burnt its full response timeout (all of
-                // them swallowed), and the client then saw each command time
-                // out in turn. Fail within one timeout, and say where to look.
-                protocol.disconnect();
-                const std::string where = connection_info_.type == alpacacore::vendor::synscan::ConnectionType::Serial
-                                              ? connection_info_.port_path
-                                              : connection_info_.host + ":" + std::to_string(connection_info_.tcp_port);
-                throw AlpacaException("SynScan hand controller did not answer the echo test on " + where +
-                                      " - check that the cable is on the handset's PC port, the handset is "
-                                      "powered and past its start-up prompts, and the baud rate is 9600");
-            }
+            // The echo test lives INSIDE the retry lambda: connect() only opens the
+            // port, and a stale auto-detected path that another adapter now owns
+            // still opens, so an identity gate outside the lambda would count that
+            // as "the resolved endpoint still answers" and never re-scan.
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_, [&protocol](const ConnectionInfo& info) {
+                    if (!protocol.connect(info)) {
+                        throw AlpacaException("Failed to connect to SynScan mount");
+                    }
+                    if (!protocol.echo_test()) {
+                        // Without this gate a link with nothing listening came up
+                        // as Connected=true once every query below had burnt its
+                        // full response timeout (all of them swallowed), and the
+                        // client then saw each command time out in turn. Fail
+                        // within one timeout, and say where to look.
+                        protocol.disconnect();
+                        const std::string where = info.type == alpacacore::vendor::synscan::ConnectionType::Serial
+                                                      ? info.port_path
+                                                      : info.host + ":" + std::to_string(info.tcp_port);
+                        throw AlpacaException("SynScan hand controller did not answer the echo test on " + where +
+                                              " - check that the cable is on the handset's PC port, the handset is "
+                                              "powered and past its start-up prompts, and the baud rate is 9600");
+                    }
+                });
             connected_ = true;
             mount_firmware_version_ = "";
             mount_model_id_ = -1;

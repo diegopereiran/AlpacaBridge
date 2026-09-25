@@ -631,10 +631,14 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   to a fresh scan. The scan's own message propagates as the connect refusal
   (#358), so it reaches the client and `LastConnectError`.
 - **Every driver exposes a `create_*_deferred(device_number, resolver, ...)`
-  seam** and ships the three cases in `tests/deferred_connect_cases.h` over its
-  fake: refused (construction succeeds, the refusal is the connect error, sync
-  and async), reused (one scan across a reconnect), re-resolved (the fake behind
-  the resolved endpoint dies, a new one appears, the driver reaches it).
+  seam** and ships the cases in `tests/deferred_connect_cases.h` over its fake:
+  refused (construction succeeds, the refusal is the connect error, sync and
+  async), reused (one scan across a reconnect), re-resolved (the fake behind the
+  resolved endpoint dies, a new one appears, the driver reaches it). A driver
+  with no fake (Astroasis, hidapi) ships the refusal case alone and says so.
+  Put the vendor's cheap identity gate (SynScan's echo test) INSIDE the
+  `try_connect` lambda: the helper only re-scans when the lambda throws, and a
+  stale port another adapter now owns still opens.
 - Drivers that resolve inside `set_connected(true)` by hand (iEFW
   `resolve_serial_port_locked()`, Gemini PDH / flat panel, WandererAstro) already
   meet the rule; do not move them back into a factory. A new `_auto` or
