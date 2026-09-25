@@ -13,6 +13,8 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
 
 #include <memory>
 #include <string>
@@ -55,6 +57,16 @@ std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel(int device_number
  * port, which DTR-resets whatever is behind it). wheel_index selects which
  * detected wheel to use (0-based, in candidate order).
  */
+/// Port resolved at connect time by `resolver` (#659); the by-index factory
+/// below wraps it, tests inject a fake's pty path.
+std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_deferred(
+    int device_number, util::ConnectionResolver<Cfw3ConnectionConfig> resolver);
+
+/// The serial scan behind create_qhy_cfw3_filterwheel_by_index(); throws when nothing answers.
+Cfw3ConnectionConfig resolve_qhy_cfw3_filterwheel_by_index(int wheel_index, const Cfw3Settings& settings);
+
+// The scan runs at connect time, so construction succeeds while the wheel is
+// absent (#659).
 std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int device_number, int wheel_index = 0,
                                                                         const Cfw3Settings& settings = {});
 

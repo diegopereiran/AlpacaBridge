@@ -13,6 +13,9 @@
 #pragma once
 
 #include <alpacacore/focuser_driver.h>
+#include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
+
 #include <memory>
 #include <string>
 
@@ -43,6 +46,16 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
  * @param focuser_index 0-based index into the list of detected focusers
  * @return Unique pointer to focuser driver
  */
+/// Port resolved at connect time by `resolver` (#659); the by-index factory
+/// below wraps it, tests inject a fake's pty path.
+std::unique_ptr<FocuserDriver> create_gemini_focuser_deferred(int device_number,
+                                                              util::ConnectionResolver<ConnectionConfig> resolver);
+
+/// The serial scan behind create_gemini_focuser_by_index(); throws when nothing answers.
+ConnectionConfig resolve_gemini_focuser_by_index(int focuser_index);
+
+// Auto-detect by enumeration index. The scan runs at connect time, so
+// construction succeeds while the focuser is absent (#659).
 std::unique_ptr<FocuserDriver> create_gemini_focuser_by_index(int device_number,
                                                                int focuser_index = 0);
 

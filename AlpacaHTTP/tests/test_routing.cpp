@@ -2266,8 +2266,7 @@ int main() {
     {
         // astroasis / focuser — explicit hidPath persists through
         // sanitize_device_config. (An empty hidPath instead falls back to
-        // focuserIndex, which eagerly scans the USB bus at construction and
-        // has no lazy no-hardware path to round-trip in this test.)
+        // focuserIndex, whose USB scan runs at connect time since #659.)
         const auto cfg = roundtrip_config(
             router,
             {{"vendor", "astroasis"}, {"deviceType", "focuser"}, {"deviceNumber", 9621}, {"hidPath", "/dev/hidraw3"}},

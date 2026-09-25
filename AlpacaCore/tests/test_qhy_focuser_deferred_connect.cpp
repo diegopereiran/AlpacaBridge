@@ -1,0 +1,71 @@
+// AlpacaCore
+// Copyright (c) 2025-2026 Joey Troy and contributors
+//
+// This file is part of AlpacaCore.
+//
+// AlpacaCore is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
+
+// QHY Q-Focuser: auto-detect resolves at connect time, not at construction
+// (issue #659). The persisted device is constructed at server start-up, when
+// the hardware is often not there yet; the scan now runs inside the connect,
+// its refusal is the connect error the client sees, and the resolved
+// endpoint is reused on the next connect. Cases live in
+// deferred_connect_cases.h; this file supplies the fake and the seam.
+
+#ifndef _WIN32
+
+#include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
+
+#include <memory>
+#include <string>
+
+#include "catch2_compat.h"
+#include "deferred_connect_cases.h"
+#include "fake_qhy_qfocuser.h"
+
+namespace {
+
+using Info = alpacacore::vendor::qhy::QFocuserConnectionConfig;
+
+using Fake = alpacacore::test::FakeQhyQFocuser;
+
+Info endpoint(const std::string& path) {
+    Info config;
+    config.serial_port = path;
+    return config;
+}
+
+Info spawn(std::unique_ptr<Fake>& fake) {
+    auto next = std::make_unique<Fake>();
+    fake = std::move(next);
+    return endpoint(fake->slave_path());
+}
+
+alpacacore::test::DeferredFactory<Info> make_driver() {
+    return [](alpacacore::util::ConnectionResolver<Info> resolver) -> std::unique_ptr<alpacacore::AlpacaDriver> {
+        return alpacacore::vendor::qhy::create_qhy_focuser_deferred(0, std::move(resolver));
+    };
+}
+
+}  // namespace
+
+TEST_CASE("QHY Q-Focuser auto-detect - a failed scan refuses the connect, not construction", "[qhy][focuser][unit]") {
+    alpacacore::test::check_deferred_connect_refused<Info>(make_driver(), "nothing answered the auto-detect probe");
+}
+
+TEST_CASE("QHY Q-Focuser auto-detect - resolves at connect and reuses the endpoint", "[qhy][focuser][unit]") {
+    std::unique_ptr<Fake> fake;
+    alpacacore::test::check_deferred_connect_reuses_endpoint<Info>(make_driver(), [&fake] { return spawn(fake); });
+}
+
+TEST_CASE("QHY Q-Focuser auto-detect - re-scans when the resolved endpoint dies", "[qhy][focuser][unit]") {
+    std::unique_ptr<Fake> fake;
+    alpacacore::test::check_deferred_connect_re_resolves<Info>(make_driver(), [&fake] { return spawn(fake); });
+}
+
+#endif  // _WIN32

@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
@@ -150,10 +151,12 @@ public:
 
     SynScanTelescopeDriver(int device_number, const ConnectionInfo& connection_info, SynScanVersion version,
                            std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect)
+                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+                           util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
         : AsyncConnectable("SynScan"),
           device_number_(device_number),
           connection_info_(connection_info),
+          connection_resolver_(std::move(connection_resolver)),
           version_(version),
           connected_(false),
           target_ra_hours_(0.0),
@@ -301,9 +304,13 @@ public:
 
         auto& protocol = SynScanProtocolWrapper::instance();
         if (connected) {
-            if (!protocol.connect(connection_info_)) {
-                throw AlpacaException("Failed to connect to SynScan mount");
-            }
+            // An auto-detected mount resolves its port here, not in the factory (#659).
+            util::connect_resolved(connection_info_, connection_resolved_, connection_resolver_,
+                                   [&protocol](const ConnectionInfo& info) {
+                                       if (!protocol.connect(info)) {
+                                           throw AlpacaException("Failed to connect to SynScan mount");
+                                       }
+                                   });
             if (!protocol.echo_test()) {
                 // connect() only opens the port. Without this gate a link
                 // with nothing listening came up as Connected=true once every
@@ -1893,6 +1900,11 @@ private:
 
     int device_number_;
     ConnectionInfo connection_info_;
+    // Set by the auto-detect factory; empty for an explicit port or host.
+    // connection_resolved_ is true once a connect has run the resolver, so a
+    // later connect retries that endpoint before scanning again (#659).
+    util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    bool connection_resolved_ = false;
     SynScanVersion version_;
     mutable std::mutex mutex_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
@@ -2011,15 +2023,19 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
                                                     site_elevation_m, sync_time_on_connect);
 }
 
-std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(
-    int device_number,
-    int mount_index,
-    SynScanVersion version,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect) {
+std::unique_ptr<TelescopeDriver> create_synscan_telescope_deferred(
+    int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver, SynScanVersion version,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    if (!connection_resolver) {
+        throw AlpacaException("SynScan telescope: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<SynScanTelescopeDriver>(device_number, ConnectionInfo{}, version, site_latitude_deg,
+                                                    site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                    std::move(connection_resolver));
+}
 
+ConnectionInfo resolve_synscan_serial_auto(int mount_index) {
     auto ports = enumerate_synscan_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("SynScan mount"));
@@ -2036,10 +2052,19 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(
     ConnectionInfo conn;
     conn.type = ConnectionType::Serial;
     conn.port_path = port.port_path;
+    return conn;
+}
 
-    return create_synscan_telescope_with_site(
-        device_number, conn, version, site_latitude_deg, site_longitude_deg,
-        site_elevation_m, sync_time_on_connect);
+std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(int device_number, int mount_index,
+                                                               SynScanVersion version,
+                                                               std::optional<double> site_latitude_deg,
+                                                               std::optional<double> site_longitude_deg,
+                                                               std::optional<double> site_elevation_m,
+                                                               std::optional<bool> sync_time_on_connect) {
+    // The serial scan runs at connect time (#659), not here.
+    return create_synscan_telescope_deferred(
+        device_number, [mount_index] { return resolve_synscan_serial_auto(mount_index); }, version, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
 
 } // namespace alpacacore::vendor::synscan
