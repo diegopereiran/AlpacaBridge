@@ -139,8 +139,21 @@ public:
             }
             // An auto-detected wheel resolves its port here, not in the factory (#659).
             Cfw3DeviceInfo info;
-            util::connect_resolved(config_, connection_resolved_, connection_resolver_,
-                                   [this, &info](const Cfw3ConnectionConfig& cfg) { info = protocol_.connect(cfg); });
+            util::connect_resolved(
+                config_, connection_resolved_, connection_resolver_,
+                [this, &info](const Cfw3ConnectionConfig& cfg) {
+                    try {
+                        info = protocol_.connect(cfg);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished node is stale. The out-of-step refusal of a wheel
+                        // that is still homing, or any other failure on a present port, must
+                        // NOT trigger the probe: it DTR-resets every CP210x device on the box.
+                        if (util::device_node_missing(cfg.serial_port))
+                            throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                kLogTag);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 slot_count_ = info.slot_count;

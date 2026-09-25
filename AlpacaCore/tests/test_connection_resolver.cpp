@@ -12,9 +12,11 @@
 
 // util::connect_resolved() policy (issue #659): fixed endpoints connect once,
 // a resolver runs on the first connect, the resolved endpoint is retried
-// before a second scan, and a dead endpoint falls through to a fresh scan.
-// Exceptions from the resolver or from the connect that follows it
-// propagate; only the retry of a stale endpoint is swallowed.
+// before a second scan, and a STALE endpoint (the lambda throws
+// util::StaleEndpoint) falls through to a fresh scan. Every other exception,
+// from the retry, the resolver or the connect that follows it, propagates:
+// a scan can DTR-reset every device on the bus, so a transient failure of a
+// present endpoint must never trigger one (review of #660).
 
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
@@ -76,7 +78,7 @@ TEST_CASE("connect_resolved - first connect scans, later connects reuse the endp
     CHECK(tried == std::vector<std::string>{"/dev/found1", "/dev/found1"});
 }
 
-TEST_CASE("connect_resolved - a dead resolved endpoint triggers one fresh scan", "[util][unit]") {
+TEST_CASE("connect_resolved - a stale resolved endpoint triggers one fresh scan", "[util][unit]") {
     Endpoint info{"/dev/found1"};
     bool resolved = true;
     int scans = 0;
@@ -87,11 +89,34 @@ TEST_CASE("connect_resolved - a dead resolved endpoint triggers one fresh scan",
     std::vector<std::string> tried;
     alpacacore::util::connect_resolved(info, resolved, resolver, [&tried](const Endpoint& e) {
         tried.push_back(e.where);
-        if (e.where == "/dev/found1") throw std::runtime_error("gone");
+        if (e.where == "/dev/found1") throw alpacacore::util::StaleEndpoint("gone");
     });
     CHECK(scans == 1);
     CHECK(tried == std::vector<std::string>{"/dev/found1", "/dev/found2"});
     CHECK(info.where == "/dev/found2");
+    CHECK(resolved);
+}
+
+TEST_CASE("connect_resolved - a non-stale failure of the resolved endpoint propagates without a scan", "[util][unit]") {
+    // The QHYCFW3 "still homing, try again" refusal and a Gemini handshake miss
+    // land here: the endpoint is present, so no probe may run.
+    Endpoint info{"/dev/found1"};
+    bool resolved = true;
+    int scans = 0;
+    alpacacore::util::ConnectionResolver<Endpoint> resolver = [&scans] {
+        ++scans;
+        return Endpoint{"/dev/found2"};
+    };
+    int connects = 0;
+    CHECK_THROWS_AS(alpacacore::util::connect_resolved(info, resolved, resolver,
+                                                       [&connects](const Endpoint&) {
+                                                           ++connects;
+                                                           throw alpacacore::AlpacaException("wheel still moving");
+                                                       }),
+                    alpacacore::AlpacaException);
+    CHECK(scans == 0);
+    CHECK(connects == 1);
+    CHECK(info.where == "/dev/found1");
     CHECK(resolved);
 }
 
@@ -105,7 +130,7 @@ TEST_CASE("connect_resolved - a failed scan propagates and leaves the endpoint a
     try {
         alpacacore::util::connect_resolved(info, resolved, resolver, [&connects](const Endpoint&) {
             ++connects;
-            throw std::runtime_error("gone");
+            throw alpacacore::util::StaleEndpoint("gone");
         });
         FAIL("the scan's exception must propagate");
     } catch (const alpacacore::AlpacaException& ex) {
@@ -127,4 +152,10 @@ TEST_CASE("connect_resolved - a failed connect after a fresh scan propagates wit
         alpacacore::AlpacaException);
     CHECK(resolved);
     CHECK(info.where == "/dev/found1");
+}
+
+TEST_CASE("connect_resolved - device_node_missing is false for an empty or present path", "[util][unit]") {
+    CHECK_FALSE(alpacacore::util::device_node_missing(""));
+    CHECK_FALSE(alpacacore::util::device_node_missing("/dev/null"));
+    CHECK(alpacacore::util::device_node_missing("/dev/alpacabridge-no-such-node-659"));
 }

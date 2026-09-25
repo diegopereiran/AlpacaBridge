@@ -125,8 +125,18 @@ public:
 
         if (connected) {
             // An auto-detected focuser resolves its HID path here, not in the factory (#659).
-            util::connect_resolved(hid_path_, connection_resolved_, connection_resolver_,
-                                   [this](const std::string& path) { protocol_.connect(path); });
+            util::connect_resolved(
+                hid_path_, connection_resolved_, connection_resolver_,
+                [this](const std::string& path) {
+                    try {
+                        protocol_.connect(path);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished hidraw node is stale; a handshake miss on a present one is not.
+                        if (util::device_node_missing(path)) throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                "Astroasis");
             connected_.store(true);
             ALPACA_LOG_INFO("Astroasis", "Focuser connected");
         } else {

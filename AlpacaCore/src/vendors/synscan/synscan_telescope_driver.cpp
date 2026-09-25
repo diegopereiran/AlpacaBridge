@@ -310,8 +310,14 @@ public:
             // still opens, so an identity gate outside the lambda would count that
             // as "the resolved endpoint still answers" and never re-scan.
             util::connect_resolved(
-                connection_info_, connection_resolved_, connection_resolver_, [&protocol](const ConnectionInfo& info) {
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
                     if (!protocol.connect(info)) {
+                        // Refused TCP connect or vanished serial node: stale, re-scan.
+                        if (info.type == alpacacore::vendor::synscan::ConnectionType::Network ||
+                            util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to SynScan mount");
+                        }
                         throw AlpacaException("Failed to connect to SynScan mount");
                     }
                     if (!protocol.echo_test()) {
@@ -319,16 +325,19 @@ public:
                         // as Connected=true once every query below had burnt its
                         // full response timeout (all of them swallowed), and the
                         // client then saw each command time out in turn. Fail
-                        // within one timeout, and say where to look.
+                        // within one timeout, and say where to look. It is the
+                        // identity gate: a port that opens but does not echo is
+                        // not (or no longer) this handset, so it is stale.
                         protocol.disconnect();
                         const std::string where = info.type == alpacacore::vendor::synscan::ConnectionType::Serial
                                                       ? info.port_path
                                                       : info.host + ":" + std::to_string(info.tcp_port);
-                        throw AlpacaException("SynScan hand controller did not answer the echo test on " + where +
-                                              " - check that the cable is on the handset's PC port, the handset is "
-                                              "powered and past its start-up prompts, and the baud rate is 9600");
+                        throw util::StaleEndpoint("SynScan hand controller did not answer the echo test on " + where +
+                                                  " - check that the cable is on the handset's PC port, the handset is "
+                                                  "powered and past its start-up prompts, and the baud rate is 9600");
                     }
-                });
+                },
+                "SynScan");
             connected_ = true;
             mount_firmware_version_ = "";
             mount_model_id_ = -1;

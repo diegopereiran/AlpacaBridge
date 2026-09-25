@@ -138,7 +138,17 @@ public:
             QFocuserDeviceInfo info;
             util::connect_resolved(
                 config_, connection_resolved_, connection_resolver_,
-                [this, &info](const QFocuserConnectionConfig& cfg) { info = protocol_.connect(cfg); });
+                [this, &info](const QFocuserConnectionConfig& cfg) {
+                    try {
+                        info = protocol_.connect(cfg);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished node is stale; a handshake miss on a present port is not.
+                        if (util::device_node_missing(cfg.serial_port))
+                            throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                kLogTag);
             try {
                 apply_settings();
             } catch (...) {

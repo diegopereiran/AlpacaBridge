@@ -153,8 +153,20 @@ public:
 
         if (connected) {
             // An auto-detected focuser resolves its port here, not in the factory (#659).
-            util::connect_resolved(config_, connection_resolved_, connection_resolver_,
-                                   [this](const ConnectionConfig& cfg) { protocol_.connect(cfg); });
+            util::connect_resolved(
+                config_, connection_resolved_, connection_resolver_,
+                [this](const ConnectionConfig& cfg) {
+                    try {
+                        protocol_.connect(cfg);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished node is stale; a handshake miss on a present
+                        // port must not trigger the probe, which resets every CH340 MCU.
+                        if (util::device_node_missing(cfg.serial_port))
+                            throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                "Gemini");
             // Cache the focuser firmware once (web UI only — never DriverInfo).
             // firmware_ is exactly what get_device_firmware() reports; a failed
             // query must not fail the connect.

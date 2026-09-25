@@ -627,9 +627,18 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   failure (the existing `if (!protocol.connect(info)) throw ...` moved into the
   lambda). The helper retries the last resolved endpoint before scanning again,
   so repeated ConformU / NINA connects stay under the Platform 7 5 s `Connect()`
-  budget, and a dead endpoint (re-enumerated port, new DHCP lease) falls through
-  to a fresh scan. The scan's own message propagates as the connect refusal
-  (#358), so it reaches the client and `LastConnectError`.
+  budget. **Re-scanning is opt-in**: the retry falls through to the resolver
+  only when the lambda throws `util::StaleEndpoint`, which it does for a
+  vanished serial or HID node (`util::device_node_missing()`), a refused network
+  connect, or a failed identity gate (SynScan's echo test). Every other
+  exception propagates: a scan DTR-resets every CP210x / CH340 device on the
+  box, so a wheel still homing or a handshake that missed once must never start
+  one (review of #660). The scan's own message propagates as the connect
+  refusal (#358), so it reaches the client and `LastConnectError`. **The first
+  connect after a service restart pays the scan** (5.5 s for the iOptron Wi-Fi
+  sweep, up to two boots for the CFW3 probe) inside the Platform 7 `Connecting`
+  window, so before a ConformU run against a freshly restarted service connect
+  the device once from the web UI, or give it an explicit port or host.
 - **Every driver exposes a `create_*_deferred(device_number, resolver, ...)`
   seam** and ships the cases in `tests/deferred_connect_cases.h` over its fake:
   refused (construction succeeds, the refusal is the connect error, sync and

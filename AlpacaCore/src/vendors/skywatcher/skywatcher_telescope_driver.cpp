@@ -388,12 +388,18 @@ public:
                     AlpacaError::InvalidOperation);
             }
             // An auto-detected mount resolves its port or host here, not in the factory (#659).
-            util::connect_resolved(connection_info_, connection_resolved_, connection_resolver_,
-                                   [&protocol](const ConnectionInfo& info) {
-                                       if (!protocol.connect(info)) {
-                                           throw AlpacaException("Failed to connect to Sky-Watcher motor controller");
-                                       }
-                                   });
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
+                    if (!protocol.connect(info)) {
+                        // Unanswered UDP endpoint or vanished serial node: stale, re-scan.
+                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to Sky-Watcher motor controller");
+                        }
+                        throw AlpacaException("Failed to connect to Sky-Watcher motor controller");
+                    }
+                },
+                "SkyWatcher");
             connected_ = true;
             reset_runtime_state_locked();
 

@@ -236,14 +236,22 @@ public:
             // Auto-detected devices resolve their port or host here, not in the
             // factory: a persisted device is constructed at server start-up,
             // when a Wi-Fi mount has often not joined the network yet (#659).
-            util::connect_resolved(connection_info_, connection_resolved_, connection_resolver_,
-                                   [&protocol](const ConnectionInfo& info) {
-                                       ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
-                                       if (!protocol.connect(info)) {
-                                           ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
-                                           throw AlpacaException("Failed to connect to iOptron mount");
-                                       }
-                                   });
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
+                    ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
+                    if (!protocol.connect(info)) {
+                        ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
+                        // A refused TCP connect or a vanished serial node means the
+                        // resolved endpoint is gone: re-scan. A node that is present
+                        // but would not open is not stale (busy, permissions).
+                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to iOptron mount");
+                        }
+                        throw AlpacaException("Failed to connect to iOptron mount");
+                    }
+                },
+                "iOptron");
             {
                 ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
                 connected_ = true;

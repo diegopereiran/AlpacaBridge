@@ -133,8 +133,19 @@ public:
         if (connected) {
             // An auto-detected focuser resolves its port here, not in the factory (#659).
             IeafDeviceInfo info;
-            util::connect_resolved(config_, connection_resolved_, connection_resolver_,
-                                   [this, &info](const IeafConnectionConfig& cfg) { info = protocol_.connect(cfg); });
+            util::connect_resolved(
+                config_, connection_resolved_, connection_resolver_,
+                [this, &info](const IeafConnectionConfig& cfg) {
+                    try {
+                        info = protocol_.connect(cfg);
+                    } catch (const AlpacaException& e) {
+                        // Only a vanished node is stale; a handshake miss on a present port is not.
+                        if (util::device_node_missing(cfg.serial_port))
+                            throw util::StaleEndpoint(e.what(), e.error_code());
+                        throw;
+                    }
+                },
+                "iOptron");
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_ = info.firmware > 0 ? std::to_string(info.firmware) : std::string();

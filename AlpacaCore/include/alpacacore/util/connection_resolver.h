@@ -12,11 +12,14 @@
 
 #pragma once
 
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <string>
+#include <system_error>
 #include <utility>
 
 namespace alpacacore::util {
@@ -42,19 +45,27 @@ namespace alpacacore::util {
  * - No resolver: `try_connect(info)` once; the endpoint is fixed.
  * - Resolver, nothing resolved yet: resolve, then `try_connect` the result.
  * - Resolver, a previous connect resolved an endpoint: `try_connect` that
- *   endpoint first and re-resolve only if it fails. ConformU and NINA
- *   connect and disconnect many times per session; paying the full scan
- *   (several seconds for a serial probe ladder or a subnet sweep) on every
- *   connect would push a Platform 7 `Connect()` past its 5 s client budget,
- *   while a stale endpoint (re-enumerated USB port, new DHCP lease) still
- *   falls through to a fresh scan.
+ *   endpoint first and re-resolve only if it throws `StaleEndpoint`. ConformU
+ *   and NINA connect and disconnect many times per session; paying the full
+ *   scan (several seconds for a serial probe ladder or a subnet sweep) on
+ *   every connect would push a Platform 7 `Connect()` past its 5 s client
+ *   budget, while a stale endpoint (re-enumerated USB port, new DHCP lease)
+ *   still falls through to a fresh scan.
  *
  * `try_connect(const Info&)` must THROW on failure (the drivers' existing
  * `if (!protocol.connect(info)) throw AlpacaException(...)` shape, moved into
- * the lambda). An exception from the retry of a previously resolved endpoint
- * is swallowed and triggers the re-resolve; an exception from the resolver
- * or from the connect that follows it propagates unchanged, so the client
- * sees the scan's own message as the connect refusal (#358).
+ * the lambda). Re-scanning is OPT-IN: the retry of a previously resolved
+ * endpoint falls through to the resolver only when the lambda throws
+ * `StaleEndpoint`, which it does for failures that mean the endpoint is gone
+ * or is not this device any more: the serial or HID node no longer exists
+ * (`device_node_missing()`), a network connect was refused, or the vendor's
+ * identity gate failed (SynScan's echo test). Every other exception
+ * propagates unchanged, because a scan is not free: the QHYCFW3 and Gemini
+ * probes open, and DTR-reset, every CP210x or CH340 device on the box, so a
+ * wheel that is still homing ("try again in a few seconds") or a handshake
+ * that missed once must NOT trigger one (review of #660). An exception from
+ * the resolver, or from the connect that follows it, propagates unchanged,
+ * so the client sees the scan's own message as the connect refusal (#358).
  *
  * The caller holds whatever lock its connect path already holds; this helper
  * takes none. `info` and `resolved` are the driver's own members so the
@@ -64,8 +75,27 @@ namespace alpacacore::util {
 template <typename Info>
 using ConnectionResolver = std::function<Info()>;
 
+/// Thrown by a `try_connect` lambda when the resolved endpoint is gone or is
+/// not this device any more; the only exception `connect_resolved()` answers
+/// with a fresh scan.
+class StaleEndpoint : public AlpacaException {
+public:
+    using AlpacaException::AlpacaException;
+};
+
+/// True when a serial or HID device node that was resolved earlier no longer
+/// exists (unplugged, or re-enumerated under another name). An empty path is
+/// never "missing"; a stat error other than absence counts as missing too,
+/// since the node cannot be opened either way.
+inline bool device_node_missing(const std::string& path) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    return !std::filesystem::exists(path, ec);
+}
+
 template <typename Info, typename TryConnect>
-void connect_resolved(Info& info, bool& resolved, const ConnectionResolver<Info>& resolver, TryConnect&& try_connect) {
+void connect_resolved(Info& info, bool& resolved, const ConnectionResolver<Info>& resolver, TryConnect&& try_connect,
+                      const char* log_tag = "AutoDetect") {
     if (!resolver) {
         try_connect(static_cast<const Info&>(info));
         return;
@@ -74,10 +104,11 @@ void connect_resolved(Info& info, bool& resolved, const ConnectionResolver<Info>
         try {
             try_connect(static_cast<const Info&>(info));
             return;
-        } catch (const std::exception& e) {
-            // The endpoint a previous connect found no longer answers: scan again.
-            ALPACA_LOG_INFO("AutoDetect", "Previously resolved endpoint no longer answers (" + std::string(e.what()) +
-                                              "); scanning again");
+        } catch (const StaleEndpoint& e) {
+            // The endpoint a previous connect found is gone: scan again. Any
+            // other failure propagated out of try_connect above.
+            ALPACA_LOG_INFO(log_tag,
+                            "Previously resolved endpoint is stale (" + std::string(e.what()) + "); scanning again");
         }
     }
     Info fresh = resolver();

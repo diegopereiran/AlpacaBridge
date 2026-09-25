@@ -264,12 +264,18 @@ public:
         auto& protocol = CelestronProtocolWrapper::instance();
         if (connected) {
             // An auto-detected mount resolves its port here, not in the factory (#659).
-            util::connect_resolved(connection_info_, connection_resolved_, connection_resolver_,
-                                   [&protocol](const ConnectionInfo& info) {
-                                       if (!protocol.connect(info)) {
-                                           throw AlpacaException("Failed to connect to Celestron mount");
-                                       }
-                                   });
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
+                    if (!protocol.connect(info)) {
+                        // Refused TCP connect or vanished serial node: stale, re-scan.
+                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to Celestron mount");
+                        }
+                        throw AlpacaException("Failed to connect to Celestron mount");
+                    }
+                },
+                "Celestron");
             connected_ = true;
             mount_firmware_version_ = "";
             mount_model_id_ = -1;
