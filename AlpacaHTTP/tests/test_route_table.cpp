@@ -88,7 +88,8 @@ std::vector<std::string> load_type_names() {
         if (line.empty() || line[0] == '#') {
             continue;
         }
-        EXPECT(std::all_of(line.begin(), line.end(), [](char c) { return std::islower(static_cast<unsigned char>(c)) != 0; }));
+        EXPECT(std::all_of(line.begin(), line.end(),
+                           [](char c) { return std::islower(static_cast<unsigned char>(c)) != 0; }));
         EXPECT(std::find(names.begin(), names.end(), line) == names.end());
         names.push_back(line);
     }
