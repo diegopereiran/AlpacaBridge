@@ -19,13 +19,15 @@
 // agrees with itself and a wrong pointing model is invisible. That is how a
 // six-hour error shipped and passed conformance on three different boards.
 //
-// WHAT IS AND IS NOT AN EXTERNAL ANCHOR HERE. The four hardware rows in the
+// WHAT IS AND IS NOT AN EXTERNAL ANCHOR HERE. The hardware rows in the
 // first test case are: an EQM-35 Pro at latitude -37.2 was driven to known
 // axis positions on 2026-09-12 with the shipped (wrong) 3.5.1 build and the
-// tube's real direction was read off the mount by hand (three rows), and a
+// tube's real direction was read off the mount by hand (three rows), a
 // fourth, northern row comes from the Wave 150i report that opened the
-// issue. Those four, and the alt/az cross-check against what was observed,
-// are the only checks in this file that the driver cannot satisfy by
+// issue, and the rest are listed in that case. Those rows, the alt/az
+// cross-check against what was observed, and the plate-solved rows in the
+// last test case ("measured axes agree with the plate-solved sky across a
+// flip") are the only checks in this file that the driver cannot satisfy by
 // agreeing with itself.
 //
 // `sky_from_axes()` below is a transcription of the driver's own formula, so
@@ -37,7 +39,8 @@
 // agree with for a board of the same dec-axis sense.
 //
 // If you change the pointing model, this file is what has to justify it, and
-// a new hardware row is what has to extend it. Do not "verify" a change here
+// a new hardware row, in the first test case or as a plate-solved row in the
+// last, is what has to extend it. Do not "verify" a change here
 // against the driver's own readback.
 
 #ifndef _WIN32
@@ -1142,6 +1145,239 @@ TEST_CASE("SkyWatcher pointing - an unmeasured board keeps the #432 model in bot
 
         driver->set_tracking(false);
         driver->set_connected(false);
+    }
+}
+
+// A plate-solving client syncs on a target, slews away and slews back. The
+// only other sync in this file is at the exact pole (#459), so nothing here
+// pinned a sync anywhere else, or that a goto after it still lands on the
+// sky. The return trip has to put the tube back where the sync was made;
+// a1 is allowed to differ by the sidereal motion tracking adds while the test
+// runs (15 deg an hour, so 1.5 deg is six minutes).
+TEST_CASE("SkyWatcher pointing - a sync away from the pole survives a goto and the way back, south",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = -35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double sync_ra = std::fmod(lst - 2.0 + 24.0, 24.0);  // HA +2 h
+    const double sync_dec = -30.0;
+    driver->sync_to_coordinates(sync_ra, sync_dec);
+
+    // A sync is the controller's ":E" count re-stamp: no motor moves, so the
+    // axes stay physically at home while the driver's frame jumps to the
+    // synced target. That is why the landings below are judged by the
+    // driver's own readback and by where the axes really are relative to the
+    // sync, never through sky_from_axes()/check_landing(), which assume the
+    // physical axes and the counts share one frame.
+    CHECK(std::abs(mount.physical_degrees(1)) < 0.1);
+    CHECK(std::abs(mount.physical_degrees(2)) < 0.1);
+    CHECK(std::abs(wrap_ha(driver->get_right_ascension() - sync_ra)) < kHaToleranceHours);
+    CHECK(std::abs(driver->get_declination() - sync_dec) < kDecToleranceDegrees);
+    CHECK(driver->get_side_of_pier() == 0);
+
+    driver->set_tracking(true);
+
+    // Same side of the meridian, different HA and dec: no flip involved. The
+    // tube has to move, and the readback has to follow the new target.
+    const double other_ra = std::fmod(lst - 4.0 + 24.0, 24.0);  // HA +4 h
+    const double other_dec = -55.0;
+    const LandedFrame away = land(*driver, mount, other_ra, other_dec);
+    INFO("away: physical a1=" << away.a1 << " a2=" << away.a2);
+    CHECK(std::abs(wrap_ha(away.reported_ra - other_ra)) < kHaToleranceHours);
+    CHECK(std::abs(away.reported_dec - other_dec) < kDecToleranceDegrees);
+    CHECK(away.side_of_pier == 0);
+    CHECK(std::abs(away.a1) > 10.0);
+    CHECK(std::abs(away.a2) > 10.0);
+
+    // Back on the synced target the tube is where the sync was made, i.e.
+    // home, apart from the tracking drift.
+    const LandedFrame back = land(*driver, mount, sync_ra, sync_dec);
+    INFO("back: physical a1=" << back.a1 << " a2=" << back.a2);
+    CHECK(std::abs(wrap_ha(back.reported_ra - sync_ra)) < kHaToleranceHours);
+    CHECK(std::abs(back.reported_dec - sync_dec) < kDecToleranceDegrees);
+    CHECK(back.side_of_pier == 0);
+    CHECK(std::abs(back.a2) < 0.05);
+    CHECK(std::abs(back.a1) < 1.5);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// A west goto, an east goto (the flip), and a west goto again. The existing
+// west and east cases each start from home; the other branch changes in this
+// file all start or end at the pole (#459). None goes from one side of the
+// meridian to the other and back. The return to the first target has to reproduce the
+// first landing's axes: a2 exactly (it does not depend on time), a1 within the
+// tracking drift while the test runs.
+TEST_CASE("SkyWatcher pointing - consecutive meridian flips return to the same axes, south",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    const double latitude = -35.0;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double west_ra = std::fmod(lst - 2.0 + 24.0, 24.0);  // HA +2 h
+    const double west_dec = -30.0;
+    const double east_ra = std::fmod(lst + 2.5, 24.0);  // HA -2.5 h
+    const double east_dec = -50.0;
+    REQUIRE(driver->get_destination_side_of_pier(west_ra, west_dec) == 0);
+    REQUIRE(driver->get_destination_side_of_pier(east_ra, east_dec) == 1);
+
+    const LandedFrame first = land(*driver, mount, west_ra, west_dec);
+    check_landing(first, latitude, west_ra, west_dec, 0, -1);
+    CHECK(first.a2 > 0.0);
+
+    const LandedFrame flipped = land(*driver, mount, east_ra, east_dec);
+    check_landing(flipped, latitude, east_ra, east_dec, 1, -1);
+    CHECK(flipped.a2 < 0.0);
+
+    const LandedFrame back = land(*driver, mount, west_ra, west_dec);
+    check_landing(back, latitude, west_ra, west_dec, 0, -1);
+    CHECK(back.a2 > 0.0);
+    CHECK(std::abs(back.a2 - first.a2) < 0.05);
+    CHECK(std::abs(back.a1 - first.a1) < 1.5);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+// The side and the dec branch are chosen from the sky hour angle, so they
+// change at HA 0 and nowhere else. The pole cases already pin that at HA
+// +/-0.1 h, but only at dec 90; every other goto away from the pole sits 2 h or
+// more from the meridian. This case pins the switch away from the pole, 0.05 h
+// either side, with the RA axis at the counterweight limit. The
+// targets sit 0.05 h either side because LST cannot be frozen: a target at
+// exactly HA 0 would land on either side depending on when the driver reads
+// the clock. The driver aims ahead by an estimated slew time (distance over
+// the max rate plus goto overhead and resume latency) before it picks the
+// branch, so the test's LST read and the driver's own evaluation must stay
+// within 3 min (0.05 h) of each other; the simulated slew is about 27 s, so a
+// wrong `expected_side` here is a timing budget to look at before it is a
+// driver regression.
+// At HA +/-0.05 h the RA axis is within 0.75 deg of +/-90, the
+// counterweight-horizontal limit, and the two landings are on opposite dec
+// branches.
+TEST_CASE("SkyWatcher pointing - the pier side changes at HA 0 and the axes stay inside the limit, south",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    const double latitude = -35.0;
+    for (const double ha : {+0.05, -0.05}) {
+        FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+        REQUIRE(mount.ok());
+        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0);
+        driver->set_connected(true);
+        driver->set_tracking(true);
+
+        const double lst = driver->get_sidereal_time();
+        const double target_ra = std::fmod(lst - ha + 24.0, 24.0);
+        const double target_dec = -30.0;
+        const int side = ha >= 0.0 ? 0 : 1;
+        INFO("target HA " << ha << " h");
+        REQUIRE(driver->get_destination_side_of_pier(target_ra, target_dec) == side);
+
+        const LandedFrame f = land(*driver, mount, target_ra, target_dec);
+        check_landing(f, latitude, target_ra, target_dec, side, -1);
+        if (ha > 0.0) {
+            CHECK(f.a2 > 0.0);
+            CHECK(f.a1 > 85.0);
+        } else {
+            CHECK(f.a2 < 0.0);
+            CHECK(f.a1 < -85.0);
+        }
+
+        driver->set_tracking(false);
+        driver->set_connected(false);
+    }
+}
+
+// Hardware rows measured against the sky. EQM-35 Pro (0x32) at latitude -37.1
+// (rounded), 2026-09-24. Each row pairs the physical axis
+// angles at a 5 s exposure with where ASTAP plate-solved that exposure, precessed
+// to the equinox of date. The axes are the board's own :j replies from the
+// driver's TRACE log, read within 2.7 s of the exposure midpoint, with both :E
+// sync re-stamps taken out, so they are where the axes really were, not what
+// the driver was told. Two power-ons; the mount was hand-homed before each.
+//
+// The tolerances are set by the mount, not by the model. A seven-term fit to
+// 15 solved exposures (these 14 rows and the home row) puts the polar axis
+// 1.3 deg off the pole, the tube 0.8 deg off
+// square to the dec axis, the dec zero 0.8 and 3.3 deg off and the RA zero 3.3
+// and 6.2 deg off (first and second power-on), with 8 arcmin rms left over. The
+// plain model below has none of those terms, so it is up to 0.43 h and 4.6 deg
+// from the sky. The checks are sized to catch what this file exists to catch:
+// a 6 h or 12 h hour-angle error, a wrong sign, a wrong dec branch across the
+// meridian, or a wrong RA-axis scale or direction. The last is the within-
+// power-on check: the RA zero cancels there, so rows on one side of the
+// meridian must share one HA offset while a1 spans 38.7 to 80.4 deg (first
+// power-on, west) and 19.0 to 72.1 deg (second power-on, west).
+// The home row is left out: at a2 = 0 the dec branch is undefined (#459).
+// Before adding a row, check its residuals against the bounds below: the dec
+// bound has only 0.42 deg of margin here (4.58 measured) and the HA bound
+// 0.066 h (0.434 measured, "Dec -40 circle 1"), and both margins are set by
+// this rig's own zero errors, so a row from a worse-homed rig would fail on the
+// rig, not on the model. The same-side spread only constrains groups with two
+// or more rows: power-on 2 east has one, so its check compares it to itself.
+TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky across a flip, south",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere]") {
+    struct Row {
+        const char* what;
+        int power_on;
+        double a1;
+        double a2;
+        double solved_ha;   // hours, of date
+        double solved_dec;  // degrees, of date
+    };
+    const Row rows[] = {
+        {"M7 first", 1, 59.130, 55.210, 2.291, -34.630},
+        {"M7 at the sync", 1, 58.508, 55.210, 2.331, -34.639},
+        {"NGC 6752, west", 1, 80.393, 29.869, 0.897, -59.786},
+        {"Antares field, west", 1, 38.678, 63.349, 3.664, -26.796},
+        {"IC 5148 after a flip, east", 1, -60.436, -50.801, -1.791, -37.117},
+        {"Capricornus field, east", 1, -72.167, -54.151, -1.017, -33.710},
+        {"Dec -40 circle 1, west", 2, 72.073, 50.000, 1.629, -42.252},
+        {"Dec -40 circle 2, west", 2, 53.910, 50.000, 2.817, -42.549},
+        {"Dec -40 circle 3, west", 2, 35.750, 50.000, 4.024, -42.874},
+        {"Dec -40 circle 4, west", 2, 19.579, 50.000, 5.105, -43.175},
+        {"at the second sync, west", 2, 18.963, 50.000, 5.145, -43.186},
+        {"M7, west", 2, 54.214, 58.396, 2.812, -34.121},
+        {"IC 5148 after a flip, east", 2, -65.344, -47.464, -1.297, -37.956},
+        {"M7 after the flip back, west", 2, 53.241, 58.396, 2.877, -34.143},
+    };
+    constexpr double latitude = -37.1;
+    constexpr double kRowHaToleranceHours = 0.5;     // 7.5 deg; a 6 h error is twelve times this
+    constexpr double kRowDecToleranceDegrees = 5.0;  // a wrong hemisphere sign is 53 deg or more here
+    constexpr double kSameSideSpreadHours = 0.05;    // 3 min; measured spread is under 2 min
+
+    // First HA offset (model - sky) seen per power-on and side, for the spread check.
+    double first_offset[3][2] = {};
+    bool seen[3][2] = {};
+    for (const Row& r : rows) {
+        REQUIRE((r.power_on == 1 || r.power_on == 2));  // indexes first_offset / seen below
+        const SkyPoint sky = sky_from_axes(latitude, r.a1, r.a2, -1);
+        const double ha_offset = wrap_ha(sky.ha_hours - r.solved_ha);
+        INFO(r.what << " (power-on " << r.power_on << "): model HA " << sky.ha_hours << " h dec " << sky.dec_degrees
+                    << "; solved HA " << r.solved_ha << " h dec " << r.solved_dec);
+        CHECK(std::abs(ha_offset) < kRowHaToleranceHours);
+        CHECK(std::abs(sky.dec_degrees - r.solved_dec) < kRowDecToleranceDegrees);
+        // Data check on the recorded rows: each landing's dec branch is the side of
+        // the meridian the sky put the tube on. A wrong branch in the model is caught
+        // by the HA check above, not by this line. This assumes this board's
+        // k = s * eps = +1 (EQM-35 Pro, south): an eps = +1 board in the south
+        // would legitimately fail it.
+        CHECK((r.solved_ha >= 0.0) == (r.a2 >= 0.0));
+
+        const int side = r.a2 >= 0.0 ? 0 : 1;
+        if (!seen[r.power_on][side]) {
+            seen[r.power_on][side] = true;
+            first_offset[r.power_on][side] = ha_offset;
+        }
+        CHECK(std::abs(wrap_ha(ha_offset - first_offset[r.power_on][side])) < kSameSideSpreadHours);
     }
 }
 
