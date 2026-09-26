@@ -20,6 +20,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -149,6 +150,11 @@ public:
 
     std::vector<FakeCamera> cameras;
     std::set<std::string> throw_from;
+    // Persistent, not a one-shot: runs before every call until it is cleared (after the call is counted, before
+    // throw_from), so a case can make one named call block. Null in every ordinary test; the contract sweep
+    // sets it on the connect call to hold a connect open.
+    // Ownership (as fake_qhy_sdk.h): set before the driver exists, never changed while a connect is in flight.
+    std::function<void(const std::string&)> before_call;
     std::vector<std::string> call_log;
 
     int open_count{0};
@@ -317,6 +323,7 @@ private:
 
     void log_and_maybe_throw(const std::string& name) {
         call_log.push_back(name);
+        if (before_call) before_call(name);
         if (throw_from.count(name) != 0) {
             throw AlpacaException("FakeGPhotoSDK: injected failure in " + name, AlpacaError::DriverException);
         }

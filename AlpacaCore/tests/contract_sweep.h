@@ -129,10 +129,13 @@ using DriverFactory = std::function<std::unique_ptr<AlpacaDriver>(int device_num
 // can_move_axis), camera, rotator. Excluded, with the reason:
 //  - focuser, filter wheel, cover calibrator, observing conditions: the interface (AlpacaCore/include/
 //    alpacacore/*_driver.h) declares no Can* getter. The focuser's Absolute is read as one.
-//  - switch: CanWrite(id) and CanAsync(id) take an id. zwo, gemini, playerone, wandererastro and the ToupTek
-//    thermal switch throw NotConnected from them (validate the id, then ensure_connected()); ioptron and the
-//    ToupTek StellaVita and the ASIAIR drivers return static config. Which is the contract is not settled by
-//    AGENTS.md or a protocol document, so the sweep pins neither (assumption: no source says).
+//  - switch: CanWrite(id), CanAsync(id) and MaxSwitch while disconnected may answer from static configuration
+//    or throw NotConnected; any other code is a defect (decided in #655). Each switch entry states which of the
+//    two its driver does, with its source, and names a writable id that the set_switch probe uses. The
+//    sweep pins exactly the stated mode, so a driver that changes flips the case and the entry is updated.
+// How a per-id capability read behaves while disconnected: answered from static configuration, or NotConnected.
+enum class DisconnectedRead { Static, NotConnected };
+
 struct ContractEntry {
     const char* id;           // "<vendor>_<devicetype>", the ctest case name stem
     const char* vendor;       // router vendor string
@@ -154,10 +157,19 @@ struct ContractEntry {
     // Where the expectations above come from: "protocol document", "hardware run"
     // or "assumption", with the reference. The sweep requires one of those words.
     const char* source;
-    // Telescope only. Non-null: this driver answers get_at_park from driver-side parked state while
-    // disconnected instead of throwing NotConnected (AGENTS.md: every operational property does). The
-    // string names the issue and the source; the sweep pins today's behaviour until it is fixed.
-    const char* at_park_known_defect = nullptr;
+    // Camera only. Non-null: this driver answers get_image_ready / get_ccd_temperature while disconnected
+    // instead of throwing NotConnected (AGENTS.md: every operational property does). The string names the
+    // issue and the source; the sweep pins today's behaviour until it is fixed.
+    const char* image_ready_known_defect = nullptr;
+    const char* ccd_temperature_known_defect = nullptr;
+    // Switch only (with_switch_caps): what MaxSwitch and CanWrite/CanAsync do while disconnected, where that
+    // is read from, and a writable id for the set_switch probe. A writable id is one whose writability the
+    // driver checks BEFORE the connection (iOptron, ToupTek StellaVita: a read-only port would answer
+    // NotImplemented) or that the connected device reports writable (the rest check the connection first).
+    DisconnectedRead switch_max_disconnected = DisconnectedRead::Static;
+    DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
+    int switch_writable_id = -1;
+    const char* switch_caps_source = "";
 };
 
 // Platform 7 interface versions per device type.
@@ -193,23 +205,29 @@ inline const char* invalid_probe_reason_for(DeviceType t) {
     }
 }
 
-// get_at_park while disconnected: bisque, celestron, synscan and skywatcher return parked_ under the
-// state mutex with no connection check; onstep, ioptron and zwo check it (get_at_park in
-// AlpacaCore/src/vendors/<vendor>/<vendor>_telescope_driver.cpp).
-inline const char* at_park_known_defect_for(const std::string& vendor, const std::string& device_type) {
-    if (device_type != "telescope") return nullptr;
-    if (vendor == "bisque")
-        return "known defect, open-astro#656: bisque_telescope_driver.cpp get_at_park returns parked_ with no "
-               "NotConnected";
-    if (vendor == "celestron")
-        return "known defect, open-astro#656: celestron_telescope_driver.cpp get_at_park returns parked_ with no "
-               "NotConnected";
-    if (vendor == "synscan")
-        return "known defect, open-astro#656: synscan_telescope_driver.cpp get_at_park returns parked_ with no "
-               "NotConnected";
-    if (vendor == "skywatcher")
-        return "known defect, open-astro#656: skywatcher_telescope_driver.cpp get_at_park returns parked_ with no "
-               "NotConnected";
+// Camera getters that answer while disconnected, one issue for the set (open-astro#658). get_image_ready
+// returns false on an early `!connected_` check in playerone (also behind the router's ioptron/camera arm),
+// svbony, gphoto and touptek; qhy get_ccd_temperature returns 0.0 with no ensure_connected(). zwo checks both.
+inline const char* image_ready_known_defect_for(const std::string& id) {
+    if (id == "playerone_camera" || id == "ioptron_camera")
+        return "known defect, open-astro#658: PlayerOneCameraDriver::get_image_ready returns false when "
+               "!connected_";
+    if (id == "svbony_camera")
+        return "known defect, open-astro#658: SVBONYCameraDriver::get_image_ready returns false when "
+               "!connected_";
+    if (id == "gphoto_camera")
+        return "known defect, open-astro#658: GPhotoCameraDriver::get_image_ready returns false when "
+               "!connected_";
+    if (id == "touptek_camera")
+        return "known defect, open-astro#658: ToupTekCameraDriver::get_image_ready returns false when "
+               "!connected_";
+    return nullptr;
+}
+
+inline const char* ccd_temperature_known_defect_for(const std::string& id) {
+    if (id == "qhy_camera")
+        return "known defect, open-astro#658: QHYCameraDriver::get_ccd_temperature returns 0.0 with no "
+               "ensure_connected()";
     return nullptr;
 }
 
@@ -226,13 +244,23 @@ inline ContractEntry make_entry(const char* id, const char* vendor, const char* 
                          false,
                          invalid_probe_reason_for(type),
                          source,
-                         at_park_known_defect_for(vendor, device_type)};
+                         image_ready_known_defect_for(id),
+                         ccd_temperature_known_defect_for(id)};
 }
 
 inline ContractEntry with_command_passthrough(ContractEntry e) {
     // Command* forward to the mount protocol when connected (driver source; assumption for the
     // disconnected NotConnected code, checked by the sweep itself). Source string is kept.
     e.command_passthrough = true;
+    return e;
+}
+
+inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_switch, DisconnectedRead can_write_async,
+                                      int writable_id, const char* source) {
+    e.switch_max_disconnected = max_switch;
+    e.switch_caps_disconnected = can_write_async;
+    e.switch_writable_id = writable_id;
+    e.switch_caps_source = source;
     return e;
 }
 
@@ -283,29 +311,43 @@ inline ContractEntry contract_entry_zwo_rotator() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_zwo_switch() {
-    return make_entry(
-        "zwo_switch", "zwo", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0); },
-        "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
-        "router arm have their own entries below");
+    return with_switch_caps(
+        make_entry(
+            "zwo_switch", "zwo", "switch", DeviceType::Switch,
+            [](int n) -> std::unique_ptr<AlpacaDriver> {
+                return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0);
+            },
+            "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
+            "router arm have their own entries below"),
+        DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
+        "ZWODewHeaterSwitchDriver: MaxSwitch returns 1; CanWrite and CanAsync validate the id then "
+        "ensure_connected()");
 }
 // Second and third backends behind the same (zwo, switch) router pair: the on-board GPIO switch of the
 // ASIAIR Pro and Plus (Pi CM4), and the ASIAIR Plus (RK3568) switch.
 inline ContractEntry contract_entry_zwo_switch_asiair() {
-    return make_entry(
-        "zwo_switch_asiair", "zwo", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> {
-            return vendor::zwo::create_zwo_asiair_switch(n, vendor::zwo::default_asiair_pro_config());
-        },
-        kSrcAgents);
+    return with_switch_caps(make_entry(
+                                "zwo_switch_asiair", "zwo", "switch", DeviceType::Switch,
+                                [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                    return vendor::zwo::create_zwo_asiair_switch(
+                                        n, vendor::zwo::default_asiair_pro_config());
+                                },
+                                kSrcAgents),
+                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                            "ZWOAsiairSwitchDriver: MaxSwitch is the configured port count; CanWrite is "
+                            "true and CanAsync false, both after validate_id only");
 }
 inline ContractEntry contract_entry_zwo_switch_asiair_plus() {
-    return make_entry(
-        "zwo_switch_asiair_plus", "zwo", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> {
-            return vendor::zwo::create_zwo_asiair_plus_switch(n, vendor::zwo::default_asiair_plus_rk3568_config());
-        },
-        kSrcAgents);
+    return with_switch_caps(make_entry(
+                                "zwo_switch_asiair_plus", "zwo", "switch", DeviceType::Switch,
+                                [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                    return vendor::zwo::create_zwo_asiair_plus_switch(
+                                        n, vendor::zwo::default_asiair_plus_rk3568_config());
+                                },
+                                kSrcAgents),
+                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                            "ZWOAsiairPlusSwitchDriver: MaxSwitch is the configured port count; "
+                            "CanWrite is true and CanAsync false, both after validate_id only");
 }
 #endif
 
@@ -369,12 +411,16 @@ inline ContractEntry contract_entry_ioptron_filterwheel() {
 
 #if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
 inline ContractEntry contract_entry_ioptron_switch() {
-    return make_entry(
-        "ioptron_switch", "ioptron", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> {
-            return vendor::ioptron::create_ioptron_switch(n, vendor::ioptron::default_imate_powerbox_config());
-        },
-        kSrcAgents);
+    return with_switch_caps(make_entry(
+                                "ioptron_switch", "ioptron", "switch", DeviceType::Switch,
+                                [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                    return vendor::ioptron::create_ioptron_switch(
+                                        n, vendor::ioptron::default_imate_powerbox_config());
+                                },
+                                kSrcAgents),
+                            DisconnectedRead::Static, DisconnectedRead::Static, 1,
+                            "IoptronSwitchDriver and default_imate_powerbox_config(): static port table; id 0 "
+                            "(DC3 always on) is read-only, id 1 (DC1) is writable");
 }
 #endif
 
@@ -407,10 +453,14 @@ inline ContractEntry contract_entry_playerone_filterwheel() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_playerone_switch() {
-    return make_entry(
-        "playerone_switch", "playerone", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_switch(n, 0); },
-        kSrcAgents);
+    return with_switch_caps(
+        make_entry(
+            "playerone_switch", "playerone", "switch", DeviceType::Switch,
+            [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_switch(n, 0); },
+            kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
+        "PlayerOneSwitchDriver: MaxSwitch returns kMaxThermalElements while disconnected; CanWrite and "
+        "CanAsync ensure_connected()");
 }
 #endif
 
@@ -532,10 +582,15 @@ inline ContractEntry contract_entry_gemini_focuser() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_gemini_switch() {
-    return make_entry(
-        "gemini_switch", "gemini", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::gemini::create_gemini_pdh_switch(n, "/dev/null"); },
-        kSrcAgents);
+    return with_switch_caps(make_entry(
+                                "gemini_switch", "gemini", "switch", DeviceType::Switch,
+                                [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                    return vendor::gemini::create_gemini_pdh_switch(n, "/dev/null");
+                                },
+                                kSrcAgents),
+                            DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
+                            "GeminiPdhSwitchDriver and kSwitches: MaxSwitch is kPdhSwitchCount; "
+                            "CanWrite and CanAsync ensure_connected(); id 0 (USB A) is writable");
 }
 #endif
 
@@ -581,21 +636,29 @@ inline ContractEntry contract_entry_touptek_focuser() {
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 // Second backend behind the same (touptek, switch) router pair; needs no libgpiod.
 inline ContractEntry contract_entry_touptek_switch_thermal() {
-    return make_entry(
-        "touptek_switch_thermal", "touptek", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::touptek::create_touptek_thermal_switch(n, 0); },
-        kSrcAgents);
+    return with_switch_caps(
+        make_entry(
+            "touptek_switch_thermal", "touptek", "switch", DeviceType::Switch,
+            [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::touptek::create_touptek_thermal_switch(n, 0); },
+            kSrcAgents),
+        DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
+        "ToupTekThermalSwitchDriver: MaxSwitch is the probed count or the kMaxThermalElements upper "
+        "bound; CanWrite and CanAsync ensure_connected()");
 }
 #endif
 
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 inline ContractEntry contract_entry_touptek_switch() {
-    return make_entry(
-        "touptek_switch", "touptek", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> {
-            return vendor::touptek::create_touptek_switch(n, vendor::touptek::default_stellavita_config());
-        },
-        kSrcAgents);
+    return with_switch_caps(make_entry(
+                                "touptek_switch", "touptek", "switch", DeviceType::Switch,
+                                [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                    return vendor::touptek::create_touptek_switch(
+                                        n, vendor::touptek::default_stellavita_config());
+                                },
+                                kSrcAgents),
+                            DisconnectedRead::Static, DisconnectedRead::Static, 0,
+                            "TouptekSwitchDriver and default_stellavita_config(): static port table, "
+                            "all four ports writable");
 }
 #endif
 
@@ -625,12 +688,15 @@ inline ContractEntry contract_entry_wandererastro_rotator() {
         kSrcAgents);
 }
 inline ContractEntry contract_entry_wandererastro_switch() {
-    return make_entry(
-        "wandererastro_switch", "wandererastro", "switch", DeviceType::Switch,
-        [](int n) -> std::unique_ptr<AlpacaDriver> {
-            return vendor::wandererastro::create_wandererastro_box_switch(n, "/dev/null");
-        },
-        kSrcAgents);
+    return with_switch_caps(make_entry(
+                                "wandererastro_switch", "wandererastro", "switch", DeviceType::Switch,
+                                [](int n) -> std::unique_ptr<AlpacaDriver> {
+                                    return vendor::wandererastro::create_wandererastro_box_switch(n, "/dev/null");
+                                },
+                                kSrcAgents),
+                            DisconnectedRead::Static, DisconnectedRead::NotConnected, 2,
+                            "WandererBoxSwitchDriver and kSwitches: MaxSwitch is kBoxSwitchCount; CanWrite and "
+                            "CanAsync ensure_connected(); ids 0-1 are read-only, id 2 (DC3-4) is writable");
 }
 #endif
 
@@ -800,7 +866,16 @@ inline std::vector<ContractEntry> contract_entries() {
 // in-process fake today. Pinned to AlpacaCore/tests/fake_*.h by
 // scripts/check_docs_drift.py (check 13): a fake on disk that is neither here
 // nor a helper fake fails, and a row whose fake no longer exists fails. The
-// tier-2 cases over this roster follow in a second PR against #571.
+// tier-2 cases over this roster are in test_contract_sweep.cpp: the array stays a
+// literal three-field list because check 13 parses it, so each row's connect recipe
+// and the registry entry it hosts live in CONTRACT_SWEEP_TIER2_HOSTS there, and the
+// case "Contract sweep tier 2 - hosts match kFakeConnectableRoster" pins the two
+// together. Every row hosts every applicable case and no case is registered where it would assert
+// nothing: target flags on telescopes only, InvalidValue only on types with a static out-of-range probe
+// (invalid_probe_reason_for() states why the others have none). A row whose fake cannot hold a connect
+// open states why and the source in its connecting_unobservable reason there instead of skipping the
+// Connecting check silently. A row whose fake covers
+// less than its registry entry says so inline.
 // ---------------------------------------------------------------------------
 
 struct FakeRosterRow {
@@ -811,7 +886,7 @@ struct FakeRosterRow {
 
 inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"skywatcher", "telescope", "fake_skywatcher_mount.h"},
-    {"skywatcher", "telescope", "fake_skywatcher_serial_board.h"},
+    {"skywatcher", "telescope", "fake_skywatcher_serial_board.h"},  // hosted as skywatcher_telescope_serial
     {"zwo", "telescope", "fake_mount_server.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
@@ -819,10 +894,10 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
     {"gemini", "focuser", "fake_gemini_focuser.h"},
-    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
     {"qhy", "camera", "fake_qhy_sdk.h"},
-    {"qhy", "filterwheel", "fake_qhy_cfw3.h"},
+    {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
