@@ -535,6 +535,7 @@ public:
 
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         if (homing_ && connected_) {
             check_homing_complete_locked();
         }
@@ -543,6 +544,7 @@ public:
 
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         return parked_;
     }
 
