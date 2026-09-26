@@ -93,6 +93,47 @@ TEST_CASE("SynScan telescope auto-detect - re-scans when the resolved endpoint d
     alpacacore::test::check_deferred_connect_re_resolves<Info>(make_driver(), [&fake] { return spawn(fake); });
 }
 
+TEST_CASE("SynScan telescope auto-detect - a port that opens but does not echo is stale and re-scans",
+          "[synscan][telescope][unit]") {
+    // The identity gate (review of #660, round 6). connect() succeeds on any
+    // open port, so a resolved endpoint another device now owns still opens;
+    // only the echo test tells a handset from a port with nothing listening,
+    // and its failure is what turns a reused endpoint into a fresh scan. This
+    // fake accepts the TCP connect and answers every query except the echo,
+    // so the shared re-resolve case (whose old fake is GONE, refused connect)
+    // never reaches it.
+    auto silent = std::make_unique<Fake>([](const std::string& chunk) -> std::string {
+        if (!chunk.empty() && chunk[0] == 'K') return "";  // no echo, ever
+        return synscan_responder(chunk);
+    });
+    REQUIRE(silent->ok());
+    int calls = 0;
+    Info current = endpoint(silent->port());
+    auto driver = make_driver()([&calls, &current]() -> Info {
+        ++calls;
+        return current;
+    });
+
+    // First connect: the scan resolves the silent endpoint, the TCP connect
+    // succeeds, the echo gate refuses with the client-facing message. The
+    // endpoint is now "resolved" (the post-scan failure propagates unchanged).
+    REQUIRE_THROWS_WITH(driver->set_connected(true),
+                        Catch::Matchers::ContainsSubstring("did not answer the echo test"));
+    CHECK(calls == 1);
+    CHECK_FALSE(driver->get_connected());
+
+    // Second connect: the retry of the resolved endpoint opens again and again
+    // fails the echo. That is StaleEndpoint, so the helper scans once more and
+    // reaches the handset that now answers. With a plain AlpacaException from
+    // the gate (the pre-#660 shape) no re-scan happens and this connect fails.
+    std::unique_ptr<Fake> echoing;
+    current = spawn(echoing);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK(calls == 2);
+    CHECK(driver->get_connected());
+    REQUIRE(alpacacore::test::settle_connected(*driver, false));
+}
+
 TEST_CASE("SynScan telescope auto-detect - the production factory constructs with no hardware",
           "[synscan][telescope][unit]") {
     {
