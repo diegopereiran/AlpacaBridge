@@ -50,13 +50,6 @@ struct Cfw3Settings {
 std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel(int device_number, const std::string& serial_port,
                                                                const Cfw3Settings& settings = {});
 
-/**
- * @brief Create a QHYCFW3 driver by auto-detecting its serial port.
- *
- * Probes every CP210x serial bridge on the machine (each probe opens the
- * port, which DTR-resets whatever is behind it). wheel_index selects which
- * detected wheel to use (0-based, in candidate order).
- */
 /// Port resolved at connect time by `resolver` (#659); the by-index factory
 /// below wraps it, tests inject a fake's pty path.
 std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_deferred(
@@ -65,8 +58,16 @@ std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_deferred(
 /// The serial scan behind create_qhy_cfw3_filterwheel_by_index(); throws when nothing answers.
 Cfw3ConnectionConfig resolve_qhy_cfw3_filterwheel_by_index(int wheel_index, const Cfw3Settings& settings);
 
-// The scan runs at connect time, so construction succeeds while the wheel is
-// absent (#659).
+/**
+ * @brief Create a QHYCFW3 driver by auto-detecting its serial port.
+ *
+ * Probes every CP210x serial bridge on the machine (each probe opens the
+ * port, which DTR-resets whatever is behind it). wheel_index selects which
+ * detected wheel to use (0-based, in candidate order).
+ *
+ * The scan runs at connect time, so construction succeeds while the wheel is
+ * absent (#659).
+ */
 std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel_by_index(int device_number, int wheel_index = 0,
                                                                         const Cfw3Settings& settings = {});
 

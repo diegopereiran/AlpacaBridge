@@ -50,13 +50,6 @@ struct QFocuserSettings {
 std::unique_ptr<FocuserDriver> create_qhy_focuser(int device_number, const std::string& serial_port,
                                                   const QFocuserSettings& settings = {});
 
-/**
- * @brief Create a QHY Q-Focuser driver by auto-detecting its serial port.
- *
- * Scans for the focuser's GigaDevice CDC-ACM interface and probes each with
- * the version handshake. focuser_index selects which detected focuser to
- * use (0-based).
- */
 /// Port resolved at connect time by `resolver` (#659); the by-index factory
 /// below wraps it, tests inject a fake's pty path.
 std::unique_ptr<FocuserDriver> create_qhy_focuser_deferred(int device_number,
@@ -66,8 +59,16 @@ std::unique_ptr<FocuserDriver> create_qhy_focuser_deferred(int device_number,
 /// The serial scan behind create_qhy_focuser_by_index(); throws when nothing answers.
 QFocuserConnectionConfig resolve_qhy_focuser_by_index(int focuser_index);
 
-// Auto-detect by enumeration index. The scan runs at connect time, so
-// construction succeeds while the focuser is absent (#659).
+/**
+ * @brief Create a QHY Q-Focuser driver by auto-detecting its serial port.
+ *
+ * Scans for the focuser's GigaDevice CDC-ACM interface and probes each with
+ * the version handshake. focuser_index selects which detected focuser to
+ * use (0-based).
+ *
+ * Auto-detect by enumeration index. The scan runs at connect time, so
+ * construction succeeds while the focuser is absent (#659).
+ */
 std::unique_ptr<FocuserDriver> create_qhy_focuser_by_index(int device_number, int focuser_index = 0,
                                                            const QFocuserSettings& settings = {});
 

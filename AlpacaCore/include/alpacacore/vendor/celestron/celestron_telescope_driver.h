@@ -33,8 +33,6 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
     std::optional<double> site_elevation_m,
     std::optional<bool> sync_time_on_connect);
 
-// Auto-detect: scans serial ports, probes for NexStar mount, creates driver.
-// mount_index selects which mount if multiple are found (0 = first).
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_deferred(
@@ -45,8 +43,10 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_deferred(
 /// The serial scan behind create_celestron_telescope_auto(); throws when nothing answers.
 ConnectionInfo resolve_celestron_serial_auto(int mount_index);
 
-// Auto-detect: the scan runs at connect time, so construction succeeds while
-// the mount is absent (#659).
+// Auto-detect: scans serial ports, probes for a NexStar mount, creates the
+// driver; mount_index selects which mount if several are found (0 = first).
+// The scan runs at connect time, so construction succeeds while the mount is
+// absent (#659).
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_auto(
     int device_number,
     int mount_index = 0,
