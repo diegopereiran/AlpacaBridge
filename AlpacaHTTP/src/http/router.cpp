@@ -1402,7 +1402,7 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
 
 Router::Router() : Router(CatalogExtension{}) {}
 
-Router::Router(CatalogExtension extend_catalog) {
+Router::Router(const CatalogExtension& extend_catalog) {
     alpacacore::catalog::register_builtin_schemas(catalog_);
     alpacacore::catalog::register_builtin_factories(catalog_);
     if (extend_catalog) {
@@ -7692,8 +7692,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     std::optional<alpacacore::DeviceType> device_type_key;
     try {
         device_type_key = string_to_device_type(device_type_str);
-    } catch (const std::exception&) {
+    } catch (const std::exception& ex) {
         // Unknown device_type_str: fall through to the arm chain.
+        util::log_debug("register_device_from_config: device type \"" + device_type_str +
+                        "\" is not catalog-recognized (" + ex.what() + "); falling through to the arm chain");
     }
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
@@ -9620,8 +9622,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             }
             return sanitized;
         }
-    } catch (const std::exception&) {
+    } catch (const std::exception& ex) {
         // Unknown device_type: fall through to the vendor-specific chain.
+        util::log_debug("sanitize_device_config: device type \"" + device_type + "\" is not catalog-recognized (" +
+                        ex.what() + "); falling through to the vendor-specific chain");
     }
 
     if (vendor == "ioptron") {

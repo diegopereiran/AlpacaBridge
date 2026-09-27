@@ -75,7 +75,7 @@ public:
     // production never passes one -- only tests, which need a descriptor the
     // built-in registration functions don't provide, use it.
     using CatalogExtension = std::function<void(alpacacore::catalog::DeviceCatalog&)>;
-    explicit Router(CatalogExtension extend_catalog);
+    explicit Router(const CatalogExtension& extend_catalog);
 
     // The catalog this router consults before its arm chain
     // (register_device_from_config()) and serves at GET
