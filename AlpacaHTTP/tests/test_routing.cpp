@@ -5167,7 +5167,7 @@ int main() {
         // CSRF guard (issue #298): this endpoint sets the system clock and,
         // since #291, marks the host client-stepped, so it takes the same
         // Origin check the wifi endpoints use. A cross-origin mutating
-        // request is rejected with 403 before the body is even parsed.
+        // request is rejected with 403 before the body is acted on.
         {
             const std::string body = "{\"Epoch\": 100}";
             std::ostringstream raw;

@@ -7234,7 +7234,9 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
         return std::nullopt;
     }
     // Issue #509: the ID may arrive only in the JSON body, which the handlers
-    // have not read yet when they call this guard.
+    // have not read yet when they call this guard. Precedence: a non-zero
+    // query-string ID wins over the body here, whereas handle_description()
+    // and handle_log_level() let a non-zero body ID override the query one.
     if (client_tx_id == 0 && !request.body().empty()) {
         if (auto json_opt = parse_json(request.body())) {
             client_tx_id = extract_client_transaction_id(*json_opt);
