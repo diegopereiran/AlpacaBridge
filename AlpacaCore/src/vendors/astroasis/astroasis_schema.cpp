@@ -17,9 +17,8 @@
 // the per-field rules (focuserIndex >= 0) are enough, same as the arm it
 // replaces never validated anything beyond hidPath.empty().
 
-#include "astroasis_fields.h"
-
 #include "../../catalog/builtin_descriptors.h"
+#include "astroasis_fields.h"
 
 namespace alpacacore::catalog {
 

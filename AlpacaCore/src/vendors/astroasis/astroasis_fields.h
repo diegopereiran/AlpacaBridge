@@ -35,8 +35,7 @@ namespace alpacacore::catalog {
 // Explicit hidapi device path (e.g. from enumerate_astroasis_focusers()).
 // Takes precedence over kFocuserIndex when both are present -- the factory
 // checks hidPath.empty() first, same as the arm it replaces.
-inline const Field<std::string> kAstroasisHidPath{
-    .key = "hidPath", .default_value = "", .role = Role::PortPath};
+inline const Field<std::string> kAstroasisHidPath{.key = "hidPath", .default_value = "", .role = Role::PortPath};
 
 // 0-based index into the USB HID bus scan (enumerate_astroasis_focusers()),
 // used only when hidPath is absent or empty.

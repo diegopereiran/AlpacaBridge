@@ -19,11 +19,10 @@
 // ALPACACORE_ENABLE_ASTROASIS, and is not in the layering gate's catalog
 // file set (only *_schema.cpp is), so the vendor header here is fine.
 
-#include "astroasis_fields.h"
+#include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
 
 #include "../../catalog/builtin_descriptors.h"
-
-#include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
+#include "astroasis_fields.h"
 
 namespace alpacacore::catalog {
 
