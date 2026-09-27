@@ -7288,7 +7288,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
         if (now_seconds < kMinEpoch || now_seconds > kMaxEpoch) {
             response.set_body(make_error_response(
                 client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                "Host clock is outside 2000-01-01..2100-01-01 UTC; set the time with POST /management/v1/synctime"));
+                "Host clock is outside 2000-01-01..2100-01-01 UTC; set the time with POST /management/v1/synctime."));
             return response;
         }
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);

@@ -5144,7 +5144,7 @@ int main() {
                 EXPECT(j.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
                 EXPECT(
                     j.value("ErrorMessage", "") ==
-                    "Host clock is outside 2000-01-01..2100-01-01 UTC; set the time with POST /management/v1/synctime");
+                    "Host clock is outside 2000-01-01..2100-01-01 UTC; set the time with POST /management/v1/synctime.");
                 EXPECT(!j.contains("Value"));
             }
             for (const std::int64_t edge : {std::int64_t{946684800}, std::int64_t{4102444800}}) {
