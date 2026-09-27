@@ -1472,9 +1472,7 @@ void Router::set_host_clock_hooks(alpacacore::util::HostClock::IsSynchronizedFn 
     host_clock_.set_hooks(std::move(is_synchronized), std::move(set_time), std::move(has_rtc));
 }
 
-void Router::set_now_fn(NowFn now_fn) {
-    now_fn_ = std::move(now_fn);
-}
+void Router::set_now_fn(NowFn now_fn) { now_fn_ = std::move(now_fn); }
 
 void Router::set_shutdown_callback(std::function<void()> callback) {
     shutdown_callback_ = callback;
