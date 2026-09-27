@@ -96,21 +96,24 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the Astroasis fo
     CHECK_FALSE(index->required);
     CHECK_FALSE(index->applies_when.has_value());
     CHECK(index->allowed_values.empty());
-    REQUIRE(index->min.has_value());
-    CHECK(*index->min == 0.0);
-    CHECK_FALSE(index->max.has_value());  // F2 pins no upper bound, so the descriptor declares none
+    CHECK_FALSE(index->min.has_value());  // ALP-271: no range declared, see astroasis_fields.h
+    CHECK_FALSE(index->max.has_value());  // F2 pins no range for focuserIndex either
     REQUIRE(std::holds_alternative<std::int64_t>(index->default_value));
     CHECK(std::get<std::int64_t>(index->default_value) == 0);
 
-    // The only rule: a negative index is refused from the API and dropped when persisted.
+    // No rule on focuserIndex: a negative index passes through unchanged from
+    // both sources -- the arm it replaces never validated the index either.
     DeviceConfig negative;
     negative.set("focuserIndex", std::int64_t{-1});
-    const auto rejected = catalog.normalize(kAstroasisKey, negative, Source::Api);
-    REQUIRE(rejected.rejection.has_value());
-    CHECK(rejected.rejection->find("focuserIndex") != std::string::npos);
-    const auto warned = catalog.normalize(kAstroasisKey, negative, Source::Persisted);
-    CHECK(warned.warnings.size() == 1);
-    CHECK_FALSE(warned.config.has("focuserIndex"));
+    const auto negative_api = catalog.normalize(kAstroasisKey, negative, Source::Api);
+    CHECK_FALSE(negative_api.rejection.has_value());
+    const auto negative_persisted = catalog.normalize(kAstroasisKey, negative, Source::Persisted);
+    CHECK(negative_persisted.warnings.empty());
+    REQUIRE(negative_persisted.config.has("focuserIndex"));
+    const ConfigValue* negative_value = negative_persisted.config.find_value("focuserIndex");
+    REQUIRE(negative_value != nullptr);
+    REQUIRE(std::holds_alternative<std::int64_t>(*negative_value));
+    CHECK(std::get<std::int64_t>(*negative_value) == -1);
 
     // Both keys accepted together, and an empty config normalizes to itself.
     DeviceConfig both;

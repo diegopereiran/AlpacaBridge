@@ -7711,9 +7711,16 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                     return false;
                 }
             } else {
+                // ALP-271: distinct from reject_invalid_config()'s "will refuse to
+                // connect" wording below, which is false here -- normalize() has
+                // already substituted a usable value (the field's default, or
+                // unset), so the device is not refusing to connect over this.
                 for (const auto& warning : result.warnings) {
-                    reject_invalid_config(source, warning.c_str(), vendor, device_type_str, device_number,
-                                          error_message);
+                    util::log_warning(persisted_device_subject(vendor, device_type_str, device_number) +
+                                      " config normalized: " + warning +
+                                      ". The saved value is not used: the field falls back to its default, or "
+                                      "stays unset if it has none. Registered so it stays listed and editable in "
+                                      "the web UI.");
                 }
             }
             if (!view->available) {

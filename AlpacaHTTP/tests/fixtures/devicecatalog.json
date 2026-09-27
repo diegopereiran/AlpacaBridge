@@ -7,7 +7,7 @@
     "buildOption": "ALPACACORE_ENABLE_ASTROASIS",
     "fields": [
       {"key": "hidPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath"},
-      {"key": "focuserIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex", "range": {"min": 0}}
+      {"key": "focuserIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
     ]
   },
   {

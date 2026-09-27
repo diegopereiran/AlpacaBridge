@@ -13,9 +13,9 @@
 // The Astroasis Oasis Focuser schema (open-astro#664). No vendor header:
 // compiles in every build (including vendors-OFF), so `available` in
 // GET /management/v1/devicecatalog reflects only whether a factory is
-// registered, not whether this file was compiled. No cross-field normalize:
-// the per-field rules (focuserIndex >= 0) are enough, same as the arm it
-// replaces never validated anything beyond hidPath.empty().
+// registered, not whether this file was compiled. No cross-field normalize
+// and no per-field range on focuserIndex (ALP-271): the arm this replaces
+// never validated anything beyond hidPath.empty().
 
 #include "../../catalog/builtin_descriptors.h"
 #include "astroasis_fields.h"

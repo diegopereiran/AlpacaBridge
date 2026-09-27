@@ -6038,11 +6038,14 @@ int main() {
         EXPECT(unknown.message == "Vendor/device type combination not yet supported: yyy/focuser");
     }
     {
-        // Persisted: the same out-of-range and out-of-enum values warn with
-        // reject_invalid_config()'s wording, one line per warning, and the
-        // device registers anyway with the normalized config (count dropped to
-        // its default, mode substituted) while configureddevices keeps showing
-        // the raw values, secret excluded, so the entry stays editable.
+        // Persisted: the catalog consult's own warning text, one line per
+        // warning -- distinct from reject_invalid_config()'s "will refuse to
+        // connect" wording (that text is false here: normalize() has already
+        // substituted a usable value, so the device is not refusing anything).
+        // The device registers anyway with the normalized config (count
+        // dropped to its default, mode substituted) while configureddevices
+        // keeps showing the raw values, secret excluded, so the entry stays
+        // editable.
         const auto persisted = persisted_attempt(
             nlohmann::json::parse(
                 R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9256,"count":99,"mode":"zzz","token":"s3cret"})"),
@@ -6052,12 +6055,17 @@ int main() {
         EXPECT(persisted.config.value("count", -1) == 99);
         EXPECT(persisted.config.value("mode", "") == "zzz");
         EXPECT(!persisted.config.contains("token"));
-        EXPECT(any_warning_contains(persisted.warnings,
-                                    "Persisted zzz focuser 9256 will refuse to connect: count is out of range"));
-        EXPECT(any_warning_contains(persisted.warnings,
-                                    "Persisted zzz focuser 9256 will refuse to connect: mode must be one of: a, b"));
-        EXPECT(any_warning_contains(persisted.warnings,
-                                    ". Registered anyway so it stays listed and editable in the web UI."));
+        EXPECT(any_warning_contains(
+            persisted.warnings,
+            "Persisted zzz focuser 9256 config normalized: count is out of range (min 1.000000) (max 8.000000). "
+            "The saved value is not used: the field falls back to its default, or stays unset if it has none. "
+            "Registered so it stays listed and editable in the web UI."));
+        EXPECT(any_warning_contains(
+            persisted.warnings,
+            "Persisted zzz focuser 9256 config normalized: mode must be one of: a, b. "
+            "The saved value is not used: the field falls back to its default, or stays unset if it has none. "
+            "Registered so it stays listed and editable in the web UI."));
+        EXPECT(!any_warning_contains(persisted.warnings, "will refuse to connect"));
         EXPECT(persisted.errors.empty());
     }
 
