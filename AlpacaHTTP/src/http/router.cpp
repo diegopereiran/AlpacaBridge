@@ -1472,6 +1472,10 @@ void Router::set_host_clock_hooks(alpacacore::util::HostClock::IsSynchronizedFn 
     host_clock_.set_hooks(std::move(is_synchronized), std::move(set_time), std::move(has_rtc));
 }
 
+void Router::set_now_fn(NowFn now_fn) {
+    now_fn_ = std::move(now_fn);
+}
+
 void Router::set_shutdown_callback(std::function<void()> callback) {
     shutdown_callback_ = callback;
 }
@@ -7276,7 +7280,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     if (request.method() == HttpMethod::GET) {
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = static_cast<std::int64_t>(
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+            std::chrono::duration_cast<std::chrono::seconds>(now_fn_().time_since_epoch())
                 .count());
         response.set_body(alpaca_response);
         return response;
