@@ -102,7 +102,10 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the Astroasis fo
     REQUIRE(std::holds_alternative<std::int64_t>(index->default_value));
     CHECK(std::get<std::int64_t>(index->default_value) == 0);
 
-    // The only rule: a negative index is refused from the API and dropped when persisted.
+    // The only rule: a negative index is refused from the API and warned about
+    // when persisted. The persisted value is KEPT: an enumeration index picks
+    // the physical unit, so dropping it to the default of 0 would bind the
+    // first Oasis on the bus instead of refusing at connect (PR #129 review).
     DeviceConfig negative;
     negative.set("focuserIndex", std::int64_t{-1});
     const auto rejected = catalog.normalize(kAstroasisKey, negative, Source::Api);
@@ -110,7 +113,10 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the Astroasis fo
     CHECK(rejected.rejection->find("focuserIndex") != std::string::npos);
     const auto warned = catalog.normalize(kAstroasisKey, negative, Source::Persisted);
     CHECK(warned.warnings.size() == 1);
-    CHECK_FALSE(warned.config.has("focuserIndex"));
+    const ConfigValue* kept = warned.config.find_value("focuserIndex");
+    REQUIRE(kept != nullptr);
+    REQUIRE(std::holds_alternative<std::int64_t>(*kept));
+    CHECK(std::get<std::int64_t>(*kept) == -1);
 
     // Both keys accepted together, and an empty config normalizes to itself.
     DeviceConfig both;

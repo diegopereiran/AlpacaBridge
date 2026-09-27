@@ -6060,6 +6060,35 @@ int main() {
                                     ". Registered anyway so it stays listed and editable in the web UI."));
         EXPECT(persisted.errors.empty());
     }
+    {
+        // PR diegopereiran/AlpacaBridge#129 review: a saved Astroasis config
+        // with a negative focuserIndex logs "will refuse to connect", so the
+        // factory must be handed that index (the connect-time scan then
+        // refuses it), never the field's default of 0, which would silently
+        // bind the first Oasis focuser on the USB bus. The real schema is kept;
+        // only the factory is swapped for a stub that reports the index it got,
+        // so this runs with the vendor on or off.
+        const auto persisted = persisted_attempt(
+            nlohmann::json::parse(R"({"vendor":"astroasis","deviceType":"focuser","deviceNumber":9258,)"
+                                  R"("focuserIndex":-1})"),
+            "Focuser", [](alpacacore::catalog::DeviceCatalog& c) {
+                c.add(alpacacore::catalog::Factory{
+                    alpacacore::catalog::DeviceKey{"astroasis", alpacacore::DeviceType::Focuser},
+                    [](const alpacacore::catalog::DeviceConfig& config, int n) {
+                        const auto* v = config.find_value("focuserIndex");
+                        const auto* index = v ? std::get_if<std::int64_t>(v) : nullptr;
+                        return std::unique_ptr<alpacacore::AlpacaDriver>(new alpacahttp::test_catalog::StubFocuser(
+                            n, "focuserIndex=" + (index ? std::to_string(*index) : std::string("unset"))));
+                    }});
+            });
+        EXPECT(persisted.listed);
+        EXPECT(persisted.name == "focuserIndex=-1");
+        EXPECT(persisted.config.value("focuserIndex", 0) == -1);
+        EXPECT(any_warning_contains(persisted.warnings,
+                                    "Persisted astroasis focuser 9258 will refuse to connect: focuserIndex is out of "
+                                    "range"));
+        EXPECT(persisted.errors.empty());
+    }
 
 #ifndef ALPACACORE_ENABLE_ASTROASIS
     // open-astro#664 Part C step 3: with the vendor built out, the catalog path

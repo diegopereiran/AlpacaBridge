@@ -216,6 +216,20 @@ TEST_CASE("Persisted normalize warns and keeps the device registrable", "[catalo
     CHECK_FALSE(r3.config.find(kPollMs).has_value());
     CHECK(r3.config.get(kPollMs) == 1000);
 
+    // Out-of-range enumeration index: warned but KEPT. Unset would read back as
+    // the default 0 and bind a different unit; kept, the driver refuses it at
+    // connect (PR diegopereiran/AlpacaBridge#129 review).
+    DeviceConfig bad_index = valid_config();
+    bad_index.set("enumerationIndex", std::int64_t{-1});
+    auto r5 = catalog.normalize(kStubKey, bad_index, Source::Persisted);
+    CHECK_FALSE(r5.rejection.has_value());
+    REQUIRE(r5.warnings.size() == 1);
+    CHECK(mentions(r5.warnings[0], "enumerationIndex"));
+    REQUIRE(r5.config.find(kEnumIndex).has_value());
+    CHECK(*r5.config.find(kEnumIndex) == -1);
+    // The API still refuses it.
+    CHECK(catalog.normalize(kStubKey, bad_index, Source::Api).rejection.has_value());
+
     // Cross-field failure is a warning too.
     DeviceConfig cross = valid_config();
     cross.set("switchType", std::string{"stellavita"});

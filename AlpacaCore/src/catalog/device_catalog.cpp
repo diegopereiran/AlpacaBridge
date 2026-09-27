@@ -39,6 +39,9 @@ bool matches_kind(FieldRef::Kind kind, const ConfigValue& v) {
     return false;
 }
 
+// Roles whose value chooses the physical unit rather than configuring it.
+bool selects_unit(Role role) { return role == Role::EnumerationIndex || role == Role::DeviceId; }
+
 std::string allowed_list(const FieldRef& f) {
     std::string s;
     for (const char* a : f.allowed_values) {
@@ -100,7 +103,11 @@ DeviceConfig normalize_fields(std::span<const FieldRef> fields, const DeviceConf
                 message += " is ";
                 message += range;
                 messages.push_back(std::move(message));
-                out.erase(f.key);  // Persisted: dropped to unset
+                // Persisted: dropped to unset, except a field that picks WHICH unit
+                // to open. Unset there reads back as the default (index 0), which
+                // would bind a different physical device than the one saved; kept,
+                // the driver refuses it at connect, as the warning says it will.
+                if (!selects_unit(f.role)) out.erase(f.key);
             }
         } else if (f.kind == FieldRef::Kind::RecordList) {
             std::vector<DeviceConfig> records = std::get<std::vector<DeviceConfig>>(*v);

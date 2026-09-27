@@ -45,7 +45,10 @@ public:
     // the normalized config is returned.
     // Source::Persisted: every failure becomes a warning and the config is
     // normalized so the device still registers (missing required stays absent,
-    // out-of-enum becomes the default, out-of-range becomes unset). A wrong-type
+    // out-of-enum becomes the default, out-of-range becomes unset, except that an
+    // out-of-range Role::EnumerationIndex or Role::DeviceId value is kept so the
+    // driver refuses it at connect instead of the default silently selecting
+    // another unit). A wrong-type
     // value is a failure too (Api rejects, Persisted erases it). An int64 in a Double
     // field is accepted and widened to double before the range check.
     //
