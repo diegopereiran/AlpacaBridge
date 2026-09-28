@@ -2298,10 +2298,16 @@ int main() {
         // focuserIndex, whose USB scan runs at connect time since #659.)
         const auto cfg = roundtrip_config(
             router,
-            {{"vendor", "astroasis"}, {"deviceType", "focuser"}, {"deviceNumber", 9621}, {"hidPath", "/dev/hidraw3"}},
+            {{"vendor", "astroasis"},
+             {"deviceType", "focuser"},
+             {"deviceNumber", 9621},
+             {"hidPath", "/dev/hidraw3"},
+             {"responseTimeoutMs", 2500}},
             "Focuser", 9621);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("hidPath", "") == "/dev/hidraw3");
+        // A vendor-agnostic key survives the catalog-sanitized save.
+        EXPECT(cfg.value("responseTimeoutMs", -1) == 2500);
         remove_device(router, "astroasis", "focuser", 9621);
     }
     {
@@ -6010,6 +6016,28 @@ int main() {
                                   R"("host":"h","ports":[{"name":"p0","pwm":true}]})");
         EXPECT(ok.config.dump() == expected_config.dump());
         EXPECT(listed_entry(router, "Focuser", 9255).value("DeviceName", "") == "zzz count=3 mode=a");
+        remove_device(router, "zzz", "focuser", 9255);
+
+        // The vendor-agnostic keys sanitize_device_config() keeps for every
+        // device (responseTimeoutMs, site, optics, syncTimeOnConnect) survive
+        // a catalog-sanitized save too, as they did through the deleted arm.
+        const auto shared = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":3,)"
+                                  R"("responseTimeoutMs":2500,"apertureDiameter":0.2,"focalLength":1.0,)"
+                                  R"("siteLatitude":-41.5,"siteLongitude":174.5,"siteElevation":30.0,)"
+                                  R"("learnSiteFromClient":true,"syncTimeOnConnect":false})"),
+            "Focuser");
+        EXPECT(shared.ok);
+        EXPECT(shared.config.value("count", -1) == 3);
+        EXPECT(shared.config.value("responseTimeoutMs", -1) == 2500);
+        EXPECT(shared.config.value("apertureDiameter", -1.0) == 0.2);
+        EXPECT(shared.config.value("focalLength", -1.0) == 1.0);
+        EXPECT(shared.config.value("siteLatitude", 0.0) == -41.5);
+        EXPECT(shared.config.value("siteLongitude", 0.0) == 174.5);
+        EXPECT(shared.config.value("siteElevation", 0.0) == 30.0);
+        EXPECT(shared.config.value("learnSiteFromClient", false) == true);
+        EXPECT(shared.config.value("syncTimeOnConnect", true) == false);
         remove_device(router, "zzz", "focuser", 9255);
 
         // API, wrong type: the bridge's InvalidValue is reported as a

@@ -9619,7 +9619,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
 
     // open-astro#664: a catalog-registered vendor/type is sanitized from its
     // descriptor's own field list; the vendor-specific chain below is for
-    // arm-chain vendors only.
+    // arm-chain vendors only. Either way the vendor-agnostic keys at the end
+    // are kept, as they were through the deleted arm.
+    bool catalog_handled = false;
     try {
         const alpacacore::catalog::DeviceKey key{vendor, string_to_device_type(device_type)};
         if (auto view = find_descriptor(catalog_, key)) {
@@ -9627,7 +9629,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             for (const auto& [k, v] : extra.items()) {
                 sanitized[k] = v;
             }
-            return sanitized;
+            catalog_handled = true;
         }
     } catch (const std::exception& ex) {
         // Unknown device_type: fall through to the vendor-specific chain.
@@ -9635,7 +9637,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
                         ex.what() + "); falling through to the vendor-specific chain");
     }
 
-    if (vendor == "ioptron") {
+    if (catalog_handled) {
+        // Vendor-specific keys came from the descriptor above.
+    } else if (vendor == "ioptron") {
         if (device_type == "switch") {
             // iMate PowerBox: local GPIO. Persist the optional chip path plus
             // the PWM frequency and per-port PWM/name overrides so dimmable-port
