@@ -55,8 +55,14 @@ public:
     // Stop the server
     void stop();
 
-    // Check if server is running
-    bool is_running() const { return running_; }
+    // Check if server is running. stop() clears running_ before it joins, so
+    // a restart (stop then start on the endpoint's detached thread) read false
+    // for the whole join window; the embedder's wait loop exited on that and
+    // the process ended with status 0, which Restart=on-failure does not
+    // respawn (#713). restarting_ bridges that window. It is a view-only flag:
+    // start(), start_async() and stop() keep testing the raw running_, so the
+    // !running_ reap-only path and the idempotency early-returns are unchanged.
+    bool is_running() const { return running_ || restarting_; }
 
     // The port actually bound, read back from the listening socket via
     // getsockname(). Differs from config's http_port() when that was 0 ("let
@@ -258,6 +264,9 @@ private:
     std::function<void()> restart_callback_;
     std::mutex restart_mutex_;
     std::atomic<bool> restart_requested_{false};
+    // True from handle_restart_request()'s stop() until its start_async() has
+    // returned; read only by is_running().
+    std::atomic<bool> restarting_{false};
 };
 
 } // namespace alpacahttp
