@@ -1873,9 +1873,16 @@ function updateServerClock() {
         el.textContent = 'clock error';
         el.title = serverClockErrorText;
         el.classList.add('drift');
+        // A title tooltip never shows on a touch screen and a span takes no
+        // keyboard focus, so the clock becomes a control that shows the
+        // message (showServerClockError()) until the error clears.
+        el.tabIndex = 0;
+        el.setAttribute('role', 'button');
         return;
     }
     el.title = el.dataset.defaultTitle;
+    el.removeAttribute('tabindex');
+    el.removeAttribute('role');
     if (serverClockOffsetMs === null) {
         el.textContent = '--:--:--';
         el.classList.remove('drift');
@@ -1886,6 +1893,20 @@ function updateServerClock() {
     // The GET returns whole seconds, so up to ±1 s of the offset is
     // quantization, not drift; only flag beyond 2 s.
     el.classList.toggle('drift', Math.abs(serverClockOffsetMs) > 2000);
+}
+
+// open-astro#677: a tap, click, Enter or Space on the header clock while it
+// reads "clock error" shows the server's message, which the title tooltip
+// alone keeps from touch and keyboard users.
+function showServerClockError(event) {
+    if (!serverClockErrorText) {
+        return;
+    }
+    if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') {
+        return;
+    }
+    event.preventDefault();
+    alert(serverClockErrorText + '\n\nTo set it from this device, use Sync Time at the bottom of the page.');
 }
 
 // Shutdown server
@@ -4258,6 +4279,11 @@ function escapeHtml(text) {
 document.addEventListener('DOMContentLoaded', function() {
     loadDevices();
     loadServerInfo();
+    const serverClock = document.getElementById('server-clock');
+    if (serverClock) {
+        serverClock.addEventListener('click', showServerClockError);
+        serverClock.addEventListener('keydown', showServerClockError);
+    }
     refreshServerClockOffset();
     setInterval(updateServerClock, 1000);
     setInterval(refreshServerClockOffset, 60000);
