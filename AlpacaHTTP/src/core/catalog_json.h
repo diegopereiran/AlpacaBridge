@@ -30,8 +30,9 @@
 //      converts to int64 there, so `true` in an int field must still be
 //      refused. A JSON float with no fractional part that fits an int64
 //      (e.g. 1.0) in an Int field is accepted and stored as that integer,
-//      as config_get<int>() accepted it; 1.5, a JSON true/false and an
-//      out-of-range float (e.g. 1e300) are still refused. A nested
+//      as config_get<int>() accepted it. 1.5 and a JSON true/false are
+//      now refused, a narrowing: config_get<int>() took them as 1, 1 and
+//      0. An out-of-range float (e.g. 1e300) is refused too. A nested
 //      record field is named with its index, e.g.
 //      "ports[1].name"; a bad list or a bad list element is named by the
 //      list's own key ("ports", "filterNames"), never indexed, because the
