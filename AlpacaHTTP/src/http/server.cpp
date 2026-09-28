@@ -1516,7 +1516,7 @@ void Server::handle_shutdown_request() {
         return;
     }
 
-    stop(); // no callback installed: the handler is the only thing that can stop the server
+    stop();  // no callback installed: the handler is the only thing that can stop the server
 }
 
 void Server::handle_restart_request() {
