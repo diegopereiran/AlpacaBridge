@@ -5259,6 +5259,38 @@ int main() {
             // A plausible epoch, so a served-but-empty reply cannot pass.
             EXPECT(json["Value"].is_number_integer() && json["Value"].get<std::int64_t>() > 1600000000);
         }
+
+        // open-astro#674: a ClientTransactionID sent only in the JSON body is
+        // echoed on every reply, not only on the cross-origin 403 (#509). A
+        // successful POST would set this machine's clock, which a unit test
+        // must never do (see above), so the success reply is the GET, served
+        // through the NowFn seam; the POST cases are the InvalidValue replies.
+        {
+            const auto echoed = [](const alpacahttp::Response& response) {
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded());
+                return json.value("ClientTransactionID", 0U);
+            };
+            router.set_now_fn([] { return std::chrono::system_clock::time_point(std::chrono::seconds(1790467200)); });
+            const auto ok = route_request(router, "GET", "/management/v1/synctime", R"({"ClientTransactionID": 4242})");
+            EXPECT(nlohmann::json::parse(ok.body(), nullptr, false).value("ErrorNumber", -1) == 0);
+            EXPECT(echoed(ok) == 4242U);
+            router.set_now_fn([] { return std::chrono::system_clock::now(); });
+
+            for (const char* body :
+                 {R"({"Epoch": 100, "ClientTransactionID": 4242})", R"({"ClientTransactionID": 4242})"}) {
+                const auto response = route_request(router, "POST", "/management/v1/synctime", body);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded());
+                EXPECT(json.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::InvalidValue));
+                EXPECT(echoed(response) == 4242U);
+            }
+
+            // Same precedence as the 403 path: a non-zero query-string ID wins.
+            const auto both = route_request(router, "POST", "/management/v1/synctime?ClientTransactionID=7",
+                                            R"({"Epoch": 100, "ClientTransactionID": 4242})");
+            EXPECT(echoed(both) == 7U);
+        }
     }
 
     // wifi management endpoints: routing + input validation. The happy paths

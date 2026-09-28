@@ -7276,6 +7276,14 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
     }
+    // open-astro#674: an ID sent only in the JSON body is echoed on every
+    // reply, not only on the cross-origin 403 (#509), with the same
+    // precedence: a non-zero query-string ID wins.
+    if (client_tx_id == 0 && !request.body().empty()) {
+        if (auto json_opt = parse_json(request.body())) {
+            client_tx_id = extract_client_transaction_id(*json_opt);
+        }
+    }
 
     // Since open-astro#291 a successful set has a second effect beyond the
     // clock: it marks the host client-stepped, which suppresses the
