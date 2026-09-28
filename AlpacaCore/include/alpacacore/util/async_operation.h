@@ -42,7 +42,7 @@ namespace alpacacore::util {
  * and publishes that state. Superseded: a newer operation now owns the same
  * axes or device; the body touches neither hardware nor driver state.
  */
-enum class StopReason { None, Cancelled, Superseded };
+enum class StopReason : std::uint8_t { None, Cancelled, Superseded };
 
 /**
  * Driver-wide generation, shared by every slot that owns the same axes or
