@@ -758,8 +758,9 @@ independently broken the same way, before it was centralised:
 - When adding a vendor in `AlpacaCore/CMakeLists.txt`, always update:
   1. `option(ALPACACORE_ENABLE_<VENDOR> ...)`
   2. `ALPACACORE_ENABLE_ALL_VENDORS` logic (only if implemented)
-  3. conditional `add_subdirectory(src/vendors/<vendor>)` + link
+  3. conditional `add_subdirectory(src/vendors/<vendor>)` + `target_link_libraries(alpacacore_builtins PRIVATE alpacacore_<vendor>)`
   4. install rules for vendor target
+- The dependency runs one way: `alpacacore` <- `alpacacore_<vendor>` <- `alpacacore_builtins` <- `alpacahttp` (#710). The vendor's own `CMakeLists.txt` links `alpacacore` PRIVATE; `alpacacore` never links a vendor library, takes no `ALPACACORE_ENABLE_<VENDOR>` definition and compiles no `src/vendors/` source (`scripts/check_layering.py` rules L1-L3).
 - If vendor libs are discovered by pkg-config, prefer imported targets (example: `PkgConfig::LIBUSB`) so dependent test binaries get correct link paths.
 - When adding a new vendor SDK under `AlpacaCore/external/<vendor>/`, add an allowlist entry to `AlpacaCore/.gitignore` so the SDK binaries (`.a`, `.so`, `.dll`, firmware files, etc.) are not blocked by the global compiled-file ignore rules. Follow the existing pattern: `!external/<VENDOR>/**`.
 

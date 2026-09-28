@@ -498,7 +498,7 @@ The Web UI (Step 6) should include a connection type selector matching this patt
 Update `AlpacaCore/CMakeLists.txt`:
 1. Add `option(ALPACACORE_ENABLE_<VENDOR> ...)`.
 2. Update `ALPACACORE_ENABLE_ALL_VENDORS` logic (if it exists).
-3. Add conditional `add_subdirectory(src/vendors/<vendor>)` + link.
+3. Add conditional `add_subdirectory(src/vendors/<vendor>)` + `target_link_libraries(alpacacore_builtins PRIVATE alpacacore_<vendor>)` (never link a vendor into `alpacacore`; the vendor's own CMakeLists links `alpacacore` PRIVATE, #710).
 4. Add install rules for vendor target.
 
 Create `AlpacaCore/src/vendors/<vendor>/CMakeLists.txt` for the vendor target.
