@@ -7268,11 +7268,6 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
 
 }  // namespace
 
-namespace {
-constexpr std::int64_t kMinEpoch = 946684800;   // 2000-01-01T00:00:00Z
-constexpr std::int64_t kMaxEpoch = 4102444800;  // 2100-01-01T00:00:00Z
-}  // namespace
-
 Response Router::handle_sync_time(const Request& request, std::uint32_t server_tx_id) {
     // Note: like the restart/shutdown management endpoints, this is
     // intentionally unauthenticated — the web UI is served on the LAN and the
@@ -7281,6 +7276,10 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // TLS validation / log ordering elsewhere on the SBC), so the epoch is
     // sanity-bounded to 2000-2100 UTC below. Deployments on untrusted networks
     // should firewall the management port.
+    //
+    // open-astro#676: one copy of the 2000..2100 UTC window, shared with the
+    // UTCDate client-step path.
+    using alpacacore::util::HostClock;
     Response response;
     response.set_content_type("application/json");
 
@@ -7314,7 +7313,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
             std::chrono::duration_cast<std::chrono::seconds>((*current_now_fn())().time_since_epoch()).count());
         // open-astro#670: report a clock POST would refuse to set as an error,
         // not as a Value the UI would render as a year-1970 or year-2100+ time.
-        if (now_seconds < kMinEpoch || now_seconds > kMaxEpoch) {
+        if (now_seconds < HostClock::kMinEpoch || now_seconds > HostClock::kMaxEpoch) {
             response.set_body(make_error_response(
                 client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
                 "Host clock is outside 2000-01-01..2100-01-01 UTC; set the time with POST /management/v1/synctime."));
@@ -7359,7 +7358,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
     // Sanity range: 2000-01-01 .. 2100-01-01 UTC. Reject anything outside —
     // a bogus value (or a clock reset) would break Alpaca timestamps worse
     // than not syncing at all.
-    if (epoch_seconds < kMinEpoch || epoch_seconds > kMaxEpoch) {
+    if (epoch_seconds < HostClock::kMinEpoch || epoch_seconds > HostClock::kMaxEpoch) {
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
                                 "Epoch must be a Unix timestamp in seconds between 2000-01-01 and 2100-01-01 UTC");
