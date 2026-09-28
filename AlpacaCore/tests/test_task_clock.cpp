@@ -59,7 +59,12 @@ public:
         future_ = result->get_future();
         thread_ = std::thread([this, &clock, timeout, result] {
             std::unique_lock<std::mutex> lock(mutex_);
-            result->set_value(clock.wait_for(lock, cv_, timeout, [this] { return cancel_; }));
+            result->set_value(clock.wait_for(lock, cv_, timeout, [this] {
+                if (!cancel_) {
+                    false_evaluations_.fetch_add(1);
+                }
+                return cancel_;
+            }));
         });
     }
     Waiter(const Waiter&) = delete;
@@ -82,6 +87,21 @@ public:
         }
     }
 
+    // True once the waiter has evaluated its predicate false. The predicate
+    // runs under the waiter's mutex, so after this a cancel() cannot take the
+    // mutex until the waiter has released it inside the condition variable
+    // wait: the notify then reaches a blocked waiter.
+    bool blocked_within(std::chrono::milliseconds bound) {
+        const auto give_up = std::chrono::steady_clock::now() + bound;
+        while (false_evaluations_.load() == 0) {
+            if (std::chrono::steady_clock::now() >= give_up) {
+                return false;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        return true;
+    }
+
     bool finished_within(std::chrono::milliseconds bound) {
         return future_.wait_for(bound) == std::future_status::ready;
     }
@@ -91,6 +111,7 @@ private:
     std::mutex mutex_;
     std::condition_variable cv_;
     bool cancel_ = false;
+    std::atomic<int> false_evaluations_{0};
     std::future<bool> future_;
     std::thread thread_;
 };
@@ -353,6 +374,9 @@ TEST_CASE("TaskClock real adapter - steady clock and condition variable", "[util
     SECTION("a notify with the flag set returns true before the timeout") {
         const auto start = std::chrono::steady_clock::now();
         Waiter waiter(clock, 10s);
+        // Without this rendezvous the flag is usually set before the waiter
+        // first locks, and the case passes on the already-true path.
+        REQUIRE(waiter.blocked_within(kBound));
         waiter.cancel(true);
         REQUIRE(waiter.finished_within(kBound));
         CHECK(waiter.result());
