@@ -242,6 +242,17 @@ TEST_CASE("TaskClock fake - cancel wins", "[util][taskclock][unit]") {
         CHECK(result.get());
         CHECK(fake.waiter_count() == 0);
     }
+
+    SECTION("a timeout too large for the clock waits until the flag is set") {
+        Waiter waiter(clock, std::chrono::nanoseconds::max());
+        REQUIRE(fake.wait_for_waiters(1, kBound));
+        CHECK_FALSE(waiter.finished_within(50ms));
+        fake.advance(24h);
+        CHECK_FALSE(waiter.finished_within(50ms));
+        waiter.cancel(true);
+        REQUIRE(waiter.finished_within(kBound));
+        CHECK(waiter.result());
+    }
 }
 
 TEST_CASE("TaskClock fake - sleep_for and the waiter rendezvous", "[util][taskclock][unit]") {
@@ -381,6 +392,16 @@ TEST_CASE("TaskClock real adapter - steady clock and condition variable", "[util
         REQUIRE(waiter.finished_within(kBound));
         CHECK(waiter.result());
         CHECK(std::chrono::steady_clock::now() - start < 5s);
+    }
+
+    SECTION("a timeout too large for the clock waits until the flag is set") {
+        // libstdc++ adds the timeout to steady_clock::now(), which overflows
+        // for a timeout near nanoseconds::max() and returned false at once.
+        Waiter waiter(clock, std::chrono::nanoseconds::max());
+        CHECK_FALSE(waiter.finished_within(50ms));
+        waiter.cancel(true);
+        REQUIRE(waiter.finished_within(kBound));
+        CHECK(waiter.result());
     }
 
     SECTION("sleep_for sleeps real time") {

@@ -46,7 +46,8 @@ public:
      * evaluated under the lock at that moment, so a cancel set before the
      * deadline, or at the same moment, reports true ("cancel wins"). A pred()
      * that is already true returns true at once without blocking. A timeout
-     * of zero or less evaluates pred() once and returns.
+     * of zero or less evaluates pred() once and returns. A timeout too large
+     * for the clock waits until pred() is true.
      */
     virtual bool wait_for(std::unique_lock<std::mutex>& lock, std::condition_variable& cv,
                           std::chrono::nanoseconds timeout, const std::function<bool()>& pred) = 0;
@@ -76,6 +77,12 @@ public:
         // an already-expired wait; the contract above says once.
         if (timeout <= std::chrono::nanoseconds::zero()) {
             return pred();
+        }
+        // condition_variable::wait_for adds the timeout to clock::now(),
+        // which overflows for a timeout near nanoseconds::max().
+        const auto current = clock::now();
+        if (timeout >= clock::time_point::max() - current) {
+            return cv.wait_until(lock, clock::time_point::max(), pred);
         }
         return cv.wait_for(lock, timeout, pred);
     }
