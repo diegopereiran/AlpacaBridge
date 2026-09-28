@@ -17,7 +17,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -38,6 +40,18 @@ using alpacacore::catalog::Role;
         alpacacore::AlpacaError::InvalidValue);
 }
 
+// A JSON float with no fractional part that fits an int64 (e.g. 1.0), as the
+// integer it holds; config_get<int>() accepted that shape. Anything else,
+// including 1.5, is not a whole number here.
+std::optional<std::int64_t> whole_number(const nlohmann::json& v) {
+    if (!v.is_number_float()) return std::nullopt;
+    const double d = v.get<double>();
+    // 2^63 is exact as a double; the int64 range is [-2^63, 2^63).
+    constexpr double kTwo63 = 9223372036854775808.0;
+    if (!(d >= -kTwo63 && d < kTwo63) || d != std::trunc(d)) return std::nullopt;
+    return static_cast<std::int64_t>(d);
+}
+
 DeviceConfig config_from_json_fields(const nlohmann::json& object, std::span<const FieldRef> fields,
                                      const std::string& prefix) {
     DeviceConfig out;
@@ -52,8 +66,13 @@ DeviceConfig config_from_json_fields(const nlohmann::json& object, std::span<con
                 out.set(f.key, v.get<bool>());
                 break;
             case FieldRef::Kind::Int:
-                if (!v.is_number_integer()) throw_wrong_type(name, v);
-                out.set(f.key, v.get<std::int64_t>());
+                if (v.is_number_integer()) {
+                    out.set(f.key, v.get<std::int64_t>());
+                } else if (const auto whole = whole_number(v)) {
+                    out.set(f.key, *whole);
+                } else {
+                    throw_wrong_type(name, v);
+                }
                 break;
             case FieldRef::Kind::Double:
                 if (!v.is_number()) throw_wrong_type(name, v);

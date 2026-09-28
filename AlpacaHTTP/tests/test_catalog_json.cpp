@@ -124,6 +124,17 @@ int main() {
         EXPECT(invalid_value_message(R"({"count":99,"mode":"zzz"})").empty());
     }
 
+    // 3a. A whole-valued JSON float in an int field (e.g. 1.0) is accepted and
+    // stored as the integer, as config_get<int>() accepted it; a fractional or
+    // out-of-int64-range float is still the wrong type.
+    {
+        const DeviceConfig c = cj::config_from_json(nlohmann::json::parse(R"({"count":2.0})"), schema);
+        const auto* v = c.find_value("count");
+        EXPECT(v != nullptr && std::holds_alternative<std::int64_t>(*v) && std::get<std::int64_t>(*v) == 2);
+        EXPECT(invalid_value_message(R"({"count":-3.0})").empty());
+        EXPECT(invalid_value_message(R"({"count":1e300})").find("count") != std::string::npos);
+    }
+
     // 4. An integer in a double field is accepted; normalize widens it.
     {
         const DeviceConfig c = cj::config_from_json(nlohmann::json::parse(R"({"ratio":2})"), schema);
