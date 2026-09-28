@@ -2296,14 +2296,13 @@ int main() {
         // astroasis / focuser — explicit hidPath persists through
         // sanitize_device_config. (An empty hidPath instead falls back to
         // focuserIndex, whose USB scan runs at connect time since #659.)
-        const auto cfg = roundtrip_config(
-            router,
-            {{"vendor", "astroasis"},
-             {"deviceType", "focuser"},
-             {"deviceNumber", 9621},
-             {"hidPath", "/dev/hidraw3"},
-             {"responseTimeoutMs", 2500}},
-            "Focuser", 9621);
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "astroasis"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9621},
+                                           {"hidPath", "/dev/hidraw3"},
+                                           {"responseTimeoutMs", 2500}},
+                                          "Focuser", 9621);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("hidPath", "") == "/dev/hidraw3");
         // A vendor-agnostic key survives the catalog-sanitized save.
@@ -6021,13 +6020,13 @@ int main() {
         // The vendor-agnostic keys sanitize_device_config() keeps for every
         // device (responseTimeoutMs, site, optics, syncTimeOnConnect) survive
         // a catalog-sanitized save too, as they did through the deleted arm.
-        const auto shared = api_attempt(
-            router,
-            nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":3,)"
-                                  R"("responseTimeoutMs":2500,"apertureDiameter":0.2,"focalLength":1.0,)"
-                                  R"("siteLatitude":-41.5,"siteLongitude":174.5,"siteElevation":30.0,)"
-                                  R"("learnSiteFromClient":true,"syncTimeOnConnect":false})"),
-            "Focuser");
+        const auto shared =
+            api_attempt(router,
+                        nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":3,)"
+                                              R"("responseTimeoutMs":2500,"apertureDiameter":0.2,"focalLength":1.0,)"
+                                              R"("siteLatitude":-41.5,"siteLongitude":174.5,"siteElevation":30.0,)"
+                                              R"("learnSiteFromClient":true,"syncTimeOnConnect":false})"),
+                        "Focuser");
         EXPECT(shared.ok);
         EXPECT(shared.config.value("count", -1) == 3);
         EXPECT(shared.config.value("responseTimeoutMs", -1) == 2500);
