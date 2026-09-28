@@ -14,8 +14,9 @@
 
 // Astroasis Oasis Focuser catalog field declarations (open-astro#664), shared
 // by astroasis_schema.cpp (no vendor header) and astroasis_catalog.cpp (the
-// factory, vendor header allowed). No vendor header here either: this file
-// sits alongside astroasis_schema.cpp in the layering gate's catalog file set.
+// factory, vendor header allowed). No vendor header here either: the schema
+// file includes this one and compiles in every build (including vendors-OFF),
+// and the layering gate scans only the schema file, not its includes.
 
 #include <alpacacore/catalog/device_catalog.h>
 
