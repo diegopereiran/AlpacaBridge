@@ -42,7 +42,8 @@ using alpacacore::catalog::Role;
 
 // A JSON float with no fractional part that fits an int64 (e.g. 1.0), as the
 // integer it holds; config_get<int>() accepted that shape. Anything else,
-// including 1.5, is not a whole number here.
+// including 1.5 and a JSON true/false (which config_get<int>() took as 1/0),
+// is not a whole number here.
 std::optional<std::int64_t> whole_number(const nlohmann::json& v) {
     if (!v.is_number_float()) return std::nullopt;
     const double d = v.get<double>();

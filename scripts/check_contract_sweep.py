@@ -486,8 +486,10 @@ def main() -> int:
         print("\n%d finding(s)." % len(failures))
         return 1
     pairs = router_pairs(read_text(ROOT / ROUTER))
-    print("Contract-sweep registration OK -- %d router pairs checked, %d allow-listed as not-yet-swept."
-          % (len(pairs), len(ALLOWLIST)))
+    cat_by_file = catalog_pairs({p.relative_to(ROOT).as_posix(): read_text(p) for p in find_catalog_files(ROOT)})
+    cat_pairs: set[tuple[str, str]] = set().union(*cat_by_file.values()) if cat_by_file else set()
+    print("Contract-sweep registration OK -- %d router pairs and %d catalog pairs checked (%d total), "
+          "%d allow-listed as not-yet-swept." % (len(pairs), len(cat_pairs), len(pairs | cat_pairs), len(ALLOWLIST)))
     return 0
 
 
