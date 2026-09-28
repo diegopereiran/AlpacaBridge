@@ -3,21 +3,28 @@
 
 The cross-driver contract sweep (AlpacaCore/tests/contract_sweep.h +
 test_contract_sweep.cpp) runs the ASCOM contract cases over one registry entry
-per (vendor, device type) pair the router can construct. Nothing else makes a
-new driver join it: without this gate an 8th telescope driver inherits no
-contract coverage and CI stays green, which is the failure the sweep exists to
-end.
+per (vendor, device type) pair the server can construct, through either a
+Router::register_device_from_config() arm or a device-catalog factory
+(AlpacaCore/src/vendors/*/*_catalog.cpp). Nothing else makes a new driver join
+it: without this gate an 8th telescope driver inherits no contract coverage and
+CI stays green, which is the failure the sweep exists to end.
 
-Rules:
-  1. Every (vendor, deviceType) pair Router::register_device_from_config()
-     constructs has an `X(<vendor>_<devicetype>)` registry entry, or is in
-     ALLOWLIST with a reason.
-  2. A stale ALLOWLIST entry fails: the pair is now registered, or the router no
-     longer constructs it.
-  3. A registry entry whose pair the router does not construct fails (orphan),
-     and one registered under a guard that does not name its vendor fails (the
-     vendors-off build would sweep the wrong set). GUARD_OVERRIDE names the
-     pairs the router itself builds under another vendor's flag.
+Rules (a "constructed" pair is the union of the router arms and the catalog
+files' DeviceKey{...} pairs):
+  1. Every constructed (vendor, deviceType) pair has an
+     `X(<vendor>_<devicetype>)` registry entry, or is in ALLOWLIST with a reason
+     (UNSWEPT PAIR). Every create_* backend a router arm or catalog factory
+     calls for a swept pair is called by some registry entry, or is in
+     BACKEND_ALLOWLIST (UNSWEPT BACKEND). A catalog file with no parseable
+     DeviceKey{...} literal, or a router or registry construct the text parser
+     does not follow, fails (PARSER LIMIT).
+  2. A stale ALLOWLIST or BACKEND_ALLOWLIST entry fails: the pair or backend is
+     now swept, or neither the router nor the catalog constructs it any more.
+  3. A registry entry whose pair neither the router nor the catalog constructs
+     fails (orphan), and one registered under a guard that does not name its
+     vendor fails (the vendors-off build would sweep the wrong set).
+     GUARD_OVERRIDE names the pairs the router itself builds under another
+     vendor's flag.
   4. tests/CMakeLists.txt must define every ALPACACORE_* guard the registry uses
      for alpacacore_tests. Those macros are NOT inherited from the vendor
      targets (only AlpacaHTTP/CMakeLists.txt defines them, for the router), so a
