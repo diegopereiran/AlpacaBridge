@@ -224,7 +224,7 @@ TEST_CASE("AsyncOperation - wait contract", "[util][async_operation][unit]") {
         h.clock.advance(1ms);
         REQUIRE(eventually([&] { return p->exited.load(); }));
         CHECK(p->wait_result == 1);
-        CHECK(p->reason == StopReason::None);
+        CHECK(p->reason.load() == StopReason::None);
     }
 
     SECTION("false at once, with virtual time unchanged, on a cancel mid-wait") {
@@ -235,7 +235,7 @@ TEST_CASE("AsyncOperation - wait contract", "[util][async_operation][unit]") {
         REQUIRE(eventually([&] { return p->exited.load(); }));
         CHECK(p->wait_result == 0);
         CHECK(h.clock.now() == before);
-        CHECK(p->reason == StopReason::Cancelled);
+        CHECK(p->reason.load() == StopReason::Cancelled);
     }
 
     SECTION("false when cancelled and advanced past the deadline (cancel wins)") {
@@ -282,7 +282,7 @@ TEST_CASE("AsyncOperation - start returns while the old body is blocked", "[util
 
     ga->open();
     REQUIRE(eventually([&] { return a->exited.load(); }));
-    CHECK(a->reason == StopReason::Superseded);
+    CHECK(a->reason.load() == StopReason::Superseded);
     CHECK(a->stops == 0);
     CHECK(h.op->stale_count() == 1);  // returned, not joined yet
 
@@ -368,7 +368,7 @@ TEST_CASE("AsyncOperation - stale bound", "[util][async_operation][unit]") {
         // The current body was not superseded.
         g[3]->open();
         REQUIRE(eventually([&] { return p[3]->exited.load(); }));
-        CHECK(p[3]->reason == StopReason::None);
+        CHECK(p[3]->reason.load() == StopReason::None);
     }
 }
 
@@ -400,7 +400,7 @@ TEST_CASE("AsyncOperation - shared generation: a stop body sees superseded", "[u
 
     h.clock.advance(50ms);
     REQUIRE(eventually([&] { return s->exited.load(); }));
-    CHECK(s->reason == StopReason::Superseded);
+    CHECK(s->reason.load() == StopReason::Superseded);
     CHECK(s->stops == 0);
 }
 
@@ -414,7 +414,7 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         REQUIRE(h.clock.wait_for_waiters(1, kBound));
         REQUIRE(h.start_within(waiting_body(probe(), 1h)));
         REQUIRE(eventually([&] { return p->exited.load(); }));  // woken at once
-        CHECK(p->reason == StopReason::Superseded);
+        CHECK(p->reason.load() == StopReason::Superseded);
         CHECK(p->stops == 0);
     }
 
@@ -423,7 +423,7 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         REQUIRE(h.clock.wait_for_waiters(1, kBound));
         h.op->cancel();
         REQUIRE(eventually([&] { return p->exited.load(); }));
-        CHECK(p->reason == StopReason::Cancelled);
+        CHECK(p->reason.load() == StopReason::Cancelled);
         CHECK(p->stops == 1);
     }
 
@@ -435,7 +435,7 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         REQUIRE(h.start_within(waiting_body(probe(), 1h)));
         g->open();
         REQUIRE(eventually([&] { return p->exited.load(); }));
-        CHECK(p->reason == StopReason::Superseded);
+        CHECK(p->reason.load() == StopReason::Superseded);
         CHECK(p->stops == 0);
     }
 
@@ -453,7 +453,7 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
         CHECK(p->exited);
-        CHECK(p->reason == StopReason::Superseded);
+        CHECK(p->reason.load() == StopReason::Superseded);
         CHECK(p->stops == 0);
     }
 
@@ -466,7 +466,7 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         REQUIRE(eventually([&] { return h.op->stale_count() == 0; }));
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
-        CHECK(p->reason == StopReason::Superseded);
+        CHECK(p->reason.load() == StopReason::Superseded);
         CHECK(p->stops == 0);
     }
 }
@@ -541,7 +541,7 @@ TEST_CASE("AsyncOperation - destructor joins every body", "[util][async_operatio
     }
 
     REQUIRE(eventually([&] { return cur->exited.load(); }));  // the current body was woken
-    CHECK(cur->reason == StopReason::Cancelled);
+    CHECK(cur->reason.load() == StopReason::Cancelled);
     CHECK(cur->wait_result == 0);
     CHECK(done.wait_for(100ms) == std::future_status::timeout);  // still joining the gated bodies
     CHECK_FALSE(s1->exited);
@@ -552,8 +552,8 @@ TEST_CASE("AsyncOperation - destructor joins every body", "[util][async_operatio
     REQUIRE(done.wait_for(kBound) == std::future_status::ready);
     CHECK(s1->exited);
     CHECK(s2->exited);
-    CHECK(s1->reason == StopReason::Superseded);
-    CHECK(s2->reason == StopReason::Superseded);
+    CHECK(s1->reason.load() == StopReason::Superseded);
+    CHECK(s2->reason.load() == StopReason::Superseded);
 
     if (h.op) {  // the cancel_all_and_join() section: the slot is empty and usable
         CHECK(h.op->stale_count() == 0);
