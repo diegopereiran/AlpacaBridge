@@ -21,6 +21,9 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 ### Changed
 - **The README brand list no longer names libgphoto2** (docs, issue #691): the item read "Canon and Nikon DSLRs (via libgphoto2)" while release 4.1.0 had removed the library name from every other user-facing string; it now reads "Canon and Nikon DSLRs", and the check 15 map entry that pins the wording moved with it in the same commit.
 
+### Fixed
+- **`ci_preflight.sh` fails when it cannot resolve its diff base** (tooling, issue #601): when `git merge-base` failed, because the ref named by `PREFLIGHT_BASE` did not exist (a fork without an `upstream` remote, a typo) or shared no history with HEAD (a shallow clone), the merge base silently became `HEAD`, the diff was empty, every change-scoped gate skipped, and the run could end "All mandatory checks passed. Safe to push." The script now resolves the base with `git rev-parse --verify` after its fetch and, before any gate runs, exits non-zero with a message on stderr that names the base and how to fix it (add and fetch the `upstream` remote and set `PREFLIGHT_BASE=upstream/main`, or run `git fetch --unshallow` when there is no merge base). The `HEAD` fallback is removed.
+
 <details>
 <summary><strong>[4.1.0] - 2026-09-27</strong></summary>
 
