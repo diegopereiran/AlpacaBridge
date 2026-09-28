@@ -1815,12 +1815,16 @@ let serverClockOffsetMs = null;
 // TimeZone field ('' until the first successful load, or when the host
 // cannot name one); formatServerClock() falls back to the browser's zone.
 let serverTimeZone = '';
+// open-astro#677: the synctime ErrorMessage while the server refuses to report
+// its time (serverClockError() in web/format.js), '' otherwise.
+let serverClockErrorText = '';
 
 async function refreshServerClockOffset() {
     try {
         const t0 = Date.now();
         const response = await fetch(API_BASE + '/management/v1/synctime');
         const result = await response.json();
+        serverClockErrorText = serverClockError(result);
         if (result && result.ErrorNumber === 0 && isValidClockSeconds(result.Value)) {
             // Value is whole seconds; assume the server read its clock halfway
             // through the round trip.
@@ -1858,6 +1862,20 @@ function updateServerClock() {
     if (!el) {
         return;
     }
+    if (el.dataset.defaultTitle === undefined) {
+        el.dataset.defaultTitle = el.title;
+    }
+    if (serverClockErrorText) {
+        // open-astro#677: the reply carried no time, so show none, in the red
+        // "needs sync" style, with the server's reason on hover; the #670
+        // refusal names Sync Time as the fix. The header has no room for the
+        // whole message.
+        el.textContent = 'clock error';
+        el.title = serverClockErrorText;
+        el.classList.add('drift');
+        return;
+    }
+    el.title = el.dataset.defaultTitle;
     if (serverClockOffsetMs === null) {
         el.textContent = '--:--:--';
         el.classList.remove('drift');
