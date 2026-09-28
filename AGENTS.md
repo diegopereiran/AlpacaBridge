@@ -956,7 +956,7 @@ Every new driver **must** ship with at least the following 8 unit test cases, pl
 4. **Unsupported actions** `[<vendor>][<device>][unit]`
    - `CHECK` `get_supported_actions()` is empty (unless the driver defines actions).
    - `CHECK` `can_action("anything") == false`.
-   - `require_alpaca_error` with `ActionNotImplemented` (0x40C) for `action()`, and with `MethodNotImplemented` (0x400) for `command_blind()`, `command_bool()`, `command_string()` — the codes case 8 and the [exception table](#ascom-exception-vocabulary-pick-the-right-one--conformu-checks-it) require. A bare `CHECK_THROWS_AS(..., AlpacaException)` passes for any error code, so it cannot catch the wrong one.
+   - `require_alpaca_error` with `ActionNotImplemented` (0x40C) for `action()`, and with `MethodNotImplemented` (0x400) for `command_blind()`, `command_bool()`, `command_string()` (unless the driver implements command pass-through, as the OnStep, Celestron, SkyWatcher and SynScan mounts do: those check the connection first, so disconnected they throw `NotConnected` (0x407), and the test asserts that instead) — the codes case 8 and the [exception table](#ascom-exception-vocabulary-pick-the-right-one--conformu-checks-it) require. A bare `CHECK_THROWS_AS(..., AlpacaException)` passes for any error code, so it cannot catch the wrong one.
 
 5. **Device-specific behavior** — at least one test covering behavior unique to the device type:
    - Cameras: sub-exposure support (`get_sub_exposure_duration` / `set_sub_exposure_duration` throw if unsupported).
