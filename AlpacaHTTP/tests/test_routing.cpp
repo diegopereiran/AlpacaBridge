@@ -6095,6 +6095,17 @@ int main() {
         EXPECT(!any_warning_contains(persisted.warnings, "will refuse to connect"));
         EXPECT(persisted.errors.empty());
     }
+    {
+        // Persisted, wrong JSON type: the bridge's InvalidValue is thrown before
+        // normalize() runs, so the entry fails to load as a config_get() failure
+        // did through the deleted arm. It is not normalized to the default.
+        const auto persisted = persisted_attempt(
+            nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9258,"count":"seven"})"),
+            "Focuser", alpacahttp::test_catalog::add_schema_and_factory);
+        EXPECT(!persisted.listed);
+        EXPECT(persisted.failed_listed);
+        EXPECT(!any_warning_contains(persisted.warnings, "config normalized"));
+    }
 
 #ifndef ALPACACORE_ENABLE_ASTROASIS
     // open-astro#664 Part C step 3: with the vendor built out, the catalog path
