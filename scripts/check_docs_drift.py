@@ -144,6 +144,12 @@ Checks:
      the row's name. CamelCase names only, so a protocol constant such as
      MC_AUX_GUIDE 0x26 is not read as a pin; a floor catches an extractor that
      stops matching.
+ 18. The first bullet under AGENTS.md's "Continuous Integration and Pre-flight"
+     heading (`- CI (...`) names exactly the job ids under `jobs:` in
+     .github/workflows/ci.yml, in both directions and by id, not by count
+     (issue #702): it listed 11 of 18 jobs and called `format` `clang-format`.
+     The roster is every backticked token in the bullet outside parentheses,
+     so each id's description goes in parentheses after it.
 """
 
 import glob
@@ -1979,6 +1985,89 @@ def check_error_codes_match_header(root=ROOT):
     return _error_code_findings(read(ALPACA_ERRORS_H, root), {p: read(p, root) for p in ERROR_CODE_DOCS})
 
 
+# --- check 18: AGENTS.md CI job roster vs ci.yml ------------------------------
+
+CI_ROSTER_HEADING = "## Continuous Integration and Pre-flight"
+CI_ROSTER_BULLET = "- CI ("
+_CI_JOBS_BLOCK_RE = re.compile(r"^jobs:[ \t]*\n(.*?)(?=^\S|\Z)", re.MULTILINE | re.DOTALL)
+_CI_JOB_ID_RE = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+
+
+def _ci_job_ids(ci_text):
+    """The top-level job ids under `jobs:`, in file order (not the `on:` keys)."""
+    m = _CI_JOBS_BLOCK_RE.search(ci_text)
+    return _CI_JOB_ID_RE.findall(m.group(1)) if m else []
+
+
+def _strip_parenthesized(text):
+    """text with every (possibly nested) parenthesised group removed."""
+    out, depth = [], 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        elif not depth:
+            out.append(ch)
+    return "".join(out)
+
+
+def _ci_roster_bullet(agents_text):
+    """The first bullet under the CI heading that starts with `- CI (`,
+    continuation lines included, or None."""
+    start = agents_text.find("\n" + CI_ROSTER_HEADING + "\n")
+    if start == -1:
+        return None
+    section_end = agents_text.find("\n## ", start + 1)
+    section = agents_text[start:section_end if section_end != -1 else len(agents_text)]
+    lines = section.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith(CI_ROSTER_BULLET):
+            bullet = [line]
+            for more in lines[i + 1:]:
+                if not more.startswith("  "):
+                    break
+                bullet.append(more)
+            return "\n".join(bullet)
+    return None
+
+
+def _ci_roster_findings(ci_text, agents_text):
+    """Check 18 over the two files' text. Pure, so --self-test can drive it.
+
+    The roster is every backticked token in the bullet outside parentheses:
+    the descriptions (the ci.yml path, the `[stress]` tags) sit in parentheses
+    after each id, so they are not read as job ids.
+    """
+    jobs = _ci_job_ids(ci_text)
+    if not jobs:
+        return ["found no job ids under `jobs:` in .github/workflows/ci.yml: the parser is stale"]
+    bullet = _ci_roster_bullet(agents_text)
+    if bullet is None:
+        return ["could not find the '%s...' job roster bullet under '%s' in AGENTS.md"
+                % (CI_ROSTER_BULLET, CI_ROSTER_HEADING)]
+    named = _BACKTICK_RE.findall(_strip_parenthesized(bullet))
+    failures = []
+    seen = set()
+    for job in named:
+        if job in seen:
+            failures.append("AGENTS.md CI roster names '%s' twice" % job)
+        seen.add(job)
+        if job not in jobs:
+            failures.append("AGENTS.md CI roster names '%s', which does not exist as a job id in "
+                            ".github/workflows/ci.yml (ids: %s)" % (job, ", ".join(jobs)))
+    for job in jobs:
+        if job not in seen:
+            failures.append("ci.yml job '%s' is missing from the AGENTS.md CI roster bullet ('%s...')"
+                            % (job, CI_ROSTER_BULLET))
+    return failures
+
+
+def check_ci_roster_matches_workflow(root=ROOT):
+    return _ci_roster_findings(read(".github/workflows/ci.yml", root), read("AGENTS.md", root))
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -1998,6 +2087,7 @@ CHECKS = [
     ("README headline counts match SUPPORTED-DRIVERS.md", check_readme_headline_counts),
     ("SUPPORTED-DRIVERS.md Updated date is not behind the README release date", check_supported_drivers_updated_date),
     ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
+    ("AGENTS.md CI job roster matches ci.yml job ids", check_ci_roster_matches_workflow),
 ]
 
 
@@ -2658,6 +2748,56 @@ def self_test():
     f = ec(header="namespace AlpacaError {\n}\n")
     check("error codes: an enum the parser cannot read is a finding, not a pass",
           f is not None and any("no AlpacaError constants" in x for x in f))
+
+    # check 18: the AGENTS.md CI job roster vs ci.yml (issue #702).
+    roster_ci = (
+        "on:\n"
+        "  pull_request:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      - main\n"
+        "jobs:\n"
+        "  build-test:\n"
+        "    name: Build\n"
+        "    steps:\n"
+        "      - run: echo\n"
+        "  format:\n"
+        "    runs-on: x\n"
+        "  docs-drift:\n"
+        "    runs-on: x\n"
+    )
+    roster_agents = (
+        "# Agent Instructions\n\n"
+        "## Continuous Integration and Pre-flight\n\n"
+        "Related decision: none.\n\n"
+        "- CI (`.github/workflows/ci.yml`) runs on every PR. Its jobs, by id: `build-test` (vendors OFF),\n"
+        "  `format` (clang-format over `[stress]` changed lines), and `docs-drift`.\n"
+        "- **Layering gate** (`layering`, a later bullet) is not the roster.\n"
+    )
+
+    def roster(ci_text=roster_ci, agents_text=roster_agents):
+        return attempt("ci roster", lambda: _ci_roster_findings(ci_text, agents_text))
+
+    f = roster()
+    check("ci roster: a bullet naming exactly the ci.yml job ids is clean", f == [])
+    f = roster(agents_text=sub(roster_agents, "`build-test` (vendors OFF),\n", "\n"))
+    check("ci roster: a real ci.yml job missing from the bullet is reported by id",
+          f is not None and len(f) == 1 and "'build-test'" in f[0] and "missing" in f[0])
+    f = roster(agents_text=sub(roster_agents, "`format` (clang-format", "`clang-format` (clang-format"))
+    check("ci roster: a bullet naming a job id ci.yml does not define is reported (and the real id as missing)",
+          f is not None and len(f) == 2 and any("'clang-format'" in x and "does not exist" in x for x in f)
+          and any("'format'" in x and "missing" in x for x in f))
+    f = roster(agents_text=sub(roster_agents, "and `docs-drift`", "`docs-drift` and `docs-drift`"))
+    check("ci roster: a job id named twice is reported", f is not None and len(f) == 1 and "twice" in f[0])
+    f = roster(ci_text=roster_ci + "  zizmor:\n    runs-on: x\n")
+    check("ci roster: a job added to ci.yml without a bullet entry is reported",
+          f is not None and len(f) == 1 and "'zizmor'" in f[0])
+    f = roster(agents_text=roster_agents.replace("- CI (", "- Continuous integration ("))
+    check("ci roster: a missing roster bullet is a finding, not a pass",
+          f is not None and len(f) == 1 and "could not find" in f[0])
+    f = roster(ci_text=roster_ci.replace("jobs:\n", "workflows:\n"))
+    check("ci roster: a ci.yml with no jobs: block is a finding, not a pass",
+          f is not None and len(f) == 1 and "no job ids" in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
