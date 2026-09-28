@@ -24,6 +24,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -118,23 +121,39 @@ private:
 
 // One thread in TaskClock::sleep_for. The fake's sleeper can only be released
 // by advance(), so a failed case advances the fake far enough in the
-// destructor to let the thread go.
+// destructor to let the thread go. `before_sleep`, empty by default, runs on
+// the thread just before sleep_for.
 class Sleeper {
 public:
-    Sleeper(TaskClock& clock, std::chrono::nanoseconds duration, FakeTaskClock* release_with)
+    Sleeper(TaskClock& clock, std::chrono::nanoseconds duration, FakeTaskClock* release_with,
+            std::function<void()> before_sleep = {})
         : release_with_(release_with) {
         auto done = std::make_shared<std::promise<void>>();
         future_ = done->get_future();
-        thread_ = std::thread([&clock, duration, done] {
+        thread_ = std::thread([&clock, duration, done, before_sleep = std::move(before_sleep)] {
+            if (before_sleep) {
+                before_sleep();
+            }
             clock.sleep_for(duration);
             done->set_value();
         });
     }
     Sleeper(const Sleeper&) = delete;
     Sleeper& operator=(const Sleeper&) = delete;
+    // The thread may not have reached sleep_for yet: an advance before it
+    // registers moves the time but leaves its deadline ahead. So advance
+    // until the thread finishes, bounded in real time, and abort rather than
+    // join a thread that is still blocked.
     ~Sleeper() {
-        if (release_with_ != nullptr && !finished_within(0ms)) {
-            release_with_->advance(24h);
+        if (release_with_ != nullptr) {
+            const auto give_up = std::chrono::steady_clock::now() + kBound;
+            while (!finished_within(1ms)) {
+                if (std::chrono::steady_clock::now() >= give_up) {
+                    std::fprintf(stderr, "Sleeper: thread not released within the real-time bound\n");
+                    std::abort();
+                }
+                release_with_->advance(24h);
+            }
         }
         if (thread_.joinable()) {
             thread_.join();
@@ -268,6 +287,30 @@ TEST_CASE("TaskClock fake - sleep_for and the waiter rendezvous", "[util][taskcl
         fake.advance(1ms);
         REQUIRE(sleeper.finished_within(kBound));
         CHECK(fake.waiter_count() == 0);
+    }
+
+    SECTION("destroying a sleeper that has not reached sleep_for yet is bounded") {
+        // The thread is held off sleep_for until the destructor has moved
+        // the time, so it registers with a deadline past that advance.
+        auto sleeper = std::make_unique<Sleeper>(clock, 1s, &fake, [&clock] {
+            const auto give_up = std::chrono::steady_clock::now() + kBound;
+            while (clock.now() == TaskClock::clock::time_point{} && std::chrono::steady_clock::now() < give_up) {
+                std::this_thread::sleep_for(1ms);
+            }
+        });
+        auto destroyed = std::make_shared<std::promise<void>>();
+        auto destroyed_future = destroyed->get_future();
+        std::thread destroyer([&sleeper, destroyed] {
+            sleeper.reset();
+            destroyed->set_value();
+        });
+        const bool bounded = destroyed_future.wait_for(2 * kBound) == std::future_status::ready;
+        CHECK(bounded);
+        // On failure, release the stuck sleeper so the case still tears down.
+        for (int i = 0; i < 100 && destroyed_future.wait_for(10ms) != std::future_status::ready; ++i) {
+            fake.advance(24h);
+        }
+        destroyer.join();
     }
 
     SECTION("wait_for_waiters with no waiter times out in real time") {
