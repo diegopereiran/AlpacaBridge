@@ -253,6 +253,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
     require_alpaca_error([&]() { (void)driver->get_switch_value(14); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { (void)driver->get_switch(7); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->set_switch(7, false); }, alpacacore::AlpacaError::DriverException);
+    CHECK_FALSE(box.received("200"));  // nothing went on the wire while faulted
     // Static metadata does not depend on the box and keeps answering.
     CHECK(driver->get_can_write(7));
     CHECK_FALSE(driver->get_switch_name(14).empty());
