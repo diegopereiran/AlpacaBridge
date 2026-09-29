@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and [AlpacaHTTP](AlpacaHTTP/README.md).
 
+## [4.2.1] - UNRELEASED
+
+### Fixed
+- **iOptron mount: the fault latch counts consecutive failures only, and AbortSlew still stops a faulted mount** (AlpacaCore, issue #728; `ioptron_telescope_driver.cpp`): the latch that makes every member throw "Mount communications compromised" counted every failed read over the whole session, so three transient read failures spread over a night latched it, and the latch then refused AbortSlew too, leaving a client no way to stop a slewing mount short of a reconnect. A successful position, Alt/Az, status or site-info read from the mount now resets the count, so only three failures in a row latch. While latched, AbortSlew sends the stop (`:Q#`) with no status read first and whatever the cached slewing flag says; a sent stop clears the latch, and a failed one throws `DriverException` and leaves it set. Every other member still refuses while latched, and AbortSlew is unchanged when the link is healthy. The fake mount gains `set_fail_reads()`, and three cases in `test_ioptron_telescope.cpp` pin the consecutive count, the latch on the third failure in a row, and the stop on a latched link.
+
 ## [4.2.0] - 2026-09-30
 
 ### Added
