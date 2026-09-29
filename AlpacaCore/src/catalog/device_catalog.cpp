@@ -50,7 +50,7 @@ std::string allowed_list(const FieldRef& f) {
 // Formats a range bound for a message: an Int field without a fraction, a
 // Double field in its shortest round-trip form (0.5, 100).
 std::string format_bound(FieldRef::Kind kind, double bound) {
-    if (kind == FieldRef::Kind::Int) return std::to_string(static_cast<std::int64_t>(bound));
+    if (kind == FieldRef::Kind::Int) return std::to_string(int_bound(bound));
     char buf[32];
     auto res = std::to_chars(buf, buf + sizeof(buf), bound);
     return std::string(buf, res.ptr);
