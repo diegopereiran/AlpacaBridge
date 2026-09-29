@@ -121,8 +121,6 @@ CMAKE_CALL_RE = re.compile(
 )
 ADD_LIBRARY_KEYWORDS = {"STATIC", "SHARED", "MODULE", "OBJECT", "INTERFACE", "IMPORTED",
                         "GLOBAL", "EXCLUDE_FROM_ALL"}
-LINK_KEYWORDS = {"PUBLIC", "PRIVATE", "INTERFACE", "LINK_PUBLIC", "LINK_PRIVATE",
-                 "LINK_INTERFACE_LIBRARIES", "debug", "optimized", "general"}
 VAR_RE = re.compile(r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
