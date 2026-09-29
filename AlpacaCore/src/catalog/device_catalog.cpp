@@ -242,7 +242,4 @@ const Factory* DeviceCatalog::find_factory(const DeviceKey& key) const {
     return nullptr;
 }
 
-void register_builtin_schemas(DeviceCatalog&) {}
-void register_builtin_factories(DeviceCatalog&) {}
-
 }  // namespace alpacacore::catalog
