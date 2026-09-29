@@ -515,6 +515,8 @@ endif()
 
 **Replace `newvendor` with your vendor name (lowercase) and `NEWVENDOR` with uppercase.**
 
+A vendor whose descriptor factory `register_builtin_factories()` registers (`AlpacaCore/src/catalog/builtin_catalog.cpp`) also needs `target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_<VENDOR>)` next to that link, or the registration compiles empty with no build error (see the Astroasis block in `AlpacaCore/CMakeLists.txt`).
+
 #### Step 4: Add Installation Rules
 
 Add installation rules in the "Installation" section (around line 130-156):
