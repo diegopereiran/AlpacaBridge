@@ -48,6 +48,15 @@ struct FakeZwoState {
     // Answer ":Sr" with "0" (rejected) instead of the "1" ack.
     std::atomic<bool> reject_sr{false};
     std::atomic<int> sr_count{0};  // ":Sr" received (counted before the delay)
+    // Delay the ":SMTI" ack the same way, to land a cancel inside the
+    // site/time sync that precedes the target write.
+    std::atomic<int> smti_delay_ms{0};
+    std::atomic<int> smti_count{0};  // ":SMTI" received (counted before the delay)
+    std::atomic<int> sd_count{0};    // ":Sd" received
+    // Every command only the GOTO setup thread sends (site read, site/time
+    // write, target write), counted on receipt: open-astro#720 requires that
+    // none arrives after the call that fences the GOTO has returned.
+    std::atomic<int> setup_count{0};
     // open-astro#720: what the initiators that must fence a pending GOTO put
     // on the wire. The mount's own traffic (poll thread) sends none of these.
     std::atomic<int> park_count{0};  // ":hP#"
@@ -83,7 +92,15 @@ alpacacore::test::FakeMountServer::Responder zwo_responder(const std::shared_ptr
             st->goto_count.fetch_add(1);
             return st->reject_goto.load() ? "2" : "0";
         }
+        for (const char* setup : {":GMGE", ":SMGE", ":SMTI", ":Sr", ":Sd"}) {
+            st->setup_count.fetch_add(count_command(chunk, setup));
+        }
         st->sr_count.fetch_add(count_command(chunk, ":Sr"));
+        st->sd_count.fetch_add(count_command(chunk, ":Sd"));
+        st->smti_count.fetch_add(count_command(chunk, ":SMTI"));
+        if (chunk.find(":SMTI") != std::string::npos && st->smti_delay_ms.load() > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(st->smti_delay_ms.load()));
+        }
         if (chunk.find(":Sr") != std::string::npos && st->sr_delay_ms.load() > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(st->sr_delay_ms.load()));
         }
@@ -153,6 +170,14 @@ bool goto_sent_within_setup_window(const FakeZwoState& st) {
     return wait_until([&] { return st.goto_count.load() > 0; }, 2000);
 }
 
+// open-astro#720: the setup commands received once the fencing call returned.
+// Waits out the whole setup window, so a setup thread the call did not join
+// has had time to send whatever it was going to send.
+int setup_sent_after_return(const FakeZwoState& st, int at_return) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    return st.setup_count.load() - at_return;
+}
+
 }  // namespace
 
 TEST_CASE("ZWO async - a GOTO the mount rejects surfaces through Slewing (#575)",
@@ -212,10 +237,17 @@ TEST_CASE("ZWO async - AbortSlew during GOTO setup is not reported as a slew fai
     st->reject_goto.store(true);
     st->sr_delay_ms.store(150);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    // open-astro#720: abort while the ":Sr" is in flight. The fence lets that
+    // one round trip finish and nothing after it, and nothing at all once
+    // AbortSlew has returned.
+    REQUIRE(wait_until([&] { return st->sr_count.load() > 0; }, 1000));
     REQUIRE_NOTHROW(driver->abort_slew());
+    const int setup_at_return = st->setup_count.load();
     // Outlast the setup (site sync + delayed ":Sr" + ":Sd" + ":MS").
     CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 2000));
     CHECK(st->goto_count.load() == 0);  // the aborted GOTO was never sent
+    CHECK(setup_sent_after_return(*st, setup_at_return) == 0);
+    CHECK(st->sd_count.load() == 0);
     driver->set_connected(false);
 }
 
@@ -259,12 +291,16 @@ TEST_CASE("ZWO async - Park during GOTO setup cancels the pending GOTO (#720)",
 
     st->sr_delay_ms.store(150);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->sr_count.load() > 0; }, 1000));
     std::chrono::milliseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->park(); }));
+    const int setup_at_return = st->setup_count.load();
     CHECK(elapsed < kInitiatorBudget);
     CHECK_FALSE(goto_sent_within_setup_window(*st));
     CHECK(st->goto_count.load() == 0);
     CHECK(st->park_count.load() == 1);
+    CHECK(setup_sent_after_return(*st, setup_at_return) == 0);
+    CHECK(st->sd_count.load() == 0);
     driver->set_connected(false);
 }
 
@@ -365,10 +401,39 @@ TEST_CASE("ZWO async - Disconnect during GOTO setup cancels the pending GOTO (#7
 
     st->sr_delay_ms.store(150);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->sr_count.load() > 0; }, 1000));
     std::chrono::milliseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
+    const int setup_at_return = st->setup_count.load();
     CHECK(elapsed < kInitiatorBudget);
     CHECK_FALSE(goto_sent_within_setup_window(*st));
+    CHECK(st->goto_count.load() == 0);
+    CHECK(setup_sent_after_return(*st, setup_at_return) == 0);
+    CHECK(st->sd_count.load() == 0);
+}
+
+// open-astro#720: the cancel lands while the site/time sync's ":SMTI" is in
+// flight, so the GOTO must stop there: no target write follows the sync,
+// before or after Connected=false returns.
+TEST_CASE("ZWO async - Disconnect during the GOTO's site/time sync sends no target (#720)",
+          "[zwo][telescope][async][slewfailure]") {
+    auto st = std::make_shared<FakeZwoState>();
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->smti_delay_ms.store(150);
+    const int smti_before = st->smti_count.load();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->smti_count.load() > smti_before; }, 1000));
+    std::chrono::milliseconds elapsed{0};
+    REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
+    const int setup_at_return = st->setup_count.load();
+    CHECK(elapsed < kInitiatorBudget);
+    CHECK(setup_sent_after_return(*st, setup_at_return) == 0);
+    CHECK(st->sr_count.load() == 0);
+    CHECK(st->sd_count.load() == 0);
     CHECK(st->goto_count.load() == 0);
 }
 

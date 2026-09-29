@@ -2132,6 +2132,12 @@ public:
                     abandon();
                     return;
                 }
+                // The sync's last round trip (":SMTI") may be the one the
+                // cancel landed in.
+                if (goto_cancel_.load()) {
+                    abandon();
+                    return;
+                }
                 protocol.set_target_ra(target_ra);
                 if (goto_cancel_.load()) {
                     abandon();
