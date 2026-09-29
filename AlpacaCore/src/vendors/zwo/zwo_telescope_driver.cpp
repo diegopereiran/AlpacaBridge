@@ -415,7 +415,9 @@ public:
             pulse_thread_stop_.store(true);
             pulse_cancel_.store(true);
             pulse_cv_.notify_all();
-            cancel_goto_thread_request();
+            // open-astro#720: fence before teardown, so a pending GOTO setup
+            // cannot send ":MS" after Connected=false returns.
+            cancel_and_join_goto_thread();
 
             // Joinable member thread, NOT detached: the destructor (and the
             // next connect) joins it, so the teardown can never touch a
@@ -1426,6 +1428,10 @@ public:
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
 
+        // open-astro#720: a pending GOTO setup must not send ":MS" after the
+        // stop or the jog below. One fence covers both branches.
+        cancel_and_join_goto_thread();
+
         auto& protocol = ZWOMountProtocolWrapper::instance();
 
         if (std::abs(rate) < 1e-9) {
@@ -1749,6 +1755,8 @@ public:
     void find_home() override {
         check_connected();
         ensure_not_parked("FindHome");
+        // open-astro#720: a pending GOTO setup must not send ":MS" after ":hC".
+        cancel_and_join_goto_thread();
         reset_position_offsets();
         ZWOMountProtocolWrapper::instance().go_home();
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1766,6 +1774,8 @@ public:
 
     void park() override {
         check_connected();
+        // open-astro#720: a pending GOTO setup must not send ":MS" after ":hP".
+        cancel_and_join_goto_thread();
         reset_position_offsets();
         if (get_at_park()) {
             return;
@@ -1811,11 +1821,12 @@ public:
         check_connected();
         ensure_not_parked("AbortSlew");
         reset_position_offsets();
-        // open-astro#575: cancel a GOTO setup thread still writing the target,
-        // so it neither sends ":MS" after the abort nor records its rejection
-        // as a slew failure. Flag + notify only (no join): the next initiator,
-        // disconnect and the destructor reap the thread.
-        cancel_goto_thread_request();
+        // open-astro#575 / #720: fence a GOTO setup thread still writing the
+        // target (cancel AND join), so it neither sends ":MS" after this abort
+        // nor records its rejection as a slew failure. A ":MS" already on the
+        // wire when the cancel lands goes out before the ":Q" below, which
+        // stops it. The join waits for at most one mount round trip.
+        cancel_and_join_goto_thread();
         ZWOMountProtocolWrapper::instance().abort_motion();
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[0] = false;
@@ -2074,8 +2085,10 @@ public:
 
         // Joinable member thread, NOT detached (H1): cancel + join any
         // previous GOTO setup first, then reset the cancel flag for this one.
-        // The destructor and set_connected(false) cancel via
-        // cancel_goto_thread_request(); the destructor joins.
+        // Park, FindHome, MoveAxis, AbortSlew and set_connected(false) cancel
+        // and join via cancel_and_join_goto_thread(); the destructor cancels
+        // and joins too. The reap stays inline here because goto_reap_mutex_
+        // must be held across the respawn and is not recursive.
         // goto_reap_mutex_ serializes concurrent SlewAsync callers — without
         // it two callers join and assign goto_thread_ simultaneously (UB,
         // found by the [stress] telescope suite). The GOTO body never takes
@@ -2097,9 +2110,22 @@ public:
                     resume_poll();
                     return;
                 }
-                synchronize_mount_time_and_site_for_goto(false);
+                // open-astro#720: every checkpoint below lets a cancel-and-join
+                // wait for at most the one round trip in flight.
+                if (!synchronize_mount_time_and_site_for_goto(false)) {
+                    resume_poll();
+                    return;
+                }
                 protocol.set_target_ra(target_ra);
+                if (goto_cancel_.load()) {
+                    resume_poll();
+                    return;
+                }
                 protocol.set_target_dec(target_dec);
+                if (goto_cancel_.load()) {
+                    resume_poll();
+                    return;
+                }
                 for (int attempt = 0; attempt < 3 && !goto_cancel_.load(); ++attempt) {
                     try {
                         if (!protocol.goto_target()) {
@@ -2111,6 +2137,12 @@ public:
                     } catch (const AlpacaException& ex) {
                         if (attempt < 2 && is_ms_mount_busy_error(ex)) {
                             ALPACA_LOG_WARN("ZWO", "GOTO rejected with e3 (mount busy); aborting motion and retrying");
+                            // A cancelled thread must not send ":Q" on top of
+                            // the newer command.
+                            if (goto_cancel_.load()) {
+                                resume_poll();
+                                return;
+                            }
                             protocol.abort_motion();
                             // Cancellable backoff: a disconnect/destruction
                             // must not wait out the retry sleep.
@@ -2127,14 +2159,20 @@ public:
                                 "GOTO rejected with " +
                                     std::string(is_ms_time_site_not_synchronized_error(ex) ? "e7" : "e5") +
                                     "; synchronizing site/time and retrying once");
-                            synchronize_mount_time_and_site_for_goto(false);
+                            if (!synchronize_mount_time_and_site_for_goto(false)) {
+                                resume_poll();
+                                return;
+                            }
                             continue;
                         }
                         if (attempt == 1 && is_ms_target_under_horizon_error(ex)) {
                             ALPACA_LOG_WARN(
                                 "ZWO",
                                 "GOTO still rejected with e5 after normal sync; retrying with inverted longitude sign");
-                            synchronize_mount_time_and_site_for_goto(true);
+                            if (!synchronize_mount_time_and_site_for_goto(true)) {
+                                resume_poll();
+                                return;
+                            }
                             continue;
                         }
 
@@ -2555,7 +2593,9 @@ private:
         }
     }
 
-    void synchronize_mount_time_and_site_for_goto(bool invert_longitude_sign) {
+    // Returns false, having sent nothing more, once goto_cancel_ is set
+    // (open-astro#720): the GOTO setup thread then exits.
+    bool synchronize_mount_time_and_site_for_goto(bool invert_longitude_sign) {
         auto& protocol = ZWOMountProtocolWrapper::instance();
 
         std::optional<SiteInfo> site_to_write;
@@ -2575,6 +2615,9 @@ private:
         }
 
         if (!site_to_write.has_value()) {
+            if (goto_cancel_.load()) {
+                return false;
+            }
             try {
                 site_to_write = protocol.get_site_info();
             } catch (const std::exception&) {
@@ -2585,6 +2628,9 @@ private:
             SiteInfo normalized = site_to_write.value();
             if (invert_longitude_sign) {
                 normalized.longitude_degrees = -normalized.longitude_degrees;
+            }
+            if (goto_cancel_.load()) {
+                return false;
             }
             protocol.set_site_info(normalized);
             if (!invert_longitude_sign) {
@@ -2598,6 +2644,9 @@ private:
         const auto now = std::chrono::system_clock::now();
         const int offset_minutes = 0;
         const TimeInfo info = from_utc_time_point(now, offset_minutes);
+        if (goto_cancel_.load()) {
+            return false;
+        }
         protocol.set_time_info(info);
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2606,6 +2655,7 @@ private:
         last_utc_valid_ = true;
         timezone_offset_minutes_ = offset_minutes;
         timezone_valid_ = true;
+        return true;
     }
 
     void check_connected() const {
@@ -2965,12 +3015,29 @@ private:
     // Ask a running GOTO setup thread to exit promptly (it re-checks the
     // flag between protocol calls and its retry backoff waits on goto_cv_).
     // The store happens under goto_mutex_ so a waiter cannot miss the wakeup.
+    // Flag only: the callers join afterwards (cancel_and_join_goto_thread(),
+    // slew_to_target_async()'s reap, the destructor).
     void cancel_goto_thread_request() {
         {
             std::lock_guard<std::mutex> lock(goto_mutex_);
             goto_cancel_.store(true);
         }
         goto_cv_.notify_all();
+    }
+
+    // open-astro#720 fence: after this returns no GOTO setup thread started
+    // before the call can put anything on the wire. The join waits for at
+    // most the one mount round trip in flight (the body checks goto_cancel_
+    // between protocol calls). The caller must NOT hold mutex_, pulse_mutex_
+    // or the protocol mutex: the GOTO body takes mutex_ and the protocol
+    // mutex, so a join under either deadlocks. Does not reset goto_cancel_;
+    // only slew_to_target_async() does, under goto_mutex_.
+    void cancel_and_join_goto_thread() {
+        std::lock_guard<std::mutex> reap_lock(goto_reap_mutex_);
+        cancel_goto_thread_request();
+        if (goto_thread_.joinable()) {
+            goto_thread_.join();
+        }
     }
 
     const int device_number_;
