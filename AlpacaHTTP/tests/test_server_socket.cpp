@@ -163,6 +163,18 @@ std::uint16_t wait_for_bound_port(alpacahttp::Server& server, int budget_ms) {
     return port;
 }
 
+// Wait for a management restart's detached thread to make its last write to
+// the server. A new listener answering proves start_async() ran, not that the
+// thread has finished: stop() racing its tail can read is_running() true, and
+// the Server can leave scope while that thread still writes its members.
+bool wait_for_restart_done(const alpacahttp::Server& server, int budget_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
+    while (server.restart_in_progress_for_test() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return !server.restart_in_progress_for_test();
+}
+
 int connect_local(std::uint16_t port) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     EXPECT(fd >= 0);
@@ -950,6 +962,9 @@ int main() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
                 EXPECT(restart_probes.load() > probes_before);
+                // Let this restart's thread finish before the next round's
+                // request (a duplicate would be ignored) or stop().
+                EXPECT(wait_for_restart_done(restart_server, 5000));
             }
             restart_server.stop();
         } else {
@@ -1054,6 +1069,7 @@ int main() {
             EXPECT(samples.load() > 0);
             EXPECT(!saw_false.load());
 
+            EXPECT(wait_for_restart_done(keep_server, 5000));
             keep_server.stop();
             EXPECT(!keep_server.is_running());
         } else {

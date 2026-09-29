@@ -1545,14 +1545,15 @@ void Server::handle_restart_request() {
     }
 
     util::log_info("Restarting HTTP server");
-    // Published BEFORE stop() clears running_, cleared only after start_async()
-    // has returned: is_running() never reads false across the join window.
-    // If run_server() then fails to bind, it clears running_ itself and
-    // is_running() drops for real -- the embedder exits 1 and systemd respawns.
-    restarting_ = true;
+    // Made odd BEFORE stop() clears running_, even again only after
+    // start_async() has returned: is_running() never reads false across the
+    // join window. If run_server() then fails to bind, it clears running_
+    // itself and is_running() drops for real -- the embedder exits 1 and
+    // systemd respawns.
+    ++restart_epoch_;
     stop();
     start_async();
-    restarting_ = false;
+    ++restart_epoch_;
     restart_requested_ = false;
 }
 
