@@ -147,8 +147,8 @@ std::string make_request_with_header_size(std::size_t header_bytes) {
 // --- keep-alive helpers ------------------------------------------------------
 
 // Read back the ephemeral port a just-started Server bound, retrying
-// briefly: is_running() can go true before the listener is actually created
-// (see the restart-case comment below for why), so bound_port() may answer 0
+// briefly: is_running() goes true before the listener is actually created,
+// so bound_port() may answer 0
 // for a few milliseconds after start_async() returns. Returns 0 if the port
 // never showed up within the budget.
 std::uint16_t wait_for_bound_port(alpacahttp::Server& server, int budget_ms) {
@@ -913,21 +913,19 @@ int main() {
                 ::close(fd);
 
                 // The restart runs on a detached thread 100 ms after the
-                // response, so polling is_running() here would race it (a
-                // true seen before stop() begins is the OLD generation, and
-                // a client connecting then lands in a listener about to be
-                // closed and gets a reset). Wait for proof the restart
-                // happened instead: stop() closes the parked bystander.
+                // response, and is_running() stays true for the whole of it
+                // (#713), so it cannot tell the old generation from the new
+                // one: a client connecting too early lands in a listener
+                // about to be closed and gets a reset. Wait for proof the
+                // restart happened instead: stop() closes the parked
+                // bystander.
                 EXPECT(peer_closed(bystander, 5000));
                 ::close(bystander);
-                // Then for the new generation to be up. is_running() goes
-                // true before the new listener is bound, so retry connect.
-                bool back = false;
-                for (int i = 0; i < 50 && !back; ++i) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    back = restart_server.is_running();
-                }
-                EXPECT(back);
+                // Then for the new generation to be up: the restart thread
+                // clears its flag only after stop() dropped the old listener
+                // and start_async() returned, so bound_port() below cannot
+                // answer the old one.
+                EXPECT(wait_for_restart_done(restart_server, 5000));
                 // The new generation's listener is a fresh ephemeral port
                 // (config_.http_port() is still 0), not necessarily the one
                 // from before this restart -- re-read it before using

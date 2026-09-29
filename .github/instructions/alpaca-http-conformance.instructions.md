@@ -425,13 +425,15 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     the router's detached thread, so every connection is already closed and
     the count already zero before the reset ran, but the reset was wrong on
     principle and is gone.)
-  - Restart-path tests must not poll `is_running()` right after the restart
-    response: the router fires the callback 100 ms later on a detached
-    thread, so a true seen before `stop()` begins is the OLD generation, and
-    a client connecting then lands in a listener about to close and reads a
-    reset. Wait for a parked bystander to see EOF (proof `stop()` ran), then
-    for `is_running()`, then retry `connect()` (it goes true before the new
-    listener is bound). And lines "missing" from a test log after an
+  - Restart-path tests must not use `is_running()` as a readiness signal:
+    since #713 it stays true for the whole of a restart, so it never tells
+    the OLD generation from the new one, and a client connecting before
+    `stop()` lands in a listener about to close and reads a reset. Wait for
+    a parked bystander to see EOF (proof `stop()` ran), then for
+    `restart_in_progress_for_test()` to clear (`wait_for_restart_done()`:
+    `start_async()` has returned), then for `bound_port()` to be non-zero
+    (`wait_for_bound_port()`; the new listener is bound after
+    `start_async()` returns), and retry `connect()`. And lines "missing" from a test log after an
     `EXPECT` abort are usually buffered stdout lost at `abort()`, not a hang;
     confirm with a backtrace (`pidof test_server_socket`, never `pgrep -f`
     with a pattern that matches your own shell) before chasing one.
