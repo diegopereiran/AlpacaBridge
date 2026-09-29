@@ -31,6 +31,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <future>
 #include <memory>
@@ -136,6 +138,31 @@ Body gated_body(const ProbePtr& p, const GatePtr& g) {
     };
 }
 
+// Runs its callback when the thread that last touched it exits. A body's
+// thread exits only after the slot has published that the body returned, so
+// this is the one point a test can wait for that publication; `exited` is
+// set inside the body, before it.
+struct ThreadExitHook {
+    std::function<void()> on_exit;
+    ThreadExitHook() = default;
+    ThreadExitHook(const ThreadExitHook&) = delete;
+    ThreadExitHook& operator=(const ThreadExitHook&) = delete;
+    ~ThreadExitHook() {
+        if (on_exit) {
+            on_exit();
+        }
+    }
+};
+
+// gated_body() that also sets `thread_ended` when its thread has exited.
+Body gated_body_signalling_exit(const ProbePtr& p, const GatePtr& g, std::shared_ptr<std::atomic<bool>> thread_ended) {
+    return [inner = gated_body(p, g), thread_ended](OperationContext& ctx) {
+        thread_local ThreadExitHook hook;
+        hook.on_exit = [thread_ended] { thread_ended->store(true); };
+        inner(ctx);
+    };
+}
+
 // One wait of `d` on the slot's clock, then finishes.
 Body waiting_body(const ProbePtr& p, std::chrono::nanoseconds d) {
     return [p, d](OperationContext& ctx) {
@@ -166,6 +193,8 @@ struct Harness {
     std::unique_ptr<AsyncOperation> op;
     std::vector<GatePtr> gates;
     std::vector<std::thread> helpers;
+    // Helpers whose function has returned; each helper counts itself last.
+    std::shared_ptr<std::atomic<std::size_t>> helpers_done = std::make_shared<std::atomic<std::size_t>>(0);
 
     Harness() : op(std::make_unique<AsyncOperation>("test-slot", generation, clock)) {}
     Harness(const Harness&) = delete;
@@ -176,9 +205,22 @@ struct Harness {
         }
         // A start() refused at the bound throws; nothing else waits this long.
         clock.advance(AsyncOperation::kStaleReapTimeout + 1h);
+        // The helper joins are bounded: a helper still running after kBound
+        // (a slot that no longer returns from start() or from its joins)
+        // aborts the binary with a message instead of hanging it. A
+        // destructor cannot fail a Catch2 case, and detaching a helper that
+        // references this Harness would be a use-after-free.
+        if (!eventually([&] { return helpers_done->load() == helpers.size(); })) {
+            std::fprintf(stderr, "test_async_operation: %zu of %zu helper threads still running after %lld ms\n",
+                         helpers.size() - helpers_done->load(), helpers.size(),
+                         static_cast<long long>(std::chrono::milliseconds(kBound).count()));
+            std::abort();
+        }
         for (auto& t : helpers) {
             t.join();
         }
+        // AsyncOperation's own destructor joins with no bound (rule 8); every
+        // gate is open and every clock wait released, so it returns.
         op.reset();
     }
 
@@ -192,7 +234,10 @@ struct Harness {
     auto on_helper(Fn fn) -> std::future<decltype(fn())> {
         std::packaged_task<decltype(fn())()> task(std::move(fn));
         auto future = task.get_future();
-        helpers.emplace_back(std::move(task));
+        helpers.emplace_back([task = std::move(task), done = helpers_done]() mutable {
+            task();
+            done->fetch_add(1);
+        });
         return future;
     }
 
@@ -272,7 +317,8 @@ TEST_CASE("AsyncOperation - start returns while the old body is blocked", "[util
     Harness h;
     auto a = probe();
     auto ga = h.gate();
-    REQUIRE(h.start_within(gated_body(a, ga)));
+    auto a_thread_ended = std::make_shared<std::atomic<bool>>(false);
+    REQUIRE(h.start_within(gated_body_signalling_exit(a, ga, a_thread_ended)));
     REQUIRE(eventually([&] { return a->entered.load(); }));
 
     auto b = probe();
@@ -281,7 +327,10 @@ TEST_CASE("AsyncOperation - start returns while the old body is blocked", "[util
     CHECK(h.op->stale_count() == 1);
 
     ga->open();
-    REQUIRE(eventually([&] { return a->exited.load(); }));
+    // Wait for A's thread to exit, not only for `exited`: the next start()
+    // joins A only once the slot has published that A returned.
+    REQUIRE(eventually([&] { return a_thread_ended->load(); }));
+    CHECK(a->exited);
     CHECK(a->reason.load() == StopReason::Superseded);
     CHECK(a->stops == 0);
     CHECK(h.op->stale_count() == 1);  // returned, not joined yet
