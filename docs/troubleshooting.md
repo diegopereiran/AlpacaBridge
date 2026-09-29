@@ -45,10 +45,8 @@ always build the tests, so Catch2 is required for those.
 
 ### Missing system libraries
 
-**Solution**: Install every package in the `Build-Depends` field of `debian/control`, which is the
-complete list (it includes `zlib1g-dev`, `libsystemd-dev` and `pkgconf`, which the configure step
-requires). Add `catch2` to build the tests. [development.md](development.md#prerequisites) has the
-`apt install` command.
+**Solution**: Install every package in the `Build-Depends` field of `debian/control`, the complete list (it includes `zlib1g-dev`, `libsystemd-dev` and `pkgconf`, which the configure step requires).
+Add `catch2` to build the tests. [development.md](development.md#prerequisites) has the `apt install` command.
 
 ## Runtime issues
 
