@@ -2234,7 +2234,13 @@ public:
                 return;
             } catch (const std::exception& ex) {
                 ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
-                if (!goto_cancel_.load()) {
+                // A cancelled GOTO that then fails (a rejected ":Sr" the
+                // canceller waited for) is abandoned like any other.
+                if (goto_cancel_.load()) {
+                    abandon();
+                    return;
+                }
+                {
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (slew_error_epoch_ == slew_epoch) {
                         last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
