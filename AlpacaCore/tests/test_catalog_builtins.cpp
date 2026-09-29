@@ -22,6 +22,7 @@
 
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/serial_io.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -327,6 +328,10 @@ public:
     explicit LoopbackWeeWx(bool answer) : answer_(answer) {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         REQUIRE(listen_fd_ >= 0);
+        // Non-blocking, so a connection reset between poll() and accept()
+        // makes accept() fail with EAGAIN instead of blocking serve() and the
+        // destructor's join. An accepted fd does not inherit the flag on Linux.
+        REQUIRE(alpacacore::util::set_nonblocking(listen_fd_));
         const int one = 1;
         ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
         sockaddr_in addr{};
@@ -455,6 +460,12 @@ TEST_CASE("Builtin catalog - the WeeWX factory passes weewxUrl and timeoutMs thr
     const auto start = std::chrono::steady_clock::now();
     CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
     const auto elapsed = std::chrono::steady_clock::now() - start;
+    // serve() counts after its own poll() wakes, which a starved runner can
+    // schedule after the client has already given up.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (silent.requests() < 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     CHECK(silent.requests() >= 1);
     CHECK(elapsed < std::chrono::milliseconds(3000));
     CHECK_FALSE(driver->get_connected());

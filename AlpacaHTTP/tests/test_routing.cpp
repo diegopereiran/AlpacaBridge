@@ -128,6 +128,7 @@ void remove_device(alpacahttp::Router& router, const std::string& vendor, const 
 struct ApiAttempt {
     bool ok = false;
     std::string message;
+    int error_number = 0;
     nlohmann::json config;
 };
 
@@ -173,7 +174,8 @@ ApiAttempt api_attempt(alpacahttp::Router& router, const nlohmann::json& posted,
         attempt.message = "<non-JSON response>";
         return attempt;
     }
-    if (response.value("ErrorNumber", -1) != 0) {
+    attempt.error_number = response.value("ErrorNumber", -1);
+    if (attempt.error_number != 0) {
         attempt.message = response.value("ErrorMessage", "");
         return attempt;
     }
@@ -6295,6 +6297,7 @@ int main() {
             const auto api = api_attempt(router, entry, "ObservingConditions");
             EXPECT(!api.ok);
             EXPECT(api.message == bad[1]);
+            EXPECT(api.error_number == 0x401);  // InvalidValue
             EXPECT(listed_entry(router, "ObservingConditions", number).is_null());
 
             const auto persisted = persisted_attempt(entry, "ObservingConditions");
@@ -6314,6 +6317,7 @@ int main() {
             "ObservingConditions");
         EXPECT(!off.ok);
         EXPECT(off.message == "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "ObservingConditions", 9264).is_null());
     }
 #endif
