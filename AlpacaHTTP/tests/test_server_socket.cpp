@@ -996,7 +996,7 @@ int main() {
 
         if (const std::uint16_t keep_port = keep_server.is_running() ? wait_for_bound_port(keep_server, 2000) : 0;
             keep_port != 0) {
-            struct timeval tv{};
+            struct timeval tv {};
             tv.tv_sec = 5;
 
             // A bystander parked on the reactor: stop() closing it is the
@@ -1040,7 +1040,7 @@ int main() {
             // true throughout), and the old listener may still be bound for
             // a moment after the bystander closes, so re-read the port and
             // retry the whole connect + request until a 200 comes back.
-            struct timeval short_tv{};
+            struct timeval short_tv {};
             short_tv.tv_sec = 1;
             bool answered = false;
             const auto back_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -1108,7 +1108,7 @@ int main() {
 
         if (const std::uint16_t cb_port = cb_server.is_running() ? wait_for_bound_port(cb_server, 2000) : 0;
             cb_port != 0) {
-            struct timeval tv{};
+            struct timeval tv {};
             tv.tv_sec = 5;
 
             // A bystander parked on the reactor: a stop() the handler must
