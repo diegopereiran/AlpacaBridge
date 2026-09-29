@@ -2104,26 +2104,42 @@ public:
         }
         goto_thread_ = std::thread([this, target_ra, target_dec, slew_epoch]() {
             auto resume_poll = [this]() { poll_pause_.store(false); };
+            // open-astro#720: a cancelled GOTO started no slew (it exits before
+            // ":MS", or after the mount rejected it), so it must not leave its
+            // bookkeeping behind: the 5 s Slewing force window, or the
+            // post-slew adjustment that would report the abandoned target as
+            // the mount's position. A newer SlewToTargetAsync has already
+            // moved the epoch on and owns both.
+            auto abandon = [this, slew_epoch, &resume_poll]() {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (slew_error_epoch_ == slew_epoch) {
+                        pending_slew_adjust_ = false;
+                        slew_force_until_ = std::chrono::steady_clock::time_point{};
+                    }
+                }
+                resume_poll();
+            };
             auto& protocol = ZWOMountProtocolWrapper::instance();
             try {
                 if (goto_cancel_.load()) {
-                    resume_poll();
+                    abandon();
                     return;
                 }
                 // open-astro#720: every checkpoint below lets a cancel-and-join
                 // wait for at most the one round trip in flight.
                 if (!synchronize_mount_time_and_site_for_goto(false)) {
-                    resume_poll();
+                    abandon();
                     return;
                 }
                 protocol.set_target_ra(target_ra);
                 if (goto_cancel_.load()) {
-                    resume_poll();
+                    abandon();
                     return;
                 }
                 protocol.set_target_dec(target_dec);
                 if (goto_cancel_.load()) {
-                    resume_poll();
+                    abandon();
                     return;
                 }
                 for (int attempt = 0; attempt < 3 && !goto_cancel_.load(); ++attempt) {
@@ -2140,7 +2156,7 @@ public:
                             // A cancelled thread must not send ":Q" on top of
                             // the newer command.
                             if (goto_cancel_.load()) {
-                                resume_poll();
+                                abandon();
                                 return;
                             }
                             protocol.abort_motion();
@@ -2160,7 +2176,7 @@ public:
                                     std::string(is_ms_time_site_not_synchronized_error(ex) ? "e7" : "e5") +
                                     "; synchronizing site/time and retrying once");
                             if (!synchronize_mount_time_and_site_for_goto(false)) {
-                                resume_poll();
+                                abandon();
                                 return;
                             }
                             continue;
@@ -2170,7 +2186,7 @@ public:
                                 "ZWO",
                                 "GOTO still rejected with e5 after normal sync; retrying with inverted longitude sign");
                             if (!synchronize_mount_time_and_site_for_goto(true)) {
-                                resume_poll();
+                                abandon();
                                 return;
                             }
                             continue;
@@ -2195,7 +2211,11 @@ public:
                         // last_slew_error_. Nor is a rejection after a newer
                         // command (Park/FindHome/MoveAxis/Unpark) cleared the
                         // slot: the epoch says that command owns it now.
-                        if (!goto_cancel_.load()) {
+                        if (goto_cancel_.load()) {
+                            abandon();
+                            return;
+                        }
+                        {
                             std::lock_guard<std::mutex> lock(mutex_);
                             if (slew_error_epoch_ == slew_epoch) {
                                 last_slew_error_ = "SlewToTargetAsync failed: " + std::string(ex.what());
@@ -2209,6 +2229,9 @@ public:
                         return;
                     }
                 }
+                // Only a cancel ends the loop; every other path returns above.
+                abandon();
+                return;
             } catch (const std::exception& ex) {
                 ALPACA_LOG_WARN("ZWO", "GOTO failed: " + std::string(ex.what()));
                 if (!goto_cancel_.load()) {

@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -50,6 +51,9 @@ struct FakeZwoState {
     std::atomic<int> home_count{0};  // ":hC#"
     std::atomic<int> stop_count{0};  // ":Q#" (not the per-direction ":Qe#" etc.)
     std::atomic<int> jog_count{0};   // ":Me#" / ":Mw#" / ":Mn#" / ":Ms#"
+    // Answer ":GU" as a stopped mount and ":GR"/":GD" with a fixed position
+    // (12h, +45 deg), so Slewing and RA/Dec reads reach the mount's answer.
+    std::atomic<bool> serve_position{false};
 };
 
 // A chunk can carry more than one command, so count occurrences.
@@ -85,6 +89,11 @@ alpacacore::test::FakeMountServer::Responder zwo_responder(const std::shared_ptr
         }
         if (chunk.find(":GAT") != std::string::npos) {
             return "1#";
+        }
+        if (st->serve_position.load()) {
+            if (chunk.find(":GU") != std::string::npos) return "N#";
+            if (chunk.find(":GR") != std::string::npos) return "12:00:00#";
+            if (chunk.find(":GD") != std::string::npos) return "+45*00:00#";
         }
         return "0#";
     };
@@ -287,6 +296,30 @@ TEST_CASE("ZWO async - MoveAxis stop during GOTO setup cancels the pending GOTO 
     CHECK_FALSE(goto_sent_within_setup_window(*st));
     CHECK(st->goto_count.load() == 0);
     CHECK(st->stop_count.load() == 1);
+    driver->set_connected(false);
+}
+
+// open-astro#720: the cancelled GOTO never slewed, so it must not leave its
+// bookkeeping behind: neither the 5 s Slewing force window nor the post-slew
+// adjustment that would report the abandoned target as the mount's position.
+TEST_CASE("ZWO async - a GOTO cancelled during setup leaves no slew bookkeeping (#720)",
+          "[zwo][telescope][async][slewfailure]") {
+    auto st = std::make_shared<FakeZwoState>();
+    st->serve_position.store(true);
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->sr_delay_ms.store(150);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
+    CHECK_FALSE(goto_sent_within_setup_window(*st));
+    // Still inside the GOTO's force window, but nothing is moving.
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 6000));
+    CHECK(std::fabs(driver->get_right_ascension() - 12.0) < 1e-6);
+    CHECK(std::fabs(driver->get_declination() - 45.0) < 1e-6);
     driver->set_connected(false);
 }
 
