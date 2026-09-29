@@ -221,7 +221,8 @@ TEST_CASE("Builtin catalog - the Astroasis factory scans by index when hidPath i
 // Astroasis. The schema declares no required/min/max rule: the three refusals
 // of the router arm it replaces ("... requires weewxUrl", "... must be greater
 // than 0") come from the factory, so a persisted entry that breaks one is still
-// not registered, as before the move.
+// not registered, as before the move. The factory also refuses a value above
+// the int range the arm read both numbers in ("... must be at most 2147483647").
 
 namespace {
 
@@ -419,6 +420,23 @@ TEST_CASE("Builtin catalog - the WeeWX factory refuses what the router arm refus
     timeout_negative.set("weewxUrl", std::string{"http://weewx.test:8998/current.json"});
     timeout_negative.set("timeoutMs", std::int64_t{-1});
     CHECK(create_refusal(catalog, timeout_negative) == "timeoutMs must be greater than 0");
+}
+
+TEST_CASE("Builtin catalog - the WeeWX factory refuses an interval or timeout above the int range",
+          "[catalog][weewx][unit]") {
+    // The deleted arm read both fields as int. The schema's Int is 64-bit, and
+    // 1e10 s converted to the nanoseconds wait_for() uses overflows, so the poll
+    // thread waited 0 ms and fetched back to back.
+    const DeviceCatalog catalog = builtin_catalog();
+    DeviceConfig poll_huge;
+    poll_huge.set("weewxUrl", std::string{"http://weewx.test:8998/current.json"});
+    poll_huge.set("pollIntervalSeconds", std::int64_t{10000000000});
+    CHECK(create_refusal(catalog, poll_huge) == "pollIntervalSeconds must be at most 2147483647");
+
+    DeviceConfig timeout_huge;
+    timeout_huge.set("weewxUrl", std::string{"http://weewx.test:8998/current.json"});
+    timeout_huge.set("timeoutMs", std::int64_t{10000000000});
+    CHECK(create_refusal(catalog, timeout_huge) == "timeoutMs must be at most 2147483647");
 }
 
 TEST_CASE("Builtin catalog - the WeeWX factory passes weewxUrl and timeoutMs through", "[catalog][weewx][unit]") {

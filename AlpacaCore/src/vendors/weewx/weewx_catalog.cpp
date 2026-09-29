@@ -11,18 +11,25 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // The WeeWX ObservingConditions factory (open-astro#731). It refuses what the
-// router arm it replaces refused, with the same text, in the same order. The
+// router arm it replaces refused, with the same text, in the same order, and
+// then a value above the int range (below). Each
 // refusal is an InvalidValue AlpacaException rather than a schema rule so that
 // both config sources keep the arm's outcome: an API configuredevice call gets
 // the text as its error message, and a persisted entry that breaks one is not
 // registered. This file (unlike weewx_schema.cpp) is compiled only under
 // ALPACACORE_ENABLE_WEEWX and is not in the layering gate's catalog file set,
 // so the vendor header here is fine.
+//
+// The deleted arm read both numbers as int; the schema's Int is 64-bit, so the
+// factory refuses a value above INT_MAX to keep that domain. Without it 1e10 s
+// overflows the nanoseconds the poll thread's wait_for() converts to, and the
+// wait returns at once, so the driver fetches back to back.
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 
 #include <chrono>
+#include <limits>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "weewx_fields.h"
@@ -45,6 +52,13 @@ void register_weewx_factory(DeviceCatalog& catalog) {
         }
         if (timeout_ms <= 0) {
             throw AlpacaException("timeoutMs must be greater than 0", AlpacaError::InvalidValue);
+        }
+        constexpr std::int64_t kIntMax = std::numeric_limits<int>::max();
+        if (poll_interval > kIntMax) {
+            throw AlpacaException("pollIntervalSeconds must be at most 2147483647", AlpacaError::InvalidValue);
+        }
+        if (timeout_ms > kIntMax) {
+            throw AlpacaException("timeoutMs must be at most 2147483647", AlpacaError::InvalidValue);
         }
         weewx_config.poll_interval = std::chrono::seconds(poll_interval);
         weewx_config.timeout = std::chrono::milliseconds(timeout_ms);

@@ -6271,14 +6271,20 @@ int main() {
 #ifdef ALPACACORE_ENABLE_WEEWX
     // open-astro#731: the WeeWX refusals keep the router arm's exact text on
     // the API path, and a persisted entry that breaks one is still not
-    // registered (listed as failed to load, so it stays editable). Green before
-    // the arm moved into the catalog; pins the texts and outcome across it.
+    // registered (listed as failed to load, so it stays editable). The first
+    // three rows were green before the arm moved into the catalog and pin the
+    // texts and outcome across it; the last two pin the factory's INT_MAX bound,
+    // which keeps the int domain the arm read both numbers in.
     {
         const char* const kBadConfigs[][2] = {
             {R"({"pollIntervalSeconds":300,"timeoutMs":2500})", "WeeWX observing conditions requires weewxUrl"},
             {R"({"weewxUrl":"http://weewx.test:8998/current.json","pollIntervalSeconds":0})",
              "pollIntervalSeconds must be greater than 0"},
             {R"({"weewxUrl":"http://weewx.test:8998/current.json","timeoutMs":0})", "timeoutMs must be greater than 0"},
+            {R"({"weewxUrl":"http://weewx.test:8998/current.json","pollIntervalSeconds":10000000000})",
+             "pollIntervalSeconds must be at most 2147483647"},
+            {R"({"weewxUrl":"http://weewx.test:8998/current.json","timeoutMs":10000000000})",
+             "timeoutMs must be at most 2147483647"},
         };
         int number = 9265;
         for (const auto& bad : kBadConfigs) {

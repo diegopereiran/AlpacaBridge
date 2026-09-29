@@ -19,7 +19,9 @@
 // No field declares a required, min or max rule: the router arm this replaces
 // refused a missing weewxUrl and a non-positive interval or timeout from both
 // config sources, which a schema rule cannot do (Source::Persisted only warns
-// and registers), so the factory refuses them with the arm's text instead.
+// and registers), so the factory refuses them with the arm's text instead. For
+// the same reason the factory, not a max rule, refuses an interval or timeout
+// above INT_MAX, the int domain the arm read them in.
 
 #include <alpacacore/catalog/device_catalog.h>
 

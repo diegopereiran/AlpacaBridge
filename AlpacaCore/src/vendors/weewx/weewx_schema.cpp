@@ -13,8 +13,8 @@
 // The WeeWX ObservingConditions schema (open-astro#731). No vendor header:
 // compiles in every build (including vendors-OFF), so `available` in
 // GET /management/v1/devicecatalog reflects only whether a factory is
-// registered. No cross-field normalize and no per-field rule: the three
-// refusals live in the factory (see weewx_fields.h).
+// registered. No cross-field normalize and no per-field rule: the refusals
+// live in the factory (see weewx_fields.h).
 
 #include "../../catalog/builtin_descriptors.h"
 #include "weewx_fields.h"
