@@ -239,12 +239,15 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connection ends — so an ACTIVE client (NINA/PHD2 polling every second)
   held its worker, and therefore `stop()`, until the 300s lifetime cap.
   systemd's default 90s `TimeoutStopSec` would SIGKILL the service first,
-  and the same applies to the management restart/shutdown endpoints, which
-  go through `stop()` on the main thread. Before keep-alive a worker only
-  ever held one request, so this was a genuine regression the caps did not
-  cover: they bound how long a connection may live, not whether it outlives
-  the server. Measured with a client sending every 2s: `stop()` blocked
-  26,006 ms and served 13 further requests before the check, 1 ms after.
+  and the same applies to the management restart/shutdown endpoints: the
+  router's detached thread always calls `stop()` for a restart, and for a
+  shutdown only when no shutdown callback is installed (otherwise the
+  embedder's own `stop()` is the call that blocks). Before keep-alive a
+  worker only ever held one request, so this was a genuine regression the
+  caps did not cover: they bound how long a connection may live, not
+  whether it outlives the server. Measured with a client sending every
+  2s: `stop()` blocked 26,006 ms and served 13 further requests before
+  the check, 1 ms after.
   With the reactor (below) no worker is ever parked, so `stop()` no longer
   waits out an idle gap at all: a request in flight is answered with
   `Connection: close`, a request already on the wire at the reactor's final
