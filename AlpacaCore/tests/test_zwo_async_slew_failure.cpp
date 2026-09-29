@@ -44,13 +44,34 @@ struct FakeZwoState {
     // Delay the ":Sr" ack (still inside the 250 ms reply timeout) so a test
     // can land AbortSlew while the GOTO setup thread is mid-setup.
     std::atomic<int> sr_delay_ms{0};
+    // open-astro#720: what the initiators that must fence a pending GOTO put
+    // on the wire. The mount's own traffic (poll thread) sends none of these.
+    std::atomic<int> park_count{0};  // ":hP#"
+    std::atomic<int> home_count{0};  // ":hC#"
+    std::atomic<int> stop_count{0};  // ":Q#" (not the per-direction ":Qe#" etc.)
+    std::atomic<int> jog_count{0};   // ":Me#" / ":Mw#" / ":Mn#" / ":Ms#"
 };
+
+// A chunk can carry more than one command, so count occurrences.
+int count_command(const std::string& chunk, const std::string& command) {
+    int count = 0;
+    for (auto pos = chunk.find(command); pos != std::string::npos; pos = chunk.find(command, pos + command.size())) {
+        ++count;
+    }
+    return count;
+}
 
 // LX200-style AM5 dialect: ":Sr"/":Sd"/":SMTI" are acked with a bare "1",
 // ":MS" answers "0" (accepted) or a non-zero code (rejected), ":GAT" reports
 // tracking, and "0#" is a validly terminated reply for everything else.
 alpacacore::test::FakeMountServer::Responder zwo_responder(const std::shared_ptr<FakeZwoState>& st) {
     return [st](const std::string& chunk) -> std::string {
+        st->park_count.fetch_add(count_command(chunk, ":hP#"));
+        st->home_count.fetch_add(count_command(chunk, ":hC#"));
+        st->stop_count.fetch_add(count_command(chunk, ":Q#"));
+        for (const char* jog : {":Me#", ":Mw#", ":Mn#", ":Ms#"}) {
+            st->jog_count.fetch_add(count_command(chunk, jog));
+        }
         if (chunk.find(":MS") != std::string::npos) {
             st->goto_count.fetch_add(1);
             return st->reject_goto.load() ? "2" : "0";
@@ -99,6 +120,21 @@ SlewingRead read_slewing(alpacacore::TelescopeDriver& driver, std::string* messa
         return ex.error_code() == alpacacore::AlpacaError::DriverException ? SlewingRead::Threw
                                                                            : SlewingRead::ThrewOther;
     }
+}
+
+// ConformU's STANDARD response target for an initiator.
+constexpr auto kInitiatorBudget = std::chrono::milliseconds(1000);
+
+std::chrono::milliseconds timed(const std::function<void()>& call) {
+    const auto start = Clock::now();
+    call();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
+}
+
+// Longer than the whole GOTO setup (site sync + delayed ":Sr" + ":Sd" +
+// ":MS"), so a ":MS" that was going to follow the initiator has gone out.
+bool goto_sent_within_setup_window(const FakeZwoState& st) {
+    return wait_until([&] { return st.goto_count.load() > 0; }, 2000);
 }
 
 }  // namespace
@@ -181,10 +217,94 @@ TEST_CASE("ZWO async - a MoveAxis during GOTO setup owns the error slot (#575)",
     st->reject_goto.store(true);
     st->sr_delay_ms.store(150);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
+    std::chrono::milliseconds elapsed{0};
+    REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 1.0); }));
+    CHECK(elapsed < kInitiatorBudget);
     CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 2000));
+    // open-astro#720: the jog fences the pending GOTO, so its ":MS" never
+    // lands on top of the jog.
+    CHECK(st->goto_count.load() == 0);
+    CHECK(st->jog_count.load() == 1);
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
     driver->set_connected(false);
+}
+
+// open-astro#720: every initiator that commands the mount fences a GOTO setup
+// thread that is still writing the target (cancel AND join) before it sends
+// its own command. The GOTO here would be accepted, so a ":MS" on the wire is
+// the stale GOTO overriding the newer command.
+TEST_CASE("ZWO async - Park during GOTO setup cancels the pending GOTO (#720)",
+          "[zwo][telescope][async][slewfailure]") {
+    auto st = std::make_shared<FakeZwoState>();
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->sr_delay_ms.store(150);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    std::chrono::milliseconds elapsed{0};
+    REQUIRE_NOTHROW(elapsed = timed([&] { driver->park(); }));
+    CHECK(elapsed < kInitiatorBudget);
+    CHECK_FALSE(goto_sent_within_setup_window(*st));
+    CHECK(st->goto_count.load() == 0);
+    CHECK(st->park_count.load() == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO async - FindHome during GOTO setup cancels the pending GOTO (#720)",
+          "[zwo][telescope][async][slewfailure]") {
+    auto st = std::make_shared<FakeZwoState>();
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->sr_delay_ms.store(150);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    std::chrono::milliseconds elapsed{0};
+    REQUIRE_NOTHROW(elapsed = timed([&] { driver->find_home(); }));
+    CHECK(elapsed < kInitiatorBudget);
+    CHECK_FALSE(goto_sent_within_setup_window(*st));
+    CHECK(st->goto_count.load() == 0);
+    CHECK(st->home_count.load() == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO async - MoveAxis stop during GOTO setup cancels the pending GOTO (#720)",
+          "[zwo][telescope][async][slewfailure]") {
+    auto st = std::make_shared<FakeZwoState>();
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->sr_delay_ms.store(150);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    std::chrono::milliseconds elapsed{0};
+    REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 0.0); }));
+    CHECK(elapsed < kInitiatorBudget);
+    CHECK_FALSE(goto_sent_within_setup_window(*st));
+    CHECK(st->goto_count.load() == 0);
+    CHECK(st->stop_count.load() == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO async - Disconnect during GOTO setup cancels the pending GOTO (#720)",
+          "[zwo][telescope][async][slewfailure]") {
+    auto st = std::make_shared<FakeZwoState>();
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->sr_delay_ms.store(150);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    std::chrono::milliseconds elapsed{0};
+    REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
+    CHECK(elapsed < kInitiatorBudget);
+    CHECK_FALSE(goto_sent_within_setup_window(*st));
+    CHECK(st->goto_count.load() == 0);
 }
 
 #endif  // _WIN32
