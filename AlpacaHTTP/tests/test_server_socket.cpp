@@ -1565,12 +1565,15 @@ int main() {
     }
 
     {
-        // Two threads calling stop() on the SAME running Server, which is the
-        // shipped shutdown path, not a contrived one: PUT
-        // /management/v1/shutdown spawns a detached thread that runs the
-        // shutdown callback, and the example server's callback clears the flag
-        // its own main loop polls -- so that loop calls stop() too, while the
-        // detached thread is inside stop(). Both reach join_server_thread().
+        // Two threads calling stop() on the SAME running Server, which a
+        // shipped server can reach, not a contrived one: PUT
+        // /management/v1/restart spawns a detached thread whose
+        // handle_restart_request() stops and restarts the server, and an
+        // embedder that also calls stop() from its own thread (its main loop
+        // after SIGTERM, or the shutdown endpoint with no callback installed)
+        // can land while that thread is inside stop(). The shutdown endpoint
+        // no longer stops when a callback is installed (#713), but these
+        // pairs still race. Both reach join_server_thread().
         //
         // Concurrent join() on one std::thread is UB; in practice the second
         // pthread_join throws std::system_error, which nothing catches, so the
