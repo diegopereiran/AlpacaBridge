@@ -194,7 +194,9 @@ public:
         // Rule 4: every start bumps the shared generation; the new value is
         // the body's token.
         const std::uint64_t token = generation_.bump();
-        // Rule 9: a successful start clears the kept failure.
+        // Rule 9: a successful start clears the kept failure, and from now on
+        // only the new body's throw may be kept.
+        latest_token_ = token;
         last_failure_.reset();
 
         auto next = std::make_unique<OperationContext::Body>();
@@ -262,8 +264,9 @@ public:
         return stale_.size();
     }
 
-    /// The current body's throw (rule 9), until the next successful start().
-    /// May be called with the driver mutex held (rule 10).
+    /// The throw of the body the last successful start() spawned (rule 9),
+    /// until the next successful start(); a stale body's throw is logged
+    /// instead. May be called with the driver mutex held (rule 10).
     std::optional<std::string> last_failure() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return last_failure_;
@@ -333,10 +336,14 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (failure) {
-                if (b.superseded) {
+                // Kept only from the body the slot started last. A body
+                // replaced by start(), or taken by cancel_all_and_join()
+                // before a later start(), is stale: its throw must not
+                // overwrite what that later start() cleared.
+                if (b.token != latest_token_) {
                     stale_failure = true;
                 } else {
-                    last_failure_ = failure;  // kept from the current body only
+                    last_failure_ = failure;
                 }
             }
             if (!stale_failure) {
@@ -345,9 +352,9 @@ private:
                 return;
             }
         }
-        // Rule 9: a superseded body's throw is logged, not kept; rule 10:
-        // never while holding the slot mutex.
-        ALPACA_LOG_WARN(name_, "superseded operation failed: " + *failure);
+        // Rule 9: a stale body's throw is logged, not kept; rule 10: never
+        // while holding the slot mutex.
+        ALPACA_LOG_WARN(name_, "stale operation failed: " + *failure);
         std::lock_guard<std::mutex> lock(mutex_);
         b.returned = true;
         cv_.notify_all();
@@ -364,6 +371,7 @@ private:
     std::unique_ptr<OperationContext::Body> current_;
     std::vector<std::unique_ptr<OperationContext::Body>> stale_;  // oldest first
     std::optional<std::string> last_failure_;
+    std::uint64_t latest_token_ = 0;  // token of the body the last successful start() spawned
 };
 
 // Rule 6: waits through the slot's TaskClock on the slot mutex and condition

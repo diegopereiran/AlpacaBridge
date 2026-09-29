@@ -513,6 +513,42 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
         CHECK(stale->exited);
         CHECK(h.op->last_failure() == std::optional<std::string>("current"));
     }
+
+    SECTION("a body taken by cancel_all_and_join() does not overwrite a later start()") {
+        auto g = h.gate();
+        auto taken = probe();
+        REQUIRE(h.start_within([g, taken](OperationContext&) {
+            taken->entered = true;
+            g->wait();
+            taken->exited = true;
+            throw std::runtime_error("taken");
+        }));
+        REQUIRE(eventually([&] { return taken->entered.load(); }));
+        auto joined = h.on_helper([&h] { h.op->cancel_all_and_join(); });
+        // cancel_all_and_join() has taken the body once nothing is running;
+        // it is now blocked joining it.
+        REQUIRE(eventually([&] { return !h.op->running(); }));
+        auto next = probe();
+        REQUIRE(h.start_within(waiting_body(next, 1h)));
+        CHECK_FALSE(h.op->last_failure().has_value());
+        g->open();
+        REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
+        CHECK(taken->exited);
+        CHECK_FALSE(h.op->last_failure().has_value());  // the next start()'s outcome, not the taken body's throw
+    }
+
+    SECTION("a body taken by cancel_all_and_join() with no later start() keeps its failure") {
+        auto g = h.gate();
+        REQUIRE(h.start_within([g](OperationContext&) {
+            g->wait();
+            throw std::runtime_error("disconnect");
+        }));
+        auto joined = h.on_helper([&h] { h.op->cancel_all_and_join(); });
+        REQUIRE(eventually([&] { return !h.op->running(); }));
+        g->open();
+        REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
+        CHECK(h.op->last_failure() == std::optional<std::string>("disconnect"));
+    }
 }
 
 // Case 7: the destructor and cancel_all_and_join() wake and join every body
