@@ -27,7 +27,7 @@ The guard compares `Origin` with `Host` as strings. It passes every GET and ever
 - **What it can do.** Read every property, move hardware (slew, `MoveAxis`, pulse guide, focuser and rotator moves, dome and cover commands), start and abort exposures, set switches (power ports), call `Action` and `CommandBlind`/`CommandBool`/`CommandString` where a driver implements them, read image data.
 - **What is trusted and why.** The caller is trusted to operate the device. Parameters are not: each driver validates its ranges and throws `InvalidValue`. The device number is bounded at parse time (`parse_route`, `router.cpp:1587`).
 - **Guard coverage.** The verb check (`router.cpp:2256-2279`, guard call at `2270`) calls the origin guard only for a request whose verb the method does not accept, so a forged POST gets 403. A well-formed PUT that reaches a driver is not passed through the guard; only `UTCDate` (`router.cpp:3564`) and the `Site*` PUTs (`3771`, `3792`, `3813`) are. Today a browser cannot deliver such a PUT cross-origin: PUT needs a CORS preflight and the server never answers one (no `Access-Control-*` header and no OPTIONS handling anywhere under `AlpacaHTTP/`). That protection is absent-by-omission, and DNS rebinding bypasses it. It is listed under Known gaps; NS-02 (issue #392) carries the rebinding half.
-- **Resource budget.** Header block at most 64 KiB (`kMaxHeaderBytes`, `server.cpp:860`). Body at most 10 MiB (`Request::kMaxBodyBytes`, `AlpacaHTTP/include/alpacahttp/request.h:36`, checked `server.cpp:1058`). URL path at most 2048 bytes (`kMaxRequestPathBytes`, `router.cpp:1392`), refused before any regex (`router.cpp:1520`, issue #711). Worker pool 32 threads and 512 open connections (`AlpacaHTTP/include/alpacahttp/config.h:139`, `146`), 1000 requests per connection (`server.cpp:843`), a total-request deadline, a per-recv timeout and an idle keep-alive deadline (`server.cpp:803`, `959-962`, `1253`). There is no per-host cap, so one host can hold every slot (NS-03+05), and every request on every route may carry the full 10 MiB body, so a few parallel requests can exhaust memory on a 1 GB board (NS-04, issue #741).
+- **Resource budget.** Header block at most 64 KiB (`kMaxHeaderBytes`, `server.cpp:860`). Body at most 64 KiB (`Request::kMaxBodyBytes`, `AlpacaHTTP/include/alpacahttp/request.h:38`, issue #741): a larger Content-Length is answered `413` from the headers alone, before any body byte is read (`server.cpp:1058`), and refused by `Request::parse()` (`AlpacaHTTP/src/core/request.cpp:127`). URL path at most 2048 bytes (`kMaxRequestPathBytes`, `router.cpp:1392`), refused before any regex (`router.cpp:1520`, issue #711). Worker pool 32 threads and 512 open connections (`AlpacaHTTP/include/alpacahttp/config.h:139`, `146`), 1000 requests per connection (`server.cpp:843`), a total-request deadline, a per-recv timeout and an idle keep-alive deadline (`server.cpp:803`, `959-962`, `1253`). There is no per-host cap, so one host can hold every slot (NS-03+05).
 
 ### Surface 2: Management API
 
@@ -94,7 +94,6 @@ A change passes only when every line holds, or the exception is written in the c
 - Unbounded detached threads per shutdown and restart request; tracked with the NS-14 low-severity items.
 - 28 unaudited `innerHTML`-class sinks in `app.js`; tracked with the NS-14 items (web UI item).
 - Discovery logs client-triggered datagrams at WARNING (NS-13).
-- Any request may carry a 10 MiB body (NS-04).
 
 ### Finding map
 
@@ -103,7 +102,7 @@ A change passes only when every line holds, or the exception is written in the c
 | NS-01 | Management API | fixed | landed on main |
 | NS-02 | Device API, Management API, Web UI | open | Host allowlist against DNS rebinding (issue #392); also carries the rebinding half of the unguarded device PUT gap |
 | NS-03+05 | all HTTP surfaces | open | per-host connection cap |
-| NS-04 | all HTTP surfaces | open | every request may carry a 10 MiB body, so parallel requests can exhaust memory (issue #741) |
+| NS-04 | all HTTP surfaces | fixed | request body cap lowered from 10 MiB to 64 KiB (issue #741) |
 | NS-06 | Wi-Fi API | open | hotspot passphrase by default |
 | NS-07 | Device API, Management API | open | JSON output throws on non-UTF-8 input (`json.dump()` with no replace handler, `AlpacaHTTP/src/core/response.cpp:75`) |
 | NS-08 | Web UI | open | framing headers and CSP |
@@ -129,7 +128,7 @@ When a finding lands, set its row to `fixed` in the same change.
 - Reviewers get one list for any new route or config field. The rule stays at the instruction owners; this record keeps the reason.
 - Every known gap has an owner: the device PUT guard rests on NS-02 and the reviewer check; the detached threads and the `innerHTML` audit go with the NS-14 low-severity items.
 - Accepted by the board on 2026-09-30 (R1 to R4 accepted as residual risk).
-- NS-04, NS-07 and NS-09 to NS-14 are not decided here; each carrier decides its fix and must pass the reviewer check.
+- NS-07 and NS-09 to NS-14 are not decided here; each carrier decides its fix and must pass the reviewer check.
 - ConformU and other non-browser clients are unaffected by every control named here.
 
 ## Links
