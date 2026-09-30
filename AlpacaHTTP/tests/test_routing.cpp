@@ -1009,6 +1009,21 @@ int main() {
             const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         }
+
+        // 4. #627: a valid uint32 device number above INT_MAX names no device
+        // (the registry keys devices by int). It gets the ordinary not-found
+        // reply naming the number as sent, never a lookup of the negative int
+        // a narrowing cast would give (4294967295 -> -1). Regression guard:
+        // this passed before the fix too, since nothing registers a negative
+        // device number.
+        for (const std::string number : {"4294967295", "2147483648"}) {
+            const auto resp = route_request(router, "GET", "/api/v1/telescope/" + number + "/connected");
+            EXPECT(resp.status_code() == 400);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(!json.is_discarded() &&
+                   json.value("ErrorMessage", std::string()) == "Device not found: telescope #" + number);
+        }
     }
 
 #ifdef ALPACACORE_ENABLE_ZWO
