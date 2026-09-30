@@ -4342,9 +4342,7 @@ private:
     // and the waiter sleeps out its whole wait (on a FakeTaskClock, until the next
     // advance()), holding up the reaper's join.
     void notify_task_waiters() {
-        {
-            std::lock_guard<std::mutex> publish(task_mutex_);
-        }
+        { std::lock_guard<std::mutex> publish(task_mutex_); }
         task_cv_.notify_all();
     }
 
