@@ -54,7 +54,7 @@ The guard compares `Origin` with `Host` as strings. It passes every GET and ever
 ### Surface 5: Discovery responder
 
 - **Who can reach it.** Any host that can send UDP to port 32227, including the multicast group.
-- **What it can do.** Learn that an Alpaca server exists and its HTTP port. The reply is a fixed JSON object with the `AlpacaPort` key (`Discovery::handle_probe`, `AlpacaHTTP/src/discovery/discovery.cpp:149-181`), smaller than the class of probe it answers, so it is not a useful reflector and needs no rate limit.
+- **What it can do.** Learn that an Alpaca server exists and its HTTP port. The reply is a fixed JSON object with the `AlpacaPort` key (`Discovery::handle_probe`, `AlpacaHTTP/src/discovery/discovery.cpp:149-181`), At the default port 6800 it is 19 bytes against a 16-byte minimum matching probe (`alpacadiscovery1`); this small amplification is not a useful reflector and needs no rate limit.
 - **What is trusted and why.** The sender address is spoofable and the reply goes to it; with a reply this small that is accepted.
 - **Defect.** `handle_probe` logs every probe at INFO (`discovery.cpp:151`) and every non-Alpaca datagram at WARNING (`discovery.cpp:179`). A host sending garbage in a loop fills the daily log at WARNING (checklist line below; NS-13, issue #740).
 - **Resource budget.** One socket, one thread, one small `sendto` per probe; no memory grows with the count.
@@ -66,7 +66,7 @@ Accepted by the board on 2026-09-30; they bind as part of this record.
 - **R1. A device config accepts any `portPath`, `host`, `tcpPort` or `hidPath`, so `LastConnectError` is a LAN reachability oracle.** A configuring host can register a device pointing at any host and port, connect it, and read the driver refusal (`configureddevices`, `LastConnectError`, `router.cpp:2136`). Accepted because a LAN host can already probe the LAN directly. Kept: no driver puts a credential in a connect error.
 - **R2. Duplicate query and form parameters resolve by position and the two parsers differ.** The query parser keeps the last value (`AlpacaHTTP/src/core/request.cpp:151-191`); the form body keeps the first (`get_form_value`, `router.cpp:873`). Accepted because both are deterministic, no security check depends on a duplicate, and the caller is a trusted LAN host; it would matter only behind a proxy or filter that decides on the other occurrence, which is unsupported.
 - **R3. The udev rules install `MODE=0666` on whole vendor IDs** (`AlpacaCore/external/**/*.rules`), so any local user can open the device. Accepted because the board is a single-purpose appliance and group access would break the companion projects that dlopen the same libraries. Unacceptable on a shared machine; the README must say so.
-- **R4. `GET /management/v1/wifi/scan` holds the Wi-Fi mutex for 1.5 s.** Accepted because the per-host connection cap of NS-03+05 and the worker pool bound it, it degrades only the Wi-Fi card, and a host that reaches the board can disconnect it by other means. The scan changes no state, so it stays a GET.
+- **R4. `GET /management/v1/wifi/scan` holds the Wi-Fi mutex for 1.5 s.** Accepted because today the 32-worker pool and the global connection limit bound it (there is no per-host cap yet; the proposed cap is NS-03+05, open), it degrades only the Wi-Fi card, and a host that reaches the board can disconnect it by other means. The scan changes no state, so it stays a GET.
 
 ### Reviewer check for any new route or persisted config field
 
@@ -126,7 +126,7 @@ When a finding lands, set its row to `fixed` in the same change.
 ## Consequences
 
 - Reviewers get one list for any new route or config field. The rule stays at the instruction owners; this record keeps the reason.
-- Every known gap has an owner: the device PUT guard rests on NS-02 and the reviewer check; the detached threads and the `innerHTML` audit go with the NS-14 low-severity items.
+- Gaps with a filed upstream issue name it in the finding map (NS-02 issue #392, NS-04 issue #741, NS-13 issue #740). The other open rows have a proposed fix and no owner or issue yet; this record does not promise one. The device PUT guard rests on NS-02 and the reviewer check; the detached threads and the `innerHTML` audit go with the NS-14 low-severity items.
 - Accepted by the board on 2026-09-30 (R1 to R4 accepted as residual risk).
 - NS-07 and NS-09 to NS-14 are not decided here; each carrier decides its fix and must pass the reviewer check.
 - ConformU and other non-browser clients are unaffected by every control named here.
