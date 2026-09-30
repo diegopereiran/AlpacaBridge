@@ -134,6 +134,7 @@ public:
                 } catch (const AlpacaException&) {
                     // Unreadable (the QHYCCD_ERROR sentinel, issue #510): refused
                     // below with the same text as a zero count.
+                    slots = 0;
                 }
                 if (slots <= 0) {
                     throw AlpacaException("QHY CFW reported an invalid slot count", AlpacaError::DriverException);
