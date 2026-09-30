@@ -111,7 +111,7 @@ Review the branch contents and warn the user about anything that's missing:
 - [ ] **AGPL license headers**: `check_docs_drift.py` check 9 fails CI on any first-party source file without the current header, so this is only a reminder to run it (the pre-flight does).
 - [ ] **SDK cleanup**: If SDK files were added under `external/`, have Windows/macOS/32-bit/demo files been removed?
 
-Present the checklist to the user with pass/fail status. If critical items are missing (tests, CHANGELOG), recommend fixing before submitting but let the user decide.
+Present the checklist to the user with pass/fail status. If critical items are missing (tests, changelog fragment), recommend fixing before submitting but let the user decide.
 
 ### Verify the changelog fragment and its version (Versioning policy)
 
@@ -231,7 +231,7 @@ Group by component using bold tags:
 - **Vendor Unit Tests**: test count and assertion count
 - **Vendor SDK**: version and location
 - **ConformU Validation**: platforms tested, results
-- **Documentation**: CHANGELOG, SUPPORTED-DRIVERS.md, AGENTS.md updates
+- **Documentation**: changelog fragment, SUPPORTED-DRIVERS.md, AGENTS.md updates
 
 ## Test plan
 - [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck

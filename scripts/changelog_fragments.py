@@ -317,6 +317,7 @@ def self_test() -> int:
     expect(any("heading" in p for p in validate("a.md", "## [1.0.0] - x\n### Fixed\n- x\n")), "## heading accepted")
     expect(any("heading" in p for p in validate("a.md", "# T\n### Fixed\n- x\n")), "# heading accepted")
     expect(any("before the first" in p for p in validate("a.md", "text\n### Fixed\n- x\n")), "stray text accepted")
+    expect(any("before its first" in p for p in validate("a.md", "### Fixed\nstray\n- x\n")), "text before first bullet accepted")
     expect(validate("a.md", "") != [], "empty fragment accepted")
 
     with tempfile.TemporaryDirectory() as tmp:
