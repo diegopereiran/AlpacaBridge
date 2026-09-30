@@ -284,10 +284,10 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
     CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
 
     // Rule 3: the twelve fields the arm read, in this order, with its defaults.
-    const std::vector<std::string_view> expected_keys{"connectionType", "mountIndex",    "portPath",
-                                                      "baudRate",       "host",          "udpPort",
-                                                      "responseTimeoutMs", "siteLatitude", "siteLongitude",
-                                                      "siteElevation",  "apertureDiameter", "focalLength"};
+    const std::vector<std::string_view> expected_keys{
+        "connectionType", "mountIndex",    "portPath",          "baudRate",
+        "host",           "udpPort",       "responseTimeoutMs", "siteLatitude",
+        "siteLongitude",  "siteElevation", "apertureDiameter",  "focalLength"};
     REQUIRE(v->fields.size() == expected_keys.size());
     for (std::size_t i = 0; i < expected_keys.size(); ++i) {
         CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
@@ -322,7 +322,7 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
         REQUIRE(f != nullptr);
         CHECK(f->kind == e.kind);
         CHECK(f->role == e.role);
-        CHECK_FALSE(f->required);  // rule 3: nothing is required; rule 4 is a cross-field rule
+        CHECK_FALSE(f->required);          // rule 3: nothing is required; rule 4 is a cross-field rule
         CHECK(f->allowed_values.empty());  // rule 5: connectionType has NO allowed_values
         CHECK(same_scalar(f->default_value, e.default_value));
         CHECK(f->min == e.min);
@@ -405,8 +405,9 @@ TEST_CASE("Builtin catalog - SkyWatcher normalize requires a site from the API a
     CHECK(*no_port.rejection == kSkyWatcherMissingSite);
 }
 
-TEST_CASE("Builtin catalog - SkyWatcher normalize accepts four connection types and reads any other as serial when saved",
-          "[catalog][skywatcher][unit]") {
+TEST_CASE(
+    "Builtin catalog - SkyWatcher normalize accepts four connection types and reads any other as serial when saved",
+    "[catalog][skywatcher][unit]") {
     DeviceCatalog catalog;
     register_builtin_schemas(catalog);
 
@@ -609,9 +610,9 @@ TEST_CASE("Builtin catalog - SkyWatcher sanitize keeps every declared field what
         config.set("tcpPort", std::int64_t{1});
         config.set("junk", true);
         const DeviceConfig sanitized = catalog.sanitize(kSkyWatcherKey, config);
-        for (const char* key : {"connectionType", "mountIndex", "portPath", "baudRate", "host", "udpPort",
-                                "responseTimeoutMs", "siteLatitude", "siteLongitude", "siteElevation",
-                                "apertureDiameter", "focalLength"}) {
+        for (const char* key :
+             {"connectionType", "mountIndex", "portPath", "baudRate", "host", "udpPort", "responseTimeoutMs",
+              "siteLatitude", "siteLongitude", "siteElevation", "apertureDiameter", "focalLength"}) {
             INFO(key);
             CHECK(sanitized.has(key));
         }

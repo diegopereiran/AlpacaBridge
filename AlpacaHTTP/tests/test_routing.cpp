@@ -4221,8 +4221,8 @@ int main() {
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
             "siteLatitude is out of range (min -90) (max 90)", "{}", true,
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
-            {"config normalized: siteLatitude is out of range (min -90) (max 90)",
-             "Persisted Sky-Watcher telescope", "has no site latitude and will refuse to connect"},
+            {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
+             "has no site latitude and will refuse to connect"},
             {"Skipping persisted device", "The coordinate is ignored", "200.000000"});
 #endif
 
