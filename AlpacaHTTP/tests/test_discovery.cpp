@@ -67,16 +67,32 @@ int main() {
     
     // Start discovery in background
     discovery.start();
-    
-    // Give it a moment to start
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
-    if (!discovery.is_running()) {
-        std::cerr << "Discovery test skipped: unable to bind discovery socket.\n";
-        return 0;
-    }
 
     {
+        // is_running() is set before the listener thread binds, so a datagram
+        // sent on it alone can arrive at no socket. The thread logs this line
+        // only after bind() and the multicast join, so wait for it instead.
+        const std::string started = "Discovery service started on port ";
+        bool listening = false;
+        for (int i = 0; i < 100 && !listening && discovery.is_running(); ++i) {
+            {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                for (const auto& line : captured) {
+                    if (line.message.rfind(started, 0) == 0) {
+                        listening = true;
+                    }
+                }
+            }
+            if (!listening) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        }
+        if (!discovery.is_running()) {
+            std::cerr << "Discovery test skipped: unable to bind discovery socket.\n";
+            return 0;
+        }
+        EXPECT(listening);
+
         const int fd = socket(AF_INET, SOCK_DGRAM, 0);
         EXPECT(fd >= 0);
         sockaddr_in target{};
@@ -90,16 +106,20 @@ int main() {
 
         const std::string tag = "Discovery: Received non-Alpaca probe from ";
         bool seen = false;
+        alpacacore::logging::LogLevel seen_level = alpacacore::logging::LogLevel::Warn;
         for (int i = 0; i < 50 && !seen; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             std::lock_guard<std::mutex> lock(captured_mutex);
             for (const auto& line : captured) {
                 if (line.message.find(tag) != std::string::npos) {
                     seen = true;
+                    seen_level = line.level;
                 }
             }
         }
         EXPECT(seen);
+        // Exactly DEBUG: INFO or ERROR would still put client input in the log.
+        EXPECT(seen_level == alpacacore::logging::LogLevel::Debug);
     }
 
     // Stop discovery
@@ -112,9 +132,6 @@ int main() {
             // on anything a client sent.
             if (line.message.rfind("Failed to join Alpaca multicast group", 0) == 0) {
                 continue;
-            }
-            if (line.level == alpacacore::logging::LogLevel::Warn) {
-                std::cerr << "unexpected WARNING: " << line.message << "\n";
             }
             EXPECT(line.level != alpacacore::logging::LogLevel::Warn);
         }
