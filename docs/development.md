@@ -93,8 +93,11 @@ sudo apt install git build-essential cmake g++ \
     libhidapi-dev \
     libgphoto2-dev libraw-dev \
     nlohmann-json3-dev libcurl4-openssl-dev \
+    zlib1g-dev libsystemd-dev pkgconf \
     catch2
 ```
+
+This matches the `Build-Depends` field of `debian/control`, the authoritative list, plus `git` and `catch2` for the tests.
 
 Verify: `cmake --version` (3.20+), `g++ --version` (GCC 10+, C++20 required).
 
@@ -113,9 +116,8 @@ The server starts on port **6800**: `http://localhost:6800/`
 ### Manual build
 
 ```sh
-mkdir build && cd build
-cmake .. -DALPACACORE_ENABLE_ALL_VENDORS=ON
-cmake --build . --parallel
+cmake -S AlpacaHTTP -B AlpacaHTTP/build -DALPACACORE_ENABLE_ALL_VENDORS=ON
+cmake --build AlpacaHTTP/build --parallel
 ```
 
 ### Build options
@@ -349,6 +351,7 @@ The Debian package is built from the `debian/` directory. It installs:
 - Vendor libraries under `/usr/lib/alpacabridge`
 - Configuration under `/etc/alpacabridge`
 - Systemd unit `alpacabridge.service` running as the `alpacabridge` system user
+- The software-update helper: root-owned oneshot unit `alpacabridge-update.service`, its script `/usr/libexec/alpacabridge/software-update`, and the polkit rule `/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules` that lets the service user start that one unit (see [software-update.md](software-update.md)). `debian/rules` passes only `alpacabridge.service` to `dh_installsystemd` so the helper never gets enable/start/restart snippets.
 
 ## Releases
 

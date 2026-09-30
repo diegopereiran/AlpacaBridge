@@ -18,6 +18,8 @@
 #include <alpacacore/util/logging.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <alpacahttp/software_update.h>
+#include <alpacahttp/util/error_mapping.h>
 #include <alpacahttp/util/host_timezone.h>
 #include <alpacahttp/version.h>
 #include <unistd.h>
@@ -128,6 +130,7 @@ void remove_device(alpacahttp::Router& router, const std::string& vendor, const 
 struct ApiAttempt {
     bool ok = false;
     std::string message;
+    int error_number = 0;
     nlohmann::json config;
 };
 
@@ -173,7 +176,8 @@ ApiAttempt api_attempt(alpacahttp::Router& router, const nlohmann::json& posted,
         attempt.message = "<non-JSON response>";
         return attempt;
     }
-    if (response.value("ErrorNumber", -1) != 0) {
+    attempt.error_number = response.value("ErrorNumber", -1);
+    if (attempt.error_number != 0) {
         attempt.message = response.value("ErrorMessage", "");
         return attempt;
     }
@@ -5967,6 +5971,10 @@ int main() {
             {"PUT", "/management/v1/loglevel", R"({"Level":"TRACE"})", "log level"},
             {"POST", "/management/v1/shutdown", "{}", "shutdown"},
             {"POST", "/management/v1/restart", "{}", "restart"},
+            // Software update (docs/software-update.md): check fetches from
+            // the network, install starts the root helper unit.
+            {"POST", "/management/v1/update/check", "{}", "software update"},
+            {"POST", "/management/v1/update/install", "{}", "software update"},
             {"DELETE", "/management/v1/logfiles/alpaca.log", "", "log file"},
             // The collection form deletes EVERY log file. Guarding the
             // per-file DELETE and not this one would have been exactly the
@@ -6029,6 +6037,97 @@ int main() {
         EXPECT(item_put.status_code() == 403);
     }
 
+    // Software update endpoints (docs/software-update.md) over a scripted
+    // backend: the route, the envelope, the not-configured answer, and that
+    // the router maps the manager's refusals onto their Alpaca codes.
+    {
+        // Not configured (no manager installed): every sub-endpoint answers
+        // NOT_IMPLEMENTED rather than 404, like restart without a callback.
+        alpacahttp::Router bare;
+        const auto bare_json =
+            nlohmann::json::parse(route_request(bare, "GET", "/management/v1/update/status").body(), nullptr, false);
+        EXPECT(!bare_json.is_discarded());
+        EXPECT(bare_json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::NOT_IMPLEMENTED);
+        EXPECT(bare_json.value("ErrorMessage", "").find("not configured") != std::string::npos);
+
+        class ScriptedBackend final : public alpacahttp::util::SoftwareUpdateBackend {
+        public:
+            std::string index = "Package: alpacabridge\nVersion: 99.0.0\n";
+            int starts = 0;
+            alpacahttp::util::InstallerState state;
+            std::string fetch_url(const std::string& url, std::chrono::milliseconds) override {
+                if (url.find("notes.example") != std::string::npos) return "# AlpacaBridge 99.0.0\n\n- New.\n";
+                return index;
+            }
+            void start_installer() override {
+                ++starts;
+                state.state = "running";
+            }
+            alpacahttp::util::InstallerState installer_state() override { return state; }
+        };
+
+        alpacahttp::Router router;
+        auto backend = std::make_unique<ScriptedBackend>();
+        auto* scripted = backend.get();
+        router.set_software_update_manager(std::make_unique<alpacahttp::util::SoftwareUpdateManager>(
+            alpacahttp::util::SoftwareUpdateSettings{alpacahttp::kVersion, "https://apt.example/Packages",
+                                                     "alpacabridge", "https://notes.example/{version}.md",
+                                                     "https://rel.example/v{version}"},
+            std::move(backend)));
+
+        // GET status before any check: the running version, nothing else.
+        auto json = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/update/status?ClientTransactionID=4242").body(), nullptr,
+            false);
+        EXPECT(!json.is_discarded());
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.value("ClientTransactionID", 0U) == 4242U);
+        EXPECT(json["Value"]["InstalledVersion"] == std::string(alpacahttp::kVersion));
+        EXPECT(json["Value"]["LatestVersion"].is_null());
+        EXPECT(json["Value"]["UpdateAvailable"] == false);
+        EXPECT(json["Value"]["Installer"]["State"] == "idle");
+
+        // Install before a check is INVALID_OPERATION and never reaches the backend.
+        json = nlohmann::json::parse(route_request(router, "POST", "/management/v1/update/install", "{}").body(),
+                                     nullptr, false);
+        EXPECT(json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_OPERATION);
+        EXPECT(scripted->starts == 0);
+
+        // The unversioned alias and PUT are accepted for check.
+        json = nlohmann::json::parse(route_request(router, "PUT", "/management/update/check", "{}").body(), nullptr,
+                                     false);
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+        EXPECT(json["Value"]["LatestVersion"] == "99.0.0");
+        EXPECT(json["Value"]["UpdateAvailable"] == true);
+        EXPECT(json["Value"]["CheckedAt"].is_number_integer());
+        EXPECT(json["Value"]["CheckError"].is_null());
+        // The newer version's notes and links ride along for the card.
+        EXPECT(json["Value"]["ReleaseNotes"] == "# AlpacaBridge 99.0.0\n\n- New.\n");
+        EXPECT(json["Value"]["ReleaseNotesUrl"] == "https://notes.example/99.0.0.md");
+        EXPECT(json["Value"]["ReleaseUrl"] == "https://rel.example/v99.0.0");
+
+        // Install now starts the helper exactly once and reports it running.
+        json = nlohmann::json::parse(route_request(router, "POST", "/management/v1/update/install", "{}").body(),
+                                     nullptr, false);
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+        EXPECT(scripted->starts == 1);
+        EXPECT(json["Value"]["Installer"]["State"] == "running");
+
+        // Wrong verb or unknown sub-endpoint: INVALID_VALUE, still HTTP 200.
+        const auto wrong_verb = route_request(router, "GET", "/management/v1/update/install");
+        EXPECT(wrong_verb.status_code() == 200);
+        json = nlohmann::json::parse(wrong_verb.body(), nullptr, false);
+        EXPECT(json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_VALUE);
+        json = nlohmann::json::parse(route_request(router, "POST", "/management/v1/update/status", "{}").body(),
+                                     nullptr, false);
+        EXPECT(json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_VALUE);
+        json =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/update/bogus").body(), nullptr, false);
+        EXPECT(json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_VALUE);
+        // A path outside the sub-endpoint grammar is not a management route.
+        EXPECT(route_request(router, "GET", "/management/v1/update/status/extra").status_code() == 404);
+    }
+
     // Issue #444: the buildinfo endpoint the header badge reads. Nothing
     // pinned the route, the endpoint name, or the payload keys before this,
     // so a rename on either side would have been caught only by opening the
@@ -6075,7 +6174,7 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // descriptor plus the "zzz" test descriptor, schema only, so its
+    // and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its
     // `available` is false.
     {
         alpacahttp::Router router;
@@ -6086,14 +6185,21 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 2);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 3);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
-        // with ALPACACORE_ENABLE_ASTROASIS=OFF), so it is set from this build
+        // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
         // before the compare; every other byte must match.
         for (auto& entry : fixture) {
             if (entry.value("vendor", "") == "astroasis") {
 #ifdef ALPACACORE_ENABLE_ASTROASIS
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "weewx") {
+#ifdef ALPACACORE_ENABLE_WEEWX
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -6258,6 +6364,58 @@ int main() {
         EXPECT(!off.ok);
         EXPECT(off.message == "Astroasis support not enabled. Rebuild with -DALPACACORE_ENABLE_ASTROASIS=ON");
         EXPECT(listed_entry(router, "Focuser", 9257).is_null());
+    }
+#endif
+
+#ifdef ALPACACORE_ENABLE_WEEWX
+    // open-astro#731: the WeeWX refusals keep the router arm's exact text on
+    // the API path, and a persisted entry that breaks one is still not
+    // registered (listed as failed to load, so it stays editable). The first
+    // three rows were green before the arm moved into the catalog and pin the
+    // texts and outcome across it; the last two pin the factory's INT_MAX bound,
+    // which keeps the int domain the arm read both numbers in.
+    {
+        const char* const kBadConfigs[][2] = {
+            {R"({"pollIntervalSeconds":300,"timeoutMs":2500})", "WeeWX observing conditions requires weewxUrl"},
+            {R"({"weewxUrl":"http://weewx.test:8998/current.json","pollIntervalSeconds":0})",
+             "pollIntervalSeconds must be greater than 0"},
+            {R"({"weewxUrl":"http://weewx.test:8998/current.json","timeoutMs":0})", "timeoutMs must be greater than 0"},
+            {R"({"weewxUrl":"http://weewx.test:8998/current.json","pollIntervalSeconds":10000000000})",
+             "pollIntervalSeconds must be at most 2147483647"},
+            {R"({"weewxUrl":"http://weewx.test:8998/current.json","timeoutMs":10000000000})",
+             "timeoutMs must be at most 2147483647"},
+        };
+        int number = 9265;
+        for (const auto& bad : kBadConfigs) {
+            nlohmann::json entry = nlohmann::json::parse(bad[0]);
+            entry.update({{"vendor", "weewx"}, {"deviceType", "observingconditions"}, {"deviceNumber", ++number}});
+
+            alpacahttp::Router router;
+            const auto api = api_attempt(router, entry, "ObservingConditions");
+            EXPECT(!api.ok);
+            EXPECT(api.message == bad[1]);
+            EXPECT(api.error_number == 0x401);  // InvalidValue
+            EXPECT(listed_entry(router, "ObservingConditions", number).is_null());
+
+            const auto persisted = persisted_attempt(entry, "ObservingConditions");
+            EXPECT(!persisted.listed);
+            EXPECT(persisted.failed_listed);
+        }
+    }
+#else
+    // open-astro#731: with the vendor built out, the catalog path reports the
+    // deleted arm's exact text.
+    {
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"weewx","deviceType":"observingconditions","deviceNumber":9264,)"
+                                  R"("weewxUrl":"http://weewx.test:8998/current.json"})"),
+            "ObservingConditions");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "ObservingConditions", 9264).is_null());
     }
 #endif
 

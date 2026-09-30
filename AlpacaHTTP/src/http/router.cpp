@@ -85,9 +85,6 @@
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_WEEWX
-#include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
@@ -1686,6 +1683,17 @@ RouteMatch Router::parse_route(const std::string& path) {
             return match;
         }
     }
+    {
+        // Software update: /management/v1/update/<status|check|install>.
+        static const std::regex kUpdateRegex(R"(^/management/(?:v1/)?update/([a-z]+)/?$)");
+        std::smatch update_match;
+        if (std::regex_match(path, update_match, kUpdateRegex)) {
+            match.is_management = true;
+            match.management_endpoint = "update";
+            match.method_name = update_match[1].str();
+            return match;
+        }
+    }
 
     // Device API: /api/v1/{devicetype}/{devicenumber}/{method}
     // Static: compiling a std::regex costs far more than matching it, and this
@@ -1755,6 +1763,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_sync_time(request, server_tx_id);
     } else if (match.management_endpoint == "wifi") {
         return handle_wifi(request, match, server_tx_id);
+    } else if (match.management_endpoint == "update") {
+        return handle_software_update(request, match, server_tx_id);
     }
 
     Response response;
@@ -7594,6 +7604,65 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
     }
 }
 
+void Router::set_software_update_manager(std::unique_ptr<util::SoftwareUpdateManager> manager) {
+    software_update_ = std::move(manager);
+}
+
+Response Router::handle_software_update(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id) {
+    // Unauthenticated like every other management endpoint (trusted-LAN
+    // threat model, see handle_sync_time). What a caller can make happen is
+    // bounded outside this process: the helper unit installs one fixed
+    // package from the host's own signed apt sources, and the polkit rule
+    // lets the service user start that one unit and nothing else. The
+    // check is read-only.
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // CSRF guard for the state-changing sub-endpoints (check fetches from
+    // the network, install starts the helper); GET status is exempt.
+    if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "software update")) {
+        return *rejected;
+    }
+
+    auto fail = [&](std::int32_t code, const std::string& msg) {
+        AlpacaResponse alpaca_response = make_error_response(client_tx_id, server_tx_id, code, msg);
+        response.set_body(alpaca_response);
+        return response;
+    };
+
+    if (!software_update_) {
+        return fail(util::ErrorCode::NOT_IMPLEMENTED, "Software update not configured");
+    }
+
+    const std::string& sub = match.method_name;
+    const bool is_get = request.method() == HttpMethod::GET;
+    const bool is_put = request.method() == HttpMethod::PUT || request.method() == HttpMethod::POST;
+
+    try {
+        AlpacaResponse ok(client_tx_id, server_tx_id);
+        if (sub == "status" && is_get) {
+            ok.value = software_update_->status();
+        } else if (sub == "check" && is_put) {
+            ok.value = software_update_->check();
+        } else if (sub == "install" && is_put) {
+            ok.value = software_update_->install();
+        } else {
+            return fail(util::ErrorCode::INVALID_VALUE, "Unknown update endpoint or method: " + sub);
+        }
+        response.set_body(ok);
+        return response;
+    } catch (const util::SoftwareUpdateError& e) {
+        return fail(e.alpaca_error(), e.what());
+    } catch (const std::exception& e) {
+        return fail(util::ErrorCode::DRIVER_ERROR, std::string("Software update (internal): ") + e.what());
+    }
+}
+
 Response Router::handle_restart(const Request& request, std::uint32_t server_tx_id) {
     Response response;
     response.set_content_type("application/json");
@@ -8821,42 +8890,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "weewx" && device_type_str == "observingconditions") {
-#ifdef ALPACACORE_ENABLE_WEEWX
-        alpacacore::vendor::weewx::WeeWxHttpConfig weewx_config;
-        weewx_config.url = config_get(config, "weewxUrl", "");
-        int poll_interval = config_get(config, "pollIntervalSeconds", 900);
-        int timeout_ms = config_get(config, "timeoutMs", 5000);
-        if (weewx_config.url.empty()) {
-            error_message = "WeeWX observing conditions requires weewxUrl";
-            return false;
-        }
-        if (poll_interval <= 0) {
-            error_message = "pollIntervalSeconds must be greater than 0";
-            return false;
-        }
-        if (timeout_ms <= 0) {
-            error_message = "timeoutMs must be greater than 0";
-            return false;
-        }
-        weewx_config.poll_interval = std::chrono::seconds(poll_interval);
-        weewx_config.timeout = std::chrono::milliseconds(timeout_ms);
-
-        auto observing = alpacacore::vendor::weewx::create_weewx_observingconditions(
-            device_number, weewx_config);
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(observing)))) {
-            util::log_info("Registered WeeWX observing conditions");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "qhy" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_QHY
         std::string camera_id = config_get(config, "cameraId", "");
@@ -9877,10 +9910,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             // Camera and the thermal switch both bind by camera index.
             copy_if_present("cameraIndex");
         }
-    } else if (vendor == "weewx") {
-        copy_if_present("weewxUrl");
-        copy_if_present("pollIntervalSeconds");
-        copy_if_present("timeoutMs");
     } else if (vendor == "celestron") {
         copy_if_present("connectionType");
         copy_if_present("mountIndex");
