@@ -18,8 +18,9 @@
 // ever. register_astroasis_schema() is defined in astroasis_schema.cpp
 // (compiles in every build, also no vendor header); register_astroasis_factory()
 // is defined in astroasis_catalog.cpp (vendor header allowed, compiled only
-// under ALPACACORE_ENABLE_ASTROASIS). Both are called only from
-// builtin_catalog.cpp (the alpacacore_builtins library, open-astro#710).
+// under ALPACACORE_ENABLE_ASTROASIS). The Sky-Watcher pair (open-astro#744)
+// follows the same split. All are called only from builtin_catalog.cpp (the
+// alpacacore_builtins library, open-astro#710).
 
 #include <alpacacore/catalog/device_catalog.h>
 
@@ -27,5 +28,7 @@ namespace alpacacore::catalog {
 
 void register_astroasis_schema(DeviceCatalog& catalog);
 void register_astroasis_factory(DeviceCatalog& catalog);
+void register_skywatcher_schema(DeviceCatalog& catalog);
+void register_skywatcher_factory(DeviceCatalog& catalog);
 
 }  // namespace alpacacore::catalog
