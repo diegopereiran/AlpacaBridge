@@ -15,6 +15,7 @@
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -74,7 +75,7 @@ std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::st
 std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk);
 
 /// The camera driver's two polling workers, as named to a QHYWorkerStartHook.
-enum class QHYWorker { Telemetry, TempControl };
+enum class QHYWorker : std::uint8_t { Telemetry, TempControl };
 
 /**
  * @brief Test-only hook, called by each worker start after the new thread is
