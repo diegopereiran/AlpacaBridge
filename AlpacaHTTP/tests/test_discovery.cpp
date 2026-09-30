@@ -46,7 +46,7 @@ std::optional<std::string> send_probe(const std::string& payload, int timeout_ms
     EXPECT(fd >= 0);
     timeval tv{};
     tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    tv.tv_usec = static_cast<suseconds_t>(timeout_ms % 1000) * 1000;
     EXPECT(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
