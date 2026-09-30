@@ -75,6 +75,23 @@ public:
         return now_calls_;
     }
 
+    /// The number of waits (wait_for and sleep_for) registered so far, in
+    /// total: a count that only grows, unlike waiter_count(). A test that
+    /// must not advance() past a task between one wait and the next takes
+    /// it before the advance and waits for it to grow by the number of
+    /// waiters that advance() reported woken (open-astro#743).
+    std::uint64_t wait_count() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return wait_count_;
+    }
+
+    /// Blocks the test thread until wait_count() reaches `n`, or until
+    /// `real_timeout` of real time passes; returns whether `n` was reached.
+    bool wait_for_wait_count(std::uint64_t n, std::chrono::milliseconds real_timeout) {
+        std::unique_lock<std::mutex> guard(mutex_);
+        return count_cv_.wait_for(guard, real_timeout, [this, n] { return wait_count_ >= n; });
+    }
+
     /// Blocks the test thread until now() has been called at least `n` times
     /// in total, or until `real_timeout` of real time passes; returns whether
     /// `n` was reached. A driver loop that reads the clock once per pass is
@@ -110,6 +127,7 @@ public:
             deadline = saturating_deadline(timeout);
             id = next_id_++;
             waiters_.emplace(id, Entry{deadline, lock.mutex(), &cv});
+            ++wait_count_;
             count_cv_.notify_all();
         }
         while (!pred() && !reached(deadline)) {
@@ -142,6 +160,7 @@ public:
         const auto deadline = saturating_deadline(duration);
         const auto id = next_id_++;
         waiters_.emplace(id, Entry{deadline, nullptr, nullptr});
+        ++wait_count_;
         count_cv_.notify_all();
         sleep_cv_.wait(guard, [this, deadline] { return now_ >= deadline; });
         waiters_.erase(id);
@@ -151,7 +170,9 @@ public:
      * Moves virtual time forward by `d` (zero or positive; a negative `d`
      * throws std::invalid_argument), then wakes every waiter whose deadline
      * is at or before the new time (due when now() >= deadline), and only
-     * those.
+     * those. Returns how many wait_for waiters it woke (sleepers are not
+     * counted), so a test can wait for each of them to park again before
+     * the next advance (see wait_count()).
      *
      * For each due wait_for waiter it takes that waiter's mutex, calls
      * notify_all() on its cv, and releases the mutex, so the notify cannot
@@ -162,7 +183,7 @@ public:
      * each one, re-checking under the waiter's mutex that the entry is still
      * registered.
      */
-    void advance(std::chrono::nanoseconds d) {
+    std::size_t advance(std::chrono::nanoseconds d) {
         if (d < std::chrono::nanoseconds::zero()) {
             throw std::invalid_argument("FakeTaskClock::advance: negative duration");
         }
@@ -189,6 +210,7 @@ public:
                 entry.cv->notify_all();
             }
         }
+        return due.size();
     }
 
     /// Blocks the test thread until at least `n` waiters (wait_for and
@@ -232,6 +254,7 @@ private:
     mutable std::condition_variable count_cv_;  // notified from now(), which is const
     clock::time_point now_{};
     mutable std::uint64_t now_calls_ = 0;
+    std::uint64_t wait_count_ = 0;
     std::uint64_t next_id_ = 0;
     std::map<std::uint64_t, Entry> waiters_;
 };

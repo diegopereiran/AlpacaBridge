@@ -327,6 +327,40 @@ TEST_CASE("TaskClock fake - sleep_for and the waiter rendezvous", "[util][taskcl
     }
 }
 
+TEST_CASE("TaskClock fake - wait_count grows per registration and advance reports the waiters it woke",
+          "[util][taskclock][unit]") {
+    // open-astro#743: a test that steps a driver through consecutive waits
+    // needs to know when the task it woke has parked again, or the next
+    // advance() lands between two waits and the second one is stamped from a
+    // later now. wait_count() is the cumulative registration count that
+    // answers it; advance() says how many waiters it released.
+    FakeTaskClock clock;
+    CHECK(clock.wait_count() == 0);
+    CHECK(clock.advance(1s) == 0);
+
+    Waiter first(clock, 100ms);
+    REQUIRE(clock.wait_for_wait_count(1, kBound));
+    Waiter second(clock, 300ms);
+    REQUIRE(clock.wait_for_wait_count(2, kBound));
+    CHECK(clock.waiter_count() == 2);
+
+    CHECK(clock.advance(100ms) == 1);  // only the first is due
+    REQUIRE(first.finished_within(kBound));
+    CHECK_FALSE(first.result());
+    CHECK(clock.wait_count() == 2);  // a wake is not a registration
+    CHECK(clock.advance(200ms) == 1);
+    REQUIRE(second.finished_within(kBound));
+    CHECK_FALSE(second.result());
+    CHECK(clock.advance(1s) == 0);
+
+    // A sleeper counts as a registration too.
+    std::thread sleeper([&] { clock.sleep_for(10ms); });
+    REQUIRE(clock.wait_for_wait_count(3, kBound));
+    CHECK(clock.advance(10ms) == 0);  // sleepers are not reported
+    sleeper.join();
+    CHECK_FALSE(clock.wait_for_wait_count(4, 50ms));
+}
+
 TEST_CASE("TaskClock fake - advance cannot lose a wakeup between check and block", "[util][taskclock][stress-guard]") {
     FakeTaskClock fake;
     TaskClock& clock = fake;

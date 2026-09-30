@@ -261,12 +261,14 @@ public:
                               std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                               std::optional<double> site_elevation_m,
                               std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-                              util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
+                              util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
+                              util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
           connection_info_(connection_info),
           connection_resolver_(std::move(connection_resolver)),
           protocol_(protocol ? std::move(protocol) : std::make_unique<SkyWatcherProtocolWrapper>()),
+          clock_(clock),
           site_latitude_(site_latitude_deg.value_or(0.0)),
           site_longitude_(site_longitude_deg.value_or(0.0)),
           site_elevation_m_(site_elevation_m.value_or(0.0)),
@@ -4511,6 +4513,10 @@ private:
     util::ConnectionResolver<ConnectionInfo> connection_resolver_;
     bool connection_resolved_ = false;
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol_;
+    // The clock every task wait and deadline runs on (open-astro#743,
+    // decision 0005). Pointing time (UTC anchor, dead reckoning, the
+    // discipline resample) stays on steady_clock / system time.
+    util::TaskClock& clock_;
     mutable std::mutex mutex_;
     bool connected_ = false;
 
@@ -4763,21 +4769,24 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, 
                                                              std::optional<double> site_latitude_deg,
                                                              std::optional<double> site_longitude_deg,
                                                              std::optional<double> site_elevation_m,
-                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol) {
+                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
+                                                             util::TaskClock& clock) {
     return std::make_unique<SkyWatcherTelescopeDriver>(device_number, connection_info, site_latitude_deg,
-                                                       site_longitude_deg, site_elevation_m, std::move(protocol));
+                                                       site_longitude_deg, site_elevation_m, std::move(protocol),
+                                                       util::ConnectionResolver<ConnectionInfo>{}, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol) {
+    std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
+    util::TaskClock& clock) {
     if (!connection_resolver) {
         throw AlpacaException("Sky-Watcher telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<SkyWatcherTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
                                                        site_longitude_deg, site_elevation_m, std::move(protocol),
-                                                       std::move(connection_resolver));
+                                                       std::move(connection_resolver), clock);
 }
 
 ConnectionInfo resolve_skywatcher_auto(int mount_index) {
