@@ -291,7 +291,9 @@ fi
 
 section "Docs drift check"
 if python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs_drift.py \
-   && python3 scripts/changelog_section.py --self-test; then
+   && python3 scripts/changelog_section.py --self-test \
+   && python3 scripts/changelog_fragments.py --self-test \
+   && python3 scripts/changelog_fragments.py --check; then
   record PASS "docs drift check"
 else
   record FAIL "docs drift check"
