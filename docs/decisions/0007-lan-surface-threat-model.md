@@ -54,7 +54,7 @@ The guard compares `Origin` with `Host` as strings. It passes every GET and ever
 ### Surface 5: Discovery responder
 
 - **Who can reach it.** Any host that can send UDP to port 32227, including the multicast group.
-- **What it can do.** Learn that an Alpaca server exists and its HTTP port. The reply is a fixed JSON object with the `AlpacaPort` key (`Discovery::handle_probe`, `AlpacaHTTP/src/discovery/discovery.cpp:149-181`), At the default port 6800 it is 19 bytes against a 16-byte minimum matching probe (`alpacadiscovery1`); this small amplification is not a useful reflector and needs no rate limit.
+- **What it can do.** Learn that an Alpaca server exists and its HTTP port. The reply is a fixed JSON object with the `AlpacaPort` key (`Discovery::handle_probe`, `AlpacaHTTP/src/discovery/discovery.cpp:149-181`). At the default port 6800 it is 19 bytes against a 16-byte minimum matching probe (`alpacadiscovery1`); this small amplification is not a useful reflector and needs no rate limit.
 - **What is trusted and why.** The sender address is spoofable and the reply goes to it; with a reply this small that is accepted.
 - **Defect.** `handle_probe` logs every probe at INFO (`discovery.cpp:151`) and every non-Alpaca datagram at WARNING (`discovery.cpp:179`). A host sending garbage in a loop fills the daily log at WARNING (checklist line below; NS-13, issue #740).
 - **Resource budget.** One socket, one thread, one small `sendto` per probe; no memory grows with the count.
