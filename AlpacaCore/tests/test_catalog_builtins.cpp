@@ -650,7 +650,7 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory passes the values through an
     // Rule 9, serial: create_skywatcher_telescope with the endpoint and site;
     // apertureDiameter and focalLength applied because they are > 0.
     {
-        const std::string path = "/dev/ttyUSB-alp880-none";
+        const std::string path = "/dev/ttyUSB-skywatcher-none";
         DeviceConfig config;
         config.set("connectionType", std::string{"serial"});
         config.set("portPath", path);
@@ -773,7 +773,7 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory warns about a saved config w
         INFO(c.missing);
         DeviceConfig config;
         config.set("connectionType", std::string{"serial"});
-        config.set("portPath", std::string{"/dev/ttyUSB-alp880-none"});
+        config.set("portPath", std::string{"/dev/ttyUSB-skywatcher-none"});
         if (c.latitude) config.set("siteLatitude", 39.7392);
         if (c.longitude) config.set("siteLongitude", -104.9903);
         const int number = device_number++;

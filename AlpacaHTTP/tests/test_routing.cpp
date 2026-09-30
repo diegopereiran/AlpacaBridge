@@ -5955,11 +5955,10 @@ int main() {
         }
     }
 
-    // open-astro#744 (ALP-71 plan, recon risk 5): an Int field takes an
-    // integer or a whole-number float (9600 or 9600.0); a fractional value is
-    // a wrong-type refusal naming the field, as for every catalog vendor
-    // (catalog_json.cpp whole_number()). The arm's config_get<int>() read
-    // 9600.5 as 9600 without a word. Assumption recorded in the plan: the
+    // open-astro#744: an Int field takes an integer or a whole-number float
+    // (9600 or 9600.0); a fractional value is a wrong-type refusal naming the
+    // field, as for every catalog vendor (catalog_json.cpp whole_number()).
+    // The arm's config_get<int>() read 9600.5 as 9600 without a word. The
     // catalog rule wins; the PR body quotes the change.
     {
         alpacahttp::Router router;
