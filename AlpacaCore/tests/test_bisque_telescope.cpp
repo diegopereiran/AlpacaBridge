@@ -18,6 +18,7 @@
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <string>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -378,6 +379,49 @@ TEST_CASE("Bisque Telescope Driver - non-finite input is rejected", "[bisque][te
         require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&]() { driver->set_guide_rate({0.004, -inf}); }, alpacacore::AlpacaError::InvalidValue);
         CHECK(driver->get_guide_rate().dec == before.dec);
+    }
+}
+
+// #627: the coordinate slew/sync forms and MoveAxis check their arguments after
+// check_connected(), and there is no fake TheSkyX to connect to, so the checks
+// are tested directly. The call-site wiring is covered by review only.
+TEST_CASE("Bisque Telescope Driver - non-finite slew coordinates and MoveAxis rate are rejected",
+          "[bisque][telescope][unit][nonfinite]") {
+    using alpacacore::vendor::bisque::detail::validate_move_axis_rate;
+    using alpacacore::vendor::bisque::detail::validate_ra_dec;
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    SECTION("RightAscension") {
+        for (const double bad : {nan, inf, -inf}) {
+            require_alpaca_error([&]() { validate_ra_dec(bad, 10.0); }, alpacacore::AlpacaError::InvalidValue);
+        }
+    }
+    SECTION("Declination") {
+        for (const double bad : {nan, inf, -inf}) {
+            require_alpaca_error([&]() { validate_ra_dec(12.0, bad); }, alpacacore::AlpacaError::InvalidValue);
+        }
+    }
+    SECTION("RA is checked before Dec") {
+        try {
+            validate_ra_dec(nan, nan);
+            FAIL("Expected AlpacaException");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(std::string(ex.what()).find("RA out of range") != std::string::npos);
+        }
+    }
+    SECTION("MoveAxis rate") {
+        for (const double bad : {nan, inf, -inf}) {
+            require_alpaca_error([&]() { validate_move_axis_rate(bad); }, alpacacore::AlpacaError::InvalidValue);
+        }
+    }
+    SECTION("finite values in range still pass") {
+        CHECK_NOTHROW(validate_ra_dec(0.0, -90.0));
+        CHECK_NOTHROW(validate_ra_dec(23.999, 90.0));
+        CHECK_NOTHROW(validate_move_axis_rate(0.0));
+        CHECK_NOTHROW(validate_move_axis_rate(-2.5));
+        CHECK_NOTHROW(validate_move_axis_rate(4.0));
     }
 }
 
