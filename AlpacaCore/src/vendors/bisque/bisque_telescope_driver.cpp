@@ -686,10 +686,11 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        // #627: argument validation precedes the connection check.
+        detail::validate_ra_dec(ra, dec);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinates");
-        detail::validate_ra_dec(ra, dec);
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -708,10 +709,11 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        // #627: argument validation precedes the connection check.
+        detail::validate_ra_dec(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinatesAsync");
-        detail::validate_ra_dec(ra, dec);
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -741,10 +743,11 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        // #627: argument validation precedes the connection check.
+        detail::validate_ra_dec(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SyncToCoordinates");
-        detail::validate_ra_dec(ra, dec);
 
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.sync_to_coordinates(ra, dec);
@@ -783,14 +786,15 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked("MoveAxis");
-
+        // #627: argument validation precedes the connection check.
         if (axis < 0 || axis > 1) {
             throw AlpacaException("Invalid axis: " + std::to_string(axis), AlpacaError::InvalidValue);
         }
         detail::validate_move_axis_rate(rate);
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        check_not_parked("MoveAxis");
 
         auto& protocol = BisqueProtocolWrapper::instance();
 

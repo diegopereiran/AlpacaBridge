@@ -21,8 +21,8 @@ namespace alpacacore::vendor::bisque {
 
 namespace detail {
 // open-astro#627: the argument checks the coordinate slew/sync forms and
-// MoveAxis run before any TheSkyX call. Free functions so a test can reach
-// them without a connected mount (there is no fake TheSkyX server).
+// MoveAxis run before the connection check and any TheSkyX call. Free
+// functions so a test can call them without constructing a driver.
 // Throws InvalidValue for a non-finite or out-of-range RA (checked first) or Dec.
 void validate_ra_dec(double ra, double dec);
 // Throws InvalidValue for a non-finite MoveAxis rate.
