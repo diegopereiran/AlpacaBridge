@@ -24,9 +24,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include <cerrno>
 #include <chrono>
-#include <cstring>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -80,12 +78,25 @@ bool bind_discovery_peer(bool with_reuseaddr) {
     addr.sin_port = htons(kDiscoveryPort);
     addr.sin_addr.s_addr = INADDR_ANY;
     const int rc = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (rc != 0) {
-        std::cerr << "Peer bind of UDP 32227 (SO_REUSEPORT" << (with_reuseaddr ? " + SO_REUSEADDR" : " only")
-                  << ") failed: " << std::strerror(errno) << "\n";
-    }
     ::close(fd);
     return rc == 0;
+}
+
+// True if this host lets a process listen on an ephemeral TCP port at all.
+// The http_port 0 case skips only when it does not; a server that fails where
+// this succeeds is a failure, not a skip.
+bool host_can_listen_ephemeral() {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    const bool ok = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 && ::listen(fd, 1) == 0;
+    ::close(fd);
+    return ok;
 }
 
 std::string port_reply(std::uint16_t port) { return "{\"AlpacaPort\":" + std::to_string(port) + "}"; }
@@ -152,36 +163,38 @@ int main() {
 
     // http_port 0: the responder advertises the port the server actually
     // bound, and says nothing until it knows it.
-    {
+    // Skips only when the host cannot listen on an ephemeral port; where it
+    // can, a server that never reports its bound port fails the test.
+    if (!host_can_listen_ephemeral()) {
+        std::cerr << "Discovery http_port 0 case skipped: host cannot listen on an ephemeral port.\n";
+    } else {
         alpacahttp::Config ephemeral = config;
         ephemeral.set_http_port(0);
 
         alpacahttp::Server server(ephemeral);
         server.start_async();
         std::uint16_t bound = 0;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (bound == 0 && std::chrono::steady_clock::now() < deadline) {
             bound = server.bound_port();
             if (bound == 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
-        if (bound == 0) {
-            std::cerr << "Discovery http_port 0 case skipped: server could not bind an ephemeral port.\n";
-        } else {
-            alpacahttp::Discovery discovery(ephemeral);
-            if (!start_and_wait(discovery)) {
-                std::cerr << "Discovery http_port 0 case skipped: unable to bind discovery socket.\n";
-            } else {
-                // Port not known yet: no reply rather than AlpacaPort 0.
-                EXPECT(!send_probe("alpacadiscovery1", 500).has_value());
+        EXPECT(bound != 0);
 
-                discovery.set_advertised_port(bound);
-                auto reply = send_probe("alpacadiscovery1", 2000);
-                EXPECT(reply.has_value());
-                EXPECT(*reply == port_reply(bound));
-                discovery.stop();
-            }
+        alpacahttp::Discovery discovery(ephemeral);
+        if (!start_and_wait(discovery)) {
+            std::cerr << "Discovery http_port 0 case skipped: unable to bind discovery socket.\n";
+        } else {
+            // Port not known yet: no reply rather than AlpacaPort 0.
+            EXPECT(!send_probe("alpacadiscovery1", 500).has_value());
+
+            discovery.set_advertised_port(bound);
+            auto reply = send_probe("alpacadiscovery1", 2000);
+            EXPECT(reply.has_value());
+            EXPECT(*reply == port_reply(bound));
+            discovery.stop();
         }
         server.stop();
     }
