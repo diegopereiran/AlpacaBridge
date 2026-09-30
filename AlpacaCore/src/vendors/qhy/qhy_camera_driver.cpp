@@ -812,7 +812,7 @@ public:
 
     int get_gain() const override {
         ensure_connected();
-        return static_cast<int>(sdk_.get_param(camera_id_value(), control::GAIN));
+        return param_to_int(sdk_.get_param(camera_id_value(), control::GAIN), "Gain");
     }
 
     void set_gain(int gain) override {
@@ -986,7 +986,7 @@ public:
 
     int get_offset() const override {
         ensure_connected();
-        return static_cast<int>(sdk_.get_param(camera_id_value(), control::OFFSET));
+        return param_to_int(sdk_.get_param(camera_id_value(), control::OFFSET), "Offset");
     }
 
     void set_offset(int offset) override {

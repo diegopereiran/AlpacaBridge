@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -247,6 +248,56 @@ TEST_CASE("QHY Camera Driver - Gain and offset round-trip while connected", "[qh
 
     driver->set_connected(false);
     CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("QHY Camera Driver - Gain and offset the SDK cannot read throw DriverException", "[qhy][camera][unit]") {
+    // Issue #510: get_param() answers the QHYCCD_ERROR sentinel (about 4.29e9)
+    // for an unsupported control or a failed read, and static_cast<int> of a
+    // double outside int's range is undefined behaviour -- in practice a
+    // garbage Gain/Offset handed to the client as if the camera reported it.
+    using alpacacore::vendor::qhy::control::GAIN;
+    using alpacacore::vendor::qhy::control::OFFSET;
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // No worker threads run for an uncooled camera, so editing the fake
+    // directly here does not race the driver.
+    const auto require_driver_exception = [&](const std::function<int()>& read, const std::string& control_name) {
+        try {
+            const int value = read();
+            FAIL("Expected AlpacaException, got " << value);
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()) == "QHY SDK returned no value for " + control_name);
+        }
+    };
+
+    fake.params.erase(GAIN);
+    fake.params.erase(OFFSET);
+    require_driver_exception([&]() { return driver->get_gain(); }, "Gain");
+    require_driver_exception([&]() { return driver->get_offset(); }, "Offset");
+
+    // Not only the sentinel: any value no int can hold is refused, and so is
+    // a non-finite one.
+    fake.params[GAIN] = 1e12;
+    fake.params[OFFSET] = -1e12;
+    require_driver_exception([&]() { return driver->get_gain(); }, "Gain");
+    require_driver_exception([&]() { return driver->get_offset(); }, "Offset");
+    fake.params[GAIN] = std::numeric_limits<double>::quiet_NaN();
+    fake.params[OFFSET] = std::numeric_limits<double>::infinity();
+    require_driver_exception([&]() { return driver->get_gain(); }, "Gain");
+    require_driver_exception([&]() { return driver->get_offset(); }, "Offset");
+
+    // A readable value still converts.
+    fake.params[GAIN] = 42.0;
+    fake.params[OFFSET] = 17.0;
+    CHECK(driver->get_gain() == 42);
+    CHECK(driver->get_offset() == 17);
+
+    driver->set_connected(false);
 }
 
 TEST_CASE("QHY Camera Driver - Connecting by index with no cameras detected fails", "[qhy][camera][unit]") {
