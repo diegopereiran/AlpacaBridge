@@ -380,7 +380,7 @@ TEST_CASE("iOptron Telescope Driver - three consecutive failed reads latch the f
     CHECK(contains(sync_failure(*driver), kReadFailure));
     CHECK(contains(sync_failure(*driver), kReadFailure));  // the third in a row latches
 
-    // Latched: every member refuses with the same message, even once the link answers again.
+    // Latched: members that run the connection check refuse with the same message, even once the link answers.
     mount.set_fail_reads(false);
     CHECK(contains(sync_failure(*driver), kLatched));
     require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
@@ -421,6 +421,36 @@ TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched faul
     mount.set_fail_reads(false);
     CHECK_NOTHROW(driver->get_right_ascension());
     CHECK(sync_failure(*driver).empty());
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fault keeps the latch (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(contains(sync_failure(*driver), kReadFailure));
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+
+    // The link is gone, so the blind :Q# cannot be written: the stop was not
+    // sent, AbortSlew must say so, and the latch must stay set.
+    mount.reset_link();
+    try {
+        driver->abort_slew();
+        FAIL("AbortSlew succeeded on a reset link");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(ex.what(), "AbortSlew failed"));
+    }
+    CHECK(contains(sync_failure(*driver), kLatched));
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
 
     driver->set_connected(false);
 }

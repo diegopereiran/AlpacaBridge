@@ -1803,9 +1803,9 @@ private:
     }
 
     // A single transient timeout must not brick the whole session: only latch
-    // device_faulted_ (which makes every subsequent call throw) after several
-    // CONSECUTIVE failures. Any subsequent successful command clears the count
-    // via clear_device_fault_locked().
+    // device_faulted_ (which makes every call through check_connected() throw)
+    // after several CONSECUTIVE failures. A successful read resets the count
+    // via note_device_read_ok_locked().
     static constexpr int kDeviceFaultThreshold = 3;
 
     void record_device_fault_locked(const char* context, const std::string& detail) const {

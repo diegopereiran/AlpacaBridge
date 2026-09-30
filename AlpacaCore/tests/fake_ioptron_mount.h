@@ -55,6 +55,9 @@ public:
     /// driver cannot parse, so every such read fails until this is cleared. Commands are still acknowledged.
     void set_fail_reads(bool fail) { fail_reads_.store(fail); }
 
+    /// open-astro#728: reset the driver's connection, so its next send (a blind ":Q#" included) fails.
+    void reset_link() { server_.reset_connections(); }
+
     /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
     /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
     /// make Connecting observable.
