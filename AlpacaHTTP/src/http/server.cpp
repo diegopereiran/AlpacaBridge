@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -625,13 +626,15 @@ void Server::run_server() {
     // our fd number). Observed once in the field: the accept loop broke
     // silently and the whole server shut down "successfully" mid ConformU
     // run. Recreate the listener instead of dying.
-    auto last_rebind = std::chrono::steady_clock::time_point::min();
+    // Empty until the first rebind. Not time_point::min(): now() - min()
+    // overflows the signed tick count (UB, caught by UBSan).
+    std::optional<std::chrono::steady_clock::time_point> last_rebind;
     auto rebind_listener = [&]() -> bool {
         // Backoff ACROSS rebind cycles too: if the fd-loss condition recurs
         // immediately after a successful rebind, sleep instead of spinning
         // select-fail -> rebind -> select-fail with continuous error logging.
         auto now = std::chrono::steady_clock::now();
-        if (now - last_rebind < std::chrono::seconds(2)) {
+        if (last_rebind && now - *last_rebind < std::chrono::seconds(2)) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         last_rebind = now;
