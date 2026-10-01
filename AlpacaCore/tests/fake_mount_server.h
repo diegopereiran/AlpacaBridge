@@ -27,6 +27,21 @@
 // the bytes to send back (empty = no reply). Command framing/parsing is the
 // caller's business; per-command parse failures in the drivers are tolerated
 // by design, so a dumb default reply already exercises every thread path.
+//
+// Optional knobs, all off by default so every existing user sees the fake it
+// always had (issue #617 added them for the SynScan position poller cases):
+//   - set_reply_delay(command, d): hold the reply to chunks starting with that
+//     command byte for d, the way a 9600-baud hand controller takes ~230 ms to
+//     answer a position read. The responder still runs at RECEIPT, before the
+//     delay, so a test responder can timestamp when a command reached the
+//     "mount".
+//   - exchange_count(command): chunks received that start with that byte,
+//     muted or not. Commands the driver sends blind and back-to-back can
+//     coalesce into one TCP chunk; only the first byte of a chunk is counted.
+//   - set_muted(true): keep reading but never answer (a hung handset on a
+//     healthy link), the same vocabulary as the pty fakes.
+//   - connection_count(): connections accepted so far, so a test can prove a
+//     recovery happened with no reconnect.
 
 #ifndef _WIN32
 
@@ -37,7 +52,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -119,6 +136,22 @@ public:
     bool ok() const { return listen_fd_ >= 0 && port_ > 0; }
     int port() const { return port_; }
 
+    /// Delay the reply to every chunk whose first byte is `command`. Zero (the
+    /// default for every command) replies at once.
+    void set_reply_delay(char command, std::chrono::milliseconds delay) {
+        reply_delay_ms_[index_of(command)].store(static_cast<int>(delay.count()));
+    }
+
+    /// Chunks received so far whose first byte is `command` (counted while
+    /// muted too).
+    int exchange_count(char command) const { return exchange_counts_[index_of(command)].load(); }
+
+    /// While muted the fake reads and counts but answers nothing.
+    void set_muted(bool muted) { muted_.store(muted); }
+
+    /// Connections accepted since construction.
+    int connection_count() const { return connection_count_.load(); }
+
     /// Replies "0#" to anything: valid terminator for every '#'-framed
     /// protocol in the family; per-command parse failures are tolerated by
     /// the drivers (and swallowed by the stress harness).
@@ -151,6 +184,7 @@ private:
             }
             int one = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            connection_count_.fetch_add(1);
             std::lock_guard<std::mutex> lock(conn_mutex_);
             conn_fds_.push_back(fd);
             conn_threads_.emplace_back([this, fd]() { serve(fd); });
@@ -164,7 +198,15 @@ private:
             if (n <= 0) {
                 break;  // peer disconnected (the storm churns connections)
             }
+            const std::size_t command = index_of(buf[0]);
+            exchange_counts_[command].fetch_add(1);
+            if (muted_.load()) {
+                continue;
+            }
             const std::string reply = responder_(std::string(buf, static_cast<std::size_t>(n)));
+            if (!wait_reply_delay(reply_delay_ms_[command].load())) {
+                break;
+            }
             if (!reply.empty()) {
                 static_cast<void>(::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL));
             }
@@ -178,7 +220,26 @@ private:
         ::close(fd);
     }
 
+    static std::size_t index_of(char command) { return static_cast<unsigned char>(command); }
+
+    // Sliced so the destructor never waits out a long delay. Returns false
+    // when the server is stopping.
+    bool wait_reply_delay(int delay_ms) const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(delay_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (stop_.load()) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return !stop_.load();
+    }
+
     Responder responder_;
+    std::array<std::atomic<int>, 256> reply_delay_ms_{};
+    std::array<std::atomic<int>, 256> exchange_counts_{};
+    std::atomic<bool> muted_{false};
+    std::atomic<int> connection_count_{0};
     int listen_fd_ = -1;
     int port_ = 0;
     std::atomic<bool> stop_{false};

@@ -88,6 +88,9 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_async_slew_failure.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_synscan_telescope_deferred_connect.cpp)
+    # Background position poller: cache-only DeviceState, link-fault latch,
+    # commands win the link (issue #617).
+    list(APPEND TEST_SOURCES test_synscan_poller.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
