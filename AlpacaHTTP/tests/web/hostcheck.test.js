@@ -27,7 +27,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { hostCheckSettings, settingsSaveError, hostCheckFixedNote, HOST_CHECK_ALWAYS_ALLOWED } =
+const { hostCheckSettings, settingsSaveError, HOST_CHECK_ALWAYS_ALLOWED } =
     require(path.join(__dirname, '..', '..', 'web', 'format.js'));
 
 test('a description without the fields renders no Host check rows', () => {
@@ -40,39 +40,28 @@ test('a description without the fields renders no Host check rows', () => {
 
 test('the rows load the current values', () => {
     assert.deepStrictEqual(
-        hostCheckSettings({
-            HostCheckEnabled: true,
-            AllowedHosts: '.lan, astropi.home',
-            HostCheckEnabledFixedByEnvironment: false,
-            AllowedHostsFixedByEnvironment: false,
-        }),
-        { enabled: true, hosts: '.lan, astropi.home', enabledFixed: false, hostsFixed: false });
+        hostCheckSettings({ HostCheckEnabled: true, AllowedHosts: '.lan, astropi.home' }),
+        { enabled: true, hosts: '.lan, astropi.home' });
     assert.deepStrictEqual(
         hostCheckSettings({ HostCheckEnabled: false }),
-        { enabled: false, hosts: '', enabledFixed: false, hostsFixed: false });
+        { enabled: false, hosts: '' });
 });
 
-test('a field fixed by the environment is marked read-only, each on its own', () => {
+// open-astro#787: the web UI is where the Host check is set, so neither row
+// is ever read-only, whatever an older server reports.
+test('both rows stay editable even if an older server reports them fixed', () => {
     assert.deepStrictEqual(
         hostCheckSettings({
             HostCheckEnabled: true,
             AllowedHosts: '.lan',
             HostCheckEnabledFixedByEnvironment: true,
-            AllowedHostsFixedByEnvironment: false,
-        }),
-        { enabled: true, hosts: '.lan', enabledFixed: true, hostsFixed: false });
-    assert.deepStrictEqual(
-        hostCheckSettings({
-            HostCheckEnabled: false,
-            AllowedHosts: '',
-            HostCheckEnabledFixedByEnvironment: false,
             AllowedHostsFixedByEnvironment: true,
         }),
-        { enabled: false, hosts: '', enabledFixed: false, hostsFixed: true });
-    // Only a literal true fixes a field.
-    assert.strictEqual(
-        hostCheckSettings({ HostCheckEnabled: true, HostCheckEnabledFixedByEnvironment: 'false' }).enabledFixed,
-        false);
+        { enabled: true, hosts: '.lan' });
+    const app = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'app.js'), 'utf8');
+    assert.ok(!/enabledFixed|hostsFixed|Fixed by the ALPACAHTTP_/.test(app),
+              'app.js still locks a Host check row');
+    assert.ok(app.includes('<button id="server-allowed-hosts-save"'), 'the Save button is not rendered');
 });
 
 test('a refused save shows the server message, not the status code', () => {
@@ -104,24 +93,4 @@ test('the help line lists the names default.yaml says are always allowed', () =>
     const yaml = fs.readFileSync(path.join(__dirname, '..', '..', 'config', 'default.yaml'), 'utf8');
     assert.ok(yaml.includes('Always allowed: ' + HOST_CHECK_ALWAYS_ALLOWED + '.'),
               'HOST_CHECK_ALWAYS_ALLOWED differs from the allowed_hosts comment in default.yaml');
-});
-
-test('a field fixed by the environment names the variable and how to unlock it', () => {
-    const hosts = hostCheckFixedNote('ALPACAHTTP_ALLOWED_HOSTS', 'server-allowed-hosts-fixed');
-    assert.ok(hosts.includes('id="server-allowed-hosts-fixed"'));
-    assert.ok(hosts.includes('class="info-note fixed-note"'));
-    assert.ok(hosts.includes('Fixed by the ALPACAHTTP_ALLOWED_HOSTS environment variable'));
-    assert.ok(/systemd/.test(hosts), 'the note says where to change it');
-    const check = hostCheckFixedNote('ALPACAHTTP_HOST_CHECK', 'server-host-check-fixed');
-    assert.ok(check.includes('Fixed by the ALPACAHTTP_HOST_CHECK environment variable'));
-});
-
-test('the page locks a fixed field visibly and links the note to the control', () => {
-    const web = path.join(__dirname, '..', '..', 'web');
-    const app = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
-    const css = fs.readFileSync(path.join(web, 'style.css'), 'utf8');
-    assert.ok(app.includes('aria-describedby="server-allowed-hosts-fixed"'));
-    assert.ok(app.includes('aria-describedby="server-host-check-fixed"'));
-    assert.match(css, /\.server-location input:disabled\s*{[^}]*cursor:\s*not-allowed/);
-    assert.match(css, /\.info-value\.locked/);
 });

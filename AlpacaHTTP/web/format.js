@@ -377,7 +377,7 @@ const HOST_CHECK_ALWAYS_ALLOWED =
 
 // What the two Host check rows render from the description Value. null when
 // the server does not report the setting (an older build), so no row shows a
-// toggle that reads as "off". A field is read-only only for a literal true.
+// toggle that reads as "off". Both rows are always editable (open-astro#787).
 function hostCheckSettings(desc) {
     if (!desc || typeof desc.HostCheckEnabled !== 'boolean') {
         return null;
@@ -385,17 +385,7 @@ function hostCheckSettings(desc) {
     return {
         enabled: desc.HostCheckEnabled,
         hosts: typeof desc.AllowedHosts === 'string' ? desc.AllowedHosts : '',
-        enabledFixed: desc.HostCheckEnabledFixedByEnvironment === true,
-        hostsFixed: desc.AllowedHostsFixedByEnvironment === true,
     };
-}
-
-// The note shown under a Host check control the environment fixes: which
-// variable holds the value and how to unlock it. id is what the control's
-// aria-describedby names.
-function hostCheckFixedNote(envVar, id) {
-    return `<span id="${id}" class="info-note fixed-note">&#128274; Fixed by the ${envVar} environment variable. ` +
-           `To change it, edit the setting in the systemd service drop-in and restart AlpacaBridge.</span>`;
 }
 
 // The message to show for a settings PUT, or '' when it saved. The server
@@ -422,5 +412,5 @@ function settingsSaveError(status, data) {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
-                       HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, hostCheckFixedNote, settingsSaveError };
+                       HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError };
 }
