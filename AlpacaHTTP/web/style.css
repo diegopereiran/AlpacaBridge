@@ -659,6 +659,28 @@ input[type="range"] {
     box-shadow: 0 0 0 3px rgba(74, 157, 232, 0.2);
 }
 
+/* A field the environment fixes: reads as locked, not as an empty input. */
+.server-location input:disabled {
+    color: var(--dim);
+    background: transparent;
+    border-style: dashed;
+    cursor: not-allowed;
+}
+
+.info-value.locked {
+    color: var(--dim);
+    cursor: not-allowed;
+}
+
+.info-value.locked input {
+    cursor: not-allowed;
+}
+
+.info-note.fixed-note {
+    opacity: 1;
+    color: var(--warn);
+}
+
 .server-status {
     margin: 4px 0 14px;
     color: var(--dim);

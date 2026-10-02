@@ -390,6 +390,14 @@ function hostCheckSettings(desc) {
     };
 }
 
+// The note shown under a Host check control the environment fixes: which
+// variable holds the value and how to unlock it. id is what the control's
+// aria-describedby names.
+function hostCheckFixedNote(envVar, id) {
+    return `<span id="${id}" class="info-note fixed-note">&#128274; Fixed by the ${envVar} environment variable. ` +
+           `To change it, edit the setting in the systemd service drop-in and restart AlpacaBridge.</span>`;
+}
+
 // The message to show for a settings PUT, or '' when it saved. The server
 // refuses a lockout with HTTP 400 and the reason in ErrorMessage, so the body
 // is read before the status decides anything.
@@ -414,5 +422,5 @@ function settingsSaveError(status, data) {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
-                       HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError };
+                       HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, hostCheckFixedNote, settingsSaveError };
 }

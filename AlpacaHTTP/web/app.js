@@ -1410,19 +1410,19 @@ async function loadServerInfo() {
                 ${hostCheck ? `
                 <div class="server-info-row">
                     <span class="info-label">Host names</span>
-                    <label class="info-value" title="Refuse requests whose Host header is not an allowed name, so a web page cannot reach this server through a rebound DNS name. Off: any Host name is served.">
-                        <input id="server-host-check-toggle" type="checkbox" ${hostCheck.enabled ? 'checked' : ''} ${hostCheck.enabledFixed ? 'disabled' : ''}>
+                    <label class="info-value ${hostCheck.enabledFixed ? 'locked' : ''}" title="Refuse requests whose Host header is not an allowed name, so a web page cannot reach this server through a rebound DNS name. Off: any Host name is served.">
+                        <input id="server-host-check-toggle" type="checkbox" ${hostCheck.enabled ? 'checked' : ''} ${hostCheck.enabledFixed ? 'disabled aria-describedby="server-host-check-fixed"' : ''}>
                         Restrict Host names (DNS-rebinding protection)
                     </label>
-                    ${hostCheck.enabledFixed ? '<span class="info-note">Fixed by the ALPACAHTTP_HOST_CHECK environment variable.</span>' : ''}
+                    ${hostCheck.enabledFixed ? hostCheckFixedNote('ALPACAHTTP_HOST_CHECK', 'server-host-check-fixed') : ''}
                 </div>
                 <div class="server-info-row">
                     <span class="info-label">Allowed host names</span>
                     <div class="server-location">
-                        <input id="server-allowed-hosts-input" type="text" placeholder="e.g. .lan, astropi.home" ${hostCheck.hostsFixed ? 'disabled' : ''}>
+                        <input id="server-allowed-hosts-input" type="text" placeholder="e.g. .lan, astropi.home" ${hostCheck.hostsFixed ? 'disabled aria-describedby="server-allowed-hosts-fixed"' : ''}>
                     </div>
+                    ${hostCheck.hostsFixed ? hostCheckFixedNote('ALPACAHTTP_ALLOWED_HOSTS', 'server-allowed-hosts-fixed') : ''}
                     <span class="info-note">Comma-separated; a leading dot allows a domain and every name under it. Always allowed: ${escapeHtml(HOST_CHECK_ALWAYS_ALLOWED)}.</span>
-                    ${hostCheck.hostsFixed ? '<span class="info-note">Fixed by the ALPACAHTTP_ALLOWED_HOSTS environment variable.</span>' : ''}
                     ${hostCheck.hostsFixed ? '' : '<button id="server-allowed-hosts-save" class="btn btn-secondary btn-small" type="button">Save</button>'}
                 </div>` : ''}
                 <div class="server-info-row">

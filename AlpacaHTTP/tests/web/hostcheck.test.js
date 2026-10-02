@@ -27,7 +27,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { hostCheckSettings, settingsSaveError, HOST_CHECK_ALWAYS_ALLOWED } =
+const { hostCheckSettings, settingsSaveError, hostCheckFixedNote, HOST_CHECK_ALWAYS_ALLOWED } =
     require(path.join(__dirname, '..', '..', 'web', 'format.js'));
 
 test('a description without the fields renders no Host check rows', () => {
@@ -104,4 +104,24 @@ test('the help line lists the names default.yaml says are always allowed', () =>
     const yaml = fs.readFileSync(path.join(__dirname, '..', '..', 'config', 'default.yaml'), 'utf8');
     assert.ok(yaml.includes('Always allowed: ' + HOST_CHECK_ALWAYS_ALLOWED + '.'),
               'HOST_CHECK_ALWAYS_ALLOWED differs from the allowed_hosts comment in default.yaml');
+});
+
+test('a field fixed by the environment names the variable and how to unlock it', () => {
+    const hosts = hostCheckFixedNote('ALPACAHTTP_ALLOWED_HOSTS', 'server-allowed-hosts-fixed');
+    assert.ok(hosts.includes('id="server-allowed-hosts-fixed"'));
+    assert.ok(hosts.includes('class="info-note fixed-note"'));
+    assert.ok(hosts.includes('Fixed by the ALPACAHTTP_ALLOWED_HOSTS environment variable'));
+    assert.ok(/systemd/.test(hosts), 'the note says where to change it');
+    const check = hostCheckFixedNote('ALPACAHTTP_HOST_CHECK', 'server-host-check-fixed');
+    assert.ok(check.includes('Fixed by the ALPACAHTTP_HOST_CHECK environment variable'));
+});
+
+test('the page locks a fixed field visibly and links the note to the control', () => {
+    const web = path.join(__dirname, '..', '..', 'web');
+    const app = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(web, 'style.css'), 'utf8');
+    assert.ok(app.includes('aria-describedby="server-allowed-hosts-fixed"'));
+    assert.ok(app.includes('aria-describedby="server-host-check-fixed"'));
+    assert.match(css, /\.server-location input:disabled\s*{[^}]*cursor:\s*not-allowed/);
+    assert.match(css, /\.info-value\.locked/);
 });
