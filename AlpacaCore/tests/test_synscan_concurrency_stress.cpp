@@ -54,6 +54,14 @@ void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
     guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
     guard([&] { scope.pulse_guide(0, 50); });
     guard([&] { scope.abort_slew(); });
+    // The poller's cached paths and the commands that invalidate them (#617).
+    guard([&] { static_cast<void>(scope.get_side_of_pier()); });
+    guard([&] { scope.sync_to_coordinates(5.0, 20.0); });
+    guard([&] { scope.move_axis(0, 1.0); });
+    guard([&] { scope.move_axis(0, 0.0); });
+    guard([&] { scope.park(); });
+    guard([&] { scope.unpark(); });
+    guard([&] { static_cast<void>(scope.command_string("V", true)); });
 }
 
 }  // namespace

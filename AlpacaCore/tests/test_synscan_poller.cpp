@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -63,6 +64,9 @@ struct FakeHandsetState {
     std::atomic<bool> goto_active{false};
     // The "p" answer: 'E' (pointing east) is ASCOM pierWest (1).
     std::atomic<char> pointing{'E'};
+    // Commands the handset leaves unanswered (the exchange times out).
+    std::atomic<bool> p_silent{false};
+    std::atomic<bool> l_silent{false};
     // Receipt time of the latest chunk starting with each command byte.
     std::array<std::atomic<Clock::rep>, 256> received_at{};
 
@@ -106,8 +110,10 @@ alpacacore::test::FakeMountServer::Responder handset_responder(std::shared_ptr<F
             case 'Z':
                 return "12AB,2000#";
             case 'L':
+                if (st->l_silent.load()) return "";
                 return st->goto_active.load() ? "1#" : "0#";
             case 'p':
+                if (st->p_silent.load()) return "";
                 return std::string(1, st->pointing.load()) + "#";
             case 'J':  // aligned
                 return std::string(1, static_cast<char>(1)) + "#";
@@ -159,11 +165,17 @@ struct Rig {
     alpacacore::test::FakeMountServer server{handset_responder(state)};
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
 
-    bool connect() {
+    // A driver that is not connected yet.
+    bool make() {
         if (!server.ok()) return false;
         apply_handset_delays(server);
         driver = alpacacore::vendor::synscan::create_synscan_telescope(0, endpoint(server.port()),
                                                                        alpacacore::vendor::synscan::SynScanVersion::V4);
+        return true;
+    }
+
+    bool connect() {
+        if (!make()) return false;
         driver->set_connected(true);
         return driver->get_connected();
     }
@@ -578,6 +590,74 @@ TEST_CASE("SynScan poller - disconnect stops it promptly and a reconnect starts 
     REQUIRE(scope.get_connected());
     CHECK(rig.server.connection_count() == 2);
     CHECK(rig.wait_for_poller_exchange('L', 3000));
+}
+
+// F3. A handset that answers L, e and z but not "p" is not a dead link: only
+// the pier side is lost, and RA, Dec, Alt, Az and Slewing keep answering.
+TEST_CASE("SynScan poller - a handset that does not answer p does not latch a link fault",
+          "[synscan][telescope][poller]") {
+    Rig rig;
+    REQUIRE(rig.connect());
+    auto& scope = *rig.driver;
+    std::this_thread::sleep_for(milliseconds(1500));
+    rig.state->p_silent.store(true);
+    // Well past the three cycles that latch a fault.
+    std::this_thread::sleep_for(milliseconds(14000));
+    for (const auto& [name, read] : link_reads(scope)) {
+        if (name == "SideOfPier") continue;  // asks the handset itself and gets no answer
+        INFO(name);
+        const auto thrown = thrown_by(read);
+        CHECK_FALSE(thrown.has_value());
+    }
+}
+
+// L1. A park, jog or forced slew the driver owns is Slewing whatever the link
+// says: the overlays answer before the fault check.
+TEST_CASE("SynScan poller - Slewing is true for a jog in flight on a faulted link", "[synscan][telescope][poller]") {
+    Rig rig;
+    REQUIRE(rig.connect());
+    auto& scope = *rig.driver;
+    std::this_thread::sleep_for(milliseconds(1500));
+    rig.state->l_silent.store(true);
+    REQUIRE(wait_until(
+        [&] {
+            const auto thrown = thrown_by([&] { static_cast<void>(scope.get_right_ascension()); });
+            return thrown.has_value() && thrown->code == alpacacore::AlpacaError::DriverException;
+        },
+        15000));
+    // Faulted and idle: Slewing refuses like the other link reads.
+    CHECK(thrown_by([&] { static_cast<void>(scope.get_slewing()); }).has_value());
+
+    scope.move_axis(0, 1.0);
+    bool slewing = false;
+    const auto thrown = thrown_by([&] { slewing = scope.get_slewing(); });
+    CHECK_FALSE(thrown.has_value());
+    CHECK(slewing);
+    scope.move_axis(0, 0.0);
+}
+
+// F1. A sync disconnect racing a sync connect: both return, and the driver
+// ends down with no poller left talking to the handset.
+TEST_CASE("SynScan poller - a sync connect racing a sync disconnect both return", "[synscan][telescope][poller]") {
+    for (int round = 0; round < 12; ++round) {
+        INFO("round " << round);
+        Rig rig;
+        REQUIRE(rig.make());
+        auto& scope = *rig.driver;
+        auto connect = std::async(std::launch::async, [&] { scope.set_connected(true); });
+        std::this_thread::sleep_for(milliseconds(round * 15));
+        auto disconnect = std::async(std::launch::async, [&] { scope.set_connected(false); });
+        REQUIRE(connect.wait_for(std::chrono::seconds(20)) == std::future_status::ready);
+        REQUIRE(disconnect.wait_for(std::chrono::seconds(20)) == std::future_status::ready);
+        connect.get();
+        disconnect.get();
+        scope.set_connected(false);
+        CHECK_FALSE(scope.get_connected());
+        std::this_thread::sleep_for(milliseconds(300));
+        const auto quiet = rig.link_counts();
+        std::this_thread::sleep_for(milliseconds(1200));
+        CHECK(rig.link_counts() == quiet);
+    }
 }
 
 #endif  // !_WIN32

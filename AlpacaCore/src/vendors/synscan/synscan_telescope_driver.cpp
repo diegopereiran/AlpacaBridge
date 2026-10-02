@@ -286,6 +286,10 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // Whole-call transition lock (#528): a sync disconnect landing in the
+        // tail of a sync connect (after mutex_ is released, before the poller
+        // starts) would otherwise find no poller to stop. Never taken in a getter.
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         if (!connected) {
             // Cancel + join the background slew/pulse task threads BEFORE
             // taking mutex_: the task threads take mutex_, so joining under
@@ -878,6 +882,11 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // The overlays answer before the link check: a park, jog or forced
+        // slew in flight is Slewing whatever the handset poll says.
+        if (slewing_overlay_locked()) {
+            return true;
+        }
         check_link_locked();
         // open-astro#575: surface a stored async-slew failure as an error
         // instead of a silent false, until AbortSlew or a new slew initiator
@@ -1197,6 +1206,8 @@ public:
     void fail_park_locked(const std::string& message) {
         const std::string stop_error = stop_park_slew_locked();
         parking_ = false;
+        // A poll cycle that read before this must not publish over it.
+        ++cache_generation_;
         if (stop_error.empty()) {
             slewing_cached_ = false;
         } else {
@@ -1550,6 +1561,7 @@ public:
                 // failed stop leaves Slewing at its cached value, since the
                 // park slew may still be running.
                 parking_ = false;
+                ++cache_generation_;  // a poll cycle in flight must not publish over this
                 stop_error = stop_park_slew_locked();
                 if (stop_error.empty()) {
                     slewing_cached_ = false;
@@ -1808,20 +1820,22 @@ private:
         }
     }
 
+    // Slewing states the driver owns, answered without asking the handset: a
+    // park in flight (until the park task flips AtPark in the same locked
+    // step, never Slewing false with AtPark false), a jogged axis, or a slew
+    // dispatched but not yet visible to "L". mutex_ must be held.
+    bool slewing_overlay_locked() const {
+        return parking_ || manual_axis_slewing_[0] || manual_axis_slewing_[1] ||
+               std::chrono::steady_clock::now() < slew_force_until_;
+    }
+
     bool get_slewing_locked() const {
-        // A park in flight reports Slewing until the park task flips AtPark
-        // (same locked step) — never Slewing false with AtPark false.
-        if (parking_) {
+        if (slewing_overlay_locked()) {
             return true;
         }
         check_link_locked();
         if (poller_live_) {
-            // The poller keeps slewing_cached_ current; the overlays are the
-            // ones poll_hardware_slewing_locked() applies before the handset.
-            if (manual_axis_slewing_[0] || manual_axis_slewing_[1] ||
-                std::chrono::steady_clock::now() < slew_force_until_) {
-                return true;
-            }
+            // The poller keeps slewing_cached_ current.
             return slewing_cached_;
         }
         return poll_hardware_slewing_locked();
@@ -2116,13 +2130,16 @@ private:
     }
 
     void stop_poll_thread() {
-        poll_cancel_.store(true);
-        task_cv_.notify_all();
         std::thread thread;
         {
+            // Cancel and take the handle in one task_mutex_ block, so a
+            // start_poll_thread() cannot clear the flag in between and leave a
+            // poller this stop never joins.
             std::lock_guard<std::mutex> tlock(task_mutex_);
+            poll_cancel_.store(true);
             thread = std::move(poll_thread_);
         }
+        task_cv_.notify_all();
         if (thread.joinable()) {
             thread.join();
         }
@@ -2221,22 +2238,31 @@ private:
                 cached_alt_degrees_ = decode_angle(altaz.second, bits);
                 altaz_cache_valid_ = true;
                 last_altaz_update_ = std::chrono::steady_clock::now();
+                // L, e and z are the cycle: a handset that answers them but not
+                // "p" must not latch the fault that blocks RA, Dec, Alt and Az.
+                poll_cycle_succeeded_locked();
             }
 
-            command = "p";
             if (!poll_may_continue()) {
                 return;
             }
-            const char pointing = protocol.get_pointing_state();
+            char pointing = 0;
+            bool pointing_ok = true;
+            try {
+                pointing = protocol.get_pointing_state();
+            } catch (...) {
+                pointing_ok = false;
+            }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!poll_publishable_locked(generation)) {
                     return;
                 }
-                side_of_pier_cached_ = map_pointing_state_to_side(pointing);
+                // A failed "p" only drops the pier side: SideOfPier and the
+                // pulse-guide DEC direction then ask the handset themselves.
+                side_of_pier_cached_ = pointing_ok ? map_pointing_state_to_side(pointing) : -1;
                 side_of_pier_valid_ = side_of_pier_cached_ >= 0;
                 side_of_pier_generation_ = generation;
-                poll_cycle_succeeded_locked();
             }
         } catch (...) {
             if (!poll_cancel_.load()) {
@@ -2367,6 +2393,8 @@ private:
     // their check -> reap -> spawn sequences cannot interleave. Never held
     // by the task threads and never taken while mutex_ is held.
     std::mutex initiator_mutex_;
+    // Held across the whole of set_connected(); see there.
+    std::mutex transition_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;
