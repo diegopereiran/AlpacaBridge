@@ -27,6 +27,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <ctime>
 #include <limits>
 #include <mutex>
@@ -34,6 +35,7 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 namespace alpacacore::vendor::synscan {
 
@@ -42,6 +44,10 @@ namespace {
 constexpr double kHoursToDegrees = 15.0;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
+// Background poller (#617): one cycle is L, e, z, p, then this wait.
+constexpr auto kPollInterval = std::chrono::milliseconds(500);
+// Failed cycles in a row before the link is latched as faulted (#237).
+constexpr int kPollFaultThreshold = 3;
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
@@ -356,8 +362,12 @@ public:
             position_override_until_ = std::chrono::steady_clock::time_point::min();
             last_utc_valid_ = false;
             client_disagreement_warned_ = false;
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
+            invalidate_position_caches_locked();
+            side_of_pier_valid_ = false;
+            poller_live_ = false;
+            poll_failures_ = 0;
+            link_faulted_ = false;
+            link_fault_reason_.clear();
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
             try {
@@ -442,6 +452,18 @@ public:
             position_override_until_ = std::chrono::steady_clock::time_point::min();
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            invalidate_position_caches_locked();
+            side_of_pier_valid_ = false;
+            poller_live_ = false;
+            poll_failures_ = 0;
+            link_faulted_ = false;
+            link_fault_reason_.clear();
+        }
+        if (connected) {
+            // The poller runs without mutex_, so it starts from a point where
+            // mutex_ is released (the connect above held it throughout).
+            lock.unlock();
+            start_poll_thread();
         }
     }
 
@@ -500,6 +522,7 @@ public:
     double get_altitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        check_link_locked();
         refresh_altaz_cache_locked();
         return cached_alt_degrees_;
     }
@@ -540,6 +563,7 @@ public:
     double get_azimuth() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        check_link_locked();
         refresh_altaz_cache_locked();
         return cached_az_degrees_;
     }
@@ -620,6 +644,7 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        check_link_locked();
         if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
             !get_slewing_locked()) {
             return std::clamp(target_dec_degrees_, -90.0, 90.0);
@@ -644,6 +669,7 @@ public:
     }
 
     void set_tracking(bool tracking) override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (tracking) {
@@ -694,6 +720,7 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        check_link_locked();
         if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
             !get_slewing_locked()) {
             return target_ra_hours_;
@@ -714,6 +741,12 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        check_link_locked();
+        // The poller keeps this current; before its first publish (or after a
+        // reconnect) the getter asks the handset itself, as it always did.
+        if (poller_live_ && side_of_pier_valid_) {
+            return side_of_pier_cached_;
+        }
         try {
             char side = SynScanProtocolWrapper::instance().get_pointing_state();
             side_of_pier_cached_ = map_pointing_state_to_side(side);
@@ -803,6 +836,7 @@ public:
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees",
                                   AlpacaError::InvalidValue);
         }
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         LocationInfo info = current_location_locked();
@@ -826,6 +860,7 @@ public:
             throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees",
                                   AlpacaError::InvalidValue);
         }
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         LocationInfo info = current_location_locked();
@@ -839,6 +874,7 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        check_link_locked();
         // open-astro#575: surface a stored async-slew failure as an error
         // instead of a silent false, until AbortSlew or a new slew initiator
         // clears it (see last_slew_error_).
@@ -921,6 +957,7 @@ public:
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         set_utc_date_locked(utc);
     }
@@ -976,6 +1013,7 @@ public:
     // which point AtPark flips true in the same locked step (no window where
     // a poller sees Slewing false with AtPark false). Issue #208.
     void park() override {
+        LinkYield yield(link_yield_);
         // Serialize against other initiators (SlewToCoordinatesAsync): the
         // check-then-reap-then-spawn sequence must not interleave with
         // another initiator's, or a park could be cancelled and restarted
@@ -1046,6 +1084,7 @@ public:
                 return;
             }
             try {
+                LinkYield dispatch_yield(link_yield_);
                 do_slew_to_coordinates_locked(park_ra, park_dec);
             } catch (const std::exception& ex) {
                 fail_park_locked(std::string("Park slew dispatch failed: ") + ex.what());
@@ -1070,7 +1109,11 @@ public:
                     parking_ = false;
                     return;
                 }
-                const bool slewing = poll_hardware_slewing_locked();
+                bool slewing = false;
+                {
+                    LinkYield poll_yield(link_yield_);
+                    slewing = poll_hardware_slewing_locked();
+                }
                 if (slewing) {
                     saw_slewing = true;
                 } else {
@@ -1095,6 +1138,7 @@ public:
                 }
             }
             try {
+                LinkYield stop_yield(link_yield_);
                 SynScanProtocolWrapper::instance().set_tracking_mode(0);
                 tracking_mode_cached_ = 0;
                 tracking_mode_valid_ = true;
@@ -1107,8 +1151,7 @@ public:
             }
             slewing_cached_ = false;
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
+            invalidate_position_caches_locked();
             position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             // AtPark and Slewing flip in the same locked step.
             parked_ = true;
@@ -1121,6 +1164,7 @@ public:
     // the first failure's message, or an empty string when every stop was
     // answered (#742). mutex_ must be held.
     std::string stop_park_slew_locked() {
+        LinkYield yield(link_yield_);
         auto& protocol = SynScanProtocolWrapper::instance();
         std::string first_error;
         const auto try_stop = [&first_error](auto&& stop) {
@@ -1161,6 +1205,7 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
+        LinkYield yield(link_yield_);
         int axis = -1;
         int tracking_mode = 0;
         {
@@ -1198,7 +1243,7 @@ public:
             }
 
             if (axis == 1) {
-                char pier = protocol.get_pointing_state();
+                const char pier = pointing_state_locked();
                 if (pier == 'W') {
                     slew_rate_deg_per_sec = -slew_rate_deg_per_sec;
                 }
@@ -1236,8 +1281,7 @@ public:
 
             pulse_guiding_active_ = true;
             pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
+            invalidate_position_caches_locked();
 
             tracking_mode = tracking_mode_cached_;
         }
@@ -1260,7 +1304,10 @@ public:
             tlock.lock();
         }
         pulse_task_thread_ = std::thread([this, axis, duration, tracking_mode]() {
-            if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_)) {
+            const bool on_time = task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_);
+            // The stop is a command: it wins the link from the poller.
+            LinkYield stop_yield(link_yield_);
+            if (!on_time) {
                 // Cancelled by disconnect/destruction. Still make a best-effort
                 // attempt to stop the axis before exiting — the mount would
                 // otherwise keep slewing.
@@ -1319,6 +1366,7 @@ public:
     }
 
     void set_park() override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refresh_equatorial_cache_locked();
@@ -1328,14 +1376,23 @@ public:
     }
 
     void slew_to_coordinates(double ra, double dec) override {
-        std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("SlewToCoordinates");
-        do_slew_to_coordinates_locked(ra, dec);
+        std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+        {
+            // Only the dispatch holds the link: the wait below reads the
+            // poller's Slewing, so the poller must be free to run during it.
+            LinkYield yield(link_yield_);
+            lock.lock();
+            check_connected();
+            check_not_parked_locked("SlewToCoordinates");
+            do_slew_to_coordinates_locked(ra, dec);
+        }
         wait_for_slew_complete(lock);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
+        // Handed to the dispatch thread below, which holds it until its GOTO
+        // has been sent.
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
         {
             // Gate BEFORE reaping: reap_slew_task() would cancel a park in
@@ -1361,8 +1418,7 @@ public:
             dec_raw = encode_angle(dec, bits);
             precise = use_precise_commands_;
 
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
+            invalidate_position_caches_locked();
             slewing_cached_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that retries a rejected goto must not be told the OLD goto
@@ -1395,7 +1451,7 @@ public:
             slew_task_cancel_.store(false);
             tlock.lock();
         }
-        slew_task_thread_ = std::thread([this, ra_raw, dec_raw, precise]() {
+        slew_task_thread_ = std::thread([this, ra_raw, dec_raw, precise, yield = std::move(yield)]() {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_ || slew_task_cancel_.load()) {
                 return;
@@ -1449,6 +1505,7 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
@@ -1458,6 +1515,8 @@ public:
         uint32_t ra_raw = encode_ra_raw(ra, bits);
         uint32_t dec_raw = encode_angle(dec, bits);
         protocol.sync_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
+        // A position read already on the wire predates the sync.
+        ++cache_generation_;
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
@@ -1473,6 +1532,7 @@ public:
     }
 
     void unpark() override {
+        LinkYield yield(link_yield_);
         bool was_parking = false;
         std::string stop_error;
         {
@@ -1510,6 +1570,7 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
@@ -1536,6 +1597,7 @@ public:
         // that jogs an axis after a failed GOTO must not be told the OLD
         // goto failed.
         last_slew_error_.clear();
+        ++cache_generation_;
 
         SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0);
     }
@@ -1559,6 +1621,7 @@ public:
     }
 
     void abort_slew() override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
@@ -1568,6 +1631,7 @@ public:
         protocol.move_axis_fixed_rate(1, 0);
         parking_ = false;  // an aborted park never reaches AtPark
         slewing_cached_ = false;
+        ++cache_generation_;
         // open-astro#575: AbortSlew is a valid clearing command for a stored
         // slew failure -- the client acted on the error, so the next Slewing
         // read must answer normally again.
@@ -1631,6 +1695,7 @@ private:
     // Cancel and join both task threads. Must be called WITHOUT mutex_ held
     // (both task threads take mutex_).
     void cancel_async_tasks() {
+        stop_poll_thread();
         slew_task_cancel_.store(true);
         pulse_task_cancel_.store(true);
         task_cv_.notify_all();
@@ -1701,7 +1766,7 @@ private:
 
     void refresh_equatorial_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
-        if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
+        if (equatorial_cache_valid_ && (poller_live_ || (now - last_equatorial_update_) < kPositionCacheTtl)) {
             return;
         }
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -1721,7 +1786,7 @@ private:
 
     void refresh_altaz_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
-        if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
+        if (altaz_cache_valid_ && (poller_live_ || (now - last_altaz_update_) < kPositionCacheTtl)) {
             return;
         }
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -1745,6 +1810,16 @@ private:
         if (parking_) {
             return true;
         }
+        check_link_locked();
+        if (poller_live_) {
+            // The poller keeps slewing_cached_ current; the overlays are the
+            // ones poll_hardware_slewing_locked() applies before the handset.
+            if (manual_axis_slewing_[0] || manual_axis_slewing_[1] ||
+                std::chrono::steady_clock::now() < slew_force_until_) {
+                return true;
+            }
+            return slewing_cached_;
+        }
         return poll_hardware_slewing_locked();
     }
 
@@ -1755,18 +1830,27 @@ private:
         if (std::chrono::steady_clock::now() < slew_force_until_) {
             return true;
         }
-        bool was_slewing = slewing_cached_;
         try {
-            slewing_cached_ = SynScanProtocolWrapper::instance().is_goto_in_progress();
+            apply_slewing_poll_locked(SynScanProtocolWrapper::instance().is_goto_in_progress());
         } catch (...) {
             // Keep last known state if polling times out.
         }
-        if (was_slewing && !slewing_cached_) {
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
-            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        }
         return slewing_cached_;
+    }
+
+    // Stores a hardware Slewing reading. On the slew-end edge (true to false)
+    // both position caches are invalidated and the target is served as the
+    // position for 10 s. Returns true on that edge. Shared by the on-demand
+    // path above and the background poller. mutex_ must be held.
+    bool apply_slewing_poll_locked(bool hw_slewing) const {
+        const bool was_slewing = slewing_cached_;
+        slewing_cached_ = hw_slewing;
+        if (was_slewing && !hw_slewing) {
+            invalidate_position_caches_locked();
+            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            return true;
+        }
+        return false;
     }
 
     bool get_tracking_locked() const {
@@ -1814,8 +1898,7 @@ private:
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t ra_raw = encode_ra_raw(ra, bits);
         uint32_t dec_raw = encode_angle(dec, bits);
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
+        invalidate_position_caches_locked();
         slewing_cached_ = true;
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that retries a rejected goto (even via the blocking
@@ -1880,8 +1963,7 @@ private:
         }
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
+        invalidate_position_caches_locked();
         position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
@@ -1938,6 +2020,241 @@ private:
         }
         if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
             throw AlpacaException(std::string(context) + ": Dec out of range", AlpacaError::InvalidValue);
+        }
+    }
+
+    // Both position caches go stale together; bumping the generation makes a
+    // poller read that was already on the wire unpublishable. mutex_ must be
+    // held.
+    void invalidate_position_caches_locked() const {
+        equatorial_cache_valid_ = false;
+        altaz_cache_valid_ = false;
+        ++cache_generation_;
+    }
+
+    // While faulted every cache-backed read refuses (#237): "what the poller
+    // last saw" is no more trustworthy than a stale frame once the handset is
+    // unreachable. DriverException, not NotConnected: Connected stays true.
+    void check_link_locked() const {
+        if (link_faulted_) {
+            throw AlpacaException("SynScan communications compromised: " + link_fault_reason_,
+                                  AlpacaError::DriverException);
+        }
+    }
+
+    // Pier side for pulse_guide's DEC direction: the poller's cache when it is
+    // live, the handset otherwise. mutex_ must be held.
+    char pointing_state_locked() const {
+        if (poller_live_ && side_of_pier_valid_) {
+            return side_of_pier_cached_ == 0 ? 'W' : 'E';
+        }
+        return SynScanProtocolWrapper::instance().get_pointing_state();
+    }
+
+    // Raised for the duration of a command that talks to the handset. The
+    // poller checks it before every exchange, so a command waits for at most
+    // the one exchange already on the wire, never a whole poll cycle. A
+    // counter, so nested and concurrent commands compose; movable so a
+    // dispatch thread can inherit the hold.
+    class LinkYield {
+    public:
+        explicit LinkYield(std::atomic<int>& counter) : counter_(&counter) { counter_->fetch_add(1); }
+        LinkYield(LinkYield&& other) noexcept : counter_(std::exchange(other.counter_, nullptr)) {}
+        LinkYield(const LinkYield&) = delete;
+        LinkYield& operator=(const LinkYield&) = delete;
+        LinkYield& operator=(LinkYield&&) = delete;
+        ~LinkYield() {
+            if (counter_ != nullptr) {
+                counter_->fetch_sub(1);
+            }
+        }
+
+    private:
+        std::atomic<int>* counter_;
+    };
+
+    // ── Background position poller (#617) ──
+    // Fills Slewing, both position caches and SideOfPier so the DeviceState
+    // getters answer from memory (four handset round trips cost 0.56 s against
+    // ConformU's 0.1 s FAST target). A joinable member thread, never detached:
+    // started once connect has published, stopped and joined by
+    // cancel_async_tasks() WITHOUT mutex_ held. Its serial I/O runs without
+    // mutex_ (the wrapper exchange first, then mutex_ only to publish), so the
+    // lock order stays mutex_ -> wrapper mutex.
+    void start_poll_thread() {
+        std::thread finished;
+        {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            if (!connected_.load()) {
+                return;
+            }
+            if (poll_thread_.joinable()) {
+                if (!poll_exited_.load()) {
+                    return;  // already running
+                }
+                finished = std::move(poll_thread_);
+            }
+            poll_cancel_.store(false);
+            poll_exited_.store(false);
+            poll_thread_ = std::thread([this]() { poll_loop(); });
+        }
+        if (finished.joinable()) {
+            finished.join();  // exited on its own; returns at once
+        }
+    }
+
+    void stop_poll_thread() {
+        poll_cancel_.store(true);
+        task_cv_.notify_all();
+        std::thread thread;
+        {
+            std::lock_guard<std::mutex> tlock(task_mutex_);
+            thread = std::move(poll_thread_);
+        }
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    void poll_loop() {
+        while (!poll_cancel_.load()) {
+            if (!connected_.load()) {
+                break;
+            }
+            try {
+                poll_cycle();
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                // poll_cycle() reports its own failures; nothing may reach std::terminate.
+            }
+            if (!task_wait_for(std::chrono::duration_cast<std::chrono::milliseconds>(kPollInterval), poll_cancel_)) {
+                break;
+            }
+        }
+        poll_exited_.store(true);
+    }
+
+    bool poll_may_continue() const { return !poll_cancel_.load() && link_yield_.load() == 0; }
+
+    // A reading is published only while the driver is still connected, no
+    // command bumped the generation since the cycle started and none is
+    // holding the link. mutex_ must be held.
+    bool poll_publishable_locked(std::uint64_t generation) const {
+        return connected_.load() && cache_generation_ == generation && link_yield_.load() == 0;
+    }
+
+    void poll_cycle() {
+        std::uint64_t generation = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_.load()) {
+                return;
+            }
+            generation = cache_generation_;
+        }
+        auto& protocol = SynScanProtocolWrapper::instance();
+        const bool precise = use_precise_commands_;
+        const int bits = precise ? 24 : 16;
+        const char* command = "L";
+        try {
+            // A command in flight or a generation change ends the cycle: it is
+            // neither a success nor a failure.
+            if (!poll_may_continue()) {
+                return;
+            }
+            const bool slewing = protocol.is_goto_in_progress();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!poll_publishable_locked(generation)) {
+                    return;
+                }
+                poller_live_ = true;
+                // The overlays own Slewing while a goto is dispatched, an axis
+                // is jogged or a park is running; the hardware reading would
+                // fire a false slew-end edge during them.
+                if (!manual_axis_slewing_[0] && !manual_axis_slewing_[1] && !parking_ &&
+                    std::chrono::steady_clock::now() >= slew_force_until_) {
+                    if (apply_slewing_poll_locked(slewing)) {
+                        generation = cache_generation_;  // the e/z/p below follow the edge
+                    }
+                }
+            }
+
+            command = "e";
+            if (!poll_may_continue()) {
+                return;
+            }
+            const auto equatorial = protocol.get_ra_dec_raw(precise);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!poll_publishable_locked(generation)) {
+                    return;
+                }
+                cached_ra_hours_ = decode_ra_hours(equatorial.first, bits);
+                cached_dec_degrees_ = decode_angle(equatorial.second, bits);
+                equatorial_cache_valid_ = true;
+                last_equatorial_update_ = std::chrono::steady_clock::now();
+            }
+
+            command = "z";
+            if (!poll_may_continue()) {
+                return;
+            }
+            const auto altaz = protocol.get_alt_az_raw(precise);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!poll_publishable_locked(generation)) {
+                    return;
+                }
+                cached_az_degrees_ = wrap_degrees(decode_angle(altaz.first, bits));
+                cached_alt_degrees_ = decode_angle(altaz.second, bits);
+                altaz_cache_valid_ = true;
+                last_altaz_update_ = std::chrono::steady_clock::now();
+            }
+
+            command = "p";
+            if (!poll_may_continue()) {
+                return;
+            }
+            const char pointing = protocol.get_pointing_state();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!poll_publishable_locked(generation)) {
+                    return;
+                }
+                side_of_pier_cached_ = map_pointing_state_to_side(pointing);
+                side_of_pier_valid_ = side_of_pier_cached_ >= 0;
+                poll_cycle_succeeded_locked();
+            }
+        } catch (...) {
+            if (!poll_cancel_.load()) {
+                poll_cycle_failed(command);
+            }
+        }
+    }
+
+    // mutex_ must be held.
+    void poll_cycle_succeeded_locked() {
+        poll_failures_ = 0;
+        if (link_faulted_) {
+            link_faulted_ = false;
+            link_fault_reason_.clear();
+            ALPACA_LOG_INFO("SynScan", "handset link recovered; polling resumed");
+        }
+    }
+
+    void poll_cycle_failed(const char* command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load()) {
+            return;
+        }
+        ++poll_failures_;
+        if (poll_failures_ >= kPollFaultThreshold && !link_faulted_) {
+            link_faulted_ = true;
+            link_fault_reason_ = std::string("no reply to the '") + command + "' command";
+            invalidate_position_caches_locked();
+            side_of_pier_valid_ = false;
+            ALPACA_LOG_ERROR("SynScan", "handset link fault latched after " + std::to_string(poll_failures_) +
+                                            " failed poll cycles: " + link_fault_reason_);
         }
     }
 
@@ -2043,6 +2360,18 @@ private:
     std::thread pulse_task_thread_;
     mutable std::atomic<bool> slew_task_cancel_{false};
     mutable std::atomic<bool> pulse_task_cancel_{false};
+
+    // Background poller state (#617). poll_thread_ is guarded by task_mutex_.
+    std::thread poll_thread_;
+    std::atomic<bool> poll_cancel_{false};
+    std::atomic<bool> poll_exited_{false};
+    mutable std::atomic<int> link_yield_{0};
+    // Under mutex_.
+    mutable std::uint64_t cache_generation_ = 0;
+    bool poller_live_ = false;  // the poller has published since connect
+    mutable int poll_failures_ = 0;
+    mutable bool link_faulted_ = false;
+    mutable std::string link_fault_reason_;
 };
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(
