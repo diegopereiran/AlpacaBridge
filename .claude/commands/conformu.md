@@ -40,7 +40,7 @@ Ask the following **one at a time**, waiting for each answer before moving on. I
    - If the device only supports one transport, omit the suffix — file is `Linux-arm64.txt`.
    - If the device supports multiple and this run only tests one, use the suffix — file is `Linux-arm64-<transport>.txt`. Existing reports already exist for the same device — those other transports stay untouched.
 
-5. **Test SBC host** — defaults to `openastro.lan` (see the rig identity above; if that does not resolve, `nmap -sn 192.168.1.0/24 | grep -i openastro` finds a suffixed name). ConformU itself runs on the SBC against `http://localhost:6800`; the pre-flight `curl` checks below run from the dev machine against `http://<host>:6800`. Only ask when the user names a different rig.
+5. **Test SBC host** — defaults to `openastro.lan` (see the rig identity above; if that does not resolve, `nmap -sn 192.168.1.0/24 | grep -i openastro` finds a suffixed name). ConformU itself runs on the SBC against `http://localhost:6800`; the pre-flight `curl` checks below run from the dev machine against `http://<host>:6800`. Those checks need `.lan` allowed as a `Host` on the rig only when the Host check is enabled (`http.host_check_enabled`, off by default): then the server answers HTTP 403 to a `Host` that is not an IP address, `localhost`, its own hostname, a `*.local`, `*.home.arpa` or `*.internal` name, or listed in `http.allowed_hosts` (issue #392), and `/deploy-test` Step 4 installs the systemd drop-in that sets `ALPACAHTTP_ALLOWED_HOSTS=.lan`. Only ask when the user names a different rig.
 
 6. **Device number** — defaults to `0`. Most single-device setups stay at 0.
 
@@ -80,6 +80,8 @@ curl -sS --max-time 5 http://<host>:<port>/management/v1/description | head -c 5
 Expect a JSON response containing `ServerName` or `Manufacturer`. If the request times out or returns an error:
 
 > "AlpacaBridge is not reachable at `http://<host>:<port>`. Start it (`./build_and_run.sh`) and re-run `/conformu`."
+
+If it answers HTTP 403 with `Host '<host>:<port>' is not allowed` (only with the Host check enabled), the rig lacks the `ALPACAHTTP_ALLOWED_HOSTS=.lan` drop-in: run the two `/deploy-test` Step 4 commands (drop-in, then restart), or use the rig's IP address as `<host>`. Every `curl` below needs the same fix.
 
 ### 2b. Device is configured
 
@@ -146,6 +148,8 @@ ssh astro@<host> 'chronyc tracking | grep -E "System time|Frequency|Update inter
 ```
 
 Require a `System time` offset in the low-millisecond range and a non-zero `Update interval`. On a Lima VM also confirm the host agent is not stepping: `grep "guest clock adjusted" ~/.lima/<vm>/ha.stderr.log | tail -3` must show nothing within the last few minutes, and re-check it after the run -- a step inside the run window invalidates the affected measurements even if ConformU passed. Skip for non-telescope devices.
+
+**Motion limits off.** Run the Sky-Watcher direct driver with `minAltitudeDeg` and `meridianLimitMinutes` unset (the default): ConformU slews to arbitrary targets, and a goto below the altitude floor is refused with `InvalidValue` (open-astro#436). Clear both fields in the device config before the run and restore them afterwards.
 
 **The ConformU host's clock too.** Since #301 the Sky-Watcher direct driver ignores a client-supplied `UTCDate` for pointing whenever the SBC's kernel reports its clock NTP-disciplined, so ConformU can no longer make the driver agree with a wrong clock of its own by writing `UTCDate`. If a run flags `SiderealTime`, check the clock on the machine running ConformU before suspecting the driver (issue #412): a ConformU host more than a few minutes off produces exactly that finding against a correct driver.
 

@@ -57,13 +57,17 @@ datagrams before each send so replies cannot get off-by-one.
   `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
   config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
   attaching to whatever mount answers. Use them rather than an inline `return false`; the
-  `portPath`, `host` and `connectionType` checks in every telescope branch do.
+  `portPath`, `host` and `connectionType` checks in every telescope branch do. Since #744 the
+  Sky-Watcher direct driver has no router branch: its device-catalog descriptor
+  (`AlpacaCore/src/vendors/skywatcher/skywatcher_schema.cpp`) applies the same source rule in
+  `Schema::normalize`, and the factory (`skywatcher_catalog.cpp`) logs the missing-site WARN.
   Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
   the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
   config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the
   ASCOM setters have always refused exactly that at runtime — a validation a client cannot bypass
   but a config can is not a validation. The reads and the check live in one shared
-  `read_site_coordinates()` used by all seven vendor branches that take a site, and on the
+  `read_site_coordinates()` used by the six router branches that take a site (for Sky-Watcher
+  the catalog's per-field min/max applies the same range since #744), and on the
   persisted path the offending coordinate is **cleared** so the driver's unset handling covers it. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math: the #432 sky frame (both the `a1` term and dec), the RA
@@ -137,6 +141,7 @@ datagrams before each send so replies cannot get off-by-one.
   axis positions and reading the tube's real direction off the mount (2026-09-12); those
   rows are in the driver comment and asserted in `test_skywatcher_pointing.cpp`. Extend
   that file with a new hardware row for any change here.
+- **Motion limits (#436) are off by default and soft.** `minAltitudeDeg` and `meridianLimitMinutes` live in the catalog descriptor (`skywatcher_fields.h`); `util::MotionLimits` (`util/motion_limits.h`) is the pure decision. Only `SlewToCoordinates[Async]` (and so `SlewToTarget[Async]`) check the altitude floor, throwing `InvalidValue`; Park, FindHome, MoveAxis, Sync and PulseGuide are exempt. ConformU runs with both limits off.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period

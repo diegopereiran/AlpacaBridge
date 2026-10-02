@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -53,6 +54,8 @@ Server::Server(const Config& config)
     router_.set_config_path(config_.config_path());
     router_.set_sync_system_clock_from_clients(config_.sync_system_clock_from_clients());
     router_.set_motion_watchdog_interval(std::chrono::seconds(config_.motion_watchdog_seconds()));
+    router_.set_allowed_hosts(config_.allowed_hosts());
+    router_.set_host_check_enabled(config_.host_check_enabled());
     // Software update (docs/software-update.md): the helper unit writes its
     // transcript to a root-owned directory of its own, never the daemon's log
     // directory (software_update.h explains why), so the path is fixed.
@@ -448,14 +451,21 @@ void Server::close_wake_pipe() {
     }
 }
 
-std::uint16_t Server::bound_port() const {
-    auto fd = server_fd_.load();
+// Not authoritative from another thread: the SO_ACCEPTCONN check below
+// narrows the fd-reuse window but does not close it. An fd number recycled
+// into an unrelated LISTENING socket between that check and getsockname()
+// still yields a stranger's port (#562). Fine for its test-only callers;
+// anything that must know the port for sure reads it on the server thread,
+// as run_server() does before it publishes the descriptor.
+std::uint16_t Server::bound_port() const { return listening_port(server_fd_.load()); }
+
+std::uint16_t Server::listening_port(util::SocketHandle fd) {
     if (fd == util::kInvalidSocket) {
         return 0;
     }
     // fd can be closed and its number reused by an unrelated socket between
-    // the load above and here (a concurrent stop() or rebind_listener()) --
-    // the same hazard rebind_listener() guards when reclaiming the OLD fd
+    // the caller's load and here (a concurrent stop() or rebind_listener())
+    // -- the same hazard rebind_listener() guards when reclaiming the OLD fd
     // number, with the same check. Confirm it is still a listening socket
     // before trusting getsockname()'s answer, so a race reports 0 (unknown)
     // instead of a stranger's port.
@@ -596,23 +606,37 @@ void Server::run_server() {
         return;
     }
 
+    // Resolve the port once, on this thread, before the descriptor is
+    // published and anyone else can close it. With http_port 0 the OS picked
+    // it; the rebind below and the startup log need that number, not the
+    // configured 0 (#562, #564).
+    const std::uint16_t resolved_port = port != 0 ? static_cast<std::uint16_t>(port) : listening_port(server_fd);
+    if (resolved_port == 0) {
+        util::log_error("Failed to read back the ephemeral HTTP port the listener bound");
+        util::socket_close(server_fd);
+        running_ = false;
+        return;
+    }
+
     // Store server_fd so we can close it from stop()
     server_fd_.store(server_fd);
 
-    util::log_info("Server listening on port " + std::to_string(port));
+    util::log_info("Server listening on port " + std::to_string(resolved_port));
 
     // The listener fd can go bad underneath us without stop() being called (a
     // stray double-close elsewhere in the process can free and then re-close
     // our fd number). Observed once in the field: the accept loop broke
     // silently and the whole server shut down "successfully" mid ConformU
     // run. Recreate the listener instead of dying.
-    auto last_rebind = std::chrono::steady_clock::time_point::min();
+    // Empty until the first rebind. Not time_point::min(): now() - min()
+    // overflows the signed tick count (UB, caught by UBSan).
+    std::optional<std::chrono::steady_clock::time_point> last_rebind;
     auto rebind_listener = [&]() -> bool {
         // Backoff ACROSS rebind cycles too: if the fd-loss condition recurs
         // immediately after a successful rebind, sleep instead of spinning
         // select-fail -> rebind -> select-fail with continuous error logging.
         auto now = std::chrono::steady_clock::now();
-        if (now - last_rebind < std::chrono::seconds(2)) {
+        if (last_rebind && now - *last_rebind < std::chrono::seconds(2)) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         last_rebind = now;
@@ -629,7 +653,11 @@ void Server::run_server() {
             }
         }
         for (int attempt = 0; attempt < 10 && running_; ++attempt) {
-            util::SocketHandle fd = create_listener(port);
+            // The resolved port, never the configured one: with http_port 0 a
+            // fresh ephemeral bind would move the server to a port no client
+            // or discovery reply knows. If it cannot be re-bound, recovery
+            // fails as for any fixed port.
+            util::SocketHandle fd = create_listener(resolved_port);
             if (fd != util::kInvalidSocket) {
                 server_fd_.store(fd);
                 server_fd = fd;

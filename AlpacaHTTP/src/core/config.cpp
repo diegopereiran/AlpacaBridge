@@ -133,6 +133,26 @@ bool parse_size_value(const std::string& value, std::size_t& result) {
     }
 }
 
+// open-astro#392: http.allowed_hosts and ALPACAHTTP_ALLOWED_HOSTS are one
+// comma-separated string. Entries are trimmed and empty ones dropped; the
+// router normalizes the rest.
+std::vector<std::string> split_host_list(std::string_view value) {
+    std::vector<std::string> hosts;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        auto end = value.find(',', start);
+        if (end == std::string_view::npos) {
+            end = value.size();
+        }
+        std::string entry = trim_copy(value.substr(start, end - start));
+        if (!entry.empty()) {
+            hosts.push_back(std::move(entry));
+        }
+        start = end + 1;
+    }
+    return hosts;
+}
+
 } // namespace
 
 void Config::load_config_from_yaml(const std::string& config_path) {
@@ -186,6 +206,13 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 if (parse_size_value(value, parsed) &&
                     parsed <= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
                     set_keep_alive_lifetime_seconds(static_cast<int>(parsed));
+                }
+            } else if (key == "allowed_hosts") {
+                allowed_hosts_ = split_host_list(value);
+            } else if (key == "host_check_enabled") {
+                bool enabled = host_check_enabled_;
+                if (parse_bool_value(value, enabled)) {
+                    host_check_enabled_ = enabled;
                 }
             }
         } else if (current_section == "discovery") {
@@ -382,6 +409,17 @@ void Config::apply_environment_overrides() {
             set_motion_watchdog_seconds(std::stoi(watchdog_env));
         } catch (...) {  // NOLINT(bugprone-empty-catch)
             // Unparseable: keep whatever the file (or the default) set.
+        }
+    }
+
+    // open-astro#392: replaces the file's list; an empty variable clears it.
+    if (const char* v = std::getenv("ALPACAHTTP_ALLOWED_HOSTS")) {
+        allowed_hosts_ = split_host_list(v);
+    }
+    if (const char* v = std::getenv("ALPACAHTTP_HOST_CHECK")) {
+        bool enabled = host_check_enabled_;
+        if (parse_bool_value(v, enabled)) {
+            host_check_enabled_ = enabled;
         }
     }
 

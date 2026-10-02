@@ -151,6 +151,21 @@ public:
         return std::chrono::milliseconds(motion_watchdog_ms_.load(std::memory_order_relaxed));
     }
 
+    // open-astro#392: extra names route() accepts as a request's Host, on
+    // top of the built-in ones (IP literals, localhost, this machine's name,
+    // *.local, *.home.arpa, *.internal). An entry with a leading dot is a
+    // suffix (".lan" allows "lan" and every "*.lan"); entries are normalized
+    // like the Host header and empty ones dropped. Replaces the previous list.
+    // Server sets it from Config at construction; no HTTP endpoint calls it,
+    // so a rebound page cannot add its own name.
+    void set_allowed_hosts(const std::vector<std::string>& hosts);
+
+    // http.host_check_enabled: whether route() applies the Host allowlist at
+    // all. Off by default, so a request is not refused for its Host name; the
+    // Origin==Host cross-origin guard does not depend on it. Lock-free, so it
+    // may be flipped while requests run; the next request sees the new value.
+    void set_host_check_enabled(bool enabled) { host_check_enabled_.store(enabled, std::memory_order_release); }
+
     // open-astro#547: check every registered telescope for client silence
     // during motion and stop any that have gone quiet past the configured
     // interval. Called once a second from the server's existing low-
@@ -183,6 +198,14 @@ private:
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
     std::function<void()> shutdown_callback_;
     std::function<void()> restart_callback_;
+
+    // open-astro#392: normalized allowed_hosts entries, replaced wholesale by
+    // set_allowed_hosts() and read by every request; the lock guards only the
+    // pointer copy. machine_hostname_ is set once in the constructor.
+    std::shared_ptr<const std::vector<std::string>> allowed_hosts_ = std::make_shared<const std::vector<std::string>>();
+    mutable std::mutex allowed_hosts_mutex_;
+    std::atomic<bool> host_check_enabled_{false};
+    std::string machine_hostname_;
 
     // open-astro#547.
     std::atomic<std::chrono::milliseconds::rep> motion_watchdog_ms_{
