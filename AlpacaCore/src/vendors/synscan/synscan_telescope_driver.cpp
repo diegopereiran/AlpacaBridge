@@ -482,6 +482,7 @@ public:
     }
 
     std::string command_blind(std::string_view command, bool raw) override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -494,6 +495,7 @@ public:
     }
 
     bool command_bool(std::string_view command, bool raw) override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -506,6 +508,7 @@ public:
     }
 
     std::string command_string(std::string_view command, bool raw) override {
+        LinkYield yield(link_yield_);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -744,13 +747,14 @@ public:
         check_link_locked();
         // The poller keeps this current; before its first publish (or after a
         // reconnect) the getter asks the handset itself, as it always did.
-        if (poller_live_ && side_of_pier_valid_) {
+        if (polled_side_of_pier_current_locked()) {
             return side_of_pier_cached_;
         }
         try {
             char side = SynScanProtocolWrapper::instance().get_pointing_state();
             side_of_pier_cached_ = map_pointing_state_to_side(side);
             side_of_pier_valid_ = side_of_pier_cached_ >= 0;
+            side_of_pier_generation_ = cache_generation_;
         } catch (...) {
             if (!side_of_pier_valid_) {
                 throw;
@@ -2042,10 +2046,18 @@ private:
         }
     }
 
+    // The pier side is served from the cache only while no slew, sync, abort
+    // or jog has moved the generation since it was read: a GOTO across the
+    // meridian flips it, and the poller reads "p" again only at the end of
+    // the cycle that publishes the slew-end edge. mutex_ must be held.
+    bool polled_side_of_pier_current_locked() const {
+        return poller_live_ && side_of_pier_valid_ && side_of_pier_generation_ == cache_generation_;
+    }
+
     // Pier side for pulse_guide's DEC direction: the poller's cache when it is
     // live, the handset otherwise. mutex_ must be held.
     char pointing_state_locked() const {
-        if (poller_live_ && side_of_pier_valid_) {
+        if (polled_side_of_pier_current_locked()) {
             return side_of_pier_cached_ == 0 ? 'W' : 'E';
         }
         return SynScanProtocolWrapper::instance().get_pointing_state();
@@ -2223,6 +2235,7 @@ private:
                 }
                 side_of_pier_cached_ = map_pointing_state_to_side(pointing);
                 side_of_pier_valid_ = side_of_pier_cached_ >= 0;
+                side_of_pier_generation_ = generation;
                 poll_cycle_succeeded_locked();
             }
         } catch (...) {
@@ -2368,6 +2381,8 @@ private:
     mutable std::atomic<int> link_yield_{0};
     // Under mutex_.
     mutable std::uint64_t cache_generation_ = 0;
+    // cache_generation_ when side_of_pier_cached_ was read.
+    mutable std::uint64_t side_of_pier_generation_ = 0;
     bool poller_live_ = false;  // the poller has published since connect
     mutable int poll_failures_ = 0;
     mutable bool link_faulted_ = false;

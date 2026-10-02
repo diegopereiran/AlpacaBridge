@@ -61,6 +61,8 @@ struct FakeHandsetState {
     // in the RA field, so a test can tell WHICH exchange a cached RA came from.
     std::atomic<int> ra_ordinal{0};
     std::atomic<bool> goto_active{false};
+    // The "p" answer: 'E' (pointing east) is ASCOM pierWest (1).
+    std::atomic<char> pointing{'E'};
     // Receipt time of the latest chunk starting with each command byte.
     std::array<std::atomic<Clock::rep>, 256> received_at{};
 
@@ -105,8 +107,8 @@ alpacacore::test::FakeMountServer::Responder handset_responder(std::shared_ptr<F
                 return "12AB,2000#";
             case 'L':
                 return st->goto_active.load() ? "1#" : "0#";
-            case 'p':  // pointing east -> ASCOM pierWest (1)
-                return "E#";
+            case 'p':
+                return std::string(1, st->pointing.load()) + "#";
             case 'J':  // aligned
                 return std::string(1, static_cast<char>(1)) + "#";
             case 't':  // tracking mode: chr(mode) + "#"
@@ -527,6 +529,27 @@ TEST_CASE("SynScan poller - a read in flight across an invalidation is never pub
         scope.abort_slew();
         std::this_thread::sleep_for(milliseconds(1200));
     }
+}
+
+// A GOTO across the meridian, a sync or an abort can leave the mount on the
+// other side of the pier, and the poller reads "p" again only at the end of
+// its next cycle. SideOfPier (and pulse_guide's DEC direction) must not serve
+// the pier side read before the move in that window.
+TEST_CASE("SynScan poller - SideOfPier is not served from before a sync or abort", "[synscan][telescope][poller]") {
+    Rig rig;
+    REQUIRE(rig.connect());
+    auto& scope = *rig.driver;
+    // Let the poller publish its own "p".
+    std::this_thread::sleep_for(milliseconds(1500));
+    REQUIRE(scope.get_side_of_pier() == 1);
+
+    rig.state->pointing.store('W');  // pointing west: ASCOM pierEast (0)
+    scope.sync_to_coordinates(5.0, 20.0);
+    CHECK(scope.get_side_of_pier() == 0);
+
+    rig.state->pointing.store('E');
+    scope.abort_slew();
+    CHECK(scope.get_side_of_pier() == 1);
 }
 
 // Lifecycle (design rule 6). RED before the poller on the two waits for a
