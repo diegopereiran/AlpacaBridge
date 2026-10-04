@@ -3736,3 +3736,26 @@ TEST_CASE("SkyWatcher async - the EQ-AL55i Pro is not asked for the ':i' step-pe
 }
 
 #endif  // _WIN32
+
+// open-astro#770: Tracking=false during an East/West pulse stops RA, but the
+// pulse task's end-of-pulse restore used to put the drive step period back and
+// send ":J" regardless, so RA ran at sidereal while Tracking read false.
+// Same contract as the MoveAxis(0) restore (#535/#630): a restore never
+// restarts an axis the client has switched off.
+TEST_CASE("SkyWatcher async - Tracking=false during an East pulse stays stopped after the pulse (#770)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->pulse_guide(2, 2000);  // East, 2 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    driver->set_tracking(false);
+    REQUIRE_FALSE(driver->get_tracking());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // pulse over, t = 3 s
+    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
