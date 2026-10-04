@@ -212,6 +212,21 @@ int main() {
     EXPECT(status == 200);
 #endif
 
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+    configure(router,
+              R"({"vendor":"touptek","deviceType":"switch","deviceNumber":9709,"switchType":"stellavita",)"
+              R"("gpioChip":"/dev/gpiochip4"})",
+              status);
+    EXPECT(status == 400);
+    EXPECT(!registered(router, 9709));
+    configure(router,
+              R"({"vendor":"touptek","deviceType":"switch","deviceNumber":9710,"switchType":"stellavita",)"
+              R"("gpioChip":"/dev/gpiochip0"})",
+              status);
+    EXPECT(status == 200);
+    EXPECT(registered(router, 9710));
+#endif
+
     fs::current_path(fs::temp_directory_path());
     fs::remove_all(cwd);
     return 0;

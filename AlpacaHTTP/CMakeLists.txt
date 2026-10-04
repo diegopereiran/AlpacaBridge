@@ -415,9 +415,10 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_test(NAME test_catalog_json COMMAND test_catalog_json)
 
     # open-astro#765: device config cannot choose the GPIO chip, line or device node. The test
-    # replaces libgpiod with recording stubs, so it needs the ZWO ASIAIR drivers (libgpiod
-    # build) and its own working directory (relative config/registered_devices.json).
-    if(TARGET alpacacore_zwo OR ALPACACORE_IOPTRON_POWERBOX)
+    # replaces libgpiod with recording stubs, so it needs a libgpiod board driver (ZWO ASIAIR,
+    # iMate PowerBox or StellaVita) and its own working directory (relative
+    # config/registered_devices.json).
+    if(TARGET alpacacore_zwo OR ALPACACORE_IOPTRON_POWERBOX OR ALPACACORE_TOUPTEK_STELLAVITA)
         add_executable(test_gpio_config_pin tests/test_gpio_config_pin.cpp)
         target_link_libraries(test_gpio_config_pin alpacahttp)
         target_include_directories(test_gpio_config_pin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
