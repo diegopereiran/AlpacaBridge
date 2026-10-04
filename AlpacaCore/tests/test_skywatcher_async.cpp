@@ -3735,8 +3735,6 @@ TEST_CASE("SkyWatcher async - the EQ-AL55i Pro is not asked for the ':i' step-pe
     }
 }
 
-#endif  // _WIN32
-
 // open-astro#770: Tracking=false during an East/West pulse stops RA, but the
 // pulse task's end-of-pulse restore used to put the drive step period back and
 // send ":J" regardless, so RA ran at sidereal while Tracking read false.
@@ -3759,3 +3757,35 @@ TEST_CASE("SkyWatcher async - Tracking=false during an East pulse stays stopped 
     CHECK_FALSE(mount.axis_running(1));
     driver->set_connected(false);
 }
+
+// open-astro#770, the window after the restore: a pulse of 1.5 s or more checks
+// that the restored rate took, with IsPulseGuiding still true. Tracking=false
+// landing there stops RA, the check reads the stopped axis as "did not take"
+// and its resend of ":I"+":J" used to restart RA while Tracking read false.
+TEST_CASE("SkyWatcher async - Tracking=false during the post-pulse rate check stays stopped (#770)",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    const uint32_t drive_period = mount.step_period(1);
+
+    driver->pulse_guide(2, 2000);  // East, 2 s
+    REQUIRE(wait_until([&] { return mount.step_period(1) != drive_period; }, 3000));
+    // Tight poll: the check settles 150 ms before its first position sample.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+    while (mount.step_period(1) != drive_period && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(mount.step_period(1) == drive_period);  // the pulse-end restore landed
+    REQUIRE(driver->get_is_pulse_guiding());
+    driver->set_tracking(false);
+
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(mount.axis_running(1));
+    driver->set_connected(false);
+}
+
+#endif  // _WIN32

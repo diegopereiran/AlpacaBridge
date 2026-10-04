@@ -1751,6 +1751,20 @@ public:
                 // took the busy-axis deferral and waited on a restore this
                 // task had already run: the write was stranded.
                 std::lock_guard<std::mutex> lock(mutex_);
+                // open-astro#770: Tracking=false after the restore stopped RA,
+                // and the rate check above, still sampling, read the stopped
+                // axis as "did not take" and resent ":I"+":J". Stop it again
+                // unless a reaper owns the axis now.
+                if (restore_still_wanted && !tracking_ && connected_ && !pulse_task_cancel_[ai].load()) {
+                    try {
+                        protocol_->stop_motion(kAxisRa);
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("SkyWatcher",
+                                        std::string("Pulse end: failed to stop RA after Tracking=false: ") + e.what());
+                    }
+                    cmd_axis_rate_deg_s_[0] = 0.0;
+                    invalidate_position_cache_locked();
+                }
                 end_pulse_locked();
             }
             if (!stopped) {
