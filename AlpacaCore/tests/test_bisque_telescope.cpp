@@ -16,9 +16,11 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -40,11 +42,11 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-alpacacore::vendor::bisque::ConnectionInfo loopback(int port) {
+alpacacore::vendor::bisque::ConnectionInfo loopback(int port, int timeout_ms = 300) {
     alpacacore::vendor::bisque::ConnectionInfo info;
     info.host = "127.0.0.1";
     info.tcp_port = port;
-    info.response_timeout_ms = 300;
+    info.response_timeout_ms = timeout_ms;
     return info;
 }
 
@@ -555,4 +557,61 @@ TEST_CASE("Bisque Telescope Driver - async handshake timeout releases the wrappe
     CHECK_NOTHROW(retry->set_connected(true));
     CHECK(retry->get_connected());
     retry->set_connected(false);
+}
+
+TEST_CASE("Bisque PulseGuide - async status remains readable and negative duration is InvalidValue",
+          "[bisque][telescope][pulseguiding]") {
+    auto disconnected =
+        alpacacore::vendor::bisque::create_bisque_telescope(0, alpacacore::vendor::bisque::ConnectionInfo{});
+    require_alpaca_error([&] { disconnected->pulse_guide(2, -1000); }, alpacacore::AlpacaError::InvalidValue);
+
+    struct GuideState {
+        std::atomic<bool> entered{false};
+        std::atomic<int> calls{0};
+    };
+    auto state = std::make_shared<GuideState>();
+    alpacacore::test::FakeMountServer server([state](const std::string& command) {
+        if (command.find("ConnectAndDoNotUnpark") != std::string::npos) return "1#";
+        if (command.find("GetRaDec") != std::string::npos) return "|No error. Error = 0.5.5,20.0#";
+        if (command.find("GetAzAlt") != std::string::npos) return "|No error. Error = 0.100.0,45.0#";
+        if (command.find("IsParked") != std::string::npos) return "|No error. Error = 0.false#";
+        if (command.find("MoveTelescope") != std::string::npos) {
+            state->entered.store(true);
+            state->calls.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        }
+        return "|No error. Error = 0.OK#";
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port(), 2500));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE_NOTHROW(driver->pulse_guide(2, 800));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(600));
+    const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!state->entered.load() && std::chrono::steady_clock::now() < entered_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(state->entered.load());
+
+    const auto read_start = std::chrono::steady_clock::now();
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(std::chrono::steady_clock::now() - read_start < std::chrono::milliseconds(100));
+    require_alpaca_error([&] { driver->pulse_guide(0, 800); }, alpacacore::AlpacaError::InvalidOperation);
+    const auto finished_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (driver->get_is_pulse_guiding() && std::chrono::steady_clock::now() < finished_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(state->calls.load() == 1);
+
+    driver->pulse_guide(2, 800);
+    const auto second_guide_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (state->calls.load() < 2 && std::chrono::steady_clock::now() < second_guide_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(state->calls.load() == 2);
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
 }

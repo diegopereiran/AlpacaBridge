@@ -27,9 +27,12 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -48,6 +51,21 @@ struct FakeSynScanState {
     // GOTO's read times out.
     std::atomic<bool> hold_goto{false};
     std::atomic<bool> goto_held{false};
+    std::atomic<unsigned char> model_id{50};
+    std::mutex mutex;
+    std::string position = "00000000,00000000#";
+    std::vector<std::string> gotos;
+
+    void set_position(std::string value) {
+        std::lock_guard<std::mutex> lock(mutex);
+        position = std::move(value);
+    }
+
+    std::vector<std::string> goto_snapshot() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return gotos;
+    }
+
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (!goto_seen.load()) return false;
@@ -65,8 +83,10 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'e':
             case 'E':
             case 'z':
-            case 'Z':
-                return "12AB0500,20000500#";  // parseable 16/24-bit position pair
+            case 'Z': {
+                std::lock_guard<std::mutex> lock(st->mutex);
+                return st->position;  // parseable 16/24-bit position pair
+            }
             case 'r':
             case 'R':
             case 'b':
@@ -75,9 +95,17 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
                     st->goto_held.store(true);
                     return "";
                 }
+                {
+                    std::lock_guard<std::mutex> lock(st->mutex);
+                    st->gotos.push_back(chunk);
+                }
                 st->goto_started.store(Clock::now().time_since_epoch().count());
                 st->goto_seen.store(true);
                 st->goto_count.fetch_add(1);
+                return "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'W':
                 return "#";
             case 'L':
                 return st->goto_in_progress() ? "1#" : "0#";
@@ -88,7 +116,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'P':  // tracking mode write / passthrough
                 return "#";
             case 'm':  // model id: chr(model) + "#"; 50 = EQM-35 Pro
-                return std::string(1, static_cast<char>(50)) + "#";
+                return std::string(1, static_cast<char>(st->model_id.load())) + "#";
             default:
                 return "0#";
         }
@@ -344,6 +372,49 @@ TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew 
 
     driver->unpark();
     REQUIRE_FALSE(driver->get_at_park());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[synscan][telescope][park]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->set_park();                      // mechanical position is RA=0, Dec=0 at longitude 0
+    st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
+    driver->set_site_longitude(90.0);        // longitude +90 degrees has the same six-hour LST effect
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+
+    const auto gotos = st->goto_snapshot();
+    REQUIRE(gotos.size() == 1);
+    INFO("Park GOTO after a six-hour sidereal shift: " << gotos.front());
+    CHECK((gotos.front() == "r40000000,00000000" || gotos.front() == "R4000,0000"));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan SetPark - Alt-Az mount retains azimuth and altitude", "[synscan][telescope][park]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    st->model_id.store(128);  // AZ GOTO
+    st->set_position("40000000,20000000#");
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    driver->set_park();
+    st->set_position("00000000,00000000#");
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+
+    const auto gotos = st->goto_snapshot();
+    REQUIRE(gotos.size() == 1);
+    INFO("Alt-Az Park GOTO: " << gotos.front());
+    CHECK((gotos.front() == "b40000000,20000000" || gotos.front() == "B4000,2000"));
     driver->set_connected(false);
 }
 

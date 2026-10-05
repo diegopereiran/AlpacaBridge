@@ -349,8 +349,11 @@ public:
 
     void guide(double ra_arcsec, double dec_arcsec) {
         char body[256];
+        // The driver owns the asynchronous operation state on a worker thread.
+        // Keep DirectGuide synchronous here so return means the displacement
+        // has completed; sky6RASCOMTele.Asynchronous does not govern this API.
         std::snprintf(body, sizeof(body),
-                      "sky6RASCOMTele.Asynchronous = true;"
+                      "sky6DirectGuide.lAsynchronous = 0;"
                       "sky6DirectGuide.MoveTelescope(%g, %g);",
                       ra_arcsec, dec_arcsec);
         send_ok_command_internal(body, 0);
