@@ -1,0 +1,2 @@
+### Changed (docs)
+- **Changelog fragments put each bullet on one line** (`changelog.d/README.md`): the Body section now says to write each bullet on one line and not wrap it, and its example bullet is no longer wrapped. Most fragments already used one line per bullet, but the README example was wrapped, so two fragments since v4.2.0 wrapped at about 95 columns. Rendered Markdown and the generated `debian/changelog` are the same in both styles; only the raw `CHANGELOG.md` text differed. `--check` does not enforce the rule.
