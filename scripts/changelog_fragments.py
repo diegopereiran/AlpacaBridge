@@ -494,8 +494,12 @@ def main() -> int:
         description=__doc__.splitlines()[0],
         epilog="Fragment format: changelog.d/README.md.",
         formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=28),
+        add_help=False,
     )
+    # Help sections print in group-creation order: modes first, then options.
     modes = ap.add_argument_group("mode (exactly one)")
+    opts = ap.add_argument_group("options")
+    opts.add_argument("-h", "--help", action="help", help="show this help message and exit")
     mode = modes.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="validate every fragment (CI and pre-flight)")
     mode.add_argument(
@@ -513,16 +517,16 @@ def main() -> int:
         help="write the dated X.Y.Z section to the changelog and delete the fragments (needs --date)",
     )
     mode.add_argument("--self-test", action="store_true", help="run the script's built-in tests")
-    ap.add_argument(
+    opts.add_argument(
         "--changelog", default="CHANGELOG.md", type=Path, metavar="PATH", help="changelog file (default: %(default)s)"
     )
-    ap.add_argument(
+    opts.add_argument(
         "--fragments", default="changelog.d", type=Path, metavar="DIR", help="fragment directory (default: %(default)s)"
     )
-    ap.add_argument(
+    opts.add_argument(
         "--version", metavar="X.Y.Z", help="with --preview: version for the heading (default: the --bump result)"
     )
-    ap.add_argument("--date", metavar="YYYY-MM-DD", help="with --release: release date (required)")
+    opts.add_argument("--date", metavar="YYYY-MM-DD", help="with --release: release date (required)")
     args = ap.parse_args()
 
     if args.self_test:
