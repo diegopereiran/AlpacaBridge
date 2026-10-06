@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -478,11 +479,17 @@ TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses 
     CHECK_NOTHROW(driver->park());
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
 
-    // Same mechanical position at +90 degrees longitude reads RA=6h.
+    // Same mechanical position at +90 degrees longitude reads RA=6h, plus the
+    // sidereal time the reconnect took (an RA/Dec fallback would read 0h).
     const auto gotos = st->goto_snapshot();
     REQUIRE(gotos.size() == 1);
     INFO("Park GOTO after a reconnect without a site: " << gotos.front());
-    CHECK((gotos.front() == "r40000000,00000000" || gotos.front() == "R4000,0000"));
+    const std::string& cmd = gotos.front();
+    const bool precise = cmd.front() == 'r';
+    const std::string ra_hex = cmd.substr(1, precise ? 8 : 4);
+    const double full_scale = precise ? 4294967296.0 : 65536.0;
+    const double ra_hours = static_cast<double>(std::stoul(ra_hex, nullptr, 16)) / full_scale * 24.0;
+    CHECK(std::abs(ra_hours - 6.0) < 0.01);
     driver->set_connected(false);
 }
 
