@@ -461,7 +461,7 @@ TEST_CASE("SynScan equatorial mount without a site - Park keeps the RA/Dec fallb
     }
 }
 
-TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses the saved RA/Dec",
+TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses the last known longitude",
           "[synscan][telescope][park]") {
     auto st = std::make_shared<FakeSynScanState>();
     alpacacore::test::FakeMountServer server(synscan_responder(st));
@@ -469,13 +469,20 @@ TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses 
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    REQUIRE_NOTHROW(driver->set_park());  // site known: saved as an hour angle
+    REQUIRE_NOTHROW(driver->set_park());  // RA=0 at longitude 0: saved as an hour angle
+    driver->set_site_longitude(90.0);     // the last known longitude is now +90 degrees
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
 
     st->no_location.store(true);  // the reconnected handset reports no site
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     CHECK_NOTHROW(driver->park());
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+
+    // Same mechanical position at +90 degrees longitude reads RA=6h.
+    const auto gotos = st->goto_snapshot();
+    REQUIRE(gotos.size() == 1);
+    INFO("Park GOTO after a reconnect without a site: " << gotos.front());
+    CHECK((gotos.front() == "r40000000,00000000" || gotos.front() == "R4000,0000"));
     driver->set_connected(false);
 }
 
