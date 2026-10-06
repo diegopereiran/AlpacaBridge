@@ -622,7 +622,7 @@ namespace {
 // Serves the Bisque handshake and position polls; MoveTelescope answers with
 // `guide_reply` after `guide_delay`.
 alpacacore::test::FakeMountServer::Responder bisque_guide_responder(std::chrono::milliseconds guide_delay,
-                                                                     std::string guide_reply) {
+                                                                    std::string guide_reply) {
     return [guide_delay, guide_reply](const std::string& command) -> std::string {
         if (command.find("ConnectAndDoNotUnpark") != std::string::npos) return "1#";
         if (command.find("GetRaDec") != std::string::npos) return "|No error. Error = 0.5.5,20.0#";
@@ -651,7 +651,7 @@ int wait_for_pulse_guide_end(alpacacore::TelescopeDriver& driver, std::chrono::s
     return -1;
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE("Bisque PulseGuide - a hung DirectGuide fails within duration plus margin",
           "[bisque][telescope][pulseguiding]") {
