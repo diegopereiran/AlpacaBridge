@@ -311,7 +311,8 @@ public:
         send_ok_command_internal(
             "sky6RASCOMTele.FindHome();"
             "while(!sky6RASCOMTele.IsSlewComplete) {"
-            "sky6Web.Sleep(1000);}", 60000);
+            "sky6Web.Sleep(1000);}",
+            60000);
     }
 
     int get_pier_side() {
