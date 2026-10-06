@@ -1039,25 +1039,24 @@ public:
             if (park_altaz) {
                 park_target_first = park_azimuth_degrees_;
                 park_target_second = park_altitude_degrees_;
+            } else if (!park_ra_uses_hour_angle_) {
+                park_target_first = park_ra_hours_;
+                park_target_second = park_dec_degrees_;
             } else {
-                if (park_ra_uses_hour_angle_ && !site_info_valid_) {
+                if (!site_info_valid_) {
                     ensure_site_info_cached_locked();
                 }
-                // Without a site (for example a handset reconnected with no
-                // location) fall back to the RA/Dec saved alongside the hour angle.
-                if (!park_ra_uses_hour_angle_ || !site_info_valid_) {
-                    park_target_first = park_ra_hours_;
-                    park_target_second = park_dec_degrees_;
-                } else {
-                    const double lst =
-                        compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
-                    park_target_first = std::fmod(lst - park_hour_angle_hours_, 24.0);
-                    if (park_target_first < 0.0) {
-                        park_target_first += 24.0;
-                    }
-                    park_target_second = park_dec_degrees_;
-                    validate_ra_dec(park_target_first, park_target_second, "Park");
+                // An hour angle is saved only while a site is known, so a
+                // handset that has since stopped reporting one (a reconnect
+                // without location) still leaves the last known longitude here.
+                const double lst =
+                    compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+                park_target_first = std::fmod(lst - park_hour_angle_hours_, 24.0);
+                if (park_target_first < 0.0) {
+                    park_target_first += 24.0;
                 }
+                park_target_second = park_dec_degrees_;
+                validate_ra_dec(park_target_first, park_target_second, "Park");
             }
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
