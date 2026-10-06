@@ -568,7 +568,7 @@ TEST_CASE("Bisque PulseGuide - async status remains readable and negative durati
     struct GuideState {
         std::atomic<bool> entered{false};
         std::atomic<int> calls{0};
-        std::chrono::milliseconds delay{3800};
+        std::chrono::milliseconds delay{900};
     };
     auto state = std::make_shared<GuideState>();
     alpacacore::test::FakeMountServer server([state](const std::string& command) {
@@ -588,7 +588,7 @@ TEST_CASE("Bisque PulseGuide - async status remains readable and negative durati
     REQUIRE_NOTHROW(driver->set_connected(true));
 
     const auto start = std::chrono::steady_clock::now();
-    REQUIRE_NOTHROW(driver->pulse_guide(2, 4000));
+    REQUIRE_NOTHROW(driver->pulse_guide(2, 1000));
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(600));
     const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!state->entered.load() && std::chrono::steady_clock::now() < entered_deadline) {
@@ -599,7 +599,7 @@ TEST_CASE("Bisque PulseGuide - async status remains readable and negative durati
     const auto read_start = std::chrono::steady_clock::now();
     CHECK(driver->get_is_pulse_guiding());
     CHECK(std::chrono::steady_clock::now() - read_start < std::chrono::milliseconds(100));
-    require_alpaca_error([&] { driver->pulse_guide(0, 4000); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->pulse_guide(0, 1000); }, alpacacore::AlpacaError::InvalidOperation);
     const auto finished_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
     while (driver->get_is_pulse_guiding() && std::chrono::steady_clock::now() < finished_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -607,7 +607,7 @@ TEST_CASE("Bisque PulseGuide - async status remains readable and negative durati
     CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(state->calls.load() == 1);
 
-    driver->pulse_guide(2, 4000);
+    driver->pulse_guide(2, 1000);
     const auto second_guide_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (state->calls.load() < 2 && std::chrono::steady_clock::now() < second_guide_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -656,16 +656,16 @@ int wait_for_pulse_guide_end(alpacacore::TelescopeDriver& driver, std::chrono::s
 TEST_CASE("Bisque PulseGuide - a hung DirectGuide fails within duration plus margin",
           "[bisque][telescope][pulseguiding]") {
     // 200 ms pulse: the response bound is 200 ms + 1 s margin. TheSkyX stays
-    // silent for 3 s, so the guide must be reported failed well before then.
+    // silent for 2 s, so the guide must be reported failed well before then.
     alpacacore::test::FakeMountServer server(
-        bisque_guide_responder(std::chrono::milliseconds(3000), "|No error. Error = 0.OK#"));
+        bisque_guide_responder(std::chrono::milliseconds(2000), "|No error. Error = 0.OK#"));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()));
     REQUIRE_NOTHROW(driver->set_connected(true));
 
     const auto start = std::chrono::steady_clock::now();
     REQUIRE_NOTHROW(driver->pulse_guide(2, 200));
-    const int outcome = wait_for_pulse_guide_end(*driver, start + std::chrono::milliseconds(2500));
+    const int outcome = wait_for_pulse_guide_end(*driver, start + std::chrono::milliseconds(1800));
     CHECK(outcome == alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
 }
