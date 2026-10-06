@@ -1039,25 +1039,25 @@ public:
             if (park_altaz) {
                 park_target_first = park_azimuth_degrees_;
                 park_target_second = park_altitude_degrees_;
-            } else if (!park_ra_uses_hour_angle_) {
-                park_target_first = park_ra_hours_;
-                park_target_second = park_dec_degrees_;
             } else {
-                if (!site_info_valid_) {
+                if (park_ra_uses_hour_angle_ && !site_info_valid_) {
                     ensure_site_info_cached_locked();
                 }
-                if (!site_info_valid_) {
-                    throw AlpacaException("Cannot calculate the park target without SiteLongitude",
-                                          AlpacaError::ValueNotSet);
+                // Without a site (for example a handset reconnected with no
+                // location) fall back to the RA/Dec saved alongside the hour angle.
+                if (!park_ra_uses_hour_angle_ || !site_info_valid_) {
+                    park_target_first = park_ra_hours_;
+                    park_target_second = park_dec_degrees_;
+                } else {
+                    const double lst =
+                        compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+                    park_target_first = std::fmod(lst - park_hour_angle_hours_, 24.0);
+                    if (park_target_first < 0.0) {
+                        park_target_first += 24.0;
+                    }
+                    park_target_second = park_dec_degrees_;
+                    validate_ra_dec(park_target_first, park_target_second, "Park");
                 }
-                const double lst =
-                    compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
-                park_target_first = std::fmod(lst - park_hour_angle_hours_, 24.0);
-                if (park_target_first < 0.0) {
-                    park_target_first += 24.0;
-                }
-                park_target_second = park_dec_degrees_;
-                validate_ra_dec(park_target_first, park_target_second, "Park");
             }
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
@@ -2002,6 +2002,16 @@ private:
         }
     }
 
+    // Saves the current RA/Dec as the park target, as main did for every mount.
+    void store_legacy_park_position_locked() {
+        refresh_equatorial_cache_locked();
+        park_alignment_mode_ = AlignmentMode::GermanPolar;
+        park_ra_uses_hour_angle_ = false;
+        park_ra_hours_ = cached_ra_hours_;
+        park_dec_degrees_ = cached_dec_degrees_;
+        park_position_set_ = true;
+    }
+
     void store_park_position_locked() {
         try {
             park_alignment_mode_ = alignment_mode_locked();
@@ -2009,12 +2019,7 @@ private:
             // Dual-mode and unidentified handsets cannot tell us whether the
             // saved RA/Dec needs sidereal conversion. Keep their prior usable
             // park behavior instead of making SetPark and Park unavailable.
-            refresh_equatorial_cache_locked();
-            park_alignment_mode_ = AlignmentMode::GermanPolar;
-            park_ra_uses_hour_angle_ = false;
-            park_ra_hours_ = cached_ra_hours_;
-            park_dec_degrees_ = cached_dec_degrees_;
-            park_position_set_ = true;
+            store_legacy_park_position_locked();
             return;
         }
         if (park_alignment_mode_ == AlignmentMode::AltAz) {
@@ -2027,7 +2032,10 @@ private:
                 ensure_site_info_cached_locked();
             }
             if (!site_info_valid_) {
-                throw AlpacaException("Set SiteLongitude before setting the park position", AlpacaError::ValueNotSet);
+                // No longitude, so no LST for an hour angle: keep the prior
+                // park behavior rather than making SetPark and Park unavailable.
+                store_legacy_park_position_locked();
+                return;
             }
             refresh_equatorial_cache_locked();
             const double lst =
