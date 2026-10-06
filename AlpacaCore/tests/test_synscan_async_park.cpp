@@ -52,6 +52,9 @@ struct FakeSynScanState {
     std::atomic<bool> hold_goto{false};
     std::atomic<bool> goto_held{false};
     std::atomic<unsigned char> model_id{50};
+    // With `no_location` set the handset never answers the location query,
+    // so the driver has no site unless config or a client supplies one.
+    std::atomic<bool> no_location{false};
     std::mutex mutex;
     std::string position = "00000000,00000000#";
     std::vector<std::string> gotos;
@@ -104,6 +107,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
                 st->goto_count.fetch_add(1);
                 return "#";
             case 'w':
+                if (st->no_location.load()) return "";
                 return std::string(8, '\0') + "#";
             case 'W':
                 return "#";
@@ -436,6 +440,24 @@ TEST_CASE("SynScan ambiguous or unknown mount - Park keeps the RA/Dec fallback",
             REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
             driver->set_connected(false);
         }
+    }
+}
+
+TEST_CASE("SynScan equatorial mount without a site - Park keeps the RA/Dec fallback", "[synscan][telescope][park]") {
+    for (const bool set_park_first : {false, true}) {
+        auto st = std::make_shared<FakeSynScanState>();  // model 50, EQM-35 Pro: known equatorial
+        st->no_location.store(true);
+        alpacacore::test::FakeMountServer server(synscan_responder(st));
+        REQUIRE(server.ok());
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        if (set_park_first) {
+            CHECK_NOTHROW(driver->set_park());
+        }
+        CHECK_NOTHROW(driver->park());
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        driver->set_connected(false);
     }
 }
 
