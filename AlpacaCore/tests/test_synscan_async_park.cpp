@@ -461,6 +461,24 @@ TEST_CASE("SynScan equatorial mount without a site - Park keeps the RA/Dec fallb
     }
 }
 
+TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses the saved RA/Dec",
+          "[synscan][telescope][park]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE_NOTHROW(driver->set_park());  // site known: saved as an hour angle
+    REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
+
+    st->no_location.store(true);  // the reconnected handset reports no site
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK_NOTHROW(driver->park());
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescope][async]") {
     auto st = std::make_shared<FakeSynScanState>();
     alpacacore::test::FakeMountServer server(synscan_responder(st));
