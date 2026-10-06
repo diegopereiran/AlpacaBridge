@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -36,6 +37,7 @@
 #include <numbers>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <thread>
 
 namespace alpacacore::vendor::celestron {
@@ -2154,13 +2156,23 @@ private:
                 throw AlpacaException("Celestron handset firmware is unavailable; cannot select EQ tracking mode",
                                       AlpacaError::DriverException);
             }
-            const auto separator = mount_firmware_version_.find('.');
-            if (separator == std::string::npos) {
-                throw AlpacaException("Celestron handset firmware is unavailable; cannot select EQ tracking mode",
+            const std::string_view firmware = mount_firmware_version_;
+            const auto separator = firmware.find('.');
+            if (separator == std::string_view::npos) {
+                throw AlpacaException("Cannot parse Celestron handset firmware; cannot select EQ tracking mode",
                                       AlpacaError::DriverException);
             }
-            const int major = std::stoi(mount_firmware_version_.substr(0, separator));
-            const int minor = std::stoi(mount_firmware_version_.substr(separator + 1));
+            int major = 0;
+            int minor = 0;
+            const auto major_text = firmware.substr(0, separator);
+            const auto minor_text = firmware.substr(separator + 1);
+            const auto major_result = std::from_chars(major_text.data(), major_text.data() + major_text.size(), major);
+            const auto minor_result = std::from_chars(minor_text.data(), minor_text.data() + minor_text.size(), minor);
+            if (major_result.ec != std::errc{} || major_result.ptr != major_text.data() + major_text.size() ||
+                minor_result.ec != std::errc{} || minor_result.ptr != minor_text.data() + minor_text.size()) {
+                throw AlpacaException("Cannot parse Celestron handset firmware; cannot select EQ tracking mode",
+                                      AlpacaError::DriverException);
+            }
             if (major == 3 && minor >= 1 && minor <= 4) {
                 return south ? 2 : 1;
             }

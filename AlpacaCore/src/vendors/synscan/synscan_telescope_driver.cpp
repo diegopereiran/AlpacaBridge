@@ -1038,6 +1038,9 @@ public:
             if (park_altaz) {
                 park_target_first = park_azimuth_degrees_;
                 park_target_second = park_altitude_degrees_;
+            } else if (!park_ra_uses_hour_angle_) {
+                park_target_first = park_ra_hours_;
+                park_target_second = park_dec_degrees_;
             } else {
                 if (!site_info_valid_) {
                     ensure_site_info_cached_locked();
@@ -1992,11 +1995,25 @@ private:
     }
 
     void store_park_position_locked() {
-        park_alignment_mode_ = alignment_mode_locked();
+        try {
+            park_alignment_mode_ = alignment_mode_locked();
+        } catch (const AlpacaException&) {
+            // Dual-mode and unidentified handsets cannot tell us whether the
+            // saved RA/Dec needs sidereal conversion. Keep their prior usable
+            // park behavior instead of making SetPark and Park unavailable.
+            refresh_equatorial_cache_locked();
+            park_alignment_mode_ = AlignmentMode::GermanPolar;
+            park_ra_uses_hour_angle_ = false;
+            park_ra_hours_ = cached_ra_hours_;
+            park_dec_degrees_ = cached_dec_degrees_;
+            park_position_set_ = true;
+            return;
+        }
         if (park_alignment_mode_ == AlignmentMode::AltAz) {
             refresh_altaz_cache_locked();
             park_azimuth_degrees_ = cached_az_degrees_;
             park_altitude_degrees_ = cached_alt_degrees_;
+            park_ra_uses_hour_angle_ = false;
         } else {
             if (!site_info_valid_) {
                 ensure_site_info_cached_locked();
@@ -2008,7 +2025,9 @@ private:
             const double lst =
                 compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
             park_hour_angle_hours_ = shortest_ra_delta_hours(lst, cached_ra_hours_);
+            park_ra_hours_ = cached_ra_hours_;
             park_dec_degrees_ = cached_dec_degrees_;
+            park_ra_uses_hour_angle_ = true;
         }
         park_position_set_ = true;
     }
@@ -2257,7 +2276,9 @@ private:
     bool park_position_set_ = false;
     mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
     AlignmentMode park_alignment_mode_ = AlignmentMode::GermanPolar;
+    bool park_ra_uses_hour_angle_ = false;
     double park_hour_angle_hours_ = 0.0;
+    double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
     double park_azimuth_degrees_ = 0.0;
     double park_altitude_degrees_ = 0.0;

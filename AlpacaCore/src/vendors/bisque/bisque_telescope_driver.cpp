@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <numbers>
 #include <optional>
@@ -719,11 +720,15 @@ public:
         pulse_guiding_ = true;
         pulse_guide_error_.clear();
         const std::uint64_t generation = ++pulse_guide_generation_;
+        constexpr int kResponseMarginMs = 1000;
+        const int guide_timeout_ms = duration > std::numeric_limits<int>::max() - kResponseMarginMs
+                                         ? std::numeric_limits<int>::max()
+                                         : duration + kResponseMarginMs;
         try {
-            pulse_guide_thread_ = std::thread([this, generation, ra_arcsec, dec_arcsec] {
+            pulse_guide_thread_ = std::thread([this, generation, ra_arcsec, dec_arcsec, guide_timeout_ms] {
                 std::string error;
                 try {
-                    BisqueProtocolWrapper::instance().guide(ra_arcsec, dec_arcsec);
+                    BisqueProtocolWrapper::instance().guide(ra_arcsec, dec_arcsec, guide_timeout_ms);
                 } catch (const std::exception& e) {
                     error = std::string("PulseGuide failed: ") + e.what();
                 } catch (...) {

@@ -418,6 +418,27 @@ TEST_CASE("SynScan SetPark - Alt-Az mount retains azimuth and altitude", "[synsc
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan ambiguous or unknown mount - Park keeps the RA/Dec fallback", "[synscan][telescope][park]") {
+    for (const auto model_id :
+         {static_cast<unsigned char>(5), static_cast<unsigned char>(6), static_cast<unsigned char>(255)}) {
+        for (const bool set_park_first : {false, true}) {
+            auto st = std::make_shared<FakeSynScanState>();
+            st->model_id.store(model_id);
+            alpacacore::test::FakeMountServer server(synscan_responder(st));
+            REQUIRE(server.ok());
+            auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+                0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+            if (set_park_first) {
+                CHECK_NOTHROW(driver->set_park());
+            }
+            CHECK_NOTHROW(driver->park());
+            REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+            driver->set_connected(false);
+        }
+    }
+}
+
 TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescope][async]") {
     auto st = std::make_shared<FakeSynScanState>();
     alpacacore::test::FakeMountServer server(synscan_responder(st));

@@ -347,7 +347,7 @@ public:
         send_ok_command_internal("sky6RASCOMTele.DoCommand(10,'');", 0);
     }
 
-    void guide(double ra_arcsec, double dec_arcsec) {
+    void guide(double ra_arcsec, double dec_arcsec, int timeout_ms) {
         char body[256];
         // The driver owns the asynchronous operation state on a worker thread.
         // Keep DirectGuide synchronous here so return means the displacement
@@ -356,7 +356,7 @@ public:
                       "sky6DirectGuide.lAsynchronous = 0;"
                       "sky6DirectGuide.MoveTelescope(%g, %g);",
                       ra_arcsec, dec_arcsec);
-        send_ok_command_internal(body, 0);
+        send_ok_command_internal(body, timeout_ms);
     }
 
     std::string send_command(const std::string& js_body, int timeout_ms) {
@@ -503,7 +503,7 @@ void BisqueProtocolWrapper::find_home() { pimpl_->find_home(); }
 int BisqueProtocolWrapper::get_pier_side() { return pimpl_->get_pier_side(); }
 void BisqueProtocolWrapper::start_open_loop_motion(int dir, int rate) { pimpl_->start_open_loop_motion(dir, rate); }
 void BisqueProtocolWrapper::stop_open_loop_motion() { pimpl_->stop_open_loop_motion(); }
-void BisqueProtocolWrapper::guide(double ra, double dec) { pimpl_->guide(ra, dec); }
+void BisqueProtocolWrapper::guide(double ra, double dec, int timeout_ms) { pimpl_->guide(ra, dec, timeout_ms); }
 std::string BisqueProtocolWrapper::send_command(const std::string& js, int t) { return pimpl_->send_command(js, t); }
 void BisqueProtocolWrapper::send_ok_command(const std::string& js, int t) { pimpl_->send_ok_command(js, t); }
 
