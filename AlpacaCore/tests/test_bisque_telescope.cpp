@@ -706,3 +706,23 @@ TEST_CASE("Bisque PulseGuide - the maximum duration completes without a timeout 
     CHECK(wait_for_pulse_guide_end(*driver, std::chrono::steady_clock::now() + std::chrono::seconds(2)) == 0);
     driver->set_connected(false);
 }
+
+TEST_CASE("Bisque FindHome - waits past the default response timeout for TheSkyX's home loop",
+          "[bisque][telescope][findhome]") {
+    // FindHome runs a JavaScript loop in TheSkyX that answers only once the
+    // mount is home; its response bound is 60 s, not the 300 ms default here.
+    alpacacore::test::FakeMountServer server([](const std::string& command) -> std::string {
+        if (command.find("FindHome") != std::string::npos) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            return "|No error. Error = 0.OK#";
+        }
+        return bisque_guide_responder(std::chrono::milliseconds(0), "")(command);
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    REQUIRE_NOTHROW(driver->find_home());
+    CHECK(driver->get_at_home());
+    driver->set_connected(false);
+}
