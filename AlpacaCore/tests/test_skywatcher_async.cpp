@@ -29,8 +29,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string_view>
 #include <thread>
 
@@ -2330,6 +2332,208 @@ TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rat
     REQUIRE(elapsed_ms < 300.0);
 
     driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J leaves RA stopped",
+          "[skywatcher][async][pulseguide]") {
+    // The pulse task restores the drive with ":I" then ":J", both outside
+    // mutex_. The hook parks it between them while Tracking=false sends its
+    // ":K"; the late ":J" then restarts RA after that stop (main CI, test #967).
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_preset = mount.step_period(1);
+
+    std::mutex m;
+    std::condition_variable cv;
+    bool parked = false;
+    bool released = false;
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([&] {
+        std::unique_lock<std::mutex> lock(m);
+        parked = true;
+        cv.notify_all();
+        cv.wait_for(lock, std::chrono::seconds(15), [&] { return released; });
+    });
+    auto release = [&] {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            released = true;
+        }
+        cv.notify_all();
+    };
+
+    driver->pulse_guide(2, 300);
+    {
+        std::unique_lock<std::mutex> lock(m);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return parked; }));
+    }
+    REQUIRE(mount.step_period(1) == sidereal_preset);
+    const int stops_before = mount.stop_count(1);
+    const int starts_before = mount.start_count(1);
+    // A real mount brakes over a ramp (#212), so RA is still running when the
+    // setter polls after its ":K": the late ":J" then lands INSIDE the
+    // stop-wait, the order the unramped fake never enters.
+    mount.set_stop_ramp_ms(400);
+
+    std::atomic<bool> threw{false};
+    std::thread off([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+    });
+    // Release once the setter's ":K" is on the board.
+    const bool k_seen = wait_until([&] { return mount.stop_count(1) > stops_before; }, 3000);
+    release();
+    off.join();
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr);
+    REQUIRE(k_seen);
+
+    CHECK_FALSE(threw.load());
+    CHECK_FALSE(driver->get_tracking());
+    // The task's ':J' did land after the setter's ':K' (the ordering under test).
+    CHECK(wait_until([&] { return mount.start_count(1) > starts_before; }, 3000));
+    CHECK(wait_until([&] { return !mount.axis_running(1); }, 3000));
+    driver->set_connected(false);
+}
+
+// Shared body of the Tracking=false-vs-pulse-end cases below: the setter runs
+// with a braking ramp long enough that the pulse task's end-of-pulse restore
+// lands inside its stop-wait, and must still succeed with RA stopped.
+static void expect_tracking_off_succeeds_with_ramp(FakeSkyWatcherMount& mount, alpacacore::TelescopeDriver& driver,
+                                                   int ramp_ms) {
+    mount.set_stop_ramp_ms(ramp_ms);
+    std::atomic<bool> threw{false};
+    std::string what;
+    std::thread off([&] {
+        try {
+            driver.set_tracking(false);
+        } catch (const std::exception& e) {
+            what = e.what();
+            threw = true;
+        }
+    });
+    off.join();
+    INFO(what);
+    CHECK_FALSE(threw.load());
+    CHECK_FALSE(driver.get_tracking());
+    CHECK(wait_until([&] { return !mount.axis_running(1); }, 4000));
+    mount.set_stop_ramp_ms(0);
+}
+
+TEST_CASE("SkyWatcher async - Tracking=false as a reversing pulse restore ends stops RA",
+          "[skywatcher][async][pulseguide]") {
+    // The restore at pulse end takes the stop-and-restart branch (the guide
+    // rate is below sidereal, so the East pulse reverses RA). That restart
+    // supersedes a Tracking=false stop-wait unless the pulse task reads the
+    // pending Tracking=false as "tracking off".
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_guide_rate(
+        {0.97 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.5 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    driver->pulse_guide(2, 1500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    expect_tracking_off_succeeds_with_ramp(mount, *driver, 2000);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - Tracking=false as a pulse dispatched with tracking off ends stops RA",
+          "[skywatcher][async][pulseguide]") {
+    // open-astro#821 branch: Tracking=true mid-pulse makes the pulse end
+    // re-apply the drive. That re-apply must not run inside a later
+    // Tracking=false stop-wait.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->pulse_guide(2, 1500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    driver->set_tracking(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    expect_tracking_off_succeeds_with_ramp(mount, *driver, 2000);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - Tracking=false as a Dec pulse with a rate offset ends stops RA",
+          "[skywatcher][async][pulseguide]") {
+    // The Dec pulse end re-applies the DeclinationRate offset, which bumps the
+    // motion generation and would supersede a Tracking=false RA stop-wait.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    driver->set_declination_rate(10.0);
+    driver->pulse_guide(0, 1500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    expect_tracking_off_succeeds_with_ramp(mount, *driver, 2000);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a second Tracking=false does not clear the first one's pending state",
+          "[skywatcher][async][pulseguide]") {
+    // Setter B supersedes setter A inside A's stop-wait poll; A's exit must not
+    // clear the pending-off state B still depends on when the parked restore
+    // ":J" lands.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    std::mutex m;
+    std::condition_variable cv;
+    bool parked = false;
+    bool released = false;
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([&] {
+        std::unique_lock<std::mutex> lock(m);
+        parked = true;
+        cv.notify_all();
+        cv.wait_for(lock, std::chrono::seconds(15), [&] { return released; });
+    });
+    driver->pulse_guide(2, 300);
+    {
+        std::unique_lock<std::mutex> lock(m);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return parked; }));
+    }
+    const int stops_before = mount.stop_count(1);
+    mount.set_stop_ramp_ms(1500);
+    std::atomic<bool> threw_b{false};
+    std::string what_b;
+    std::thread a([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const std::exception&) {  // superseded by B: expected
+        }
+    });
+    const bool k_seen = wait_until([&] { return mount.stop_count(1) > stops_before; }, 3000);
+    std::thread b([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const std::exception& e) {
+            what_b = e.what();
+            threw_b = true;
+        }
+    });
+    a.join();
+    {
+        std::lock_guard<std::mutex> lock(m);
+        released = true;
+    }
+    cv.notify_all();
+    b.join();
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr);
+    REQUIRE(k_seen);
+    INFO(what_b);
+    CHECK_FALSE(threw_b.load());
+    CHECK_FALSE(driver->get_tracking());
+    CHECK(wait_until([&] { return !mount.axis_running(1); }, 4000));
+    mount.set_stop_ramp_ms(0);
     driver->set_connected(false);
 }
 
