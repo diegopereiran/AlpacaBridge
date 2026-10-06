@@ -444,7 +444,7 @@ private:
         throw AlpacaException("TheSkyX error: " + response);
     }
 
-    void send_ok_command_internal(const std::string& js_body, int timeout_seconds) {
+    void send_ok_command_internal(const std::string& js_body, int timeout_ms) {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected_locked();
 
@@ -456,9 +456,7 @@ private:
             "Out  = 'OK#'; }"
             "catch (err) {Out = err; }";
 
-        int effective_timeout = timeout_seconds > 0
-            ? timeout_seconds * 1000
-            : connection_info_.response_timeout_ms;
+        int effective_timeout = timeout_ms > 0 ? timeout_ms : connection_info_.response_timeout_ms;
 
         write_locked(cmd);
         std::string response = read_until_hash_locked(effective_timeout);
