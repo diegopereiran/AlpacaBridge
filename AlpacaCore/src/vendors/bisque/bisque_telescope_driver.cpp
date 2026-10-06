@@ -723,10 +723,10 @@ public:
         // MoveTelescope runs at TheSkyX's fixed speed, so its run time only
         // roughly tracks `duration`; never wait less than the configured bound.
         constexpr int kResponseMarginMs = 1000;
-        const int guide_timeout_ms = std::max(connection_info_.response_timeout_ms,
-                                              duration > std::numeric_limits<int>::max() - kResponseMarginMs
-                                                  ? std::numeric_limits<int>::max()
-                                                  : duration + kResponseMarginMs);
+        const int duration_bound_ms = duration > std::numeric_limits<int>::max() - kResponseMarginMs
+                                          ? std::numeric_limits<int>::max()
+                                          : duration + kResponseMarginMs;
+        const int guide_timeout_ms = std::max(connection_info_.response_timeout_ms, duration_bound_ms);
         try {
             pulse_guide_thread_ = std::thread([this, generation, ra_arcsec, dec_arcsec, guide_timeout_ms] {
                 std::string error;
