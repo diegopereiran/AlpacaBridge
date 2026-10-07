@@ -105,6 +105,18 @@ Expect `Value: true`, `ErrorNumber: 0`. If `Value: false`:
 
 If `ErrorNumber` is non-zero (e.g. NotConnected because hardware is unplugged), report the exact error and stop.
 
+### 2c2. SynScan telescope only: the handset answers more than the echo
+
+A SynScan connect only gates on one echo, so a handset that answers that and then goes silent comes up `Connected=true` with every query timing out (issue #881). Read one position value through the driver:
+
+```bash
+curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=1"
+```
+
+Expect `ErrorNumber: 0` within about a second. A timeout, `Timeout waiting for SynScan response`, or `communications compromised` means the handset is stuck:
+
+> "The SynScan handset is not answering. Disconnect the device, unplug the handset's USB from the SBC, power-cycle the mount, bring the handset to its main screen, wait 30 s, plug the USB back in, then reconnect and re-run `/conformu`."
+
 ### 2d. Capture the current AB log level (so we can restore it later)
 
 ```bash
