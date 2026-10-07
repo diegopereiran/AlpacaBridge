@@ -3047,56 +3047,74 @@ Response Router::dispatch_device_method(
                 // still block), and calling it
                 // while a task is in
                 // flight stalled this handler for the entire connect, so the
-                // 8 s deadline below never fired. A connect requested while a
+                // wait deadline below never fired. A connect requested while a
                 // task is in flight is still handed to the driver: the base
                 // class queues it against an in-flight disconnect and drops
                 // it against an in-flight connect
                 // (.github/instructions/alpaca-http-conformance.instructions.md).
                 if (connected && (device->get_connecting() || !device->get_connected())) {
-                    // Use async connect then poll for completion.
-                    // Slow-connecting devices (serial focusers etc.) can exceed
-                    // ASCOM Alpaca client timeouts if set_connected() blocks
-                    // synchronously.  The async path + poll lets us return as
-                    // soon as the handshake finishes without hard-blocking the
-                    // full worst-case duration.
+                    // Start the async connect, then wait for it: Connected is
+                    // synchronous in ASCOM, so this returns only once the
+                    // device is connected or with the error (issue #776). The
+                    // wait used to end at 8 s and reply success with the
+                    // connect still running, which a connect that then failed
+                    // turned into a success the client could never take back.
+                    //
+                    // Bounded, not open-ended (connect_wait_limit(), 60 s by
+                    // default): the slowest connects known are a CFW3 boot
+                    // (~17 s) and a first connect that has to scan first (two
+                    // CFW3 boots, the 5.5 s iOptron Wi-Fi sweep), all well
+                    // inside it, and a driver whose handshake never returns
+                    // must not hold this worker and the device's op mutex
+                    // forever. Other devices and every GET on this one stay
+                    // served meanwhile: only this device's PUT connect /
+                    // disconnect queue behind the op mutex, as they did for
+                    // the old 8 s.
                     warn_if_clock_undisciplined(*device);
-                    device->connect();
-                    auto deadline = std::chrono::steady_clock::now()
-                                  + std::chrono::seconds(8);
-                    while (device->get_connecting() && std::chrono::steady_clock::now() < deadline) {
-                        std::this_thread::sleep_for(
-                            std::chrono::milliseconds(100));
+                    try {
+                        device->connect();
+                    } catch (const alpacacore::AlpacaException& e) {
+                        // A synchronous connect() reports its own failure.
+                        unregister_client_connection(device.get(), client_key);
+                        // ASCOM Connected: "Do not use a NotConnectedException
+                        // here".
+                        if (e.error_code() == alpacacore::AlpacaError::NotConnected) {
+                            throw alpacacore::AlpacaException(e.what(), alpacacore::AlpacaError::DriverException);
+                        }
+                        throw;
+                    } catch (...) {
+                        unregister_client_connection(device.get(), client_key);
+                        throw;
                     }
-                    if (!device->get_connecting() && !device->get_connected()) {
+                    const auto limit = connect_wait_limit();
+                    const auto deadline = std::chrono::steady_clock::now() + limit;
+                    while (device->get_connecting() && std::chrono::steady_clock::now() < deadline) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                    if (device->get_connecting()) {
+                        // Withdraw the connect when no other client holds the
+                        // device, so it cannot come up behind a client that was
+                        // told it failed. The base class records the
+                        // disconnect against the in-flight connect and runs it
+                        // when the connect returns.
+                        if (unregister_client_connection(device.get(), client_key) == 0) {
+                            device->disconnect();
+                        }
+                        throw alpacacore::AlpacaException(
+                            device->get_name() + " was still connecting after " +
+                                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(limit).count()) +
+                                " s; the connect was abandoned",
+                            alpacacore::AlpacaError::DriverException);
+                    }
+                    if (!device->get_connected()) {
                         // Failed connect: this client holds no live link.
                         unregister_client_connection(device.get(), client_key);
-                        // The driver's own words when it has them; the error
-                        // number is unchanged, so a client matching on it is
-                        // unaffected.
+                        // The driver's own words when it has them, as a
+                        // DriverException: ASCOM Connected says "Do not use a
+                        // NotConnectedException here" (issue #776).
                         throw alpacacore::AlpacaException(connect_failure_reason(*device),
-                                                          alpacacore::AlpacaError::NotConnected);
+                                                          alpacacore::AlpacaError::DriverException);
                     }
-                    // Still connecting at the deadline: reply now, the client
-                    // observes completion through Connecting/Connected. Until
-                    // the task ends, GET connected reports false for THIS
-                    // client too (device_connected above is gated on
-                    // get_connecting()) — a client that reads Connected
-                    // immediately after this reply sees false even though the
-                    // connect is proceeding normally and may still succeed.
-                    // This is a real behaviour change from reading
-                    // get_connected() directly (issue #130's fix trades a
-                    // false "true" — a phantom link reported while a driver's
-                    // connect sequence is still blocked on its own state
-                    // mutex — for a possibly stale "false"): a Platform 6
-                    // client that treats "PUT connected timed out, then GET
-                    // connected is false" as a hard failure and gives up will
-                    // now do so even on a connect that finishes moments
-                    // later. Accepted for this fix: the router has no
-                    // general way to tell a driver whose get_connected() is
-                    // lock-free from one that blocks on a driver or wrapper
-                    // mutex — see async_connectable.h for which is which and
-                    // why only the telescopes create the ABBA hazard — without a
-                    // per-driver capability flag, which is future work.
                 } else if (!connected && unregister_client_connection(device.get(), client_key) == 0) {
                     // A lost-link getter can report false before driver cleanup.
                     // Deliver explicit disconnect even then, as PUT /disconnect
@@ -3361,8 +3379,18 @@ Response Router::dispatch_device_method(
         }
         else if (method_name == "connecting") {
             if (request.method() == HttpMethod::GET) {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, device->get_connecting());
+                // Issue #776: Connecting is the completion property of
+                // Connect(), so a connect that failed raises its error here,
+                // on every read, until the next Connect or Disconnect. Read
+                // after get_connecting(): the base stores the error before it
+                // publishes the task as finished.
+                const bool connecting = device->get_connecting();
+                if (!connecting) {
+                    if (std::string failure = device->get_connecting_error(); !failure.empty()) {
+                        throw alpacacore::AlpacaException(failure, alpacacore::AlpacaError::DriverException);
+                    }
+                }
+                AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, connecting);
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -6876,6 +6904,21 @@ std::string config_get(const nlohmann::json& config, const char* key, const char
     return config_get<std::string>(config, key, fallback != nullptr ? std::string(fallback) : std::string());
 }
 
+// Issue #860: `alignmentMode` ("auto", "altaz" or "equatorial") tells the
+// SynScan and Celestron drivers the geometry of a mount whose handset does not
+// report it. Returns the value when it is one of those three, nullopt when it
+// is absent or unknown; an unknown value reads as "auto" and is not persisted.
+std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
+    if (!config_has(config, "alignmentMode") || !config.at("alignmentMode").is_string()) {
+        return std::nullopt;
+    }
+    std::string mode = config.at("alignmentMode").get<std::string>();
+    if (mode == "auto" || mode == "altaz" || mode == "equatorial") {
+        return mode;
+    }
+    return std::nullopt;
+}
+
 // Reads siteLatitude/siteLongitude out of a device config and range-checks
 // them (issue #398).
 //
@@ -8574,6 +8617,14 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         } else if (version_normalized == "v4" || version_normalized == "4") {
             version = alpacacore::vendor::synscan::SynScanVersion::V4;
         }
+        const std::string alignment_mode = known_alignment_mode(config).value_or("auto");
+        alpacacore::vendor::synscan::SynScanAlignmentSetting alignment =
+            alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto;
+        if (alignment_mode == "altaz") {
+            alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::AltAz;
+        } else if (alignment_mode == "equatorial") {
+            alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::Equatorial;
+        }
 
         std::optional<double> site_latitude;
         std::optional<double> site_longitude;
@@ -8596,8 +8647,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (conn_type == "auto" || conn_type.empty()) {
             int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::synscan::create_synscan_telescope_auto(
-                device_number, mount_index, version, site_latitude, site_longitude,
-                site_elevation, sync_time_on_connect);
+                device_number, mount_index, version, site_latitude, site_longitude, site_elevation,
+                sync_time_on_connect, alignment);
         } else {
             alpacacore::vendor::synscan::ConnectionInfo conn_info;
 
@@ -8628,7 +8679,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
             telescope = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
-                device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
+                device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
+                alignment);
         }
 
         if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
@@ -8759,14 +8811,22 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (config_has(config, "syncTimeOnConnect")) {
             sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
         }
+        const std::string alignment_mode = known_alignment_mode(config).value_or("auto");
+        alpacacore::vendor::celestron::CelestronAlignmentSetting alignment =
+            alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto;
+        if (alignment_mode == "altaz") {
+            alignment = alpacacore::vendor::celestron::CelestronAlignmentSetting::AltAz;
+        } else if (alignment_mode == "equatorial") {
+            alignment = alpacacore::vendor::celestron::CelestronAlignmentSetting::Equatorial;
+        }
 
         std::unique_ptr<alpacacore::TelescopeDriver> telescope;
 
         if (conn_type == "auto" || conn_type.empty()) {
             int mount_index = config_get(config, "mountIndex", 0);
             telescope = alpacacore::vendor::celestron::create_celestron_telescope_auto(
-                device_number, mount_index, site_latitude, site_longitude,
-                site_elevation, sync_time_on_connect);
+                device_number, mount_index, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
+                alignment);
         } else {
             alpacacore::vendor::celestron::ConnectionInfo conn_info;
 
@@ -8797,8 +8857,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
 
             telescope = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
-                device_number, conn_info, site_latitude, site_longitude,
-                site_elevation, sync_time_on_connect);
+                device_number, conn_info, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
+                alignment);
         }
 
         if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
@@ -9946,6 +10006,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         }
     } else if (vendor == "synscan") {
         copy_if_present("synscanVersion");
+        if (const auto alignment_mode = known_alignment_mode(config)) {
+            sanitized["alignmentMode"] = *alignment_mode;  // #860; an unknown value drops
+        }
         copy_if_present("connectionType");
         copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
         std::string connection_type = config_get(config, "connectionType", "");
@@ -10072,6 +10135,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("focuserId");
         }
     } else if (vendor == "celestron") {
+        if (const auto alignment_mode = known_alignment_mode(config)) {
+            sanitized["alignmentMode"] = *alignment_mode;  // #860; an unknown value drops
+        }
         copy_if_present("connectionType");
         copy_if_present("mountIndex");
         std::string connection_type = config_get(config, "connectionType", "");
