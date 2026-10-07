@@ -25,20 +25,34 @@ mid-line or on a ` * ` continuation line) still counts, so the gate cannot be do
 CMake rules (open-astro#710; source: AGENTS.md "Core Architecture", ADR 0004).
 `alpacacore` is vendor-neutral, so the vendor libraries and the built-in
 descriptor composition (`alpacacore_builtins`) link DOWN to it and it links to
-none of them. Read from AlpacaCore/CMakeLists.txt and every
-AlpacaCore/src/vendors/*/CMakeLists.txt, comments NOT stripped:
+none of them. Read from every CMakeLists.txt and *.cmake under AlpacaCore/ and
+AlpacaHTTP/ except below an `external/` or `build*` directory, comments NOT
+stripped:
   - L1: no `target_link_libraries(alpacacore ...)` (target name exactly
     `alpacacore`; `alpacacore_tests` or any other prefix match is not it)
     names `alpacacore_<name>` where <name> is a directory under
-    AlpacaCore/src/vendors/.
+    AlpacaCore/src/vendors/, bare, as `AlpacaCore::alpacacore_<name>` or inside a
+    generator expression (`$<LINK_ONLY:...>`): tokens are matched by fragment,
+    split on `$ < > : , ;` and quotes.
   - L2: no `target_compile_definitions(alpacacore ...)` names a macro starting
     ALPACACORE_ENABLE_, and no directory-scoped `add_definitions` /
     `add_compile_definitions` in AlpacaCore/CMakeLists.txt does either (a
-    directory-scoped one reaches `alpacacore` as well).
-  - L3: no source listed in `add_library(alpacacore ...)`, directly or through
+    directory-scoped one reaches `alpacacore` as well). The same holds for
+    AlpacaHTTP/CMakeLists.txt, but only for a call before its last
+    `add_subdirectory(... AlpacaCore ...)` (a later one does not reach
+    `alpacacore`; the last, so a commented-out copy above the real call
+    cannot hide anything); a file with no such add_subdirectory fails.
+  - L3: no source listed in `add_library(alpacacore ...)` (AlpacaCore/CMakeLists.txt)
+    or `target_sources(alpacacore ...)` (any scanned file), directly or through
     the `${VAR}` lists it expands (each resolved from a `set(VAR ...)` in the
-    same file; one that cannot be resolved is a failure), is under
-    src/vendors/.
+    same file as the call; one that cannot be resolved is a failure), is under
+    src/vendors/ or is a vendor target (`$<TARGET_OBJECTS:alpacacore_<name>>`),
+    also inside a generator expression. A variable the gate cannot see through
+    fails closed: any source token that still holds `${` once the two directory
+    prefixes are removed (a `${VAR}` inside a generator expression) is an L3
+    failure (open-astro#799). The `target_link_libraries(alpacacore ...)` tokens
+    of L1 are resolved the same way, and one that cannot be resolved is an L1
+    failure.
   - each rule fails when it has nothing to check: a missing or unreadable
     AlpacaCore/CMakeLists.txt, no `add_library(alpacacore ...)` call, an empty
     source list (L3) or no vendor directory (L1).
@@ -63,7 +77,7 @@ SOURCE_GLOBS = ("*.cpp", "*.h", "*.hpp")
 # Lowered by each vendor descriptor slice of ADR 0004 in the PR that deletes
 # that vendor's includes from AlpacaHTTP/src/http/router.cpp; the last slice
 # sets it to 0. Never raise it.
-MAX_ALPACAHTTP_VENDOR_INCLUDES = 38
+MAX_ALPACAHTTP_VENDOR_INCLUDES = 32
 # ADR 0004: <vendor>_schema.cpp compiles in every build and includes no vendor
 # header. Never rises.
 MAX_CATALOG_SCHEMA_VENDOR_INCLUDES = 0
@@ -115,8 +129,8 @@ def scan_region(root: pathlib.Path, region: str):
 # ---------------------------------------------------------------------------
 
 CMAKE_CALL_RE = re.compile(
-    r"\b(?P<cmd>target_link_libraries|target_compile_definitions|add_library|"
-    r"add_definitions|add_compile_definitions|set)\s*\(\s*(?P<args>[^)]*)\)",
+    r"\b(?P<cmd>target_link_libraries|target_compile_definitions|add_library|target_sources|"
+    r"add_definitions|add_compile_definitions|add_subdirectory|set)\s*\(\s*(?P<args>[^)]*)\)",
     re.DOTALL,
 )
 ADD_LIBRARY_KEYWORDS = {"STATIC", "SHARED", "MODULE", "OBJECT", "INTERFACE", "IMPORTED",
@@ -139,6 +153,22 @@ def cmake_calls(text: str):
         yield m.group("cmd"), toks
 
 
+GENEX_SPLIT_RE = re.compile(r'[$<>:,;"]+')
+
+
+def _fragments(tok: str) -> list[str]:
+    """Split a token on generator-expression punctuation (and `::`, quotes) after
+    dropping the ${CMAKE_CURRENT_SOURCE_DIR}/ and ${CMAKE_SOURCE_DIR}/ prefixes, so a
+    name or path wrapped in `$<...>` is matched like a bare one (open-astro#724)."""
+    norm = tok.replace("${CMAKE_CURRENT_SOURCE_DIR}/", "").replace("${CMAKE_SOURCE_DIR}/", "")
+    return [f for f in GENEX_SPLIT_RE.split(norm) if f]
+
+
+def _is_vendor_source(tok: str, vendor_targets) -> bool:
+    return any(f.startswith("src/vendors/") or "/src/vendors/" in f or f in vendor_targets
+               for f in _fragments(tok))
+
+
 def _target_is(toks: list[tuple[str, int]], name: str) -> bool:
     return bool(toks) and toks[0][0] == name
 
@@ -151,27 +181,42 @@ def vendor_dirs(root: pathlib.Path) -> list[str]:
 
 
 def cmake_files(root: pathlib.Path) -> list[pathlib.Path]:
-    files = [root / "AlpacaCore" / "CMakeLists.txt"]
-    files.extend(sorted(root.glob("AlpacaCore/src/vendors/*/CMakeLists.txt")))
-    return files
+    """Every CMakeLists.txt and *.cmake under AlpacaCore/ and AlpacaHTTP/, except
+    below an `external/` directory or a `build*` directory (matched on whole
+    path components under the root, never on the file name)."""
+    files: set[pathlib.Path] = set()
+    for top in ("AlpacaCore", "AlpacaHTTP"):
+        base = root / top
+        for pattern in ("CMakeLists.txt", "*.cmake"):
+            for path in base.rglob(pattern):
+                dirs = path.relative_to(base).parts[:-1]
+                if any(d == "external" or d.startswith("build") for d in dirs):
+                    continue
+                files.add(path)
+    return sorted(files)
 
 
 def _resolve_sources(text: str, toks: list[tuple[str, int]], sets: dict[str, list[tuple[str, int]]],
-                     errors: list[str], rel: str, depth: int = 0) -> list[tuple[str, int]]:
+                     errors: list[str], rel: str, depth: int = 0,
+                     rule: str = "L3") -> list[tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for tok, line in toks:
         v = VAR_RE.match(tok)
         if v is None:
+            if "${" in tok.replace("${CMAKE_CURRENT_SOURCE_DIR}/", "").replace("${CMAKE_SOURCE_DIR}/", ""):
+                errors.append(f"{rule}: {rel}:{line}: unresolved variable in {tok} "
+                              f"(a ${{VAR}} inside a generator expression is not expanded)")
+                continue
             out.append((tok, line))
             continue
         name = v.group("name")
         if depth > 8:
-            errors.append(f"L3: {rel}:{line}: ${{{name}}} nests too deep to resolve")
+            errors.append(f"{rule}: {rel}:{line}: ${{{name}}} nests too deep to resolve")
             continue
         if name not in sets:
-            errors.append(f"L3: {rel}:{line}: cannot resolve ${{{name}}} (no set({name} ...) in this file)")
+            errors.append(f"{rule}: {rel}:{line}: cannot resolve ${{{name}}} (no set({name} ...) in this file)")
             continue
-        out.extend(_resolve_sources(text, sets[name], sets, errors, rel, depth + 1))
+        out.extend(_resolve_sources(text, sets[name], sets, errors, rel, depth + 1, rule))
     return out
 
 
@@ -196,6 +241,20 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
         failures.append("L1: no directory under AlpacaCore/src/vendors/ -- rule is vacuous")
     vendor_targets = {f"alpacacore_{v}" for v in vendors}
 
+    http_rel = "AlpacaHTTP/CMakeLists.txt"
+    # Line of the LAST add_subdirectory(... AlpacaCore ...) in http_rel. Comments are not
+    # stripped, so a commented-out call above the real one must not move the cutoff up and
+    # hide the definitions between them; a stray later match only makes the check stricter.
+    http_cutoff = None
+    if http_rel in texts:
+        for cmd, toks in cmake_calls(texts[http_rel]):
+            if cmd == "add_subdirectory" and any("AlpacaCore" in t for t, _ in toks):
+                http_cutoff = toks[0][1]
+        if http_cutoff is None:
+            failures.append(f"L2: {http_rel}: no add_subdirectory(... AlpacaCore ...) call -- rule is vacuous")
+    else:
+        failures.append(f"L2: {http_rel} missing or unreadable -- rule is vacuous")
+
     l1 = l2 = l3 = 0
     add_library_seen = False
     for rel, text in texts.items():
@@ -206,9 +265,8 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
                 sets[toks[0][0]] = toks[1:]
         for cmd, toks in calls:
             if cmd == "target_link_libraries" and _target_is(toks, "alpacacore"):
-                for tok, line in toks[1:]:
-                    name = tok.split("::", 1)[1] if tok.startswith("AlpacaCore::") else tok
-                    if name in vendor_targets:
+                for tok, line in _resolve_sources(text, toks[1:], sets, failures, rel, rule="L1"):
+                    if any(f in vendor_targets for f in _fragments(tok)):
                         l1 += 1
                         failures.append(f"L1: {rel}:{line}: target_link_libraries(alpacacore ...) links vendor library {tok}")
             elif cmd == "target_compile_definitions" and _target_is(toks, "alpacacore"):
@@ -216,11 +274,21 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
                     if "ALPACACORE_ENABLE_" in tok:
                         l2 += 1
                         failures.append(f"L2: {rel}:{line}: target_compile_definitions(alpacacore ...) defines {tok}")
-            elif cmd in ("add_definitions", "add_compile_definitions") and rel == core_rel:
+            elif cmd in ("add_definitions", "add_compile_definitions") and rel in (core_rel, http_rel):
                 for tok, line in toks:
+                    # In AlpacaHTTP only a definition made before add_subdirectory(AlpacaCore)
+                    # is inherited by alpacacore; later ones reach only AlpacaHTTP targets.
+                    if rel == http_rel and (http_cutoff is None or line >= http_cutoff):
+                        continue
                     if "ALPACACORE_ENABLE_" in tok:
                         l2 += 1
                         failures.append(f"L2: {rel}:{line}: directory-scoped {cmd}() defines {tok} (reaches alpacacore)")
+            elif cmd == "target_sources" and _target_is(toks, "alpacacore"):
+                body = [(t, n) for t, n in toks[1:] if t not in ("PUBLIC", "PRIVATE", "INTERFACE")]
+                for tok, line in _resolve_sources(text, body, sets, failures, rel):
+                    if _is_vendor_source(tok, vendor_targets):
+                        l3 += 1
+                        failures.append(f"L3: {rel}:{line}: target_sources(alpacacore ...) compiles vendor source {tok}")
             elif cmd == "add_library" and _target_is(toks, "alpacacore") and rel == core_rel:
                 add_library_seen = True
                 body = [(t, n) for t, n in toks[1:] if t not in ADD_LIBRARY_KEYWORDS]
@@ -228,8 +296,7 @@ def check_cmake_rules(root: pathlib.Path) -> tuple[list[str], list[str]]:
                 if not sources:
                     failures.append(f"L3: {rel}: add_library(alpacacore ...) lists no source -- rule is vacuous")
                 for tok, line in sources:
-                    norm = tok.replace("${CMAKE_CURRENT_SOURCE_DIR}/", "").replace("${CMAKE_SOURCE_DIR}/", "")
-                    if norm.startswith("src/vendors/") or "/src/vendors/" in norm:
+                    if _is_vendor_source(tok, vendor_targets):
                         l3 += 1
                         failures.append(f"L3: {rel}:{line}: add_library(alpacacore ...) compiles vendor source {tok}")
     if not add_library_seen:
@@ -331,6 +398,16 @@ add_library(alpacacore_zwo STATIC zwo_driver.cpp)
 target_link_libraries(alpacacore_zwo PRIVATE alpacacore)
 """
 
+CLEAN_HTTP_CMAKE = """\
+project(alpacahttp)
+add_subdirectory(../AlpacaCore AlpacaCore)
+add_definitions(-DALPACACORE_ENABLE_ZWO)
+"""
+
+CLEAN_TESTS_CMAKE = """\
+target_link_libraries(alpacacore_tests PRIVATE alpacacore_zwo)
+"""
+
 
 def _write_clean_cmake(root: pathlib.Path) -> None:
     """A CMake tree that passes L1-L3, with the near-misses each rule must ignore:
@@ -339,6 +416,8 @@ def _write_clean_cmake(root: pathlib.Path) -> None:
     non-vendor library linked on alpacacore, and the vendor's own one-way link."""
     _write(root, "AlpacaCore/CMakeLists.txt", CLEAN_CORE_CMAKE)
     _write(root, "AlpacaCore/src/vendors/zwo/CMakeLists.txt", CLEAN_VENDOR_CMAKE)
+    _write(root, "AlpacaHTTP/CMakeLists.txt", CLEAN_HTTP_CMAKE)
+    _write(root, "AlpacaCore/tests/CMakeLists.txt", CLEAN_TESTS_CMAKE)
 
 
 def self_test() -> int:
@@ -454,7 +533,7 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as t:
         r = pathlib.Path(t)
         _write_clean_cmake(r)
-        (r / "AlpacaHTTP").mkdir()
+        (r / "AlpacaHTTP").mkdir(exist_ok=True)
         _write(r, "AlpacaCore/src/catalog/c.cpp", "int x;\n")
         rc, err = _run(r, base)
         case("empty AlpacaHTTP dir fails (vacuous)",
@@ -597,6 +676,184 @@ def self_test() -> int:
         rc, err = _run(r, base)
         case("L1: no vendor directory fails (vacuous)",
              rc == 1 and "no directory under AlpacaCore/src/vendors/" in err)
+
+    bad_link = "target_link_libraries(alpacacore PRIVATE alpacacore_zwo)\n"
+    for rel, body, want in (
+        ("AlpacaHTTP/CMakeLists.txt", CLEAN_HTTP_CMAKE + bad_link, "L1: AlpacaHTTP/CMakeLists.txt:4:"),
+        ("AlpacaCore/tests/CMakeLists.txt", CLEAN_TESTS_CMAKE + bad_link, "L1: AlpacaCore/tests/CMakeLists.txt:2:"),
+        ("AlpacaCore/foo/bar/CMakeLists.txt", bad_link, "L1: AlpacaCore/foo/bar/CMakeLists.txt:1:"),
+        ("AlpacaCore/cmake/x.cmake", bad_link, "L1: AlpacaCore/cmake/x.cmake:1:"),
+    ):
+        t, r = cmake_fixture()
+        with t:
+            _write(r, rel, body)
+            rc, err = _run(r, base)
+            case(f"scope: a vendor link on alpacacore in {rel} fails", rc == 1 and want in err)
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaCore/external/x/CMakeLists.txt", bad_link)
+        _write(r, "AlpacaHTTP/build-x/CMakeLists.txt", bad_link)
+        rc, err = _run(r, base)
+        case("scope: external/ and build* directories are not scanned", rc == 0 and err == "")
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaHTTP/buildings/CMakeLists.txt", bad_link)
+        rc, err = _run(r, base)
+        case("scope: only build* directory names are excluded by prefix (buildings/ is excluded too)", rc == 0)
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaCore/tests/CMakeLists.txt",
+               "target_link_libraries(alpacacore_tests PRIVATE alpacacore_zwo)\n"
+               "target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ZWO)\n")
+        rc, err = _run(r, base)
+        case("scope: prefix-match targets in tests/CMakeLists.txt still pass", rc == 0 and err == "")
+
+    t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + "target_sources(alpacacore PRIVATE src/vendors/zwo/x.cpp)\n")
+    with t:
+        rc, err = _run(r, base)
+        case("L3: target_sources(alpacacore) with a src/vendors/ source fails and names file:line",
+             rc == 1 and "L3: AlpacaCore/CMakeLists.txt:20:" in err and "target_sources" in err)
+
+    t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + "set(EXTRA src/vendors/zwo/x.cpp)\ntarget_sources(alpacacore PRIVATE ${EXTRA})\n")
+    with t:
+        rc, err = _run(r, base)
+        case("L3: target_sources(alpacacore) resolves ${VAR} lists",
+             rc == 1 and "L3: AlpacaCore/CMakeLists.txt:20:" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaCore/tests/CMakeLists.txt",
+               "target_sources(alpacacore PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/vendors/zwo/x.cpp)\n")
+        rc, err = _run(r, base)
+        case("L3: target_sources(alpacacore) is checked in any scanned file",
+             rc == 1 and "L3: AlpacaCore/tests/CMakeLists.txt:1:" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaCore/tests/CMakeLists.txt",
+               "target_sources(alpacacore_tests PRIVATE src/vendors/zwo/x.cpp)\n"
+               "target_sources(alpacacore PRIVATE src/core/a.cpp)\n")
+        rc, err = _run(r, base)
+        case("L3: target_sources on another target or a non-vendor source passes", rc == 0 and err == "")
+
+    # --- tokens inside generator expressions (open-astro#724) ---------------
+    genex_fail = [
+        ("L1: $<LINK_ONLY:vendor target> fails", "L1", "target_link_libraries(alpacacore PRIVATE $<LINK_ONLY:alpacacore_zwo>)\n"),
+        ("L1: nested $<$<BOOL:ON>:vendor target> fails", "L1", "target_link_libraries(alpacacore PRIVATE $<$<BOOL:ON>:alpacacore_zwo>)\n"),
+        ("L1: quoted LINK_ONLY and BUILD_INTERFACE:AlpacaCore:: vendor target fail", "L1",
+         'target_link_libraries(alpacacore PRIVATE "$<LINK_ONLY:alpacacore_zwo>" $<BUILD_INTERFACE:AlpacaCore::alpacacore_zwo>)\n'),
+        ("L3: add_library source in $<$<BOOL:ON>:src/vendors/...> fails", "L3",
+         "add_library(alpacacore STATIC src/a.cpp $<$<BOOL:ON>:src/vendors/zwo/x.cpp>)\n"),
+        ("L3: add_library BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/vendors/ source fails", "L3",
+         'add_library(alpacacore STATIC src/a.cpp "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/vendors/zwo/y.cpp>")\n'),
+        ("L3: add_library $<TARGET_OBJECTS:vendor target> fails", "L3",
+         "add_library(alpacacore STATIC src/a.cpp $<TARGET_OBJECTS:alpacacore_zwo>)\n"),
+        ("L3: target_sources source in a generator expression fails", "L3",
+         "target_sources(alpacacore PRIVATE $<$<BOOL:ON>:src/vendors/zwo/x.cpp>)\n"),
+        ("L3: target_sources $<TARGET_OBJECTS:vendor target> fails", "L3",
+         "target_sources(alpacacore PRIVATE $<TARGET_OBJECTS:alpacacore_zwo>)\n"),
+    ]
+    for name, rule, line in genex_fail:
+        t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + line)
+        with t:
+            rc, err = _run(r, base)
+            case(name, rc == 1 and f"{rule}: AlpacaCore/CMakeLists.txt:20:" in err)
+
+    genex_pass = [
+        ("generator expression around a longer target name (alpacacore_zwo_extra) passes",
+         "target_link_libraries(alpacacore PRIVATE $<LINK_ONLY:alpacacore_zwo_extra>)\n"),
+        ("generator expression around a non-vendor include path passes",
+         "target_include_directories(alpacacore PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)\n"
+         "target_sources(alpacacore PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/a.h>)\n"),
+        ("generator-expression vendor link on another target (alpacacore_tests) passes",
+         "target_link_libraries(alpacacore_tests PRIVATE $<LINK_ONLY:alpacacore_zwo>)\n"),
+        ("source under src/vendorsx/ passes",
+         "target_sources(alpacacore PRIVATE src/vendorsx/a.cpp)\n"),
+    ]
+    for name, line in genex_pass:
+        t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + line)
+        with t:
+            rc, err = _run(r, base)
+            case("genex: " + name, rc == 0 and err == "")
+
+    # --- a ${VAR} the gate cannot see through fails closed (open-astro#799) --
+    var_fail = [
+        ("L3: ${VAR} nested in a generator expression fails and names the token", "L3",
+         "${VENDOR_SRCS}",
+         "set(VENDOR_SRCS src/vendors/zwo/zwo_schema.cpp)\n"
+         "target_sources(alpacacore PRIVATE $<$<BOOL:ON>:${VENDOR_SRCS}>)\n"),
+        ("L3: unresolvable ${X} in a generator expression fails", "L3", "${X}",
+         "target_sources(alpacacore PRIVATE $<$<BOOL:ON>:${X}>)\n"),
+        ("L1: ${VAR} naming a vendor library fails", "L1", "alpacacore_zwo",
+         "set(L alpacacore_zwo)\ntarget_link_libraries(alpacacore PRIVATE ${L})\n"),
+        ("L1: unresolvable ${L} fails", "L1", "${L}",
+         "target_link_libraries(alpacacore PRIVATE ${L})\n"),
+        ("L1: ${VAR} nested in a generator expression fails", "L1", "${L}",
+         "set(L alpacacore_zwo)\ntarget_link_libraries(alpacacore PRIVATE $<LINK_ONLY:${L}>)\n"),
+    ]
+    for name, rule, named, line in var_fail:
+        t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + line)
+        with t:
+            rc, err = _run(r, base)
+            case("var: " + name,
+                 rc == 1 and any(l.startswith(f"{rule}: AlpacaCore/CMakeLists.txt:") and named in l
+                                 for l in err.splitlines()))
+
+    t, r = cmake_fixture(core=CLEAN_CORE_CMAKE + "set(L alpacacore_zwo_extra)\n"
+                         "target_link_libraries(alpacacore PRIVATE ${L})\n")
+    with t:
+        rc, err = _run(r, base)
+        case("var: L1 ${VAR} naming a non-vendor target passes", rc == 0 and err == "")
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaHTTP/CMakeLists.txt",
+               "add_definitions(-DALPACACORE_ENABLE_ZWO)\nadd_subdirectory(../AlpacaCore AlpacaCore)\n")
+        rc, err = _run(r, base)
+        case("L2: AlpacaHTTP directory-scoped ALPACACORE_ENABLE_ before add_subdirectory(AlpacaCore) fails",
+             rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt:1:" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaHTTP/CMakeLists.txt",
+               "add_compile_definitions(ALPACACORE_ENABLE_ZWO)\nadd_subdirectory(../AlpacaCore AlpacaCore)\n")
+        rc, err = _run(r, base)
+        case("L2: AlpacaHTTP add_compile_definitions before add_subdirectory(AlpacaCore) fails",
+             rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt:1:" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaHTTP/CMakeLists.txt",
+               "# add_subdirectory(../AlpacaCore AlpacaCore)\n"
+               "add_definitions(-DALPACACORE_ENABLE_ZWO)\n"
+               "add_subdirectory(../AlpacaCore AlpacaCore)\n")
+        rc, err = _run(r, base)
+        case("L2: a commented-out add_subdirectory(AlpacaCore) above the real one does not move the cutoff",
+             rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt:2:" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaHTTP/CMakeLists.txt", "project(alpacahttp)\nadd_definitions(-DALPACACORE_ENABLE_ZWO)\n")
+        rc, err = _run(r, base)
+        case("L2: AlpacaHTTP/CMakeLists.txt with no add_subdirectory(AlpacaCore) fails (vacuous)",
+             rc == 1 and "no add_subdirectory(" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        (r / "AlpacaHTTP" / "CMakeLists.txt").unlink()
+        rc, err = _run(r, base)
+        case("L2: missing AlpacaHTTP/CMakeLists.txt fails (vacuous)",
+             rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt missing or unreadable" in err)
+
+    t, r = cmake_fixture()
+    with t:
+        (r / "AlpacaHTTP" / "CMakeLists.txt").write_bytes(b"\xff\xfe\x00bad utf8 \xc3\x28\n")
+        rc, err = _run(r, base)
+        case("L2: unreadable AlpacaHTTP/CMakeLists.txt fails (vacuous)",
+             rc == 1 and "L2: AlpacaHTTP/CMakeLists.txt missing or unreadable" in err)
 
     return 1 if failures else 0
 

@@ -92,6 +92,21 @@ public:
         muted_ = muted;
     }
 
+    /// A muted board on an adapter whose driver does not honour VMIN/VTIME
+    /// (#836): a read with no data parks instead of timing out. Whenever
+    /// bytes arrive (a `:` frame or the SynScan echo guard's bare "KB") the
+    /// fake rewrites the line to VMIN=1 / VTIME=0 (every slave fd shares one
+    /// termios), after the reader's own tcsetattr, so any blocking read on
+    /// it waits for a byte. Only a poll()-bounded read keeps its budget.
+    void set_reads_ignore_vtime(bool ignore) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        reads_ignore_vtime_ = ignore;
+    }
+
+    /// Release a reader parked by set_reads_ignore_vtime(): one CR ends the
+    /// probe's read loop, so a test that saw the hang can still join.
+    void release_blocked_reader() { pty_write_bounded(pty_.master_fd(), std::string("\r"), stop_); }
+
     /// open-astro#521: start an axis in the running state, as a board whose
     /// motion outlived the driver's link does. @p speed_mode true models a
     /// MoveAxis or tracking drive — the case the driver classifies as NOT
@@ -158,6 +173,15 @@ public:
         mispair_left_ = times;
         straggler_ = std::move(straggler);
         straggler_ms_ = straggler_ms;
+    }
+
+    /// Answer the next @p times frames with a MALFORMED reply ("25278" -- no
+    /// leading "=" or "!"), i.e. a reply with a byte dropped on a noisy serial
+    /// link. The wrapper must settle and resend rather than fail the command
+    /// outright.
+    void malform_next(int times = 1) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        malform_left_ = times;
     }
 
     /// The ":e1" payload (default "033A44": Wave 100i, MC 3.58 / code 0x44).
@@ -242,6 +266,14 @@ private:
         }
     }
 
+    void force_blocking_reads() const {
+        struct termios tty {};
+        if (pty_.keepalive_fd() < 0 || tcgetattr(pty_.keepalive_fd(), &tty) != 0) return;
+        tty.c_cc[VMIN] = 1;
+        tty.c_cc[VTIME] = 0;
+        tcsetattr(pty_.keepalive_fd(), TCSANOW, &tty);
+    }
+
     // Returns the reply for one frame (without the trailing CR), or an empty
     // string for "stay silent".
     std::string handle(const std::string& frame) {
@@ -271,6 +303,10 @@ private:
                 straggler_pending_ = true;
             }
             return "=00";  // OK reply, wrong length for anything the wrapper asks
+        }
+        if (malform_left_ > 0) {
+            --malform_left_;
+            return "25278";  // no leading "=" / "!": a byte dropped on a noisy link
         }
         switch (cmd) {
             case 'e':
@@ -348,6 +384,10 @@ private:
             const int r = poll(&pfd, 1, 10);
             if (r <= 0) continue;
             const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
+            if (n > 0) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (muted_ && reads_ignore_vtime_) force_blocking_reads();
+            }
             for (ssize_t i = 0; i < n; ++i) {
                 const char ch = buf[i];
                 if (ch == ':') {
@@ -409,6 +449,7 @@ private:
     std::string version_reply_ = "033A44";
     int answer_baud_ = 0;
     int mispair_left_ = 0;
+    int malform_left_ = 0;   // frames to answer with a byte-dropped malformed reply
     char drop_command_ = 0;  // frames of this command to lose on the wire (#559)
     int drop_left_ = 0;
     std::string straggler_;
@@ -419,6 +460,7 @@ private:
     // Defaults reproduce the fixed "=101" this fake used to answer for ":f":
     // speed mode, not running, initialized.
     bool muted_ = false;
+    bool reads_ignore_vtime_ = false;
     bool running_[2] = {false, false};
     bool speed_mode_[2] = {true, true};
     bool init_done_[2] = {true, true};

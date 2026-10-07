@@ -19,10 +19,16 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 namespace alpacahttp {
+
+// open-astro#392: http.allowed_hosts and the AllowedHosts web setting are
+// one comma-separated string. Entries are
+// trimmed and empty ones dropped; the router normalizes the rest.
+std::vector<std::string> split_host_list(std::string_view value);
 
 enum class LogLevel {
     DEBUG,
@@ -79,8 +85,11 @@ public:
     // name, *.local, *.home.arpa, *.internal). An entry with a leading dot is
     // a suffix (".lan" = "lan" and every "*.lan"). Trimmed, empty entries
     // dropped; the router normalizes case, port and trailing dot. Read from
-    // the file and the environment only: nothing writes it at runtime.
+    // the file at start-up; the web UI rewrites it live through the router
+    // and the file (PUT /management/v1/description).
     const std::vector<std::string>& allowed_hosts() const { return allowed_hosts_; }
+    // http.host_check_enabled: apply the Host allowlist. Off unless set.
+    bool host_check_enabled() const { return host_check_enabled_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
@@ -172,6 +181,7 @@ private:
     std::string update_release_notes_url_ = util::kDefaultReleaseNotesUrl;
     std::string update_release_url_ = util::kDefaultReleaseUrl;
     std::vector<std::string> allowed_hosts_;
+    bool host_check_enabled_ = false;
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever

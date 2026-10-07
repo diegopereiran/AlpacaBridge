@@ -87,11 +87,38 @@ TEST_CASE("iOptron Telescope Driver - Target Range Validation", "[ioptron][teles
     REQUIRE_THROWS(driver->get_target_right_ascension());
     REQUIRE_THROWS(driver->get_target_declination());
 
-    REQUIRE_THROWS(driver->set_target_right_ascension(-0.1));
-    REQUIRE_THROWS(driver->set_target_right_ascension(24.0));
+    // Parameter validation precedes the connection check (ASCOM precedence).
+    require_alpaca_error([&]() { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_right_ascension(25.0); }, alpacacore::AlpacaError::InvalidValue);
 
-    REQUIRE_THROWS(driver->set_target_declination(-90.1));
-    REQUIRE_THROWS(driver->set_target_declination(90.1));
+    require_alpaca_error([&]() { driver->set_target_declination(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_declination(100.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    // An in-range value on a disconnected driver is the connection's error.
+    require_alpaca_error([&]() { driver->set_target_right_ascension(12.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_target_declination(45.0); }, alpacacore::AlpacaError::NotConnected);
+
+    // Other static ranges: tracking rate, MoveAxis axis and rate, coordinates.
+    require_alpaca_error([&]() { driver->set_tracking_rate(5); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_tracking_rate(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(2, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(0, 99.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(25.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { (void)driver->get_destination_side_of_pier(25.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_latitude(90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_site_longitude(180.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_alt_az(90.1, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_alt_az_async(0.0, 360.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    // PulseGuide: direction 0-3 and duration 0-99999 ms (the protocol's 5-digit field).
+    require_alpaca_error([&]() { driver->pulse_guide(4, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(-1, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(0, -1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(0, 100000); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("iOptron Telescope Driver - Axis Rate Ranges", "[ioptron][telescope][unit]") {
@@ -217,6 +244,32 @@ bool slew_and_settle(alpacacore::TelescopeDriver& driver) {
 
 }  // namespace
 
+// Connected, so a deleted validate_ra()/validate_dec() cannot hide behind the
+// NotConnected the disconnected case above would throw anyway.
+TEST_CASE("iOptron Telescope Driver - Target Range Validation over the fake mount",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    require_alpaca_error([&]() { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_declination(-90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
+
+    // A rejected write must not mark the target as set.
+    require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
+    require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    REQUIRE_NOTHROW(driver->set_target_right_ascension(12.0));
+    REQUIRE_NOTHROW(driver->set_target_declination(45.0));
+    CHECK(driver->get_target_right_ascension() == Catch::Approx(12.0));
+    CHECK(driver->get_target_declination() == Catch::Approx(45.0));
+    driver->set_connected(false);
+}
+
 TEST_CASE("iOptron Telescope Driver - HAE16 EQ (0012) GOTO settle is closed by the pulse-guide trim",
           "[ioptron][telescope][unit][fake]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);
@@ -307,6 +360,150 @@ TEST_CASE("iOptron Telescope Driver - the two target properties are independent"
     REQUIRE(driver->get_connected());
     require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); }, alpacacore::AlpacaError::ValueNotSet);
     require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+
+    driver->set_connected(false);
+}
+
+// open-astro#728: the fault latch counted every failed read over the whole
+// session, so three transient failures spread over a night latched it, and the
+// latch then refused AbortSlew too. SyncToCoordinates is the probe because it
+// forces a fresh :GEP position read on every call; the connect grace would
+// serve every other getter from cache.
+namespace {
+
+constexpr const char* kReadFailure = "Failed to refresh mount position";
+constexpr const char* kLatched = "Mount communications compromised";
+
+// The DriverException message of one forced position read, or "" on success.
+std::string sync_failure(alpacacore::TelescopeDriver& driver) {
+    try {
+        driver.sync_to_coordinates(12.0, 20.0);
+        return "";
+    } catch (const alpacacore::AlpacaException& ex) {
+        REQUIRE(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        return ex.what();
+    }
+}
+
+bool contains(const std::string& text, std::string_view part) { return text.find(part) != std::string::npos; }
+
+}  // namespace
+
+TEST_CASE("iOptron Telescope Driver - failures separated by a successful read never latch (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_fail_reads(true);
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    mount.set_fail_reads(false);
+    CHECK(sync_failure(*driver).empty());
+
+    // Two more failures: four in the session, never three in a row.
+    mount.set_fail_reads(true);
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    mount.set_fail_reads(false);
+    CHECK(sync_failure(*driver).empty());
+    CHECK_NOTHROW(driver->get_right_ascension());
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - three consecutive failed reads latch the fault (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // An earlier failure followed by a success does not count toward the run.
+    mount.set_fail_reads(true);
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    mount.set_fail_reads(false);
+    CHECK(sync_failure(*driver).empty());
+
+    mount.set_fail_reads(true);
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    CHECK(contains(sync_failure(*driver), kReadFailure));
+    CHECK(contains(sync_failure(*driver), kReadFailure));  // the third in a row latches
+
+    // Latched: members that run the connection check refuse with the same message, even once the link answers.
+    mount.set_fail_reads(false);
+    CHECK(contains(sync_failure(*driver), kLatched));
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::DriverException);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - AbortSlew sends the stop on a latched fault and clears it (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(contains(sync_failure(*driver), kReadFailure));
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+
+    // Reads still fail and the cached status says "not slewing": the stop
+    // must go out anyway, with no status read in front of it.
+    const auto before = mount.commands().size();
+    REQUIRE_NOTHROW(driver->abort_slew());
+    const auto commands = mount.commands();
+    int stops = 0;
+    int status_reads = 0;
+    for (auto i = before; i < commands.size(); ++i) {
+        stops += commands[i] == ":Q#" ? 1 : 0;
+        status_reads += commands[i] == ":GLS#" ? 1 : 0;
+    }
+    CHECK(stops == 1);
+    CHECK(status_reads == 0);
+
+    // The stop was sent, so the latch is gone.
+    mount.set_fail_reads(false);
+    CHECK_NOTHROW(driver->get_right_ascension());
+    CHECK(sync_failure(*driver).empty());
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fault keeps the latch (#728)",
+          "[ioptron][telescope][unit][fake][fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.set_fail_reads(true);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(contains(sync_failure(*driver), kReadFailure));
+    }
+    REQUIRE(contains(sync_failure(*driver), kLatched));
+
+    // The link is gone, so the blind :Q# cannot be written: the stop was not
+    // sent, AbortSlew must say so, and the latch must stay set.
+    mount.reset_link();
+    try {
+        driver->abort_slew();
+        FAIL("AbortSlew succeeded on a reset link");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(ex.what(), "AbortSlew failed"));
+    }
+    CHECK(contains(sync_failure(*driver), kLatched));
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
 
     driver->set_connected(false);
 }
@@ -403,9 +600,8 @@ TEST_CASE("iOptron Telescope Driver - non-finite guide rate is rejected", "[iopt
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
 }
 
-// #627: iOptron's site latitude and longitude setters take the mutex and check
-// the connection before validating, so unlike the other vendors their NaN
-// path needs a connected driver.
+// #627: the NaN path of iOptron's site latitude and longitude setters, over a
+// connected driver. The disconnected range case is in Target Range Validation.
 TEST_CASE("iOptron Telescope Driver - non-finite site latitude and longitude are rejected",
           "[ioptron][telescope][unit][nonfinite]") {
     alpacacore::test::FakeMountServer server;

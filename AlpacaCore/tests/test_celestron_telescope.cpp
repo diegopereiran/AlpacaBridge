@@ -254,10 +254,7 @@ TEST_CASE("Celestron Telescope Driver - Telescope Properties", "[celestron][tele
            eq == alpacacore::EquatorialSystem::J2000 ||
            eq == alpacacore::EquatorialSystem::Other));
 
-    auto align = driver->get_alignment_mode();
-    CHECK((align == alpacacore::AlignmentMode::AltAz ||
-           align == alpacacore::AlignmentMode::Polar ||
-           align == alpacacore::AlignmentMode::GermanPolar));
+    require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::NotConnected);
 
     auto rates = driver->get_tracking_rates();
     CHECK_FALSE(rates.empty());
@@ -283,6 +280,25 @@ TEST_CASE("Celestron Telescope Driver - ASCOM Error Codes", "[celestron][telesco
     require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_declination(-90.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// open-astro#769: MoveAxis validates its arguments before the connection check
+// (AGENTS.md error precedence), so a disconnected driver answers a bad
+// argument with InvalidValue rather than NotConnected.
+TEST_CASE("Celestron Telescope Driver - MoveAxis argument errors precede NotConnected",
+          "[celestron][telescope][unit]") {
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+
+    require_alpaca_error([&]() { driver->move_axis(2, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(0, std::numeric_limits<double>::quiet_NaN()); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(0, 1000.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    // Valid arguments still reach the connection check.
+    require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 // open-astro#346, the shape #304 fixed on the Sky-Watcher driver: ASCOM treats

@@ -47,15 +47,6 @@ std::string allowed_list(const FieldRef& f) {
     return s;
 }
 
-// Formats a range bound for a message: an Int field without a fraction, a
-// Double field in its shortest round-trip form (0.5, 100).
-std::string format_bound(FieldRef::Kind kind, double bound) {
-    if (kind == FieldRef::Kind::Int) return std::to_string(int_bound(bound));
-    char buf[32];
-    auto res = std::to_chars(buf, buf + sizeof(buf), bound);
-    return std::string(buf, res.ptr);
-}
-
 // Applies the per-field rules to `in`, appending one message per failure.
 // The returned config is the Persisted normalization; Api callers use only
 // the messages.
@@ -146,13 +137,32 @@ std::string describe_key(const DeviceKey& k) { return "'" + k.vendor + "' " + de
 
 }  // namespace
 
+// Formats a range bound for a message: an Int field without a fraction, a
+// Double field in its shortest round-trip form (0.5, 100).
+std::string format_bound(FieldRef::Kind kind, double bound) {
+    if (kind == FieldRef::Kind::Int) return std::to_string(int_bound(bound));
+    char buf[32];
+    auto res = std::to_chars(buf, buf + sizeof(buf), bound);
+    return std::string(buf, res.ptr);
+}
+
 std::vector<DescriptorView> DeviceCatalog::describe() const {
     std::vector<DescriptorView> views;
     views.reserve(schemas_.size());
     for (const Schema& s : schemas_) {
-        views.push_back({s.key, s.display_name, s.build_option, find_factory(s.key) != nullptr, s.fields});
+        views.push_back(
+            {s.key, s.display_name, s.build_option, find_factory(s.key) != nullptr, s.fields, s.vendor_label});
     }
     return views;
+}
+
+std::vector<DeviceKey> DeviceCatalog::factory_keys() const {
+    std::vector<DeviceKey> keys;
+    keys.reserve(factories_.size());
+    for (const Factory& f : factories_) {
+        if (f.create) keys.push_back(f.key);
+    }
+    return keys;
 }
 
 NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfig& in, Source source) const {

@@ -8,6 +8,7 @@
 #
 #   ./scripts/ci_preflight.sh                 # base = main
 #   PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh   # fork contributors
+#     (a <remote>/<branch> base is fetched first; a failed fetch or a local-branch base warns)
 #     (a base that does not resolve, or shares no history with HEAD, is a hard failure)
 #   RUN_SANITIZERS=0 ./scripts/ci_preflight.sh # SKIP the ASan+UBSan job (on by default)
 #   RUN_TSAN=1 ./scripts/ci_preflight.sh       # also run the TSan concurrency stress job
@@ -181,7 +182,30 @@ ensure_zizmor() {
 
 # --- changed-file sets -----------------------------------------------------
 
-git fetch --no-tags origin "${BASE#origin/}" >/dev/null 2>&1 || true
+# Refresh the base from the remote it names (issue #708). BASE is <remote>/<branch>
+# when its prefix is a configured remote; a failed fetch is a warning, not fatal,
+# so an offline run still diffs against the cached ref. A plain local branch
+# (the default `main`) is never fetched. A base starting with '-' would reach git
+# as an option (`--output=FILE` makes git log overwrite FILE), and a branch part
+# holding ':' would be a refspec that writes a local ref, so both are refused.
+if [[ "${BASE}" == -* || "${BASE}" == */*:* ]]; then
+  echo "ERROR: PREFLIGHT_BASE='${BASE}' is not a branch name or <remote>/<branch>." >&2
+  exit 1
+fi
+base_remote="${BASE%%/*}"
+if [[ "${BASE}" == */* ]] && git remote | grep -Fxq -e "${base_remote}"; then
+  if ! fetch_err="$(git fetch --no-tags -- "${base_remote}" "${BASE#*/}" 2>&1 >/dev/null)"; then
+    if cached_date="$(git log -1 --format=%cI "${BASE}" 2>/dev/null)" && [[ -n "${cached_date}" ]]; then
+      echo "WARNING: could not refresh '${BASE}' (${fetch_err//$'\n'/ }); using cached ref from ${cached_date}" >&2
+    fi
+  fi
+else
+  local_note=""
+  if local_date="$(git log -1 --format=%cI "${BASE}" 2>/dev/null)" && [[ -n "${local_date}" ]]; then
+    local_note=" (cached ref from ${local_date})"
+  fi
+  echo "WARNING: '${BASE}' is a local branch, not refreshed${local_note}; run git fetch or set PREFLIGHT_BASE=<remote>/<branch>" >&2
+fi
 # Fail fast when the base cannot be resolved (issue #601): an empty diff would
 # make every change-scoped gate skip and the run end "Safe to push".
 if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
@@ -278,6 +302,42 @@ else
   record FAIL "stress-test registration"
 fi
 
+# --- gate 2b2: Falsified by: lines for new test cases -----------------------
+
+section "Falsified-by (PR body)"
+if python3 scripts/check_falsified_by.py --self-test; then
+  if [ -z "${PR_BODY_FILE:-}" ]; then
+    record SKIP "falsified-by (no PR body)"
+  elif [ ! -f "${PR_BODY_FILE}" ]; then
+    echo "falsified-by: PR_BODY_FILE is set but ${PR_BODY_FILE} does not exist"
+    record FAIL "falsified-by"
+  elif FALSIFIED_BASE="${MERGE_BASE}" python3 scripts/check_falsified_by.py --body-file "${PR_BODY_FILE}"; then
+    record PASS "falsified-by"
+  else
+    record FAIL "falsified-by"
+  fi
+else
+  record FAIL "falsified-by"
+fi
+
+# --- gate 2b3: PR body follows the PR template ------------------------------
+
+section "PR template (PR body)"
+if python3 scripts/check_pr_template.py --self-test; then
+  if [ -z "${PR_BODY_FILE:-}" ]; then
+    record SKIP "pr-template (no PR body)"
+  elif [ ! -f "${PR_BODY_FILE}" ]; then
+    echo "pr-template: PR_BODY_FILE is set but ${PR_BODY_FILE} does not exist"
+    record FAIL "pr-template"
+  elif python3 scripts/check_pr_template.py --body-file "${PR_BODY_FILE}"; then
+    record PASS "pr-template"
+  else
+    record FAIL "pr-template"
+  fi
+else
+  record FAIL "pr-template"
+fi
+
 # --- gate 2c: ConformU report validation ------------------------------------
 
 section "ConformU report validation"
@@ -291,7 +351,10 @@ fi
 
 section "Docs drift check"
 if python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs_drift.py \
-   && python3 scripts/changelog_section.py --self-test; then
+   && python3 scripts/changelog_section.py --self-test \
+   && python3 scripts/changelog_fragments.py --self-test \
+   && python3 scripts/changelog_fragments.py --check \
+   && python3 scripts/changelog_to_deb.py --self-test; then
   record PASS "docs drift check"
 else
   record FAIL "docs drift check"

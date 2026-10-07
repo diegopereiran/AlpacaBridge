@@ -16,18 +16,21 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <ctime>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <numbers>
@@ -41,6 +44,7 @@ namespace {
 
 constexpr double kHoursToDegrees = 15.0;
 constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
+constexpr int kPositionLinkFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
@@ -280,7 +284,9 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        std::unique_lock<std::mutex> ilock(initiator_mutex_, std::defer_lock);
         if (!connected) {
+            ilock.lock();
             // Cancel + join the background slew/pulse task threads BEFORE
             // taking mutex_: the task threads take mutex_, so joining under
             // the lock would deadlock, and leaving them running across the
@@ -301,6 +307,7 @@ public:
         if (connected == connected_) {
             return;
         }
+        ++motion_generation_;
 
         auto& protocol = SynScanProtocolWrapper::instance();
         if (connected) {
@@ -349,15 +356,17 @@ public:
             parked_ = false;
             parking_ = false;
             at_home_ = false;
-            pulse_guiding_active_ = false;
+            clear_pulse_guiding_locked();
             slewing_cached_ = false;
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            guide_position_valid_ = false;
             last_utc_valid_ = false;
             client_disagreement_warned_ = false;
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
+            position_link_health_.reset();
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
             try {
@@ -435,13 +444,15 @@ public:
             parked_ = false;
             parking_ = false;
             at_home_ = false;
-            pulse_guiding_active_ = false;
+            clear_pulse_guiding_locked();
             slewing_cached_ = false;
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            position_link_health_.reset();
         }
     }
 
@@ -494,7 +505,9 @@ public:
     }
 
     AlignmentMode get_alignment_mode() const override {
-        return AlignmentMode::GermanPolar;
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        return alignment_mode_locked();
     }
 
     double get_altitude() const override {
@@ -559,10 +572,13 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (pulse_guiding_active_ && std::chrono::steady_clock::now() >= pulse_guide_end_time_) {
-            pulse_guiding_active_ = false;
+        const auto now = std::chrono::steady_clock::now();
+        for (std::size_t axis = 0; axis < pulse_guiding_active_.size(); ++axis) {
+            if (pulse_guiding_active_[axis] && now >= pulse_guide_end_time_[axis]) {
+                pulse_guiding_active_[axis] = false;
+            }
         }
-        return pulse_guiding_active_;
+        return pulse_guiding_active_[0] || pulse_guiding_active_[1];
     }
 
     bool get_can_set_declination_rate() const override {
@@ -620,9 +636,9 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
-            !get_slewing_locked()) {
-            return std::clamp(target_dec_degrees_, -90.0, 90.0);
+        if (!position_link_health_.faulted() && guide_position_valid_ &&
+            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+            return std::clamp(guide_position_dec_degrees_, -90.0, 90.0);
         }
         refresh_equatorial_cache_locked();
         return std::clamp(cached_dec_degrees_, -90.0, 90.0);
@@ -651,9 +667,16 @@ public:
         }
         auto& protocol = SynScanProtocolWrapper::instance();
         if (tracking) {
-            // TODO: Confirm correct SynScan tracking mode for specific mount types.
-            protocol.set_tracking_mode(2);
-            tracking_mode_cached_ = 2;
+            const AlignmentMode alignment = alignment_mode_locked();
+            if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
+                ensure_site_info_cached_locked();
+            }
+            if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
+                throw AlpacaException("Set SiteLatitude before enabling equatorial tracking", AlpacaError::ValueNotSet);
+            }
+            const int mode = alignment == AlignmentMode::AltAz ? 1 : (site_latitude_cached_ < 0.0 ? 3 : 2);
+            protocol.set_tracking_mode(mode);
+            tracking_mode_cached_ = mode;
         } else {
             protocol.set_tracking_mode(0);
             tracking_mode_cached_ = 0;
@@ -673,6 +696,7 @@ public:
     }
 
     GuideRate get_guide_rate() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         return guide_rate_;
     }
 
@@ -694,9 +718,9 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (target_ra_set_ && target_dec_set_ && std::chrono::steady_clock::now() < position_override_until_ &&
-            !get_slewing_locked()) {
-            return target_ra_hours_;
+        if (!position_link_health_.faulted() && guide_position_valid_ &&
+            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+            return guide_position_ra_hours_;
         }
         refresh_equatorial_cache_locked();
         return cached_ra_hours_;
@@ -849,6 +873,7 @@ public:
     }
 
     double get_target_declination() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -860,11 +885,13 @@ public:
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -876,6 +903,7 @@ public:
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
@@ -991,11 +1019,13 @@ public:
                 return;  // calling Park twice (or while parking) is harmless
             }
         }
-        double park_ra = 0.0;
-        double park_dec = 0.0;
+        bool park_altaz = false;
+        double park_target_first = 0.0;
+        double park_target_second = 0.0;
         // Cancel + join any previous slew task first. Must run without mutex_
         // held: the task takes mutex_.
         reap_slew_task();
+        reap_pulse_tasks();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1003,23 +1033,43 @@ public:
                 return;  // ASCOM: Park on a parked (or parking) mount is harmless.
             }
             if (!park_position_set_) {
-                refresh_equatorial_cache_locked();
-                park_ra_hours_ = cached_ra_hours_;
-                park_dec_degrees_ = cached_dec_degrees_;
-                park_position_set_ = true;
+                store_park_position_locked();
             }
-            park_ra = park_ra_hours_;
-            park_dec = park_dec_degrees_;
-            validate_ra_dec(park_ra, park_dec, "Park");
+            park_altaz = park_alignment_mode_ == AlignmentMode::AltAz;
+            if (park_altaz) {
+                park_target_first = park_azimuth_degrees_;
+                park_target_second = park_altitude_degrees_;
+            } else if (!park_ra_uses_hour_angle_) {
+                park_target_first = park_ra_hours_;
+                park_target_second = park_dec_degrees_;
+            } else {
+                if (!site_info_valid_) {
+                    ensure_site_info_cached_locked();
+                }
+                // An hour angle is saved only while a site is known, so a
+                // handset that has since stopped reporting one (a reconnect
+                // without location) still leaves the last known longitude here.
+                const double lst =
+                    compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+                park_target_first = std::fmod(lst - park_hour_angle_hours_, 24.0);
+                if (park_target_first < 0.0) {
+                    park_target_first += 24.0;
+                }
+                park_target_second = park_dec_degrees_;
+                validate_ra_dec(park_target_first, park_target_second, "Park");
+            }
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
             slewing_cached_ = true;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             at_home_ = false;
             parking_ = true;
+            ++motion_generation_;
+            clear_pulse_guiding_locked();
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls Park after a failed GOTO must not be told the OLD
             // goto failed while it's parking.
@@ -1039,14 +1089,18 @@ public:
             slew_task_cancel_.store(false);
             tlock.lock();
         }
-        slew_task_thread_ = std::thread([this, park_ra, park_dec]() {
+        slew_task_thread_ = std::thread([this, park_altaz, park_target_first, park_target_second]() {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!connected_ || slew_task_cancel_.load() || !parking_) {
                 parking_ = false;
                 return;
             }
             try {
-                do_slew_to_coordinates_locked(park_ra, park_dec);
+                if (park_altaz) {
+                    do_slew_to_altaz_locked(park_target_second, park_target_first);
+                } else {
+                    do_slew_to_coordinates_locked(park_target_first, park_target_second);
+                }
             } catch (const std::exception& ex) {
                 fail_park_locked(std::string("Park slew dispatch failed: ") + ex.what());
                 return;
@@ -1064,8 +1118,9 @@ public:
                 lock.unlock();
                 const bool keep_going = task_wait_for(std::chrono::milliseconds(250), slew_task_cancel_);
                 lock.lock();
-                // Cancelled (disconnect / destruction / superseding slew),
-                // aborted, or unparked meanwhile: the canceller owns the state.
+                // Cancelled (AbortSlew, disconnect / destruction, or a newer
+                // initiator), aborted, or unparked meanwhile: the canceller owns
+                // the state.
                 if (!keep_going || !connected_ || !parking_) {
                     parking_ = false;
                     return;
@@ -1109,68 +1164,98 @@ public:
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            guide_position_valid_ = false;
             // AtPark and Slewing flip in the same locked step.
             parked_ = true;
             parking_ = false;
         });
     }
 
+    // Stop a park slew: cancel the GOTO, then both axes to rate 0. Each stop
+    // is tried on its own so one failure does not skip the others. Returns
+    // the first failure's message, or an empty string when every stop was
+    // answered (#742). mutex_ must be held.
+    std::string stop_park_slew_locked() {
+        auto& protocol = SynScanProtocolWrapper::instance();
+        std::string first_error;
+        const auto try_stop = [&first_error](auto&& stop) {
+            try {
+                stop();
+            } catch (const std::exception& ex) {
+                if (first_error.empty()) {
+                    first_error = ex.what();
+                }
+            } catch (...) {
+                if (first_error.empty()) {
+                    first_error = "unknown exception";
+                }
+            }
+        };
+        try_stop([&protocol] { protocol.cancel_goto(); });
+        try_stop([&protocol] { protocol.move_axis_fixed_rate(0, 0); });
+        try_stop([&protocol] { protocol.move_axis_fixed_rate(1, 0); });
+        return first_error;
+    }
+
     // Park task failure path: stop the hardware so the reported idle state
     // (Slewing false, AtPark false) matches reality, then drop the parking
-    // state so the caller can retry. mutex_ must be held.
+    // state so the caller can retry. When a stop fails the mount may still
+    // be moving, so Slewing keeps its cached value. mutex_ must be held.
     void fail_park_locked(const std::string& message) {
-        try {
-            auto& protocol = SynScanProtocolWrapper::instance();
-            protocol.cancel_goto();
-            protocol.move_axis_fixed_rate(0, 0);
-            protocol.move_axis_fixed_rate(1, 0);
-        } catch (...) {  // NOLINT(bugprone-empty-catch)
-        }
+        const std::string stop_error = stop_park_slew_locked();
         parking_ = false;
-        slewing_cached_ = false;
+        if (stop_error.empty()) {
+            slewing_cached_ = false;
+        } else {
+            ALPACA_LOG_ERROR("SynScan",
+                             "stop after park failure failed: " + stop_error + "; the mount may still be moving");
+        }
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         position_override_until_ = std::chrono::steady_clock::time_point::min();
         ALPACA_LOG_WARN("SynScan", message);
     }
 
     void pulse_guide(int direction, int duration) override {
+        if (duration < 0) {
+            throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
+        }
         int axis = -1;
-        int tracking_mode = 0;
+        double direction_sign = 0.0;
+        switch (direction) {
+            case 0:
+                axis = 1;
+                direction_sign = 1.0;
+                break;
+            case 1:
+                axis = 1;
+                direction_sign = -1.0;
+                break;
+            case 2:
+                axis = 0;
+                direction_sign = -1.0;
+                break;
+            case 3:
+                axis = 0;
+                direction_sign = 1.0;
+                break;
+            default:
+                throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+        }
+
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("PulseGuide");
-
-            if (duration < 0) {
-                throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
-            }
-
+        }
+        reap_pulse_task(axis);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("PulseGuide");
             auto& protocol = SynScanProtocolWrapper::instance();
-
-            double slew_rate_deg_per_sec = 0.0;
-
-            switch (direction) {
-                case 0:
-                    axis = 1;
-                    slew_rate_deg_per_sec = guide_rate_.dec;
-                    break;
-                case 1:
-                    axis = 1;
-                    slew_rate_deg_per_sec = -guide_rate_.dec;
-                    break;
-                case 2:
-                    axis = 0;
-                    slew_rate_deg_per_sec = -guide_rate_.ra;
-                    break;
-                case 3:
-                    axis = 0;
-                    slew_rate_deg_per_sec = guide_rate_.ra;
-                    break;
-                default:
-                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-            }
-
+            const double guide_rate = axis == 1 ? guide_rate_.dec : guide_rate_.ra;
+            double slew_rate_deg_per_sec = direction_sign * guide_rate;
             if (axis == 1) {
                 char pier = protocol.get_pointing_state();
                 if (pier == 'W') {
@@ -1181,63 +1266,49 @@ public:
             const double duration_sec = duration / 1000.0;
             const auto now = std::chrono::steady_clock::now();
 
-            // Initialize target coords from mount if position override isn't active
-            if (!target_ra_set_ || !target_dec_set_ || now >= position_override_until_) {
+            // Initialize the guide-position estimate from mount position when its override expires.
+            if (!guide_position_valid_ || now >= position_override_until_) {
                 refresh_equatorial_cache_locked();
-                target_ra_hours_ = cached_ra_hours_;
-                target_dec_degrees_ = cached_dec_degrees_;
-                target_ra_set_ = true;
-                target_dec_set_ = true;
+                guide_position_ra_hours_ = cached_ra_hours_;
+                guide_position_dec_degrees_ = cached_dec_degrees_;
+                guide_position_valid_ = true;
             }
 
-            // Accumulate expected pulse delta directly into target coordinates
+            // Accumulate expected pulse delta in the private guide-position estimate.
             if (direction == 0 || direction == 1) {
                 double delta_deg = guide_rate_.dec * duration_sec;
                 if (direction == 1) delta_deg = -delta_deg;
-                target_dec_degrees_ = std::clamp(target_dec_degrees_ + delta_deg, -90.0, 90.0);
+                guide_position_dec_degrees_ = std::clamp(guide_position_dec_degrees_ + delta_deg, -90.0, 90.0);
             } else {
                 double delta_hours = (guide_rate_.ra * duration_sec) / 15.0;
                 if (direction == 3) delta_hours = -delta_hours;
-                target_ra_hours_ = std::fmod(target_ra_hours_ + delta_hours, 24.0);
-                if (target_ra_hours_ < 0.0) target_ra_hours_ += 24.0;
+                guide_position_ra_hours_ = std::fmod(guide_position_ra_hours_ + delta_hours, 24.0);
+                if (guide_position_ra_hours_ < 0.0) guide_position_ra_hours_ += 24.0;
             }
 
-            // Keep position override active so get_ra/get_dec return target coords
+            // Keep position override active so get_ra/get_dec return the estimate.
             position_override_until_ =
                 now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuidePositionGrace;
 
             protocol.move_axis_variable_rate(axis, slew_rate_deg_per_sec);
 
-            pulse_guiding_active_ = true;
-            pulse_guide_end_time_ = now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
+            pulse_guiding_active_[static_cast<std::size_t>(axis)] = true;
+            pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
+                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-
-            tracking_mode = tracking_mode_cached_;
         }
 
-        // Stop-the-pulse timer: a joinable member thread (never detached),
-        // cancelled + joined on disconnect and in the destructor. Spawned
-        // OUTSIDE mutex_ because its failure path takes mutex_.
-        reap_pulse_task();
-        // Join any task that raced in between the reap above and this lock,
-        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
-        // to observe the cancel and exit, so joining under the lock deadlocks.
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        while (pulse_task_thread_.joinable()) {
-            std::thread stale = std::move(pulse_task_thread_);
-            tlock.unlock();
-            pulse_task_cancel_.store(true);
-            task_cv_.notify_all();
-            stale.join();
-            pulse_task_cancel_.store(false);
-            tlock.lock();
-        }
-        pulse_task_thread_ = std::thread([this, axis, duration, tracking_mode]() {
-            if (!task_wait_for(std::chrono::milliseconds(duration), pulse_task_cancel_)) {
-                // Cancelled by disconnect/destruction. Still make a best-effort
-                // attempt to stop the axis before exiting — the mount would
-                // otherwise keep slewing.
+        // Each axis has its own timer; reaping above happened before the new
+        // rate command, so the old timer cannot stop this replacement pulse.
+        std::lock_guard<std::mutex> tlock(task_mutex_);
+        pulse_task_threads_[static_cast<std::size_t>(axis)] = std::thread([this, axis, duration]() {
+            const auto axis_index = static_cast<std::size_t>(axis);
+            auto& cancel = pulse_task_cancel_[axis_index];
+            if (!task_wait_for(std::chrono::milliseconds(duration), cancel)) {
+                // Cancelled by replacement, AbortSlew, disconnect or
+                // destruction. Still make a best-effort attempt to stop the
+                // axis before exiting — the mount would otherwise keep slewing.
                 try {
                     SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, 0.0);
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -1263,12 +1334,20 @@ public:
                 } catch (...) {
                     last_error = "unknown error";
                 }
-                if (!stopped && !task_wait_for(std::chrono::milliseconds(100), pulse_task_cancel_)) {
+                if (!stopped && !task_wait_for(std::chrono::milliseconds(100), cancel)) {
                     break;
                 }
             }
             if (stopped) {
-                if (axis == 0 && tracking_mode > 0) {
+                if (axis == 0) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!connected_) {
+                        return;
+                    }
+                    const int tracking_mode = tracking_mode_cached_;
+                    if (tracking_mode <= 0) {
+                        return;
+                    }
                     try {
                         proto.set_tracking_mode(tracking_mode);
                     } catch (const std::exception& e) {
@@ -1282,7 +1361,7 @@ public:
                                                 " attempts on axis " + std::to_string(axis) +
                                                 " — axis may still be moving (mount runaway risk): " + last_error);
                 std::lock_guard<std::mutex> lock(mutex_);
-                pulse_guiding_active_ = false;
+                pulse_guiding_active_[axis_index] = false;
                 // Surface the error state: report the axis as slewing until an
                 // AbortSlew/MoveAxis(0) or disconnect clears it.
                 if (connected_) {
@@ -1295,18 +1374,29 @@ public:
     void set_park() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        refresh_equatorial_cache_locked();
-        park_ra_hours_ = cached_ra_hours_;
-        park_dec_degrees_ = cached_dec_degrees_;
-        park_position_set_ = true;
+        store_park_position_locked();
     }
 
     void slew_to_coordinates(double ra, double dec) override {
+        std::unique_lock<std::mutex> ilock(initiator_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("SlewToCoordinates");
+            validate_ra_dec(ra, dec, "SlewToCoordinates");
+        }
+        reap_slew_task();
+        reap_pulse_tasks();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
+        clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
-        wait_for_slew_complete(lock);
+        const uint64_t owner_generation = ++motion_generation_;
+        ilock.unlock();
+        if (!wait_for_slew_complete(lock, owner_generation)) {
+            throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+        }
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
@@ -1324,11 +1414,13 @@ public:
         // Cancel + join any previous slew dispatch task first. Must run
         // without mutex_ held: the task takes mutex_.
         reap_slew_task();
+        reap_pulse_tasks();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            ++motion_generation_;
 
             int bits = use_precise_commands_ ? 24 : 16;
             ra_raw = encode_ra_raw(ra, bits);
@@ -1344,6 +1436,7 @@ public:
             last_slew_error_.clear();
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
             position_override_until_ = std::chrono::steady_clock::time_point::min();
+            guide_position_valid_ = false;
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
             target_ra_set_ = true;
@@ -1352,6 +1445,7 @@ public:
             manual_axis_slewing_[1] = false;
             parked_ = false;
             at_home_ = false;
+            clear_pulse_guiding_locked();
         }
 
         // Dispatch in a joinable member thread (never detached), cancelled +
@@ -1382,11 +1476,9 @@ public:
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
-                // AbortSlew does not set the cancel flag, so a dispatch it did not
-                // reap can still send its GOTO and record a real failure after the
-                // abort cleared the error. Recording it here
-                // would poison the NEXT Slewing read with an artifact of the
-                // cancel, not a real fault.
+                // AbortSlew now reaps the worker as well, so recording an error
+                // after cancellation would poison the NEXT Slewing read with an
+                // artifact of the cancel, not a real fault.
                 if (!slew_task_cancel_.load()) {
                     last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + ex.what();
                 }
@@ -1409,17 +1501,29 @@ public:
         // members -- 0h/0deg on a fresh connect. Found while splitting the
         // flag for open-astro#346: with one flag the omission was invisible,
         // since any target write at all made the check pass.
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        slew_to_coordinates(target_ra_hours_, target_dec_degrees_);
+        slew_to_coordinates(ra, dec);
     }
 
     void slew_to_target_async() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
+        slew_to_coordinates_async(ra, dec);
     }
 
     void sync_to_coordinates(double ra, double dec) override {
@@ -1436,18 +1540,29 @@ public:
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
         target_dec_set_ = true;
+        guide_position_ra_hours_ = ra;
+        guide_position_dec_degrees_ = dec;
+        guide_position_valid_ = true;
         position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     }
 
     void sync_to_target() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        sync_to_coordinates(target_ra_hours_, target_dec_degrees_);
+        sync_to_coordinates(ra, dec);
     }
 
     void unpark() override {
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         bool was_parking = false;
+        std::string stop_error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1455,22 +1570,23 @@ public:
             was_parking = parking_;
             if (was_parking) {
                 // Unpark during a park wins the race: stop the park slew and
-                // drop the parking state; the task below is then joined.
+                // drop the parking state; the task below is then joined. A
+                // failed stop leaves Slewing at its cached value, since the
+                // park slew may still be running.
                 parking_ = false;
-                auto& protocol = SynScanProtocolWrapper::instance();
-                try {
-                    protocol.cancel_goto();
-                    protocol.move_axis_fixed_rate(0, 0);
-                    protocol.move_axis_fixed_rate(1, 0);
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                stop_error = stop_park_slew_locked();
+                if (stop_error.empty()) {
+                    slewing_cached_ = false;
                 }
-                slewing_cached_ = false;
                 slew_force_until_ = std::chrono::steady_clock::time_point::min();
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
             }
         }
         if (was_parking) {
             reap_slew_task();  // without mutex_ held
+        }
+        if (!stop_error.empty()) {
+            throw AlpacaException("Unpark could not stop the park slew: " + stop_error, AlpacaError::DriverException);
         }
     }
 
@@ -1482,20 +1598,27 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("MoveAxis");
         if (axis != 0 && axis != 1) {
             throw AlpacaException("MoveAxis axis must be 0 or 1", AlpacaError::InvalidValue);
         }
-
-        if (std::isnan(rate) || std::isinf(rate)) {
+        if (!std::isfinite(rate)) {
             throw AlpacaException("MoveAxis rate must be finite", AlpacaError::InvalidValue);
         }
         if (std::abs(rate) > kMaxMoveAxisRateDegPerSec) {
-            throw AlpacaException("MoveAxis rate exceeds supported range",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("MoveAxis");
+        }
+        reap_slew_task();
+        reap_pulse_task(axis);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        check_not_parked_locked("MoveAxis");
+        ++motion_generation_;
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
@@ -1510,6 +1633,11 @@ public:
         last_slew_error_.clear();
 
         SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0);
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        pulse_guiding_active_[static_cast<std::size_t>(axis)] = false;
+        pulse_guide_end_time_[static_cast<std::size_t>(axis)] = std::chrono::steady_clock::time_point::min();
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1531,23 +1659,50 @@ public:
     }
 
     void abort_slew() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
-        auto& protocol = SynScanProtocolWrapper::instance();
-        protocol.cancel_goto();
-        protocol.move_axis_fixed_rate(0, 0);
-        protocol.move_axis_fixed_rate(1, 0);
-        parking_ = false;  // an aborted park never reaches AtPark
-        slewing_cached_ = false;
-        // open-astro#575: AbortSlew is a valid clearing command for a stored
-        // slew failure -- the client acted on the error, so the next Slewing
-        // read must answer normally again.
-        last_slew_error_.clear();
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
+            slew_task_cancel_.store(true);
+            task_cv_.notify_all();
+        }
+        try {
+            reap_pulse_tasks();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                check_connected();
+                check_not_fully_parked_locked("AbortSlew");
+                // The wrapper serializes transactions, so a GOTO already in flight
+                // must finish (or time out) before these stops can reach the mount.
+                auto& protocol = SynScanProtocolWrapper::instance();
+                protocol.cancel_goto();
+                protocol.move_axis_fixed_rate(0, 0);
+                protocol.move_axis_fixed_rate(1, 0);
+                if (tracking_mode_cached_ > 0) {
+                    // Stopping an RA guide pulse also stops sidereal tracking.
+                    // AbortSlew owns this stop, so restore the currently
+                    // requested mode only after both axes have stopped.
+                    protocol.set_tracking_mode(tracking_mode_cached_);
+                }
+                parking_ = false;  // an aborted park never reaches AtPark
+                ++motion_generation_;
+                slewing_cached_ = false;
+                clear_pulse_guiding_locked();
+                // open-astro#575: AbortSlew is a valid clearing command for a stored
+                // slew failure -- the client acted on the error, so the next Slewing
+                // read must answer normally again.
+                last_slew_error_.clear();
+                slew_force_until_ = std::chrono::steady_clock::time_point::min();
+                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                manual_axis_slewing_[0] = false;
+                manual_axis_slewing_[1] = false;
+            }
+        } catch (...) {
+            reap_slew_task();
+            throw;
+        }
+        reap_slew_task();
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
@@ -1604,20 +1759,26 @@ private:
     // (both task threads take mutex_).
     void cancel_async_tasks() {
         slew_task_cancel_.store(true);
-        pulse_task_cancel_.store(true);
+        for (auto& cancel : pulse_task_cancel_) {
+            cancel.store(true);
+        }
         task_cv_.notify_all();
         std::thread slew_thread;
-        std::thread pulse_thread;
+        std::array<std::thread, 2> pulse_threads;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
             slew_thread = std::move(slew_task_thread_);
-            pulse_thread = std::move(pulse_task_thread_);
+            for (std::size_t axis = 0; axis < pulse_task_threads_.size(); ++axis) {
+                pulse_threads[axis] = std::move(pulse_task_threads_[axis]);
+            }
         }
         if (slew_thread.joinable()) {
             slew_thread.join();
         }
-        if (pulse_thread.joinable()) {
-            pulse_thread.join();
+        for (auto& pulse_thread : pulse_threads) {
+            if (pulse_thread.joinable()) {
+                pulse_thread.join();
+            }
         }
     }
 
@@ -1637,20 +1798,31 @@ private:
         slew_task_cancel_.store(false);
     }
 
-    // Join the previous pulse-stop task (if any) and reset its cancel flag.
-    // Must be called WITHOUT mutex_ held (its failure path takes mutex_).
-    void reap_pulse_task() {
-        pulse_task_cancel_.store(true);
+    // Join the previous pulse-stop task for one axis and reset its cancel flag.
+    // Must be called WITHOUT mutex_ held (the task failure path takes mutex_).
+    void reap_pulse_task(int axis) {
+        const auto index = static_cast<std::size_t>(axis);
+        pulse_task_cancel_[index].store(true);
         task_cv_.notify_all();
         std::thread prev;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(pulse_task_thread_);
+            prev = std::move(pulse_task_threads_[index]);
         }
         if (prev.joinable()) {
             prev.join();
         }
-        pulse_task_cancel_.store(false);
+        pulse_task_cancel_[index].store(false);
+    }
+
+    void reap_pulse_tasks() {
+        reap_pulse_task(0);
+        reap_pulse_task(1);
+    }
+
+    void clear_pulse_guiding_locked() {
+        pulse_guiding_active_.fill(false);
+        pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
     }
 
     // A park in flight (parking_) gates the same members as a completed park:
@@ -1673,7 +1845,8 @@ private:
 
     void refresh_equatorial_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
-        if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
+        if (!position_link_health_.faulted() && equatorial_cache_valid_ &&
+            (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
         }
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -1684,16 +1857,20 @@ private:
             cached_dec_degrees_ = decode_angle(raw.second, bits);
             equatorial_cache_valid_ = true;
             last_equatorial_update_ = now;
-        } catch (...) {
-            if (!equatorial_cache_valid_) {
-                throw;
+            note_position_reply_locked();
+        } catch (const std::exception& e) {
+            equatorial_cache_valid_ = false;
+            note_position_failure_locked(e);
+            if (position_link_health_.faulted()) {
+                throw_position_link_fault_locked();
             }
+            throw;
         }
     }
 
     void refresh_altaz_cache_locked() const {
         auto now = std::chrono::steady_clock::now();
-        if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
+        if (!position_link_health_.faulted() && altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
         auto& protocol = SynScanProtocolWrapper::instance();
@@ -1704,11 +1881,36 @@ private:
             cached_alt_degrees_ = decode_angle(raw.second, bits);
             altaz_cache_valid_ = true;
             last_altaz_update_ = now;
-        } catch (...) {
-            if (!altaz_cache_valid_) {
-                throw;
+            note_position_reply_locked();
+        } catch (const std::exception& e) {
+            altaz_cache_valid_ = false;
+            note_position_failure_locked(e);
+            if (position_link_health_.faulted()) {
+                throw_position_link_fault_locked();
             }
+            throw;
         }
+    }
+
+    void note_position_reply_locked() const {
+        if (position_link_health_.on_reply()) {
+            ALPACA_LOG_INFO("SynScan", "Position link recovered; mount readback is available again");
+        }
+    }
+
+    void note_position_failure_locked(const std::exception& e) const {
+        if (auto fault = position_link_health_.note_failure(e.what(), kPositionLinkFailureThreshold)) {
+            ALPACA_LOG_ERROR("SynScan", "Position link faulted: " + *fault);
+        } else {
+            ALPACA_LOG_WARN("SynScan", "Position read failed (" +
+                                           std::to_string(position_link_health_.consecutive_failures()) +
+                                           " consecutive failures): " + e.what());
+        }
+    }
+
+    [[noreturn]] void throw_position_link_fault_locked() const {
+        throw AlpacaException("SynScan mount communications compromised: " + position_link_health_.fault(),
+                              AlpacaError::DriverException);
     }
 
     bool get_slewing_locked() const {
@@ -1736,7 +1938,7 @@ private:
         if (was_slewing && !slewing_cached_) {
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-            position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            guide_position_valid_ = false;
         }
         return slewing_cached_;
     }
@@ -1747,6 +1949,35 @@ private:
             tracking_mode_valid_ = true;
         }
         return tracking_mode_cached_ != 0;
+    }
+
+    AlignmentMode alignment_mode_locked() const {
+        const int model_id = mount_model_id_.load();
+        switch (model_id) {
+            case 0:
+            case 1:
+            case 2:
+            case 3:
+            case 4:
+            case 50:
+            case 56:
+                return AlignmentMode::GermanPolar;
+            case 160:
+                return AlignmentMode::AltAz;
+            case 5:
+            case 6:
+                throw AlpacaException(
+                    "SynScan cannot report whether this AZ-EQ mount is currently configured "
+                    "for Alt-Az or equatorial alignment",
+                    AlpacaError::DriverException);
+            default:
+                if ((model_id >= 128 && model_id <= 159)) {
+                    return AlignmentMode::AltAz;
+                }
+                throw AlpacaException(
+                    "SynScan cannot determine AlignmentMode for mount model ID " + std::to_string(model_id),
+                    AlpacaError::DriverException);
+        }
     }
 
     void ensure_site_info_cached_locked() const {
@@ -1768,6 +1999,52 @@ private:
         } catch (...) {
             site_info_valid_ = false;
         }
+    }
+
+    // Saves the current RA/Dec as the park target, as main did for every mount.
+    void store_legacy_park_position_locked() {
+        refresh_equatorial_cache_locked();
+        park_alignment_mode_ = AlignmentMode::GermanPolar;
+        park_ra_uses_hour_angle_ = false;
+        park_ra_hours_ = cached_ra_hours_;
+        park_dec_degrees_ = cached_dec_degrees_;
+        park_position_set_ = true;
+    }
+
+    void store_park_position_locked() {
+        try {
+            park_alignment_mode_ = alignment_mode_locked();
+        } catch (const AlpacaException&) {
+            // Dual-mode and unidentified handsets cannot tell us whether the
+            // saved RA/Dec needs sidereal conversion. Keep their prior usable
+            // park behavior instead of making SetPark and Park unavailable.
+            store_legacy_park_position_locked();
+            return;
+        }
+        if (park_alignment_mode_ == AlignmentMode::AltAz) {
+            refresh_altaz_cache_locked();
+            park_azimuth_degrees_ = cached_az_degrees_;
+            park_altitude_degrees_ = cached_alt_degrees_;
+            park_ra_uses_hour_angle_ = false;
+        } else {
+            if (!site_info_valid_) {
+                ensure_site_info_cached_locked();
+            }
+            if (!site_info_valid_) {
+                // No longitude, so no LST for an hour angle: keep the prior
+                // park behavior rather than making SetPark and Park unavailable.
+                store_legacy_park_position_locked();
+                return;
+            }
+            refresh_equatorial_cache_locked();
+            const double lst =
+                compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+            park_hour_angle_hours_ = shortest_ra_delta_hours(lst, cached_ra_hours_);
+            park_ra_hours_ = cached_ra_hours_;
+            park_dec_degrees_ = cached_dec_degrees_;
+            park_ra_uses_hour_angle_ = true;
+        }
+        park_position_set_ = true;
     }
 
     LocationInfo current_location_locked() const {
@@ -1795,6 +2072,7 @@ private:
         last_slew_error_.clear();
         slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
         position_override_until_ = std::chrono::steady_clock::time_point::min();
+        guide_position_valid_ = false;
         protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -1811,6 +2089,13 @@ private:
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t az_raw = encode_angle(azimuth, bits);
         uint32_t alt_raw = encode_angle(altitude, bits);
+        equatorial_cache_valid_ = false;
+        altaz_cache_valid_ = false;
+        slewing_cached_ = true;
+        last_slew_error_.clear();
+        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        guide_position_valid_ = false;
         protocol.goto_alt_az_raw(az_raw, alt_raw, use_precise_commands_);
         parked_ = false;
         at_home_ = false;
@@ -1821,7 +2106,9 @@ private:
     // 120 s (Bisque's unlock/sleep/relock loop is the reference pattern).
     // `lock` must be held on entry; it is held again on return/throw. The
     // connection state is re-checked after each relock.
-    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) const {
+    // Returns false when a concurrent motion command bumped motion_generation_
+    // past `owner_generation` while the lock was released (the slew was superseded).
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
         const auto start_grace = std::chrono::seconds(2);
@@ -1834,6 +2121,9 @@ private:
             check_connected();
         };
         while (true) {
+            if (motion_generation_ != owner_generation) {
+                return false;
+            }
             bool slewing = get_slewing_locked();
             if (slewing) {
                 saw_slewing = true;
@@ -1854,10 +2144,12 @@ private:
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
-        position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        guide_position_valid_ = false;
+        position_override_until_ = std::chrono::steady_clock::time_point::min();
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
+        return motion_generation_ == owner_generation;
     }
 
     void sync_mount_time_locked() {
@@ -1927,6 +2219,9 @@ private:
 
     double target_ra_hours_;
     double target_dec_degrees_;
+    double guide_position_ra_hours_ = 0.0;
+    double guide_position_dec_degrees_ = 0.0;
+    mutable bool guide_position_valid_ = false;
     double aperture_diameter_m_;
     double aperture_area_m2_;
     double focal_length_m_;
@@ -1936,6 +2231,7 @@ private:
     mutable double cached_az_degrees_ = 0.0;
     mutable bool equatorial_cache_valid_ = false;
     mutable bool altaz_cache_valid_ = false;
+    mutable util::PolledLinkHealth position_link_health_;
     mutable std::chrono::steady_clock::time_point last_equatorial_update_;
     mutable std::chrono::steady_clock::time_point last_altaz_update_;
 
@@ -1995,26 +2291,34 @@ private:
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
     GuideRate guide_rate_{};
-    mutable bool pulse_guiding_active_ = false;
-    mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
+    mutable std::array<bool, 2> pulse_guiding_active_{};
+    mutable std::array<std::chrono::steady_clock::time_point, 2> pulse_guide_end_time_{};
 
     bool park_position_set_ = false;
     mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
+    AlignmentMode park_alignment_mode_ = AlignmentMode::GermanPolar;
+    bool park_ra_uses_hour_angle_ = false;
+    double park_hour_angle_hours_ = 0.0;
+    // Bumped under mutex_ by every motion initiator; a sync slew waiting with the lock
+    // released compares it to learn it was superseded (Sky-Watcher shape, #832).
+    uint64_t motion_generation_ = 0;
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
+    double park_azimuth_degrees_ = 0.0;
+    double park_altitude_degrees_ = 0.0;
 
     // Background task threads — see the helpers above. task_mutex_ only guards
     // thread handles and the cv; it is never held across protocol I/O.
-    // Serializes the async initiators (park, slew_to_coordinates_async) so
-    // their check -> reap -> spawn sequences cannot interleave. Never held
-    // by the task threads and never taken while mutex_ is held.
+    // Serializes motion handoffs: sync/async slews, park, PulseGuide, MoveAxis,
+    // AbortSlew, Unpark, and disconnect. Never taken under mutex_; a blocking
+    // slew releases it before waiting for motion completion.
     std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
     std::thread slew_task_thread_;
-    std::thread pulse_task_thread_;
+    std::array<std::thread, 2> pulse_task_threads_;
     mutable std::atomic<bool> slew_task_cancel_{false};
-    mutable std::atomic<bool> pulse_task_cancel_{false};
+    std::array<std::atomic<bool>, 2> pulse_task_cancel_{};
 };
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(

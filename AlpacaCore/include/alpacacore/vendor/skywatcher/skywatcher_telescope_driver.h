@@ -14,10 +14,12 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/motion_limits.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -45,6 +47,12 @@ namespace detail {
 // the default afterwards. Process-wide; tests restore it after use.
 void set_host_synchronized_probe(std::function<bool()> probe);
 bool host_synchronized_probe();
+// Test-only: called by the RA pulse task after the in-place restore ":I" and
+// before the ":J", with no driver lock held, so a test can hold the task in
+// that window. Default empty; a blocking hook must be released before the
+// driver is destroyed. Process-wide; tests clear it afterwards.
+void set_pulse_restore_hook(std::function<void()> hook);
+void run_pulse_restore_hook();
 // open-astro#405: how often the pointing path re-samples discipline while a
 // client offset is armed on a host that was undisciplined at the write
 // (default 30 s; a test shortens it). Zero disables the re-sample.
@@ -57,6 +65,12 @@ std::chrono::milliseconds host_discipline_resample_interval();
 // restore the default afterwards.
 void set_relink_motion_preserve_window(std::chrono::milliseconds window);
 std::chrono::milliseconds relink_motion_preserve_window();
+// open-astro#436: the live limit guard's bodies, counted process-wide for
+// tests. started: bodies ever entered; running: bodies not yet returned. A
+// driver with no limit set never starts one, and a disconnect returns only
+// after its driver's body has returned.
+std::uint64_t limit_guard_bodies_started();
+int limit_guard_bodies_running();
 
 bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed,
@@ -88,6 +102,8 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
 bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized);
 }  // namespace detail
 
+// `motion_limits` (open-astro#436): per-device altitude floor and meridian
+// limit, both off by default; see <alpacacore/util/motion_limits.h>.
 /// `clock` is the TaskClock the driver's task waits and deadlines run on
 /// (open-astro#743, decision 0005): real by default, a FakeTaskClock in tests.
 /// It must outlive the driver. Pointing time stays on the host clock.
@@ -96,6 +112,7 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, 
                                                              std::optional<double> site_longitude_deg = std::nullopt,
                                                              std::optional<double> site_elevation_m = std::nullopt,
                                                              std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {},
+                                                             util::MotionLimits motion_limits = {},
                                                              util::TaskClock& clock = util::default_task_clock());
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
@@ -104,7 +121,7 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
     std::optional<double> site_elevation_m = std::nullopt, std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {},
-    util::TaskClock& clock = util::default_task_clock());
+    util::MotionLimits motion_limits = {}, util::TaskClock& clock = util::default_task_clock());
 
 /// The scan behind create_skywatcher_telescope_auto(): serial ports first, then
 /// Wi-Fi discovery (UDP 11880); throws when nothing answers.
@@ -114,6 +131,7 @@ ConnectionInfo resolve_skywatcher_auto(int mount_index);
 // scan runs at connect time, so construction succeeds while the mount is absent (#659).
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
     int device_number, int mount_index = 0, std::optional<double> site_latitude_deg = std::nullopt,
-    std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt);
+    std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
+    util::MotionLimits motion_limits = {});
 
 }  // namespace alpacacore::vendor::skywatcher

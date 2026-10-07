@@ -297,11 +297,9 @@ int main() {
         ::unlink(path.c_str());
     }
 
-    // open-astro#392: http.allowed_hosts, one comma-separated string, and its
-    // env override. Entries are trimmed and empty ones dropped; the router
-    // normalizes them.
+    // open-astro#392: http.allowed_hosts, one comma-separated string. Entries
+    // are trimmed and empty ones dropped; the router normalizes them.
     {
-        ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
         alpacahttp::Config fresh;
         EXPECT(fresh.allowed_hosts().empty());
 
@@ -332,18 +330,107 @@ int main() {
         EXPECT(from_file_empty_entries.load(path));
         EXPECT((from_file_empty_entries.allowed_hosts() == std::vector<std::string>{"a", "b"}));
 
+        // open-astro#787: the web UI owns the list, so the file is its only
+        // source; the old ALPACAHTTP_ALLOWED_HOSTS variable is ignored.
         ::setenv("ALPACAHTTP_ALLOWED_HOSTS", " .fritz.box ,, pi.lan ", 1);
-        alpacahttp::Config from_env;
-        EXPECT(from_env.load(path));
-        EXPECT((from_env.allowed_hosts() == std::vector<std::string>{".fritz.box", "pi.lan"}));
-
-        // An explicitly empty variable overrides the file with no entries.
-        ::setenv("ALPACAHTTP_ALLOWED_HOSTS", "", 1);
-        alpacahttp::Config from_env_empty;
-        EXPECT(from_env_empty.load(path));
-        EXPECT(from_env_empty.allowed_hosts().empty());
+        alpacahttp::Config env_ignored;
+        EXPECT(env_ignored.load(path));
+        EXPECT((env_ignored.allowed_hosts() == std::vector<std::string>{"a", "b"}));
         ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
 
+        ::unlink(path.c_str());
+    }
+
+    // http.host_check_enabled: off unless set.
+    {
+        alpacahttp::Config fresh;
+        EXPECT(!fresh.host_check_enabled());
+
+        char path_template[] = "/tmp/alpacahttp_test_host_check_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        ::close(fd);
+        const auto write_file = [&path](const char* value) {
+            std::ofstream out(path);
+            out << "http:\n  port: 6800\n";
+            if (*value != '\0') {
+                out << "  host_check_enabled: " << value << "  # a comment\n";
+            }
+        };
+
+        write_file("");
+        alpacahttp::Config absent;
+        EXPECT(absent.load(path));
+        EXPECT(!absent.host_check_enabled());
+
+        write_file("true");
+        alpacahttp::Config file_on;
+        EXPECT(file_on.load(path));
+        EXPECT(file_on.host_check_enabled());
+
+        // open-astro#787: the old ALPACAHTTP_HOST_CHECK variable is ignored;
+        // the file's value stands either way.
+        write_file("false");
+        ::setenv("ALPACAHTTP_HOST_CHECK", "true", 1);
+        alpacahttp::Config env_on_ignored;
+        EXPECT(env_on_ignored.load(path));
+        EXPECT(!env_on_ignored.host_check_enabled());
+
+        write_file("true");
+        ::setenv("ALPACAHTTP_HOST_CHECK", "false", 1);
+        alpacahttp::Config env_off_ignored;
+        EXPECT(env_off_ignored.load(path));
+        EXPECT(env_off_ignored.host_check_enabled());
+        ::unsetenv("ALPACAHTTP_HOST_CHECK");
+
+        ::unlink(path.c_str());
+    }
+
+    // open-astro#392: a '#' inside a double-quoted value is data; one outside
+    // starts a comment.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_hash_quoted_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            out << "http:\n"
+                   "  allowed_hosts: \"a#b, .lan\" # trailing comment\n";
+        }
+        alpacahttp::Config quoted;
+        EXPECT(quoted.load(path));
+        EXPECT((quoted.allowed_hosts() == std::vector<std::string>{"a#b", ".lan"}));
+        ::unlink(path.c_str());
+    }
+
+    // A double quote opens a quoted value only as its first non-space
+    // character; a later one in a plain value is a literal.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_lone_quote_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string path = path_template;
+        const auto location_of = [&path](const std::string& line) {
+            {
+                std::ofstream out(path);
+                out << "server:\n" << line << "\n";
+            }
+            alpacahttp::Config cfg;
+            EXPECT(cfg.load(path));
+            return cfg.location();
+        };
+        EXPECT(location_of("  location: 8\" Dob  # note") == "8\" Dob");
+        EXPECT(location_of("  location: \"Obs #2\"  # c") == "Obs #2");
+        EXPECT(location_of("  location: \"a\\\"#b\"  # c") == "a\"#b");
+        EXPECT(location_of("  location: 'Obs'  # c") == "Obs");
+        EXPECT(location_of("  location: 'Obs #2'") == "Obs #2");
+        EXPECT(location_of("  location: 'Obs' # comment") == "Obs");
+        EXPECT(location_of("  location: Bob's #2") == "Bob's");
+        EXPECT(location_of("  location: Plain Site") == "Plain Site");
         ::unlink(path.c_str());
     }
 

@@ -16,6 +16,7 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/logging.h>
+#include <alpacahttp/config.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
 #include <alpacahttp/software_update.h>
@@ -49,6 +50,7 @@
 #include <thread>
 #include <vector>
 
+#include "route_table_stubs.h"
 #include "test_assert.h"
 #include "test_catalog_descriptor.h"
 
@@ -94,7 +96,9 @@ alpacahttp::Response route_with_host(alpacahttp::Router& router, const std::stri
     return router.route(request, 1);
 }
 
-// True when the response is the open-astro#392 Host refusal for `host`.
+// True when the response is the open-astro#392 Host refusal for `host`. The
+// message names the web UI field first: a browser refused by name is where a
+// person meets it, and the IP address is always allowed.
 bool is_host_refusal(const alpacahttp::Response& response, const std::string& host) {
     if (response.status_code() != 403) {
         return false;
@@ -102,7 +106,9 @@ bool is_host_refusal(const alpacahttp::Response& response, const std::string& ho
     const auto json = nlohmann::json::parse(response.body(), nullptr, false);
     return !json.is_discarded() && json.value("ErrorNumber", 0) == 0x401 &&
            json.value("ErrorMessage", "") ==
-               "Host '" + host + "' is not allowed; add it to http.allowed_hosts or use the IP address";
+               "Host '" + host +
+                   "' is not allowed; open the web UI by IP address and add it under Allowed host names, or add it "
+                   "to http.allowed_hosts";
 }
 
 // Issue #102 back-fill helper: POST a device config, then read it back from
@@ -876,6 +882,111 @@ int main() {
             }
         }
         EXPECT(matched == 1);
+    }
+
+    // Client text in a log line is escaped (open-astro#753): a request path, a
+    // moveaxis body and an Accept header reach the log with control bytes and
+    // invalid UTF-8 as \xNN, and the 256-byte cut never splits a multi-byte
+    // character. The request line cannot carry a newline (the parser splits it
+    // on whitespace), so the path uses ESC; a body and a header value can.
+    {
+        std::vector<std::string> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(message);
+            });
+        auto count_logged = [&](const std::string& line) {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            return std::count(captured.begin(), captured.end(), line);
+        };
+        auto raw_byte_logged = [&](char byte) {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            return std::any_of(captured.begin(), captured.end(),
+                               [&](const std::string& line) { return line.find(byte) != std::string::npos; });
+        };
+
+        // 255 bytes, then a 2-byte character that would end at byte 257.
+        const std::string head = std::string("/setup/v1/x\x1b[31m") + "\xff";
+        const std::string path = head + std::string(255 - head.size(), 'a') + "\xC3\xA9" + "tail";
+        const std::string shown = "/setup/v1/x\\x1b[31m\\xff" + std::string(255 - head.size(), 'a') + "... (261 bytes)";
+        EXPECT(path.size() == 261);
+        EXPECT(route_request(router, "GET", path).status_code() == 404);
+        EXPECT(count_logged("HTTP GET " + shown) == 1);
+        EXPECT(count_logged("Handling setup endpoint: " + shown) == 1);
+        EXPECT(count_logged("Setup endpoint regex did not match: " + shown) == 1);
+        EXPECT(!raw_byte_logged('\x1b'));
+        EXPECT(!raw_byte_logged('\xff'));
+        EXPECT(!raw_byte_logged('\xC3'));
+
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        constexpr int kStubNumber = 9753;
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::TelescopeStub>(kStubNumber)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::CameraStub>(kStubNumber)));
+        auto send_raw = [&](const std::string& raw) {
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw));
+            return router.route(request, 1);
+        };
+
+        const std::string body = "Axis=0&Rate=0\nHTTP GET /forged";
+        send_raw("PUT /api/v1/telescope/" + std::to_string(kStubNumber) +
+                 "/moveaxis HTTP/1.1\r\nHost: localhost\r\n"
+                 "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
+                 std::to_string(body.size()) + "\r\n\r\n" + body);
+        EXPECT(count_logged("moveaxis body: Axis=0&Rate=0\\x0aHTTP GET /forged") == 1);
+        EXPECT(count_logged("HTTP GET /forged") == 0);
+
+        for (const std::string method : {"imagearray", "imagearrayvariant"}) {
+            send_raw("GET /api/v1/camera/" + std::to_string(kStubNumber) + "/" + method +
+                     " HTTP/1.1\r\nHost: localhost\r\nAccept: x\x1b[2Jy\r\n\r\n");
+            EXPECT(count_logged("Camera " + method + " Accept: x\\x1b[2Jy, imagebytes=false") == 1);
+        }
+        EXPECT(!raw_byte_logged('\x1b'));
+
+        // A validation message that quotes a decoded client value (the UTCDate
+        // text) reaches the DEBUG log escaped too: %0A in a form value decodes
+        // to a newline that would otherwise start a forged log line.
+        {
+            const std::string utc_body = "UTCDate=nope%0AHTTP+GET+/forged";
+            send_raw("PUT /api/v1/telescope/" + std::to_string(kStubNumber) +
+                     "/utcdate HTTP/1.1\r\nHost: localhost\r\n"
+                     "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
+                     std::to_string(utc_body.size()) + "\r\n\r\n" + utc_body);
+            EXPECT(count_logged("AlpacaException in telescope method 'utcdate': Invalid UTC date format: "
+                                "nope\\x0aHTTP GET /forged") == 1);
+            EXPECT(!raw_byte_logged('\n'));
+        }
+
+        // configuredevice with a deviceType carrying a newline: the DEBUG
+        // lines in register_device_from_config / sanitize_device_config quote
+        // it and the exception text, both client text.
+        {
+            const std::string cfg_body =
+                "{\"vendor\":\"zwo\",\"deviceType\":\"cam\\nHTTP GET /forged\","
+                "\"deviceNumber\":0}";
+            send_raw(
+                "POST /management/v1/configuredevice HTTP/1.1\r\nHost: localhost\r\n"
+                "Content-Type: application/json\r\nContent-Length: " +
+                std::to_string(cfg_body.size()) + "\r\n\r\n" + cfg_body);
+            EXPECT(count_logged("register_device_from_config: device type \"cam\\x0aHTTP GET /forged\" is not "
+                                "catalog-recognized (Unknown device type: cam\\x0aHTTP GET /forged); falling "
+                                "through to the arm chain") == 1);
+            EXPECT(!raw_byte_logged('\n'));
+        }
+
+        registry.unregister_device(alpacacore::DeviceType::Telescope, kStubNumber);
+        registry.unregister_device(alpacacore::DeviceType::Camera, kStubNumber);
     }
     alpacahttp::Request request;
 
@@ -2838,6 +2949,93 @@ int main() {
         remove_device(router, "skywatcher", "telescope", 9618);
     }
     {
+        // open-astro#436: the two motion limits are persisted per device and
+        // must survive the sanitize round-trip (Required Test Case 9). Both
+        // are OFF by default: absent or null reads back as absent-or-null,
+        // never as 0, because 0 is a real floor (the horizon) and a real
+        // meridian limit (stop at the meridian).
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "skywatcher"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9662},
+                                           {"connectionType", "network"},
+                                           {"host", "192.168.4.1"},
+                                           {"udpPort", 11880},
+                                           {"siteLatitude", 39.7392},
+                                           {"siteLongitude", -104.9903},
+                                           {"minAltitudeDeg", 15.0},
+                                           {"meridianLimitMinutes", 30.0}},
+                                          "Telescope", 9662);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("minAltitudeDeg", -1.0) == 15.0);
+        EXPECT(cfg.value("meridianLimitMinutes", -1.0) == 30.0);
+        remove_device(router, "skywatcher", "telescope", 9662);
+
+        // null = off, and the web UI sends null for a blank field: the config
+        // is accepted, the device registers, and the field reads back as
+        // absent or null (either means off) rather than a number.
+        const auto off = roundtrip_config(router,
+                                          {{"vendor", "skywatcher"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9663},
+                                           {"connectionType", "network"},
+                                           {"host", "192.168.4.1"},
+                                           {"udpPort", 11880},
+                                           {"siteLatitude", 39.7392},
+                                           {"siteLongitude", -104.9903},
+                                           {"minAltitudeDeg", nullptr},
+                                           {"meridianLimitMinutes", nullptr}},
+                                          "Telescope", 9663);
+        EXPECT(off.is_object() && !off.empty());
+        EXPECT(!off.contains("minAltitudeDeg") || off["minAltitudeDeg"].is_null());
+        EXPECT(!off.contains("meridianLimitMinutes") || off["meridianLimitMinutes"].is_null());
+        remove_device(router, "skywatcher", "telescope", 9663);
+
+        // One limit set, the other left out: only the set one is persisted.
+        const auto one = roundtrip_config(router,
+                                          {{"vendor", "skywatcher"},
+                                           {"deviceType", "telescope"},
+                                           {"deviceNumber", 9664},
+                                           {"connectionType", "serial"},
+                                           {"portPath", "/dev/ttyUSB6"},
+                                           {"siteLatitude", 39.7392},
+                                           {"siteLongitude", -104.9903},
+                                           {"minAltitudeDeg", 12.5}},
+                                          "Telescope", 9664);
+        EXPECT(one.is_object() && !one.empty());
+        EXPECT(one.value("minAltitudeDeg", -1.0) == 12.5);
+        EXPECT(!one.contains("meridianLimitMinutes") || one["meridianLimitMinutes"].is_null());
+        remove_device(router, "skywatcher", "telescope", 9664);
+
+        // Range: the API (not only the form) rejects a floor outside
+        // -90..90 and a meridian limit outside 0..360, and takes the bounds.
+        const auto limits_body = [](int number, const char* key, double value) {
+            return nlohmann::json{{"vendor", "skywatcher"},      {"deviceType", "telescope"},  {"deviceNumber", number},
+                                  {"connectionType", "network"}, {"host", "192.168.4.1"},      {"udpPort", 11880},
+                                  {"siteLatitude", 39.7392},     {"siteLongitude", -104.9903}, {key, value}};
+        };
+        const auto rejected = [&](int number, const char* key, double value) {
+            const auto response =
+                route_request(router, "POST", "/management/v1/configuredevice", limits_body(number, key, value).dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        };
+        rejected(9665, "minAltitudeDeg", 95.0);
+        rejected(9665, "minAltitudeDeg", -91.0);
+        rejected(9665, "meridianLimitMinutes", -1.0);
+        rejected(9665, "meridianLimitMinutes", 361.0);
+        const auto accepted = [&](int number, const char* key, double value) {
+            const auto cfg = roundtrip_config(router, limits_body(number, key, value), "Telescope", number);
+            EXPECT(cfg.is_object() && !cfg.empty());
+            EXPECT(cfg.value(key, -1000.0) == value);
+            remove_device(router, "skywatcher", "telescope", number);
+        };
+        accepted(9666, "minAltitudeDeg", -90.0);
+        accepted(9666, "minAltitudeDeg", 90.0);
+        accepted(9666, "meridianLimitMinutes", 0.0);
+        accepted(9666, "meridianLimitMinutes", 360.0);
+    }
+    {
         // issue #274: configuredevice is a first-class REST API independent of
         // the web UI, and used to accept a skywatcher config with no
         // coordinates at all. Both would then collapse to 0.0 in the driver,
@@ -4009,16 +4207,21 @@ int main() {
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
         // Site coordinates are mandatory for this vendor from the API (#274).
+        // open-astro#744 rule 8: the catalog's sanitize keeps every declared
+        // non-secret field whatever the connection type (ADR 0004; only the UI
+        // honours applies_when), so a serial config now keeps host/udpPort
+        // and a network config keeps portPath. tcpPort is not a Sky-Watcher
+        // field and still drops.
         add("skywatcher", "telescope", "Telescope", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":39.7392,)"
             R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1,"host":"h","udpPort":1})",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":39.7392,)"
-            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1})");
+            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1,"host":"h","udpPort":1})");
         add("skywatcher", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
             R"("siteLongitude":151.21,"portPath":"/dev/x","tcpPort":1})",
             R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
-            R"("siteLongitude":151.21})");
+            R"("siteLongitude":151.21,"portPath":"/dev/x"})");
         add("skywatcher", "telescope", "Telescope", "auto",
             R"({"connectionType":"auto","mountIndex":1,"siteLatitude":39.7392,"siteLongitude":-104.9903})",
             R"({"connectionType":"auto","mountIndex":1,"siteLatitude":39.7392,"siteLongitude":-104.9903})");  // #659
@@ -4198,27 +4401,35 @@ int main() {
             const char* bad_type_message;  // the arm's own literal, they differ
             const char* site;              // mandatory from the API for this vendor (#274)
             bool empty_type_is_auto;       // zwo is the odd one out (#508 item 3)
+            // open-astro#744: registered through the device catalog rather than
+            // a router arm. Two observable differences, pinned per case below:
+            // sanitize keeps every declared field (ADR 0004: portPath / host
+            // survive whatever the connection type), and a saved config's
+            // cross-field refusal is logged through the catalog's "config
+            // normalized" wrapper, not reject_invalid_config()'s "will refuse
+            // to connect" text.
+            bool catalog;
         };
         std::vector<Mount> mounts;
         const char* const kSite = R"("siteLatitude":39.7392,"siteLongitude":-104.9903)";
         const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
-        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true});
+        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true, true});
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true});
+        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false});
+        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false, false});
 #endif
         for (const auto& m : mounts) {
             const std::string site = m.site;
@@ -4231,9 +4442,13 @@ int main() {
             // instead of auto-probing), stays listed, and configureddevices
             // still shows the raw value: sanitize_device_config copies the file
             // value verbatim and only the registration sees the fallback.
+            // A catalog vendor keeps the port path in the entry too (rule 8 of
+            // open-astro#744): sanitize no longer tests == "serial".
             pin("connectionType \"carrier-pigeon\" (#380/#353)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site}), m.bad_type_message, "{}",
-                true, obj({R"("connectionType":"carrier-pigeon")", site}),
+                true,
+                m.catalog ? obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site})
+                          : obj({R"("connectionType":"carrier-pigeon")", site}),
                 {"has connectionType \"carrier-pigeon\"", warned_serial}, {"Skipping persisted device"});
 
             // #508 item 2: connectionType is not case-folded. "Network" is
@@ -4242,17 +4457,26 @@ int main() {
             // keeps the raw "Network".
             pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"Network","host":"192.168.1.60")", site}), m.bad_type_message, "{}", true,
-                obj({R"("connectionType":"Network")", site}), {"has connectionType \"Network\"", warned_serial},
-                {"Skipping persisted device"});
+                m.catalog ? obj({R"("connectionType":"Network","host":"192.168.1.60")", site})
+                          : obj({R"("connectionType":"Network")", site}),
+                {"has connectionType \"Network\"", warned_serial}, {"Skipping persisted device"});
 
             // #508 item 1 (the six mount arms that go through
             // reject_invalid_config): an empty portPath on serial is rejected
             // by the API and, from a saved config, WARNED about and registered
             // anyway. Contrast the arms further down that drop the entry.
+            // open-astro#744 rule 6: for a catalog vendor the saved config is
+            // still registered, but the WARN is the catalog's wrapper
+            // ("Persisted <vendor> telescope N config normalized: Serial port
+            // path is required. The saved value is not used: ..."), not
+            // reject_invalid_config()'s "will refuse to connect" text.
             pin("serial with empty portPath (#508 item 1, mount arm)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"serial","portPath":"")", site}), "Serial port path is required", "{}", true,
                 obj({R"("connectionType":"serial","portPath":"")", site}),
-                {"will refuse to connect: Serial port path is required"}, {"Skipping persisted device"});
+                m.catalog ? std::vector<std::string>{"config normalized: Serial port path is required"}
+                          : std::vector<std::string>{"will refuse to connect: Serial port path is required"},
+                m.catalog ? std::vector<std::string>{"Skipping persisted device", "will refuse to connect"}
+                          : std::vector<std::string>{"Skipping persisted device"});
 
             // #508 item 3: an empty connectionType. zwo treats "" as
             // unrecognised: the API rejects it, a saved one is normalised to
@@ -4290,11 +4514,29 @@ int main() {
         // one is WARNED about and ignored by the driver (the #398 test above
         // reads the driver back), but the file entry keeps it: configureddevices
         // still shows 200.0, and the next save writes it back.
+        // open-astro#744 rule 7: the range is the catalog's per-field rule, so
+        // the API text is the catalog's ("siteLatitude is out of range (min
+        // -90) (max 90)"; it was read_site_coordinates()' "siteLatitude
+        // 200.000000 is out of range: must be between -90.000000 and 90.000000
+        // degrees"). A saved value is dropped to unset with the catalog's
+        // wrapped warning, so the factory then logs the #274 missing-site
+        // WARNING as well: two WARNs, the persisted outcome unchanged.
         pin("siteLatitude 200 (#508 item 5)", "skywatcher", "telescope", "Telescope",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
-            "siteLatitude 200.000000 is out of range: must be between -90.000000 and 90.000000 degrees", "{}", true,
+            "siteLatitude is out of range (min -90) (max 90)", "{}", true,
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
-            {"siteLatitude 200.000000 is out of range", "The coordinate is ignored"}, {"Skipping persisted device"});
+            {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
+             "has no site latitude and will refuse to connect"},
+            {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        // The router-owned arm still words both the API refusal and the saved
+        // config's WARN through read_site_coordinates(): short numbers in both.
+        pin("siteLatitude 200 (read_site_coordinates)", "ioptron", "telescope", "Telescope",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            "siteLatitude 200 is out of range: must be between -90 and 90 degrees", "{}", true,
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            {"siteLatitude 200 is out of range: must be between -90 and 90 degrees"}, {"200.000000"});
 #endif
 
         // #508 item 1, the arms that DROP a saved entry on an empty portPath
@@ -5598,8 +5840,10 @@ int main() {
                  std::pair{"/management/v1/wifi/country", "{\"Alpha2\": \"usa\"}"},
                  std::pair{"/management/v1/wifi/country", "{}"},
                  std::pair{"/management/v1/wifi/profiles", "{\"Passphrase\": \"x\"}"},
+                 std::pair{"/management/v1/wifi/profiles", "{\"SsidHex\": \"gg\"}"},
                  std::pair{"/management/v1/wifi/connect", "not json"},
                  std::pair{"/management/v1/wifi/ap", "{\"Ssid\": \"x\", \"Band\": \"g\"}"},
+                 std::pair{"/management/v1/wifi/ap", "{\"SsidHex\": \"f\"}"},
                  std::pair{"/management/v1/wifi/radio", "{\"Enabled\": \"yes\"}"},
              }) {
             const auto response = route_request(router, "PUT", path, body);
@@ -6042,7 +6286,61 @@ int main() {
             remove_device(router, "skywatcher", "telescope", device);
         }
     }
+
+    // open-astro#744: an Int field takes an integer or a whole-number float
+    // (9600 or 9600.0); a fractional value is a wrong-type refusal naming the
+    // field, as for every catalog vendor (catalog_json.cpp whole_number()).
+    // The arm's config_get<int>() read 9600.5 as 9600 without a word. The
+    // catalog rule wins; the PR body quotes the change.
+    {
+        alpacahttp::Router router;
+        const auto fractional = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                  R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600.5,)"
+                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+            "Telescope");
+        EXPECT(!fractional.ok);
+        EXPECT(fractional.message.find("baudRate") != std::string::npos);
+        EXPECT(fractional.message.find("wrong type") != std::string::npos);
+        EXPECT(listed_entry(router, "Telescope", 9259).is_null());
+
+        const auto whole = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                  R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600.0,)"
+                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+            "Telescope");
+        EXPECT(whole.ok);
+        EXPECT(whole.config.value("baudRate", -1) == 9600);
+        remove_device(router, "skywatcher", "telescope", 9259);
+    }
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    // read_site_coordinates() still words the refusal for the router-owned
+    // vendors: the numbers print in their short form, not std::to_string's
+    // "200.000000" / "-90.000000".
+    {
+        alpacahttp::Router router;
+        for (const auto& [override_json, expected] :
+             {std::pair{nlohmann::json{{"siteLatitude", 200.0}},
+                        std::string("siteLatitude 200 is out of range: must be between -90 and 90 degrees")},
+              std::pair{nlohmann::json{{"siteLongitude", 999.5}},
+                        std::string("siteLongitude 999.5 is out of range: must be between -180 and 180 degrees")}}) {
+            nlohmann::json config = {{"vendor", "ioptron"},
+                                     {"deviceType", "telescope"},
+                                     {"deviceNumber", 9641},
+                                     {"connectionType", "serial"},
+                                     {"portPath", "/dev/null"}};
+            config.update(override_json);
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", config.dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(json.value("ErrorMessage", "").find(expected) != std::string::npos);
+        }
+    }
+#endif
 
     // Issue #348: every state-changing management endpoint carries the
     // cross-origin guard, not just synctime and wifi.
@@ -6293,8 +6591,8 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its
-    // `available` is false.
+    // and the Bisque, gphoto, Player One, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the "zzz"
+    // test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -6304,7 +6602,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 3);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 10);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -6312,6 +6610,41 @@ int main() {
         for (auto& entry : fixture) {
             if (entry.value("vendor", "") == "astroasis") {
 #ifdef ALPACACORE_ENABLE_ASTROASIS
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "bisque") {
+#ifdef ALPACACORE_ENABLE_BISQUE
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "gphoto") {
+#ifdef ALPACACORE_ENABLE_GPHOTO
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "playerone") {
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "skywatcher") {
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "svbony") {
+#ifdef ALPACACORE_ENABLE_SVBONY
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -6486,13 +6819,36 @@ int main() {
     }
 #endif
 
+#ifndef ALPACACORE_ENABLE_SKYWATCHER
+    // open-astro#744 rule 1 / test 3: with the vendor built out, the catalog
+    // path reports the deleted arm's exact text through vendor_label() (the
+    // display name's first word is "SkyWatcher"). Green before the arm is
+    // deleted; it pins the client-facing and web-UI text across the move. The
+    // site is supplied because the catalog validates (rule 4) before it
+    // answers "not enabled", where the arm answered first.
+    {
+        alpacahttp::Router router;
+        const auto off = api_attempt(router,
+                                     nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope",)"
+                                                           R"("deviceNumber":9258,"connectionType":"serial",)"
+                                                           R"("portPath":"/dev/ttyUSB6","siteLatitude":39.7392,)"
+                                                           R"("siteLongitude":-104.9903})"),
+                                     "Telescope");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "SkyWatcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON");
+        EXPECT(listed_entry(router, "Telescope", 9258).is_null());
+    }
+#endif
+
     // open-astro#392: Host allowlist against DNS rebinding. After a rebind
     // the browser sends the attacker's name as Host (and as Origin), so the
     // Origin==Host guard passes; route() now refuses any Host that is not an
     // IP literal, a reserved local name, the machine's own name or a
-    // configured one, for every method and path.
+    // configured one, for every method and path. The check is opt-in
+    // (http.host_check_enabled), so this block turns it on.
     {
         alpacahttp::Router router;
+        router.set_host_check_enabled(true);
         const std::string apiversions = "/management/apiversions";
 
         char hostname_buffer[256] = {};
@@ -6571,6 +6927,555 @@ int main() {
         EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "pi.lan"), "pi.lan"));
     }
 
+    // The Host check is off by default: a router or reverse-proxy name such as
+    // astropi.lan is served, the API and the static UI alike. Turning it on
+    // on the live Router changes the next request, turning it off restores it.
+    // The Origin==Host guard does not depend on the flag.
+    {
+        alpacahttp::Router router;
+        const std::string apiversions = "/management/apiversions";
+        EXPECT(route_with_host(router, "GET", "/management/v1/description", "astropi.lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", "/", "astropi.lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+
+        router.set_host_check_enabled(true);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "astropi.lan"), "astropi.lan"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", "/", "astropi.lan"), "astropi.lan"));
+
+        router.set_host_check_enabled(false);
+        EXPECT(route_with_host(router, "GET", apiversions, "astropi.lan").status_code() == 200);
+
+        // Origin differs from Host: refused with the check off.
+        std::ostringstream raw;
+        raw << "DELETE /management/v1/synctime HTTP/1.1\r\n"
+            << "Host: astropi.lan\r\n"
+            << "Origin: http://evil.example\r\n\r\n";
+        alpacahttp::Request request;
+        EXPECT(request.parse(raw.str()));
+        EXPECT(router.route(request, 1).status_code() == 403);
+    }
+
+    // The Host check is a server setting: PUT /management/v1/description takes
+    // HostCheckEnabled and AllowedHosts, writes them to the config file's
+    // http: section and applies them to the next request; GET reports them.
+    // A PUT whose own Host the resulting settings would refuse changes
+    // nothing, so the operator cannot lock the web UI out from the web UI.
+    {
+        const std::string description = "/management/v1/description";
+        const std::string apiversions = "/management/apiversions";
+
+        char path_template[] = "/tmp/alpacahttp_test_routing_hostcheck_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        const std::string original_file =
+            "# AlpacaHTTP\n"
+            "http:\n"
+            "  port: 6811\n"
+            "server:\n"
+            "  location: \"Backyard\"\n"
+            "  allowed_hosts: wrong.section\n"
+            "discovery:\n"
+            "  enabled: true\n";
+        {
+            std::ofstream out(config_path);
+            out << original_file;
+        }
+        const auto file_text = [&config_path]() {
+            std::ifstream in(config_path);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            return buf.str();
+        };
+        const auto error_number = [](const alpacahttp::Response& response) {
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            return json.is_discarded() ? -1 : json.value("ErrorNumber", -1);
+        };
+        // HTTP 400 InvalidValue with exactly this message.
+        const auto is_refused_save = [](const alpacahttp::Response& response, const std::string& message) {
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            if (!json.is_discarded() && json.value("ErrorMessage", "") != message) {
+                std::cerr << "Host check settings: got '" << json.value("ErrorMessage", "") << "'\n";
+            }
+            return response.status_code() == 400 && !json.is_discarded() && json.value("ErrorNumber", 0) == 0x401 &&
+                   json.value("ErrorMessage", "") == message;
+        };
+        const auto lockout_message = [](const std::string& host) {
+            return "Host '" + host +
+                   "' would be refused by these settings; add it to the allowed host names or use the IP address";
+        };
+        const auto settings = [&description](alpacahttp::Router& router, const std::optional<std::string>& host) {
+            const auto response = route_with_host(router, "GET", description, host);
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            return json["Value"];
+        };
+
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+
+        // GET reports both values. open-astro#787: nothing marks either one
+        // read-only; the web UI can always change them.
+        {
+            const auto v = settings(router, "astropi.lan");
+            EXPECT(v.contains("HostCheckEnabled") && v["HostCheckEnabled"].is_boolean());
+            EXPECT(v["HostCheckEnabled"].get<bool>() == false);
+            EXPECT(v.contains("AllowedHosts") && v["AllowedHosts"].is_string());
+            EXPECT(v["AllowedHosts"].get<std::string>().empty());
+            EXPECT(!v.contains("HostCheckEnabledFixedByEnvironment"));
+            EXPECT(!v.contains("AllowedHostsFixedByEnvironment"));
+        }
+
+        // Turning the check on from a name the list does not hold: 400,
+        // nothing changes in memory or in the file.
+        EXPECT(
+            is_refused_save(route_with_host(router, "PUT", description, "astropi.lan", R"({"HostCheckEnabled": true})"),
+                            lockout_message("astropi.lan")));
+        EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        EXPECT(settings(router, "astropi.lan").value("HostCheckEnabled", true) == false);
+        EXPECT(file_text() == original_file);
+        // The port is not part of the name, and the echoed Host keeps it.
+        EXPECT(is_refused_save(
+            route_with_host(router, "PUT", description, "AstroPi.lan:6800", R"({"HostCheckEnabled": true})"),
+            lockout_message("AstroPi.lan:6800")));
+        EXPECT(file_text() == original_file);
+
+        // Both fields in one PUT are judged together: the new list allows the
+        // request's Host, so the check turns on and the next request follows.
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "astropi.lan",
+                                   R"({"HostCheckEnabled": true, "AllowedHosts": ".LAN., astropi.home, ,"})")) == 0);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "attacker.example"), "attacker.example"));
+        EXPECT(is_host_refusal(route_with_host(router, "GET", description, "attacker.example"), "attacker.example"));
+        EXPECT(route_with_host(router, "GET", apiversions, "pi.lan").status_code() == 200);
+        EXPECT(route_with_host(router, "GET", apiversions, "astropi.home").status_code() == 200);
+        {
+            // AllowedHosts reads back as the normalized entries, ", " joined.
+            const auto v = settings(router, "astropi.lan");
+            EXPECT(v.value("HostCheckEnabled", false) == true);
+            EXPECT(v.value("AllowedHosts", "") == ".lan, astropi.home");
+        }
+        {
+            // Written under http:, not server:, and the rest of the file is
+            // kept. A fresh Config reads the same settings back.
+            const std::string text = file_text();
+            const auto http_at = text.find("http:\n");
+            const auto server_at = text.find("server:\n");
+            const auto flag_at = text.find("  host_check_enabled: \"true\"\n");
+            const auto list_at = text.find("  allowed_hosts: \".lan, astropi.home\"\n");
+            EXPECT(http_at != std::string::npos && server_at != std::string::npos);
+            EXPECT(flag_at != std::string::npos && flag_at > http_at && flag_at < server_at);
+            EXPECT(list_at != std::string::npos && list_at > http_at && list_at < server_at);
+            EXPECT(text.find("  allowed_hosts: wrong.section\n") > server_at);
+            EXPECT(text.find("  allowed_hosts: wrong.section\n") != std::string::npos);
+            EXPECT(text.find("# AlpacaHTTP\n") == 0);
+
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(reloaded.host_check_enabled());
+            EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan", "astropi.home"}));
+            EXPECT(reloaded.http_port() == 6811);
+            EXPECT(reloaded.location() == "Backyard");
+            EXPECT(reloaded.discovery_enabled());
+        }
+
+        // AllowedHosts alone is judged against the current flag: the check is
+        // on, so a list that drops the request's own name is refused.
+        {
+            const std::string before = file_text();
+            EXPECT(is_refused_save(
+                route_with_host(router, "PUT", description, "pi.lan", R"({"AllowedHosts": "astropi.home"})"),
+                lockout_message("pi.lan")));
+            EXPECT(route_with_host(router, "GET", apiversions, "pi.lan").status_code() == 200);
+            EXPECT(settings(router, "pi.lan").value("AllowedHosts", "") == ".lan, astropi.home");
+            EXPECT(file_text() == before);
+            // A refused field refuses the whole request: the profile name
+            // that came with it is not applied either.
+            EXPECT(is_refused_save(route_with_host(router, "PUT", description, "pi.lan",
+                                                   R"({"ProfileName": "Lockout", "AllowedHosts": ""})"),
+                                   lockout_message("pi.lan")));
+            EXPECT(settings(router, "pi.lan").value("ProfileName", "") != "Lockout");
+            EXPECT(file_text() == before);
+        }
+        // The same list from an IP address, which is always allowed, is
+        // accepted; so is a request with no Host header at all.
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "192.168.1.20:6800", R"({"AllowedHosts": ""})")) == 0);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "pi.lan"), "pi.lan"));
+        {
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(reloaded.host_check_enabled());
+            EXPECT(reloaded.allowed_hosts().empty());
+        }
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, std::nullopt, R"({"allowed_hosts": ".lan"})")) == 0);
+        EXPECT(route_with_host(router, "GET", apiversions, "pi.lan").status_code() == 200);
+
+        // Wrong types are InvalidValue and change nothing.
+        EXPECT(error_number(route_with_host(router, "PUT", description, "pi.lan", R"({"HostCheckEnabled": 3})")) ==
+               0x401);
+        EXPECT(error_number(route_with_host(router, "PUT", description, "pi.lan", R"({"AllowedHosts": [".lan"]})")) ==
+               0x401);
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "pi.lan", R"({"HostCheckEnabled": "maybe"})")) == 0x401);
+        EXPECT(settings(router, "pi.lan").value("HostCheckEnabled", false) == true);
+        EXPECT(settings(router, "pi.lan").value("AllowedHosts", "") == ".lan");
+
+        // Off again (string form, camelCase key): every Host is served, the
+        // list is kept, and the file says so.
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "pi.lan", R"({"hostCheckEnabled": "false"})")) == 0);
+        EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        {
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(!reloaded.host_check_enabled());
+            EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan"}));
+            const std::string text = file_text();
+            EXPECT(text.find("host_check_enabled") == text.rfind("host_check_enabled"));  // replaced, not appended
+        }
+        // With the check off the list may be changed from any Host; turning
+        // the check on alone is then judged against that stored list.
+        EXPECT(error_number(route_with_host(router, "PUT", description, "astropi.lan",
+                                            R"({"AllowedHosts": "astropi.home"})")) == 0);
+        EXPECT(
+            is_refused_save(route_with_host(router, "PUT", description, "astropi.lan", R"({"HostCheckEnabled": true})"),
+                            lockout_message("astropi.lan")));
+        EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "astropi.home", R"({"HostCheckEnabled": true})")) == 0);
+        EXPECT(is_host_refusal(route_with_host(router, "GET", apiversions, "astropi.lan"), "astropi.lan"));
+
+        // A Host that cannot name a host is refused like route() refuses it.
+        EXPECT(error_number(
+                   route_with_host(router, "PUT", description, "astropi.home", R"({"HostCheckEnabled": false})")) == 0);
+        EXPECT(is_refused_save(
+            route_with_host(router, "PUT", description, "fe80::1:6800", R"({"HostCheckEnabled": true})"),
+            lockout_message("fe80::1:6800")));
+
+        // Cross-origin: 403 from the same guard as the other description
+        // fields, and the check stays off.
+        {
+            const std::string body = R"({"HostCheckEnabled": true})";
+            std::ostringstream raw;
+            raw << "PUT " << description << " HTTP/1.1\r\n"
+                << "Host: localhost\r\n"
+                << "Origin: http://evil.example\r\n"
+                << "Content-Type: text/plain\r\n"
+                << "Content-Length: " << body.size() << "\r\n\r\n"
+                << body;
+            alpacahttp::Request request;
+            EXPECT(request.parse(raw.str()));
+            const auto response = router.route(request, 1);
+            EXPECT(response.status_code() == 403);
+            EXPECT(error_number(response) == 0x401);
+            EXPECT(settings(router, "localhost").value("HostCheckEnabled", true) == false);
+            EXPECT(route_with_host(router, "GET", apiversions, "attacker.example").status_code() == 200);
+        }
+
+        // An entry that cannot match a Host header is refused, not dropped:
+        // 400, the file and GET unchanged.
+        {
+            const std::string before_file = file_text();
+            const std::string before_hosts = settings(router, "localhost")["AllowedHosts"].get<std::string>();
+            const std::vector<std::string> bad_lists = {"a#b, .lan",
+                                                        "*.lan",
+                                                        "http://x.lan",
+                                                        "a b",
+                                                        std::string("a\x01.lan"),
+                                                        "a..lan",
+                                                        "[::zz]",
+                                                        "x.lan:abc",
+                                                        std::string("[::1\0junk]", 10)};
+            for (const auto& list : bad_lists) {
+                nlohmann::json body;
+                body["AllowedHosts"] = list;
+                const auto response = route_with_host(router, "PUT", description, "localhost", body.dump());
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(response.status_code() == 400);
+                EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
+                EXPECT(file_text() == before_file);
+                EXPECT(settings(router, "localhost")["AllowedHosts"].get<std::string>() == before_hosts);
+            }
+            std::string many;
+            for (int i = 0; i < 65; ++i) {
+                many += "h" + std::to_string(i) + ".lan,";
+            }
+            nlohmann::json too_many;
+            too_many["AllowedHosts"] = many;
+            EXPECT(route_with_host(router, "PUT", description, "localhost", too_many.dump()).status_code() == 400);
+            EXPECT(file_text() == before_file);
+        }
+
+        // A valid list, and a location holding '#', survive write and reload.
+        {
+            EXPECT(error_number(route_with_host(
+                       router, "PUT", description, "localhost",
+                       R"({"AllowedHosts": ".LAN, astropi.home:8080, [::1], my_host-1.", "Location": "Obs #2"})")) ==
+                   0);
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(
+                (reloaded.allowed_hosts() == std::vector<std::string>{".lan", "astropi.home", "[::1]", "my_host-1"}));
+            EXPECT(settings(router, "localhost")["AllowedHosts"].get<std::string>() ==
+                   ".lan, astropi.home, [::1], my_host-1");
+            EXPECT(reloaded.location() == "Obs #2");
+            EXPECT(error_number(route_with_host(router, "PUT", description, "localhost", R"({"AllowedHosts": ""})")) ==
+                   0);
+        }
+
+        // A body with none of the settable properties names all of them.
+        {
+            const auto response = route_with_host(router, "PUT", description, "localhost", R"({"Unrelated": 1})");
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x402);
+            EXPECT(json.value("ErrorMessage", "") ==
+                   "Request must include a 'Location', 'ProfileName', 'SyncSystemClockFromClients', "
+                   "'HostCheckEnabled' or 'AllowedHosts' property");
+        }
+        ::unlink(config_path.c_str());
+
+        // No file yet: the PUT creates it with both sections, each key under
+        // its own.
+        {
+            alpacahttp::Router created;
+            created.set_config_path(config_path);
+            EXPECT(error_number(route_with_host(
+                       created, "PUT", description, "pi.lan",
+                       R"({"Location": "Roof", "HostCheckEnabled": true, "AllowedHosts": ".lan"})")) == 0);
+            alpacahttp::Config reloaded;
+            EXPECT(reloaded.load(config_path));
+            EXPECT(reloaded.host_check_enabled());
+            EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan"}));
+            EXPECT(reloaded.location() == "Roof");
+            ::unlink(config_path.c_str());
+        }
+
+        // A file that cannot be written: the PUT fails and memory keeps the
+        // old settings.
+        {
+            alpacahttp::Router unwritable;
+            unwritable.set_config_path("/nonexistent-alpacahttp-test-dir/default.yaml");
+            const auto response = route_with_host(unwritable, "PUT", description, "localhost",
+                                                  R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})");
+            EXPECT(error_number(response) == 0x500);
+            EXPECT(route_with_host(unwritable, "GET", apiversions, "attacker.example").status_code() == 200);
+            EXPECT(settings(unwritable, "localhost").value("AllowedHosts", "x").empty());
+        }
+
+        // No config path (a Router built without a file): applied live, as
+        // the other description fields are.
+        {
+            alpacahttp::Router no_file;
+            EXPECT(error_number(route_with_host(no_file, "PUT", description, "localhost",
+                                                R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")) == 0);
+            EXPECT(
+                is_host_refusal(route_with_host(no_file, "GET", apiversions, "attacker.example"), "attacker.example"));
+            EXPECT(route_with_host(no_file, "GET", apiversions, "pi.lan").status_code() == 200);
+        }
+    }
+
+    // Saving a setting keeps the trailing comment of the line it replaces
+    // (the help text default.yaml ships), and a '#' inside a quoted old value
+    // is data, not a comment.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_routing_comments_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "http:\n"
+                   "  host_check_enabled: false  # help text\n"
+                   "  allowed_hosts: \"\"\n"
+                   "server:\n"
+                   "  location: \"Obs #2\"\n"
+                   "  profile_name: \"Old\"   # shown in the UI\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        const auto put = [&router](const std::string& body) {
+            return route_with_host(router, "PUT", "/management/v1/description", std::nullopt, body);
+        };
+        EXPECT(put(R"({"HostCheckEnabled": true, "AllowedHosts": ".lan", "Location": "Roof", "ProfileName": "New"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        const std::string text = buf.str();
+        EXPECT(text.find("  host_check_enabled: \"true\"  # help text\n") != std::string::npos);
+        EXPECT(text.find("  allowed_hosts: \".lan\"\n") != std::string::npos);
+        EXPECT(text.find("  location: \"Roof\"\n") != std::string::npos);
+        EXPECT(text.find("  profile_name: \"New\"   # shown in the UI\n") != std::string::npos);
+        EXPECT(text.find("Obs") == std::string::npos);
+
+        alpacahttp::Config reloaded;
+        EXPECT(reloaded.load(config_path));
+        EXPECT(reloaded.host_check_enabled());
+        EXPECT((reloaded.allowed_hosts() == std::vector<std::string>{".lan"}));
+        EXPECT(reloaded.location() == "Roof");
+        EXPECT(reloaded.profile_name() == "New");
+        std::remove(config_path.c_str());
+    }
+
+    // A blank line or a column-0 comment inside a section does not end it: the
+    // existing key is updated in place and no duplicate key is appended.
+    {
+        const char* const kGaps[] = {"\n", "# note\n"};
+        for (const char* gap : kGaps) {
+            char path_template[] = "/tmp/alpacahttp_test_routing_gap_XXXXXX";
+            int fd = ::mkstemp(path_template);
+            EXPECT(fd >= 0);
+            ::close(fd);
+            const std::string config_path = path_template;
+            {
+                std::ofstream out(config_path);
+                out << "http:\n"
+                       "  host_check_enabled: false\n"
+                    << gap
+                    << "  allowed_hosts: \"\"\n"
+                       "\n"
+                       "# next section\n"
+                       "server:\n"
+                       "  location: \"Old\"\n";
+            }
+            alpacahttp::Router router;
+            router.set_config_path(config_path);
+            EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt,
+                                   R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")
+                       .status_code() == 200);
+            std::ifstream in(config_path);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            const std::string text = buf.str();
+            const auto count = [&text](const std::string& needle) {
+                std::size_t n = 0;
+                for (auto pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + 1)) {
+                    ++n;
+                }
+                return n;
+            };
+            EXPECT(count("host_check_enabled:") == 1);
+            EXPECT(count("allowed_hosts:") == 1);
+            EXPECT(text.find("  allowed_hosts: \".lan\"\n\n# next section\nserver:\n") != std::string::npos);
+            std::remove(config_path.c_str());
+        }
+    }
+
+    // A key missing from an existing section is added after the section's last
+    // content line, ahead of its trailing blank and comment lines.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_routing_append_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "http:\n"
+                   "  host_check_enabled: false\n"
+                   "\n"
+                   "# next section\n"
+                   "server:\n"
+                   "  location: \"Old\"\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt,
+                               R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        const std::string text = buf.str();
+        EXPECT(text.find("  allowed_hosts: \".lan\"\n\n# next section\nserver:") != std::string::npos);
+        std::remove(config_path.c_str());
+    }
+
+    // Keys for a section the file lacks go under that section's new header,
+    // not into the section the file ends with.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_routing_new_section_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "server:\n"
+                   "  location: \"Old\"\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt,
+                               R"({"HostCheckEnabled": true, "AllowedHosts": ".lan"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str() ==
+               "server:\n"
+               "  location: \"Old\"\n"
+               "\n"
+               "http:\n"
+               "  host_check_enabled: \"true\"\n"
+               "  allowed_hosts: \".lan\"\n");
+        std::remove(config_path.c_str());
+    }
+
+    // A lone double quote inside a plain old value does not hide its comment.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_routing_lone_quote_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "server:\n"
+                   "  location: 8\" Dob  # note\n";
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt, R"({"Location": "Roof"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str().find("  location: \"Roof\"  # note\n") != std::string::npos);
+        std::remove(config_path.c_str());
+    }
+
+    // A single-quoted old value protects its '#' like a double-quoted one; a
+    // single quote inside a plain value does not.
+    // The second row's comment starts at its first '#', so "#2  # note" is kept whole.
+    const char* const kQuoteRows[][2] = {{"  location: 'Obs #2'  # note\n", "  location: \"Roof\"  # note\n"},
+                                         {"  location: Bob's #2  # note\n", "  location: \"Roof\" #2  # note\n"}};
+    for (const auto& row : kQuoteRows) {
+        char path_template[] = "/tmp/alpacahttp_test_routing_single_quote_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        {
+            std::ofstream out(config_path);
+            out << "server:\n" << row[0];
+        }
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(route_with_host(router, "PUT", "/management/v1/description", std::nullopt, R"({"Location": "Roof"})")
+                   .status_code() == 200);
+        std::ifstream in(config_path);
+        std::stringstream buf;
+        buf << in.rdbuf();
+        EXPECT(buf.str() == std::string("server:\n") + row[1]);
+        std::remove(config_path.c_str());
+    }
+
 #ifdef ALPACACORE_ENABLE_WEEWX
     // open-astro#731: the WeeWX refusals keep the router arm's exact text on
     // the API path, and a persisted entry that breaks one is still not
@@ -6620,6 +7525,99 @@ int main() {
         EXPECT(off.message == "WeeWX support not enabled. Rebuild with -DALPACACORE_ENABLE_WEEWX=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "ObservingConditions", 9264).is_null());
+    }
+#endif
+
+    {
+        // Persisted: the wrong-type refusal is thrown before normalize() and the
+        // availability check, so the entry fails to load (listed as failed) in
+        // every build, where the deleted arm loaded 1.5 as index 1.
+        const auto persisted = persisted_attempt(
+            nlohmann::json::parse(R"({"vendor":"svbony","deviceType":"camera","deviceNumber":9269,"cameraIndex":1.5})"),
+            "Camera");
+        EXPECT(!persisted.listed);
+        EXPECT(persisted.failed_listed);
+        EXPECT(any_warning_contains(persisted.errors, "cameraIndex"));
+    }
+
+#ifdef ALPACACORE_ENABLE_SVBONY
+    // The catalog's Int field refuses what the deleted arm's config_get<int>()
+    // truncated (1.5) or coerced (true): not registered, InvalidValue.
+    {
+        const char* const kBadIndexes[] = {"1.5", "true"};
+        int number = 9266;
+        for (const char* bad : kBadIndexes) {
+            nlohmann::json entry = nlohmann::json::parse(std::string(R"({"cameraIndex":)") + bad + "}");
+            entry.update({{"vendor", "svbony"}, {"deviceType", "camera"}, {"deviceNumber", ++number}});
+            alpacahttp::Router router;
+            const auto api = api_attempt(router, entry, "Camera");
+            EXPECT(!api.ok);
+            EXPECT(api.message.find("cameraIndex") != std::string::npos);
+            EXPECT(api.error_number == 0x401);  // InvalidValue
+            EXPECT(listed_entry(router, "Camera", number).is_null());
+        }
+    }
+#else
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router, nlohmann::json::parse(R"({"vendor":"svbony","deviceType":"camera","deviceNumber":9265})"),
+            "Camera");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "SVBONY support not enabled. Rebuild with -DALPACACORE_ENABLE_SVBONY=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Camera", 9265).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_GPHOTO
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        // case: gphoto vendors-OFF refusal text
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router, nlohmann::json::parse(R"({"vendor":"gphoto","deviceType":"camera","deviceNumber":9264})"),
+            "Camera");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "gphoto support not enabled. Rebuild with -DALPACACORE_ENABLE_GPHOTO=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Camera", 9264).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_BISQUE
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        // case: Bisque vendors-OFF refusal text
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router, nlohmann::json{{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9268}},
+            "Telescope");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "Bisque support not enabled. Rebuild with -DALPACACORE_ENABLE_BISQUE=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Telescope", 9268).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_PLAYERONE
+    // With the vendor built out, the catalog path reports the deleted arms' text
+    // for each Player One type: the two-word label comes from Schema::vendor_label.
+    {
+        // case: Player One vendors-OFF refusal text
+        alpacahttp::Router router;
+        const std::pair<const char*, const char*> types[] = {
+            {"camera", "Camera"}, {"filterwheel", "FilterWheel"}, {"switch", "Switch"}};
+        for (const auto& [device_type, listed_type] : types) {
+            const auto off = api_attempt(
+                router, nlohmann::json{{"vendor", "playerone"}, {"deviceType", device_type}, {"deviceNumber", 9265}},
+                listed_type);
+            EXPECT(!off.ok);
+            EXPECT(off.message == "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON");
+            EXPECT(off.error_number == 0x400);  // NotImplemented
+            EXPECT(listed_entry(router, listed_type, 9265).is_null());
+        }
     }
 #endif
 

@@ -861,6 +861,9 @@ function startEditDevice(device) {
         setFormValue('skywatcher-site-latitude', config.siteLatitude);
         setFormValue('skywatcher-site-longitude', config.siteLongitude);
         setFormValue('skywatcher-site-elevation', config.siteElevation);
+        // open-astro#436: absent or null = limit off = blank field.
+        setFormValue('skywatcher-min-altitude', config.minAltitudeDeg ?? '');
+        setFormValue('skywatcher-meridian-limit', config.meridianLimitMinutes ?? '');
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             skywatcherLearnSite.checked = config.learnSiteFromClient !== false;
@@ -1215,11 +1218,11 @@ function startEditDevice(device) {
     // Populate the ASIAIR Pro Switch per-port table from the saved config.
     // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
     // default flow), the HTML's pre-filled defaults remain in place.
+    // gpioChip is not loaded: the read-only field holds the one chip the
+    // server accepts, so a saved config naming another chip is corrected on
+    // save instead of being refused with a field the user cannot edit.
     if (vendor === 'zwo' &&
         (config.switchType === 'asiair' || config.switchType === 'asiair-plus-picm4')) {
-        if (config.gpioChip !== undefined && config.gpioChip !== null) {
-            setFormValue('asiair-gpio-chip', config.gpioChip);
-        }
         if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
             setFormValue('asiair-pwm-frequency', config.pwmFrequencyHz);
         }
@@ -1230,8 +1233,14 @@ function startEditDevice(device) {
                 if (port.name !== undefined && port.name !== null) {
                     setFormValue('asiair-port-name-' + i, port.name);
                 }
-                if (port.gpio !== undefined && port.gpio !== null) {
-                    setFormValue('asiair-port-gpio-' + i, port.gpio);
+                // A saved line the select does not offer would blank it, and
+                // the submit skips a blank port; keep the row's default.
+                const gpioSelect = document.getElementById('asiair-port-gpio-' + i);
+                if (gpioSelect && port.gpio !== undefined && port.gpio !== null) {
+                    gpioSelect.value = String(port.gpio);
+                    if (gpioSelect.selectedIndex === -1) {
+                        gpioSelect.value = gpioSelect.querySelector('option[selected]').value;
+                    }
                 }
                 const pwmCheckbox = document.getElementById('asiair-port-pwm-' + i);
                 if (pwmCheckbox) {
@@ -1242,12 +1251,9 @@ function startEditDevice(device) {
     }
     // Populate the ASIAIR Plus (RK3568) per-port table from the saved config.
     // The kernel module fixes the per-port hardware mapping, so only the
-    // device path, PWM frequency, channel names and per-port PWM flags are
-    // configurable here.
+    // channel names and per-port PWM flags are configurable here. devicePath
+    // is not loaded, for the same reason as gpioChip above.
     if (vendor === 'zwo' && config.switchType === 'asiair-plus-rk3568') {
-        if (config.devicePath !== undefined && config.devicePath !== null) {
-            setFormValue('asiair-plus-device-path', config.devicePath);
-        }
         // pwmFrequencyHz was previously surfaced here as a user-editable
         // field. It's now auto-managed by the wrapper (defaults to 50 Hz,
         // matching what ZWO's stock zwoair_imager daemon actually uses -
@@ -1375,6 +1381,7 @@ async function loadServerInfo() {
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
         const clockText = clockStateText(desc);
+        const hostCheck = hostCheckSettings(desc);
         // open-astro#354: adopt the host zone for the header clock. A missing
         // field (older server) or '' keeps the browser-zone rendering.
         serverTimeZone = String(resolveDescriptionValue(desc, ['TimeZone']) || '');
@@ -1403,6 +1410,22 @@ async function loadServerInfo() {
                         Sync time from client on connect
                     </label>
                 </div>` : ''}
+                ${hostCheck ? `
+                <div class="server-info-row">
+                    <span class="info-label">Host names</span>
+                    <label class="info-value" title="Refuse requests whose Host header is not an allowed name, so a web page cannot reach this server through a rebound DNS name. Off: any Host name is served.">
+                        <input id="server-host-check-toggle" type="checkbox" ${hostCheck.enabled ? 'checked' : ''}>
+                        Restrict Host names (DNS-rebinding protection)
+                    </label>
+                </div>
+                <div class="server-info-row">
+                    <span class="info-label">Allowed host names</span>
+                    <div class="server-location">
+                        <input id="server-allowed-hosts-input" type="text" placeholder="e.g. .lan, astropi.home">
+                    </div>
+                    <span class="info-note">Comma-separated; a leading dot allows a domain and every name under it. Always allowed: ${escapeHtml(HOST_CHECK_ALWAYS_ALLOWED)}.</span>
+                    <button id="server-allowed-hosts-save" class="btn btn-secondary btn-small" type="button">Save</button>
+                </div>` : ''}
                 <div class="server-info-row">
                     <span class="info-label">Profile Name</span>
                     <div class="server-location">
@@ -1423,6 +1446,21 @@ async function loadServerInfo() {
         const syncClockToggle = document.getElementById('server-sync-clock-toggle');
         if (syncClockToggle) {
             syncClockToggle.addEventListener('change', () => updateSyncClockFromClients(syncClockToggle.checked));
+        }
+
+        if (hostCheck) {
+            const hostCheckToggle = document.getElementById('server-host-check-toggle');
+            hostCheckToggle.addEventListener('change', () => saveHostCheckSettings({HostCheckEnabled: hostCheckToggle.checked}));
+            const allowedHostsInput = document.getElementById('server-allowed-hosts-input');
+            allowedHostsInput.value = hostCheck.hosts;
+            const saveAllowedHosts = () => saveHostCheckSettings({AllowedHosts: allowedHostsInput.value});
+            allowedHostsInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    saveAllowedHosts();
+                }
+            });
+            document.getElementById('server-allowed-hosts-save').addEventListener('click', saveAllowedHosts);
         }
 
         const locationInput = document.getElementById('server-location-input');
@@ -1685,6 +1723,41 @@ async function updateSyncClockFromClients(enabled) {
     } catch (e) {
         setServerInfoStatus('Failed to update clock policy: ' + e.message, true);
         loadServerInfo();
+    }
+}
+
+// open-astro#392: save the Host check toggle or list. The server refuses a
+// change that would lock this browser out (HTTP 400 with the reason), so the
+// body is read before the status; the rows reload either way, to show what the
+// server holds.
+async function saveHostCheckSettings(values) {
+    setServerInfoStatus('Saving Host name settings...');
+    let error = '';
+    try {
+        const response = await fetch(API_BASE + '/management/v1/description', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(values)
+        });
+        let data = null;
+        try {
+            data = await response.json();
+        } catch (e) {
+            data = null;
+        }
+        error = settingsSaveError(response.status, data);
+    } catch (e) {
+        error = e.message;
+    }
+    await loadServerInfo();
+    // A refused list stays in the field so it can be corrected, as the profile name does.
+    const typedHosts = document.getElementById('server-allowed-hosts-input');
+    if (error && typedHosts && typeof values.AllowedHosts === 'string') {
+        typedHosts.value = values.AllowedHosts;
+    }
+    setServerInfoStatus(error ? 'Host name settings not saved: ' + error : 'Host name settings saved.', !!error);
+    if (error) {
+        document.getElementById('server-info-status')?.scrollIntoView({block: 'nearest'});
     }
 }
 
@@ -3796,6 +3869,9 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (skywatcherSiteElevation !== null) {
             deviceData.siteElevation = skywatcherSiteElevation;
         }
+        // open-astro#436: blank = off, sent as null so an edit can clear a limit.
+        deviceData.minAltitudeDeg = readOptionalNumber(formData, 'skywatcherMinAltitudeDeg');
+        deviceData.meridianLimitMinutes = readOptionalNumber(formData, 'skywatcherMeridianLimitMinutes');
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444
@@ -3887,6 +3963,12 @@ document.getElementById('device-form').addEventListener('submit', async function
                 const pwmFreq = Number.parseInt(formData.get('asiairPwmFrequency'), 10);
                 if (!Number.isNaN(pwmFreq)) {
                     deviceData.pwmFrequencyHz = pwmFreq;
+                }
+                const duplicateGpio = asiairDuplicateGpioError(
+                    [0, 1, 2, 3].map((i) => Number.parseInt(formData.get('asiairPortGpio' + i), 10)));
+                if (duplicateGpio) {
+                    alert(duplicateGpio);
+                    return;
                 }
                 const ports = [];
                 for (let i = 0; i < 4; i += 1) {
@@ -4736,41 +4818,54 @@ async function wifiRenderNetworks(rescan) {
         return;
     }
     const profiles = wifiState.profiles || [];
-    const savedBySsid = {};
+    const savedBySsid = new Map();
     for (const p of profiles) {
-        if (p.Mode !== 'ap') savedBySsid[p.Ssid] = p;
+        if (p.Mode !== 'ap') savedBySsid.set(wifiSsidKey(p), p);
     }
-    const activeSsid = wifiClientConnected(status) ? status.Ssid : null;
+    const activeSsid = wifiClientConnected(status) ? wifiSsidKey(status) : null;
 
     list.innerHTML = '';
     const inRange = new Set();
+    const displayKeys = new Map();
+    for (const item of networks.concat(profiles)) {
+        const keys = displayKeys.get(item.Ssid) || new Set();
+        keys.add(wifiSsidKey(item));
+        displayKeys.set(item.Ssid, keys);
+    }
     for (const n of networks) {
-        if (n.Ssid === (wifiState.ap && wifiState.ap.Ssid)) continue;  // own hotspot
-        inRange.add(n.Ssid);
-        const saved = savedBySsid[n.Ssid];
-        const isActive = n.Ssid === activeSsid;
+        const key = wifiSsidKey(n);
+        if (key === wifiSsidKey(wifiState.ap)) continue;  // own hotspot
+        inRange.add(key);
+        const saved = savedBySsid.get(key);
+        const isActive = key === activeSsid;
+        const label = wifiSsidLabel(n, displayKeys.get(n.Ssid).size);
         const row = document.createElement('div');
         row.className = 'wifi-net-row' + (isActive ? ' active' : '');
         row.innerHTML =
             '<span class="wifi-net-check">' + (isActive ? '✓' : '') + '</span>' +
-            '<span class="wifi-net-name">' + escapeHtml(n.Ssid) + (saved && !isActive ? ' <small>saved</small>' : '') + '</span>' +
+            '<span class="wifi-net-name">' + escapeHtml(label) + (saved && !isActive ? ' <small>saved</small>' : '') + '</span>' +
             '<span class="wifi-net-meta">' + (n.Security !== 'Open' ? '🔒 ' : '') +
             (n.FrequencyMhz > 5000 ? '5' : '2.4') + ' GHz <span class="wifi-signal">' + wifiSignalIcon(n.SignalPercent) + '</span></span>';
         if (!isActive) {
-            row.addEventListener('click', () => saved ? wifiConnectSaved(saved) : wifiJoinNew(n));
+            row.addEventListener('click', () => saved ?
+                wifiConnectSaved(saved, displayKeys.get(saved.Ssid).size) :
+                wifiJoinNew(n, displayKeys.get(n.Ssid).size));
         }
         if (saved) {
             const forget = document.createElement('button');
             forget.className = 'btn btn-secondary btn-small';
             forget.textContent = 'Forget';
-            forget.addEventListener('click', (e) => { e.stopPropagation(); wifiForget(saved); });
+            forget.addEventListener('click', (e) => {
+                e.stopPropagation();
+                wifiForget(saved, displayKeys.get(saved.Ssid).size);
+            });
             row.appendChild(forget);
         }
         list.appendChild(row);
     }
 
     // Saved networks that are not in range right now: manageable (forget).
-    const outOfRange = profiles.filter((p) => p.Mode !== 'ap' && !inRange.has(p.Ssid));
+    const outOfRange = profiles.filter((p) => p.Mode !== 'ap' && !inRange.has(wifiSsidKey(p)));
     if (outOfRange.length) {
         const title = document.createElement('p');
         title.className = 'wifi-substatus';
@@ -4779,11 +4874,15 @@ async function wifiRenderNetworks(rescan) {
         for (const p of outOfRange) {
             const row = document.createElement('div');
             row.className = 'wifi-net-row dim';
-            row.innerHTML = '<span class="wifi-net-check"></span><span class="wifi-net-name">' + escapeHtml(p.Ssid) + '</span>';
+            row.innerHTML = '<span class="wifi-net-check"></span><span class="wifi-net-name">' +
+                escapeHtml(wifiSsidLabel(p, displayKeys.get(p.Ssid).size)) + '</span>';
             const forget = document.createElement('button');
             forget.className = 'btn btn-secondary btn-small';
             forget.textContent = 'Forget';
-            forget.addEventListener('click', (e) => { e.stopPropagation(); wifiForget(p); });
+            forget.addEventListener('click', (e) => {
+                e.stopPropagation();
+                wifiForget(p, displayKeys.get(p.Ssid).size);
+            });
             row.appendChild(forget);
             list.appendChild(row);
         }
@@ -4795,39 +4894,45 @@ async function wifiRenderNetworks(rescan) {
 
 function wifiScanClicked() { wifiRenderNetworks(true); }
 
-async function wifiJoinNew(network) {
+async function wifiJoinNew(network, displayCount) {
+    const label = wifiSsidLabel(network, displayCount);
     let passphrase = '';
     if (network.Security !== 'Open') {
-        passphrase = prompt('Password for "' + network.Ssid + '":');
+        passphrase = prompt('Password for "' + label + '":');
         if (passphrase === null) return;
     }
-    if (!wifiConfirmSwitch('join "' + network.Ssid + '"')) return;
+    if (!wifiConfirmSwitch('join "' + label + '"')) return;
     try {
-        await wifiApi('/profiles', 'PUT', { Ssid: network.Ssid, Passphrase: passphrase, Autoconnect: true, Priority: 0 });
+        await wifiApi('/profiles', 'PUT', Object.assign(
+            network.SsidHex ? { SsidHex: network.SsidHex } : { Ssid: network.Ssid },
+            { Passphrase: passphrase, Autoconnect: true, Priority: 0 }));
         const profiles = await wifiApi('/profiles');
-        const match = profiles.find((p) => p.Ssid === network.Ssid && p.Mode !== 'ap');
+        const match = profiles.find((p) => wifiSsidKey(p) === wifiSsidKey(network) && p.Mode !== 'ap');
         if (match) await wifiApi('/connect', 'PUT', { Uuid: match.Uuid });
-        wifiMessage('Joining ' + network.Ssid + '...');
+        wifiMessage('Joining ' + label + '...');
         setTimeout(wifiRefresh, 8000);
     } catch (e) {
         wifiMessage('Could not join: ' + e.message, true);
     }
 }
 
-async function wifiConnectSaved(profile) {
-    if (!wifiConfirmSwitch('switch to "' + profile.Ssid + '"')) return;
+async function wifiConnectSaved(profile, displayCount) {
+    const label = wifiSsidLabel(profile, displayCount);
+    if (!wifiConfirmSwitch('switch to "' + label + '"')) return;
     try {
         await wifiApi('/connect', 'PUT', { Uuid: profile.Uuid });
-        wifiMessage('Connecting to ' + profile.Ssid + '...');
+        wifiMessage('Connecting to ' + label + '...');
         setTimeout(wifiRefresh, 8000);
     } catch (e) {
         wifiMessage('Could not connect: ' + e.message, true);
     }
 }
 
-async function wifiForget(profile) {
-    const connectedNow = wifiClientConnected(wifiState.status || {}) && (wifiState.status || {}).Ssid === profile.Ssid;
-    if (!confirm('Forget "' + profile.Ssid + '"?' + (connectedNow ? '\n\nThe device is connected to this network right now and will disconnect from it.' : ''))) return;
+async function wifiForget(profile, displayCount) {
+    const label = wifiSsidLabel(profile, displayCount);
+    const connectedNow = wifiClientConnected(wifiState.status || {}) &&
+        wifiSsidKey(wifiState.status || {}) === wifiSsidKey(profile);
+    if (!confirm('Forget "' + label + '"?' + (connectedNow ? '\n\nThe device is connected to this network right now and will disconnect from it.' : ''))) return;
     try {
         await wifiApi('/profiles/' + encodeURIComponent(profile.Uuid), 'DELETE');
         wifiState.profiles = await wifiApi('/profiles');
@@ -4899,7 +5004,12 @@ async function wifiApplyAp(enabled, fromToggle) {
     }
     wifiState.busy = true;
     try {
-        await wifiApi('/ap', 'PUT', { Ssid: ssid, Passphrase: passphrase, Band: wifiSelectedBand(), Channel: 0, Enabled: enabled });
+        const apBody = { Ssid: ssid, Passphrase: passphrase, Band: wifiSelectedBand(), Channel: 0, Enabled: enabled };
+        // Keep the exact configured bytes when the user leaves the displayed SSID text unchanged.
+        if (wifiState.ap && wifiState.ap.Configured && ssid === wifiState.ap.Ssid && wifiState.ap.SsidHex) {
+            apBody.SsidHex = wifiState.ap.SsidHex;
+        }
+        await wifiApi('/ap', 'PUT', apBody);
         const passInput = wifiEl('wifi-ap-pass');
         if (passInput) passInput.value = '';
         wifiMessage(fromToggle ? (enabled ? 'Hotspot starting...' : 'Hotspot turned off.') : 'Saved.');

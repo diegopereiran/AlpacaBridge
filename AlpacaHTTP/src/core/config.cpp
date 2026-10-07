@@ -11,10 +11,12 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacahttp/config.h>
-#include <fstream>
-#include <cstdlib>
+#include <alpacahttp/util/yaml_comment.h>
+
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <string_view>
 
@@ -43,14 +45,6 @@ std::string trim_copy(std::string_view input) {
         --end;
     }
     return std::string(input.substr(start, end - start));
-}
-
-std::string strip_inline_comment(const std::string& line) {
-    auto pos = line.find('#');
-    if (pos == std::string::npos) {
-        return line;
-    }
-    return line.substr(0, pos);
 }
 
 std::string unquote_string(const std::string& value) {
@@ -133,9 +127,8 @@ bool parse_size_value(const std::string& value, std::size_t& result) {
     }
 }
 
-// open-astro#392: http.allowed_hosts and ALPACAHTTP_ALLOWED_HOSTS are one
-// comma-separated string. Entries are trimmed and empty ones dropped; the
-// router normalizes the rest.
+}  // namespace
+
 std::vector<std::string> split_host_list(std::string_view value) {
     std::vector<std::string> hosts;
     std::size_t start = 0;
@@ -153,8 +146,6 @@ std::vector<std::string> split_host_list(std::string_view value) {
     return hosts;
 }
 
-} // namespace
-
 void Config::load_config_from_yaml(const std::string& config_path) {
     std::ifstream file(config_path);
     if (!file.is_open()) {
@@ -164,7 +155,7 @@ void Config::load_config_from_yaml(const std::string& config_path) {
     std::string current_section;
     std::string line;
     while (std::getline(file, line)) {
-        std::string no_comment = strip_inline_comment(line);
+        std::string no_comment = alpacahttp::util::strip_yaml_comment(line);
         std::string trimmed = trim_copy(no_comment);
         if (trimmed.empty()) {
             continue;
@@ -209,6 +200,11 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 }
             } else if (key == "allowed_hosts") {
                 allowed_hosts_ = split_host_list(value);
+            } else if (key == "host_check_enabled") {
+                bool enabled = host_check_enabled_;
+                if (parse_bool_value(value, enabled)) {
+                    host_check_enabled_ = enabled;
+                }
             }
         } else if (current_section == "discovery") {
             if (key == "enabled") {
@@ -407,10 +403,9 @@ void Config::apply_environment_overrides() {
         }
     }
 
-    // open-astro#392: replaces the file's list; an empty variable clears it.
-    if (const char* v = std::getenv("ALPACAHTTP_ALLOWED_HOSTS")) {
-        allowed_hosts_ = split_host_list(v);
-    }
+    // open-astro#787: http.allowed_hosts and http.host_check_enabled have no
+    // environment override. The web UI edits them and writes the file, so
+    // the file is their only source; a variable would hide the UI's value.
 
     const char* packages_url_env = std::getenv("ALPACAHTTP_UPDATE_PACKAGES_URL");
     if (packages_url_env) {

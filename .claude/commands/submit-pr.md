@@ -105,51 +105,57 @@ Review the branch contents and warn the user about anything that's missing:
 
 - [ ] **Unit tests**: Does the branch include Catch2 tests? (required for all driver code)
 - [ ] **ConformU results**: If this is a driver PR, is an arm64 ConformU report included AND clean (verified in Step 1 — errors=0, issues=0, timing issues=0)?
-- [ ] **CHANGELOG.md**: Is there an entry under `## [x.x.x] - UNRELEASED`, and does the version match the **Versioning policy** below for everything on this branch?
+- [ ] **Changelog fragment**: Does the branch add `changelog.d/<branch-slug>.md` (and leave `CHANGELOG.md` alone), with categories that match the **Versioning policy** below for everything on this branch?
 - [ ] **SUPPORTED-DRIVERS.md**: If this adds or validates a driver, is the table updated?
 - [ ] **AGENTS.md**: Were lessons learned captured?
 - [ ] **AGPL license headers**: `check_docs_drift.py` check 9 fails CI on any first-party source file without the current header, so this is only a reminder to run it (the pre-flight does).
 - [ ] **SDK cleanup**: If SDK files were added under `external/`, have Windows/macOS/32-bit/demo files been removed?
 
-Present the checklist to the user with pass/fail status. If critical items are missing (tests, CHANGELOG), recommend fixing before submitting but let the user decide.
+Present the checklist to the user with pass/fail status. If critical items are missing (tests, changelog fragment), recommend fixing before submitting but let the user decide.
 
-### Verify the UNRELEASED version (Versioning policy)
+### Verify the changelog fragment and its version (Versioning policy)
 
-Look at everything this branch adds/changes (from the diff above) and confirm the
-`## [x.x.x] - UNRELEASED` heading in `CHANGELOG.md` reflects the **highest-severity** change.
+Look at everything this branch adds/changes (from the diff above) and confirm the branch's
+fragment, `changelog.d/<branch-slug>.md`, files each change under the category the release turns
+into the right version bump. The release derives the version from the fragments
+(`python3 scripts/changelog_fragments.py --bump`); a fragment carries none.
 AlpacaBridge is an end-user appliance, so "breaking" means breaks an existing user's install/
 setup. Bump relative to the last **released** version:
 
 - **MAJOR** `x.0.0` — breaks an existing user (drop a platform, remove a driver, config-format
-  change needing migration, change a default that alters behavior).
+  change needing migration, change a default that alters behavior, a saved config that loaded is
+  now refused at start-up, a call that succeeded is now refused): `### Breaking changes`. Apply the
+  "Breaking or not" test in `changelog.d/README.md` to every change, fixes included; a fix with a
+  breaking consequence keeps its `Fixed` bullet and adds a `Breaking changes` one.
 - **MINOR** `x.Y.0` — new backward-compatible capability: **a new driver**, new device/model
-  support, a new optional feature/flag. Resets patch to 0.
+  support, a new optional feature/flag. Resets patch to 0: an unqualified `### Added`.
 - **PATCH** `x.y.Z` — no new capability: bug fix to an existing driver, ConformU re-validation,
-  packaging fix, docs/skill/spec changes.
+  packaging fix, docs/skill/spec changes: any other category, `### Added (tests)` included.
 
-A branch that adds a new driver MUST be a minor bump, never a patch. If the UNRELEASED heading
-undershoots (e.g. it says `2.0.1` but the branch adds a driver, so it should be `2.1.0`), flag
-it and recommend running `/commit` to correct the heading before opening the PR — don't open a
-PR with a version that misrepresents the change.
+A branch that adds a new driver MUST have an unqualified `### Added` entry, never only a
+`Fixed`/`Changed` one. If the fragment undershoots, flag it and recommend running `/commit` to
+correct it before opening the PR — don't open a PR whose fragment misrepresents the change. The
+branch must not edit `CHANGELOG.md`, except to correct a misfiled or wrong entry (say so in the PR
+description); run `python3 scripts/changelog_fragments.py --check`.
 
 ### Release version bump (ask the user — MANDATORY, every run)
 
-Most PRs leave the version as `UNRELEASED` and the actual release is cut separately. On **every**
+Most PRs leave the version alone and the actual release is cut separately. On **every**
 run of this skill, before pushing, ask the user whether this PR is cutting the release — never
 skip or assume the answer:
 
-> "Is this PR cutting the `<UNRELEASED version>` release? If so I can update the `VERSION` file
-> and the `README.md` version badge to `<UNRELEASED version>` (and date the CHANGELOG entry) so
-> they're ready for release. Otherwise I'll leave everything as UNRELEASED."
+> "Is this PR cutting the `<next version>` release? If so I can update the `VERSION` file
+> and the `README.md` version badge to `<next version>` and assemble the changelog fragments into
+> a dated CHANGELOG section so they're ready for release. Otherwise I'll leave everything alone."
 
 - **If NO** (default for feature / driver / fix PRs) — leave the `VERSION` file, the `README.md`
-  badge, and the CHANGELOG `UNRELEASED` heading untouched. Proceed to Step 4.
-- **If YES** — finalize the version (the `[x.x.x]` from the CHANGELOG UNRELEASED heading):
+  badge, `CHANGELOG.md` and the fragments untouched. Proceed to Step 4.
+- **If YES** — finalize the version (`python3 scripts/changelog_fragments.py --bump` proposes it):
   1. Write the bare version (e.g. `2.1.0`) into the `VERSION` file — `printf '%s\n' <version> > VERSION`.
   2. Update the README badge line `#### [x.x.x] - YYYY-MM-DD &middot; [Changelog](CHANGELOG.md)`
      to the new version and **today's date**.
-  3. Change the CHANGELOG heading `## [x.x.x] - UNRELEASED` to `## [x.x.x] - YYYY-MM-DD` (today),
-     so `VERSION`, the README badge, and the CHANGELOG agree.
+  3. Assemble the fragments: `python3 scripts/changelog_fragments.py --release x.x.x --date YYYY-MM-DD`
+     (today; it writes the dated section and deletes the fragments), so `VERSION`, the README badge, and the CHANGELOG agree.
   4. These are now uncommitted changes (Step 1 required a clean tree). Show the user the diff and
      a commit message (e.g. `Release <version>`) for approval, commit them on this branch
      following the project's commit conventions, then continue to the Step 4 pre-flight and push.
@@ -188,7 +194,9 @@ Knobs:
 - `RUN_SANITIZERS=0 ./scripts/ci_preflight.sh` — skip the ASan+UBSan `sanitizers` reproduction (a third rebuild). The pass is **on by default** since #588, because it was the one configuration neither CI nor a human ran; opt out only for docs/CI-only changes.
 - `PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh` — never apt-install; missing tools are reported `[SKIP]` instead.
 
-**Gate:** the script exits non-zero if any mandatory check failed. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed), when `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled, or when `RUN_SANITIZERS=0` opted out of the ASan+UBSan pass — in the last two cases, surface it so the user knows CI will still enforce that gate.
+It can also exit non-zero before any check runs, when `PREFLIGHT_BASE` (or the default base) cannot be resolved (`ERROR: cannot resolve the diff base '<base>' to a commit.` or `ERROR: no merge-base between the diff base '<base>' and HEAD.`); report that error and the base it tried, not a failing check, and fix the base as the message says.
+
+**Gate:** the script exits non-zero if any mandatory check failed or the diff base could not be resolved. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed), when `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled, or when `RUN_SANITIZERS=0` opted out of the ASan+UBSan pass — in the last two cases, surface it so the user knows CI will still enforce that gate.
 
 ## Step 5 — Push the branch
 
@@ -214,35 +222,20 @@ Confirm the push succeeded before proceeding.
 
 ### PR body
 
-Build the body from the branch's commits and diffs. Use this structure:
+Build the body from the branch's commits and diffs. The body is
+`.github/PULL_REQUEST_TEMPLATE.md` filled in:
 
-```markdown
-## Summary
-- Bullet points summarizing what this PR does (1-4 bullets)
-- Include vendor, device model, and key technical details
-- Reference ConformU results if applicable (e.g., "0 errors, 0 issues on arm64")
+- Every section has real content (Thinking Path, Linked Issues or Issue Description, What Changed, Verification, Risks, Model Used, Checklist).
+- Delete the HTML comments.
+- Tick a checklist box only when it is true. Leave "All CI gates are green" and "Claude Review passes with no open P1, P2s, recommendations, or follow-ups" unticked when you open the PR.
+- Driver PRs: the vendor and device model, the unit-test case and assertion counts, the ConformU result and the report path (`AlpacaCore/conformu/<Vendor>/<Model>/<arch>/`) go under **Verification**.
+- Web UI Before / After tables go under **Verification**.
+- The body ends with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+- Check the shape before you submit: save the body to a file and run `python3 scripts/check_pr_template.py --body-file <file>` (pre-flight runs it when `PR_BODY_FILE` is set). The `pr-template` job in `.github/workflows/pr-body.yml` runs the same check on the PR.
 
-## Changes
-Group by component using bold tags:
-- **Vendor Device Driver** (AlpacaCore): what was added/changed
-- **Vendor Device Support** (AlpacaHTTP): router, web UI changes
-- **Vendor Unit Tests**: test count and assertion count
-- **Vendor SDK**: version and location
-- **ConformU Validation**: platforms tested, results
-- **Documentation**: CHANGELOG, SUPPORTED-DRIVERS.md, AGENTS.md updates
+### Falsified by (new test cases)
 
-## Test plan
-- [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck
-- [ ] Unit tests pass (`cd build && ctest`)
-- [ ] ConformU (latest release, but NOT arm64 4.5.0 — see `/conformu` step 2g) passes on Linux arm64
-- [ ] Web UI configuration works in browser
-- [ ] Device connects and operates correctly
-(Include only items relevant to this PR)
-
-## ConformU results
-(If applicable — link to the report files in the branch)
-- **arm64**: `AlpacaCore/conformu/Vendor/Model/arm64/`
-```
+Run `python3 scripts/check_falsified_by.py --base <merge-base>` first; it lists each new or renamed test case in the diff. For every one, draft a line under a `## Falsified by` heading placed after `## What Changed` in the body: `- "<case name>": <production path>:<line> <the one edit that makes the case fail>`. Read the code the case exercises to propose the mutation, then ask the user to confirm or correct each one. Never invent a mutation you have not read in the code. No new cases: omit the section. Before submitting, save the body to a file and run `PR_BODY_FILE=<file> ./scripts/ci_preflight.sh` (or `python3 scripts/check_falsified_by.py --body-file <file>`); the `falsified-by` job in `.github/workflows/pr-body.yml` runs the same check on the PR.
 
 ### Present for approval
 

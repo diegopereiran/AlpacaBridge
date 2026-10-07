@@ -31,6 +31,7 @@ set(TEST_SOURCES
     test_error_handling.cpp
     test_fake_pty_write.cpp
     test_host_clock.cpp
+    test_motion_limits.cpp
     test_poll_settle.cpp
     test_task_clock.cpp
     test_async_operation.cpp
@@ -88,11 +89,16 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_async_slew_failure.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_synscan_telescope_deferred_connect.cpp)
+    # Precise e/z replies decode the upper 24 bits of each field (issue #785).
+    list(APPEND TEST_SOURCES test_synscan_precise_position.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
         test_skywatcher_async.cpp test_skywatcher_serial.cpp
         test_skywatcher_pointing.cpp)
+    # Altitude floor / meridian limit: goto target check over the fake mount
+    # (open-astro#436).
+    list(APPEND TEST_SOURCES test_skywatcher_motion_limits.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
@@ -107,6 +113,8 @@ if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
+    # AbortSlew fences the async dispatch thread (issue #768).
+    list(APPEND TEST_SOURCES test_ioptron_abort_slew.cpp)
     # Auto-detect resolves at connect time (issue #659): mount and iEAF.
     list(APPEND TEST_SOURCES test_ioptron_telescope_deferred_connect.cpp
         test_ioptron_ieaf_focuser_deferred_connect.cpp)

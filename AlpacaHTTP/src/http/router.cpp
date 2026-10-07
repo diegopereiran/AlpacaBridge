@@ -19,11 +19,14 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacahttp/config.h>
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/router.h>
 #include <alpacahttp/util/error_mapping.h>
 #include <alpacahttp/util/host_timezone.h>
+#include <alpacahttp/util/log_text.h>
 #include <alpacahttp/util/logging_adapter.h>
+#include <alpacahttp/util/yaml_comment.h>
 #include <alpacahttp/version.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -46,6 +49,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -64,9 +68,6 @@
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_SKYWATCHER
-#include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
@@ -98,17 +99,8 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_SVBONY
-#include <alpacacore/vendor/svbony/svbony_camera_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_GPHOTO
-#include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_BISQUE
-#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
@@ -120,9 +112,8 @@
 #endif
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
+// The ioptron/camera (iCAM) arm only; the playerone pairs are catalog descriptors.
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
-#include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
-#include <alpacacore/vendor/playerone/playerone_switch_driver.h>
 #endif
 
 namespace {
@@ -230,17 +221,24 @@ std::string escape_yaml_string(const std::string& value) {
     return escaped;
 }
 
-// Update one or more keys under the config file's `server:` section in a
-// single read/rewrite pass, so a request that sets several values can never
-// leave the file with only some of them applied.
-bool update_server_values_in_config(const std::string& config_path,
-                                    const std::vector<std::pair<std::string, std::string>>& values,
-                                    std::string& error_message) {
+using ConfigKeyValues = std::vector<std::pair<std::string, std::string>>;
+// One top-level section and the keys to set under it, e.g. {"http", {...}}.
+using ConfigSectionValues = std::pair<std::string, ConfigKeyValues>;
+
+// Update keys under one or more top-level sections of the config file (the
+// `server:` and `http:` ones) in a single read/rewrite pass, so a request that
+// sets several values can never leave the file with only some of them
+// applied. An existing key is replaced in place, a missing key is appended to
+// its section, and a missing section is appended to the file.
+bool update_config_values(const std::string& config_path, const std::vector<ConfigSectionValues>& sections,
+                          std::string& error_message) {
     if (config_path.empty()) {
         error_message = "Config path not set";
         return false;
     }
-    if (values.empty()) {
+    const bool any_values =
+        std::any_of(sections.begin(), sections.end(), [](const auto& section) { return !section.second.empty(); });
+    if (!any_values) {
         return true;
     }
 
@@ -251,9 +249,14 @@ bool update_server_values_in_config(const std::string& config_path,
             error_message = "Unable to open config file for writing";
             return false;
         }
-        output << "server:\n";
-        for (const auto& [key, value] : values) {
-            output << "  " << key << ": \"" << escape_yaml_string(value) << "\"\n";
+        for (const auto& [section, values] : sections) {
+            if (values.empty()) {
+                continue;
+            }
+            output << section << ":\n";
+            for (const auto& [key, value] : values) {
+                output << "  " << key << ": \"" << escape_yaml_string(value) << "\"\n";
+            }
         }
         return true;
     }
@@ -284,87 +287,117 @@ bool update_server_values_in_config(const std::string& config_path,
         return std::string(value.substr(start, end - start));
     };
 
-    auto strip_comment = [](const std::string& text) {
-        auto pos = text.find('#');
-        if (pos == std::string::npos) {
-            return text;
-        }
-        return text.substr(0, pos);
-    };
-
-    bool in_server_section = false;
-    bool server_section_found = false;
-    std::vector<bool> written(values.size(), false);
-    std::size_t server_indent = 0;
+    // Index into `sections` of the section the current line sits in, or
+    // sections.size() outside every section we edit.
+    std::size_t current = sections.size();
+    std::vector<bool> section_found(sections.size(), false);
+    std::vector<std::vector<bool>> written;
+    written.reserve(sections.size());
+    for (const auto& section : sections) {
+        written.emplace_back(section.second.size(), false);
+    }
     std::vector<std::string> output;
-    output.reserve(lines.size() + values.size() + 1);
+    output.reserve(lines.size() + 8);
 
-    auto find_value_index = [&values](const std::string& key) -> std::size_t {
+    // Output index just past the last content line of the current section, so
+    // keys added at the section's end land before its trailing blank and
+    // comment lines.
+    std::size_t section_end = 0;
+
+    auto append_unwritten = [&](std::size_t section_index, std::size_t indent) {
+        const auto& values = sections[section_index].second;
+        std::vector<std::string> added;
         for (std::size_t i = 0; i < values.size(); ++i) {
-            if (values[i].first == key) {
-                return i;
+            if (!written[section_index][i]) {
+                added.push_back(std::string(indent, ' ') + values[i].first + ": \"" +
+                                escape_yaml_string(values[i].second) + "\"");
+                written[section_index][i] = true;
             }
         }
-        return values.size();
-    };
-
-    auto append_unwritten = [&](std::size_t indent) {
-        for (std::size_t i = 0; i < values.size(); ++i) {
-            if (!written[i]) {
-                output.push_back(std::string(indent, ' ') + values[i].first + ": \"" +
-                                 escape_yaml_string(values[i].second) + "\"");
-                written[i] = true;
-            }
+        if (added.empty()) {
+            return;
         }
+        output.insert(output.begin() + static_cast<std::ptrdiff_t>(std::min(section_end, output.size())), added.begin(),
+                      added.end());
     };
 
     for (const auto& current_line : lines) {
-        std::string stripped_comment = strip_comment(current_line);
+        std::string stripped_comment = alpacahttp::util::strip_yaml_comment(current_line);
         std::string trimmed = trim_copy(stripped_comment);
         std::size_t indent = leading_spaces(current_line);
 
-        if (indent == 0) {
-            if (in_server_section) {
-                append_unwritten(server_indent + 2);
+        // Only a top-level key ends a section; blank and comment lines at
+        // column 0 sit inside it (a hand-edited file may leave a gap).
+        if (indent == 0 && !(current < sections.size() && trimmed.empty())) {
+            if (current < sections.size()) {
+                append_unwritten(current, 2);
             }
-            in_server_section = false;
-        }
-
-        if (indent == 0 && trimmed == "server:") {
-            in_server_section = true;
-            server_section_found = true;
-            server_indent = indent;
+            current = sections.size();
+            for (std::size_t i = 0; i < sections.size(); ++i) {
+                if (trimmed == sections[i].first + ":") {
+                    current = i;
+                    section_found[i] = true;
+                    break;
+                }
+            }
             output.push_back(current_line);
+            section_end = output.size();
             continue;
         }
 
-        if (in_server_section && indent > server_indent && !trimmed.empty()) {
+        bool replaced = false;
+        if (current < sections.size() && !trimmed.empty()) {
             auto delimiter = trimmed.find(':');
             if (delimiter != std::string::npos) {
                 std::string key = trim_copy(trimmed.substr(0, delimiter));
-                std::size_t value_index = find_value_index(key);
-                if (value_index < values.size()) {
-                    output.push_back(std::string(indent, ' ') + key + ": \"" +
-                                     escape_yaml_string(values[value_index].second) + "\"");
-                    written[value_index] = true;
-                    continue;
+                const auto& values = sections[current].second;
+                for (std::size_t i = 0; i < values.size() && !replaced; ++i) {
+                    if (values[i].first == key) {
+                        // Keep the old line's trailing comment, with the
+                        // whitespace that sat before the '#'.
+                        std::string replacement(indent, ' ');
+                        replacement += key;
+                        replacement += ": \"";
+                        replacement += escape_yaml_string(values[i].second);
+                        replacement += '"';
+                        if (stripped_comment.size() < current_line.size()) {
+                            std::size_t gap = stripped_comment.size();
+                            while (gap > 0 && std::isspace(static_cast<unsigned char>(stripped_comment[gap - 1]))) {
+                                --gap;
+                            }
+                            replacement.append(stripped_comment, gap, std::string::npos);
+                            replacement.append(current_line, stripped_comment.size(), std::string::npos);
+                        }
+                        output.push_back(std::move(replacement));
+                        written[current][i] = true;
+                        replaced = true;
+                    }
                 }
             }
         }
 
-        output.push_back(current_line);
+        if (!replaced) {
+            output.push_back(current_line);
+        }
+        if (!trimmed.empty()) {
+            section_end = output.size();
+        }
     }
 
-    if (in_server_section) {
-        append_unwritten(server_indent + 2);
+    if (current < sections.size()) {
+        append_unwritten(current, 2);
     }
 
-    if (!server_section_found) {
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (section_found[i] || sections[i].second.empty()) {
+            continue;
+        }
         if (!output.empty() && !output.back().empty()) {
             output.push_back("");
         }
-        output.push_back("server:");
-        append_unwritten(2);
+        output.push_back(sections[i].first + ":");
+        section_end = output.size();
+        append_unwritten(i, 2);
     }
 
     std::ofstream output_file(config_path, std::ios::trunc);
@@ -372,11 +405,8 @@ bool update_server_values_in_config(const std::string& config_path,
         error_message = "Unable to open config file for writing";
         return false;
     }
-    for (std::size_t i = 0; i < output.size(); ++i) {
-        output_file << output[i];
-        if (i + 1 < output.size()) {
-            output_file << '\n';
-        }
+    for (const auto& output_line : output) {
+        output_file << output_line << '\n';
     }
 
     return true;
@@ -1132,7 +1162,7 @@ bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
 }
 
 void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
-    std::string message = context + ": " + std::string(e.what());
+    std::string message = context + ": " + alpacahttp::util::escape_for_log(e.what(), 4096);
     if (is_expected_not_implemented(e) || is_expected_validation_error(e)) {
         alpacahttp::util::log_debug(message);
     } else {
@@ -1370,6 +1400,9 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 
 namespace alpacahttp {
 
+// open-astro#765: configuredevice answers 400 for a refusal that starts with this.
+constexpr const char* kHardwareConfigRefusal = "Hardware config refused: ";
+
 namespace {
 // Issue #358: a driver that refuses a connect explains why, and the client
 // never saw it -- the reason reached the server log and stopped there, so
@@ -1424,6 +1457,104 @@ std::optional<std::string> normalize_host(std::string_view value) {
         normalized.pop_back();
     }
     return normalized;
+}
+
+// The entries set_allowed_hosts() stores: trimmed, normalized like a Host
+// header, empty and unusable ones dropped. The description PUT compares and
+// persists this form, so file, memory and the lockout check all see one list.
+std::vector<std::string> normalize_host_list(const std::vector<std::string>& hosts) {
+    std::vector<std::string> normalized;
+    for (const auto& entry : hosts) {
+        const auto first = entry.find_first_not_of(" \t");
+        if (first == std::string::npos) {
+            continue;
+        }
+        auto name = normalize_host(std::string_view(entry).substr(first, entry.find_last_not_of(" \t") - first + 1));
+        if (name && !name->empty() && *name != ".") {
+            normalized.push_back(std::move(*name));
+        }
+    }
+    return normalized;
+}
+
+// open-astro#392: whether a normalized allowed-hosts entry can match a Host
+// header: an optional leading '.' and dot-separated labels of [a-z0-9_-]
+// (1..63 each, 253 in all), or a bracketed IPv6 literal.
+bool valid_host_entry(const std::string& entry) {
+    if (entry.size() > 2 && entry.front() == '[' && entry.back() == ']') {
+        // inet_pton stops at a NUL, so refuse anything but address characters first.
+        const std::string inner = entry.substr(1, entry.size() - 2);
+        const bool chars_ok = std::all_of(inner.begin(), inner.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == ':' || c == '.';
+        });
+        in6_addr addr{};
+        return chars_ok && inet_pton(AF_INET6, inner.c_str(), &addr) == 1;
+    }
+    std::string_view rest = entry;
+    if (!rest.empty() && rest.front() == '.') {
+        rest.remove_prefix(1);
+    }
+    if (rest.empty() || rest.size() > 253) {
+        return false;
+    }
+    std::size_t label = 0;
+    for (const char c : rest) {
+        if (c == '.') {
+            if (label == 0) {
+                return false;
+            }
+            label = 0;
+            continue;
+        }
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok || ++label > 63) {
+            return false;
+        }
+    }
+    return label != 0;
+}
+
+constexpr std::size_t kMaxAllowedHostEntries = 64;
+
+// The description PUT refuses a bad entry instead of dropping it. Fills
+// `normalized` and returns "" when the list is acceptable, else the message
+// for the first problem. A port suffix must be digits (normalize_host would
+// otherwise read "http://x.lan" as the host "http").
+std::string allowed_hosts_problem(const std::vector<std::string>& raw, std::vector<std::string>& normalized) {
+    if (raw.size() > kMaxAllowedHostEntries) {
+        return "AllowedHosts holds more than 64 entries";
+    }
+    normalized.clear();
+    for (const auto& entry : raw) {
+        auto name = normalize_host(entry);
+        bool ok = name && valid_host_entry(*name);
+        if (ok) {
+            const auto port_at = entry.find(':', entry.front() == '[' ? entry.find(']') : 0);
+            if (port_at != std::string::npos) {
+                const auto port = std::string_view(entry).substr(port_at + 1);
+                ok = !port.empty() && port.size() <= 5 &&
+                     std::all_of(port.begin(), port.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+            }
+        }
+        if (!ok) {
+            std::string shown = entry.substr(0, 80);
+            std::replace_if(shown.begin(), shown.end(), [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
+            return "AllowedHosts entry '" + shown + "' is not a host name";
+        }
+        normalized.push_back(std::move(*name));
+    }
+    return {};
+}
+
+std::string join_host_list(const std::vector<std::string>& hosts) {
+    std::string joined;
+    for (const auto& host : hosts) {
+        if (!joined.empty()) {
+            joined += ", ";
+        }
+        joined += host;
+    }
+    return joined;
 }
 
 // `suffix` starts with a dot; the name must have at least one character
@@ -1513,7 +1644,9 @@ std::optional<Response> reject_disallowed_host(const Request& request, std::uint
     }
     AlpacaResponse alpaca_response =
         make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                            "Host '" + shown + "' is not allowed; add it to http.allowed_hosts or use the IP address");
+                            "Host '" + shown +
+                                "' is not allowed; open the web UI by IP address and add it under Allowed host "
+                                "names, or add it to http.allowed_hosts");
     Response resp;
     resp.set_content_type("application/json");
     resp.set_status(403, "Forbidden");
@@ -1592,17 +1725,7 @@ void Router::set_server_info(std::string server_name, std::string manufacturer, 
 }
 
 void Router::set_allowed_hosts(const std::vector<std::string>& hosts) {
-    auto normalized = std::make_shared<std::vector<std::string>>();
-    for (const auto& entry : hosts) {
-        const auto first = entry.find_first_not_of(" \t");
-        if (first == std::string::npos) {
-            continue;
-        }
-        auto name = normalize_host(std::string_view(entry).substr(first, entry.find_last_not_of(" \t") - first + 1));
-        if (name && !name->empty() && *name != ".") {
-            normalized->push_back(std::move(*name));
-        }
-    }
+    auto normalized = std::make_shared<std::vector<std::string>>(normalize_host_list(hosts));
     std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
     allowed_hosts_ = std::move(normalized);
 }
@@ -1658,7 +1781,7 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
     std::string method_str = (request.method() == HttpMethod::GET) ? "GET" : 
                            (request.method() == HttpMethod::POST) ? "POST" : 
                            (request.method() == HttpMethod::PUT) ? "PUT" : "UNKNOWN";
-    util::log_debug("HTTP " + method_str + " " + request.path());
+    util::log_debug("HTTP " + method_str + " " + util::escape_for_log(request.path()));
 
     try {
         // open-astro#711: before any regex, static file or setup handler. The
@@ -1677,8 +1800,9 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
             return response;
         }
 
-        // open-astro#392: before static files, setup pages and routing.
-        {
+        // open-astro#392: before static files, setup pages and routing. Only
+        // when http.host_check_enabled is on.
+        if (host_check_enabled_.load(std::memory_order_acquire)) {
             std::shared_ptr<const std::vector<std::string>> allowed_hosts;
             {
                 std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
@@ -1939,6 +2063,17 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
 nlohmann::json Router::build_description_payload() const {
     nlohmann::json desc;
 
+    // open-astro#392: the Host check settings the web UI edits.
+    auto add_host_check_fields = [this](nlohmann::json& target) {
+        std::shared_ptr<const std::vector<std::string>> hosts;
+        {
+            std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
+            hosts = allowed_hosts_;
+        }
+        target["HostCheckEnabled"] = host_check_enabled_.load(std::memory_order_acquire);
+        target["AllowedHosts"] = join_host_list(*hosts);
+    };
+
     if (management_driver_) {
         desc["ServerName"] = management_driver_->get_name();
         desc["Manufacturer"] = management_driver_->get_manufacturer();
@@ -1949,6 +2084,7 @@ nlohmann::json Router::build_description_payload() const {
             desc["ProfileName"] = profile_name_;
         }
         add_clock_fields(desc);
+        add_host_check_fields(desc);
         return desc;
     }
 
@@ -1972,6 +2108,7 @@ nlohmann::json Router::build_description_payload() const {
     desc["Location"] = location;
     desc["ProfileName"] = profile_name;
     add_clock_fields(desc);
+    add_host_check_fields(desc);
     return desc;
 }
 
@@ -2118,10 +2255,47 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     break;
                 }
             }
-            if (!new_location && !new_profile_name && !new_sync_clock) {
+
+            // open-astro#392: the Host check settings. Types are checked
+            // here, before anything is applied.
+            std::optional<bool> new_host_check;
+            for (const char* key : {"HostCheckEnabled", "hostCheckEnabled", "host_check_enabled"}) {
+                if (body.contains(key)) {
+                    const auto& v = body[key];
+                    if (v.is_boolean()) {
+                        new_host_check = v.get<bool>();
+                    } else if (v.is_string()) {
+                        new_host_check = parse_bool_value(v.get<std::string>(), key);
+                    } else {
+                        throw_invalid_value(std::string("Invalid value for ") + key);
+                    }
+                    break;
+                }
+            }
+            std::optional<std::vector<std::string>> new_allowed_hosts;
+            for (const char* key : {"AllowedHosts", "allowedHosts", "allowed_hosts"}) {
+                if (body.contains(key)) {
+                    if (!body[key].is_string()) {
+                        throw_invalid_value(std::string("Invalid value for ") + key);
+                    }
+                    std::vector<std::string> normalized_hosts;
+                    const auto problem =
+                        allowed_hosts_problem(split_host_list(body[key].get<std::string>()), normalized_hosts);
+                    if (!problem.empty()) {
+                        response.set_body(
+                            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE, problem));
+                        response.set_status(400, "Bad Request");
+                        return response;
+                    }
+                    new_allowed_hosts = std::move(normalized_hosts);
+                    break;
+                }
+            }
+            if (!new_location && !new_profile_name && !new_sync_clock && !new_host_check && !new_allowed_hosts) {
                 AlpacaResponse err = make_error_response(
                     client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET,
-                    "Request must include a 'Location', 'ProfileName' or 'SyncSystemClockFromClients' property");
+                    "Request must include a 'Location', 'ProfileName', 'SyncSystemClockFromClients', "
+                    "'HostCheckEnabled' or 'AllowedHosts' property");
                 response.set_body(err);
                 return response;
             }
@@ -2134,6 +2308,45 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 return response;
             }
 
+            // open-astro#392: validate, persist and apply as one step.
+            std::lock_guard<std::mutex> write_lock(description_write_mutex_);
+
+            const auto refuse_with_400 = [&](const std::string& message) {
+                response.set_body(
+                    make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE, message));
+                response.set_status(400, "Bad Request");
+                return response;
+            };
+
+            const bool host_settings_carried = new_host_check.has_value() || new_allowed_hosts.has_value();
+            std::vector<std::string> current_hosts;
+            {
+                std::lock_guard<std::mutex> lock(allowed_hosts_mutex_);
+                current_hosts = *allowed_hosts_;
+            }
+            const bool current_host_check = host_check_enabled_.load(std::memory_order_acquire);
+
+            // No self-lockout: the request that turns the check on, or edits
+            // the list while it is on, must itself pass the new settings.
+            // Same predicate as route().
+            const bool resulting_host_check = new_host_check.value_or(current_host_check);
+            const std::vector<std::string>& resulting_hosts = new_allowed_hosts ? *new_allowed_hosts : current_hosts;
+            if (host_settings_carried && resulting_host_check) {
+                const std::string host = request.get_header("Host");
+                if (!host.empty()) {
+                    const auto name = normalize_host(host);
+                    if (!name || name->empty() || !host_allowed(*name, resulting_hosts, machine_hostname_)) {
+                        std::string shown = host.substr(0, 255);
+                        std::replace_if(
+                            shown.begin(), shown.end(), [](unsigned char c) { return c < 0x20 || c > 0x7e; }, '?');
+                        return refuse_with_400(
+                            "Host '" + shown +
+                            "' would be refused by these settings; add it to the allowed host names or use the "
+                            "IP address");
+                    }
+                }
+            }
+
             std::string config_path;
             {
                 std::lock_guard<std::mutex> lock(server_info_mutex_);
@@ -2142,6 +2355,13 @@ Response Router::handle_description(const Request& request, std::uint32_t server
 
             if (!config_path.empty()) {
                 std::vector<std::pair<std::string, std::string>> persist_values;
+                std::vector<std::pair<std::string, std::string>> persist_http_values;
+                if (new_host_check) {
+                    persist_http_values.emplace_back("host_check_enabled", *new_host_check ? "true" : "false");
+                }
+                if (new_allowed_hosts) {
+                    persist_http_values.emplace_back("allowed_hosts", join_host_list(*new_allowed_hosts));
+                }
                 if (new_location) {
                     persist_values.emplace_back("location", *new_location);
                 }
@@ -2152,7 +2372,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     persist_values.emplace_back("sync_system_clock_from_clients", *new_sync_clock ? "true" : "false");
                 }
                 std::string persist_error;
-                if (!update_server_values_in_config(config_path, persist_values, persist_error)) {
+                if (!update_config_values(config_path, {{"server", persist_values}, {"http", persist_http_values}},
+                                          persist_error)) {
                     AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
                                                              "Failed to persist server settings: " + persist_error);
                     response.set_body(err);
@@ -2173,6 +2394,22 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 host_clock_.set_enabled(*new_sync_clock);
                 util::log_info(std::string("syncSystemClockFromClients ") + (*new_sync_clock ? "enabled" : "disabled") +
                                " by " + request.remote_address());
+            }
+            // Never judge a request by the new flag with the old list: turn
+            // the check on after the list, off before it.
+            if (new_host_check && !*new_host_check) {
+                set_host_check_enabled(false);
+            }
+            if (new_allowed_hosts) {
+                set_allowed_hosts(*new_allowed_hosts);
+            }
+            if (new_host_check && *new_host_check) {
+                set_host_check_enabled(true);
+            }
+            if (new_host_check || new_allowed_hosts) {
+                util::log_info("Host check settings changed by " + request.remote_address() +
+                               ": enabled=" + (host_check_enabled_.load(std::memory_order_acquire) ? "true" : "false") +
+                               ", allowed hosts='" + join_host_list(resulting_hosts) + "'");
             }
         } else if (request.method() != HttpMethod::GET) {
             AlpacaResponse alpaca_response = make_error_response(
@@ -4049,7 +4286,7 @@ Response Router::dispatch_telescope_method(
             else if (method_name == "moveaxis") {
                 // Debug logging
                 if (!request.body().empty()) {
-                    util::log_info("moveaxis body: " + request.body());
+                    util::log_info("moveaxis body: " + util::escape_for_log(request.body()));
                 }
                 int axis = parse_int("Axis");
                 double rate = parse_double("Rate");
@@ -4485,8 +4722,9 @@ Response Router::dispatch_camera_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "imagearray") {
-                util::log_debug("Camera imagearray Accept: " +
-                    (request.has_header("accept") ? request.get_header("accept") : "<none>") +
+                util::log_debug(
+                    "Camera imagearray Accept: " +
+                    (request.has_header("accept") ? util::escape_for_log(request.get_header("accept")) : "<none>") +
                     ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
                 if (accepts_imagebytes(request)) {
                     auto image = camera->get_image_array();
@@ -4501,8 +4739,9 @@ Response Router::dispatch_camera_method(
                 response.set_body(build_image_array_payload(image, 2, client_tx_id, server_tx_id));
                 return response;
             } else if (method_name == "imagearrayvariant") {
-                util::log_debug("Camera imagearrayvariant Accept: " +
-                    (request.has_header("accept") ? request.get_header("accept") : "<none>") +
+                util::log_debug(
+                    "Camera imagearrayvariant Accept: " +
+                    (request.has_header("accept") ? util::escape_for_log(request.get_header("accept")) : "<none>") +
                     ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
                 if (accepts_imagebytes(request)) {
                     auto image = camera->get_image_array();
@@ -6547,7 +6786,7 @@ Response Router::handle_static_file(const Request& request) {
 Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id) {
     Response response;
 
-    util::log_info("Handling setup endpoint: " + request.path());
+    util::log_info("Handling setup endpoint: " + util::escape_for_log(request.path()));
 
     // Setup endpoints are expected to return an HTML page.
     // We provide a simple stub page that points users to the web UI.
@@ -6556,14 +6795,8 @@ Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id
     std::smatch matches;
 
     if (!std::regex_match(request.path(), matches, setup_regex)) {
-        // Client input, so DEBUG, and the path is cut to its first 256 bytes (#740).
-        constexpr std::size_t kLoggedPathBytes = 256;
-        const std::string& path = request.path();
-        std::string logged_path = path.substr(0, kLoggedPathBytes);
-        if (path.size() > kLoggedPathBytes) {
-            logged_path += "... (" + std::to_string(path.size()) + " bytes)";
-        }
-        util::log_debug("Setup endpoint regex did not match: " + logged_path);
+        // Client input, so DEBUG, escaped and cut to 256 bytes (#740).
+        util::log_debug("Setup endpoint regex did not match: " + util::escape_for_log(request.path()));
         // Not a valid setup path; return 404 as Alpaca error.
         response.set_status(404, "Not Found");
         AlpacaResponse alpaca_response = make_error_response(
@@ -6688,9 +6921,11 @@ bool read_site_coordinates(const nlohmann::json& config, bool from_api, const st
         // NaN, so the !(in range) form below catches it where (out of range)
         // would not.
         if (!(value >= -field.limit && value <= field.limit)) {
-            const std::string detail = std::string(field.key) + " " + std::to_string(value) +
-                                       " is out of range: must be between " + std::to_string(-field.limit) + " and " +
-                                       std::to_string(field.limit) + " degrees";
+            using alpacacore::catalog::format_bound;
+            const auto kDouble = alpacacore::catalog::FieldRef::Kind::Double;
+            const std::string detail = std::string(field.key) + " " + format_bound(kDouble, value) +
+                                       " is out of range: must be between " + format_bound(kDouble, -field.limit) +
+                                       " and " + format_bound(kDouble, field.limit) + " degrees";
             if (from_api) {
                 error_message = detail;
                 return false;
@@ -6805,6 +7040,9 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
                 error_message
             );
             response.set_body(alpaca_response);
+            if (error_message.rfind(kHardwareConfigRefusal, 0) == 0) {
+                response.set_status(400, "Bad Request");
+            }
             return response;
         }
 
@@ -7686,6 +7924,15 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
         response.set_body(alpaca_response);
         return response;
     };
+    auto get_ssid = [](const nlohmann::json& body) {
+        if (const auto* hex = find_json_value(body, "SsidHex")) {
+            if (!hex->is_string()) throw util::WifiError("SsidHex (string) is required");
+            return util::ssid_from_hex(hex->get<std::string>());
+        }
+        const auto* ssid = find_json_value(body, "Ssid");
+        if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) or SsidHex (string) is required");
+        return ssid->get<std::string>();
+    };
 
     try {
         auto& wifi = wifi_manager();
@@ -7705,8 +7952,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             ok.value = wifi.profiles();
         } else if (sub == "profiles" && is_put) {
             auto body = body_json();
-            const auto* ssid = find_json_value(body, "Ssid");
-            if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) is required");
+            const auto ssid = get_ssid(body);
             std::string passphrase;
             if (const auto* p = find_json_value(body, "Passphrase"); p && p->is_string()) {
                 passphrase = p->get<std::string>();
@@ -7719,7 +7965,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             if (const auto* pr = find_json_value(body, "Priority"); pr && pr->is_number_integer()) {
                 priority = pr->get<int>();
             }
-            ok.value = wifi.save_profile(ssid->get<std::string>(), passphrase, autoconnect, priority);
+            ok.value = wifi.save_profile(ssid, passphrase, autoconnect, priority);
         } else if (sub.rfind("profiles/", 0) == 0 && is_delete) {
             wifi.delete_profile(sub.substr(std::string("profiles/").size()));
             ok.value = nlohmann::json{{"Deleted", true}};
@@ -7736,8 +7982,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             ok.value = wifi.get_ap();
         } else if (sub == "ap" && is_put) {
             auto body = body_json();
-            const auto* ssid = find_json_value(body, "Ssid");
-            if (!ssid || !ssid->is_string()) throw util::WifiError("Ssid (string) is required");
+            const auto ssid = get_ssid(body);
             std::string passphrase;
             if (const auto* p = find_json_value(body, "Passphrase"); p && p->is_string()) {
                 passphrase = p->get<std::string>();
@@ -7754,7 +7999,7 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             if (const auto* e = find_json_value(body, "Enabled"); e && e->is_boolean()) {
                 enabled = e->get<bool>();
             }
-            ok.value = wifi.set_ap(ssid->get<std::string>(), passphrase, band, channel, enabled);
+            ok.value = wifi.set_ap(ssid, passphrase, band, channel, enabled);
         } else if (sub == "country" && is_get) {
             ok.value = wifi.get_country();
         } else if (sub == "country" && is_put) {
@@ -7899,6 +8144,28 @@ std::string persisted_device_subject(const std::string& vendor, const std::strin
     return "Persisted " + vendor + " " + device_type + " " + std::to_string(device_number);
 }
 
+// open-astro#765: a device config may not choose which GPIO chip, GPIO line or
+// device node the server opens. The boards have fixed wiring, so the only
+// accepted values are the board's own; anything else is refused before the
+// device is built or saved (configuredevice answers 400 for this prefix).
+bool refuse_hardware_config(std::string& error_message, const std::string& field, const std::string& allowed) {
+    error_message = std::string(kHardwareConfigRefusal) + "'" + field + "' must be " + allowed +
+                    " for this board; the server does not open other chip nodes or GPIO lines";
+    return false;
+}
+
+bool gpio_chip_is_board_chip(const std::string& value, const char* board_chip, std::string& error_message,
+                             const char* alt_chip = nullptr) {
+    if (value == board_chip || (alt_chip != nullptr && value == alt_chip)) {
+        return true;
+    }
+    std::string allowed = std::string("'") + board_chip + "'";
+    if (alt_chip != nullptr) {
+        allowed += std::string(" or '") + alt_chip + "'";
+    }
+    return refuse_hardware_config(error_message, "gpioChip", allowed);
+}
+
 // open-astro#664: the catalog consult in register_device_from_config() below.
 // DeviceCatalog::find_schema is private, so the router can only ask
 // describe() for the DescriptorView of a key.
@@ -7910,11 +8177,11 @@ std::optional<alpacacore::catalog::DescriptorView> find_descriptor(const alpacac
     return std::nullopt;
 }
 
-// "Astroasis Oasis Focuser" -> "Astroasis": the arm text this replaces spelled
-// the vendor as the first word of its display name. Assumption (open-astro#664
-// D1): true for every descriptor except "Player One", whose own slice must
-// either add a Schema::vendor_label or accept the text change.
+// The vendor as the deleted arm texts spelled it: Schema::vendor_label when the
+// descriptor sets one ("Player One"), else the first word of its display name
+// ("Astroasis Oasis Focuser" -> "Astroasis").
 std::string vendor_label(const alpacacore::catalog::DescriptorView& view) {
+    if (!view.vendor_label.empty()) return std::string(view.vendor_label);
     const std::string name(view.display_name);
     const auto space = name.find(' ');
     return space == std::string::npos ? name : name.substr(0, space);
@@ -7977,8 +8244,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         device_type_key = string_to_device_type(device_type_str);
     } catch (const std::exception& ex) {
         // Unknown device_type_str: fall through to the arm chain.
-        util::log_debug("register_device_from_config: device type \"" + device_type_str +
-                        "\" is not catalog-recognized (" + ex.what() + "); falling through to the arm chain");
+        util::log_debug("register_device_from_config: device type \"" + util::escape_for_log(device_type_str) +
+                        "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
+                        "); falling through to the arm chain");
     }
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
@@ -8124,6 +8392,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // controllable DC1/DC2 lines.
         auto powerbox_config = alpacacore::vendor::ioptron::default_imate_powerbox_config();
         powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
+        if (!gpio_chip_is_board_chip(powerbox_config.gpio_chip_path, "/dev/gpiochip1", error_message,
+                                     "/dev/gpiochip0" /* stock BSP kernel */)) {
+            return false;
+        }
         powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // DC3/DC1/DC2 layout. The always-on pass-through has no GPIO line and
@@ -8382,119 +8654,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "skywatcher" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_SKYWATCHER
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // Issue #380: an unrecognised connectionType on a persisted config is
-        // normalised to "serial" rather than dropping the device, so it stays
-        // listed and editable in the web UI and its connect fails on the port
-        // path instead of auto-probing and attaching to whatever answers. The
-        // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
-                                                        device_type_str, device_number);
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-
-        // open-astro#274: /management/v1/configuredevice is a first-class REST
-        // API independent of the web UI, and used to accept a skywatcher
-        // config with no coordinates at all. The mount stores no site of its
-        // own, so both would then collapse to 0.0 and a southern rig would run
-        // northern pointing math -- silently undoing #250, #253 and #261.
-        // This check follows the SAME source rule as the
-        // portPath/host/connectionType checks below (reject the API, warn and
-        // register a persisted config), but it is spelled out inline rather
-        // than delegated to reject_invalid_config() because it needs the
-        // which-coordinate-is-missing detail in its WARN, and because
-        // normalize_persisted_connection_type()'s trick of substituting a safe
-        // value has no equivalent here: 0.0 is a real place that reads as
-        // northern, so there is nothing to carry forward.
-        if (!site_latitude.has_value() || !site_longitude.has_value()) {
-            static constexpr const char* kMissingSite =
-                "Site latitude and longitude are required for the Sky-Watcher direct driver: this mount stores no "
-                "site of its own, and tracking direction, guide sign and pier side are all hemisphere-dependent";
-            if (source == ConfigSource::Api) {
-                error_message = kMissingSite;
-                return false;
-            }
-            // Already on disk from before this rule existed. Register it so it
-            // keeps appearing in configureddevices and stays editable in the
-            // web UI; the driver refuses the connect until it is fixed.
-            const char* missing = (!site_latitude.has_value() && !site_longitude.has_value()) ? "site coordinates"
-                                  : !site_latitude.has_value()                                ? "site latitude"
-                                                                                              : "site longitude";
-            util::log_warning("Persisted Sky-Watcher telescope " + std::to_string(device_number) + " has no " +
-                              missing + " and will refuse to connect. " + kMissingSite);
-        }
-
-        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
-
-        if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config_get(config, "mountIndex", 0);
-            telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope_auto(
-                device_number, mount_index, site_latitude, site_longitude, site_elevation);
-        } else {
-            alpacacore::vendor::skywatcher::ConnectionInfo conn_info;
-
-            if (conn_type == "serial") {
-                conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Serial;
-                conn_info.port_path = config_get(config, "portPath", "");
-                conn_info.baud_rate = config_get(config, "baudRate", 9600);
-
-                if (conn_info.port_path.empty() &&
-                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
-                                          device_number, error_message)) {
-                    return false;
-                }
-            } else if (conn_type == "network") {
-                conn_info.type = alpacacore::vendor::skywatcher::ConnectionType::Network;
-                conn_info.host = config_get(config, "host", "");
-                conn_info.udp_port = config_get(config, "udpPort", conn_info.udp_port);
-
-                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
-                                                                    device_type_str, device_number, error_message)) {
-                    return false;
-                }
-            } else {
-                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
-                return false;
-            }
-
-            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-            telescope = alpacacore::vendor::skywatcher::create_skywatcher_telescope(
-                device_number, conn_info, site_latitude, site_longitude, site_elevation);
-        }
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered SkyWatcher telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "SkyWatcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "onstep" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_ONSTEP
         std::string conn_type = config_get(config, "connectionType", "auto");
@@ -8661,56 +8820,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         return false;
 #else
         error_message = "Celestron support not enabled. Rebuild with -DALPACACORE_ENABLE_CELESTRON=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "bisque" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_BISQUE
-        alpacacore::vendor::bisque::ConnectionInfo conn_info;
-        conn_info.host = config_get(config, "host", "localhost");
-        conn_info.tcp_port = config_get(config, "tcpPort", 3040);
-        conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-        if (conn_info.host.empty() && reject_invalid_config(source, "Host is required for Bisque/TheSkyX connection",
-                                                            vendor, device_type_str, device_number, error_message)) {
-            return false;
-        }
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-
-        auto telescope = alpacacore::vendor::bisque::create_bisque_telescope_with_site(
-            device_number, conn_info, site_latitude, site_longitude, site_elevation);
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-        if (site_elevation.has_value()) {
-            telescope->set_site_elevation(site_elevation.value());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered Bisque/Paramount telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Bisque support not enabled. Rebuild with -DALPACACORE_ENABLE_BISQUE=ON";
         return false;
 #endif
     }
@@ -8954,6 +9063,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (switch_type == "asiair-plus-rk3568") {
             auto plus_config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
             plus_config.device_path = config_get(config, "devicePath", plus_config.device_path);
+            if (plus_config.device_path != "/dev/pwm-gpio-misc") {
+                return refuse_hardware_config(error_message, "devicePath", "'/dev/pwm-gpio-misc'");
+            }
             plus_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", plus_config.pwm_frequency_hz);
             if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPlusPortConfig> ports;
@@ -8996,10 +9108,14 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 asiair_config.model_name = "ASIAIR Plus (Pi CM4)";
             }
             asiair_config.gpio_chip_path = config_get(config, "gpioChip", asiair_config.gpio_chip_path);
+            if (!gpio_chip_is_board_chip(asiair_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
+                return false;
+            }
             asiair_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", asiair_config.pwm_frequency_hz);
             if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
                 std::vector<alpacacore::vendor::zwo::AsiairPortConfig> ports;
                 ports.reserve(config["ports"].size());
+                std::set<int> seen_gpio_lines;
                 for (const auto& p : config["ports"]) {
                     // A non-object entry (e.g. "ports":[null]) would make the
                     // contains()/[] accessors below throw nlohmann type_error.
@@ -9012,9 +9128,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                         return false;
                     }
                     const int gpio_value = p["gpio"].get<int>();
-                    if (gpio_value < 0 || gpio_value > 63) {
-                        error_message = "ASIAIR port 'gpio' must be in [0, 63]";
-                        return false;
+                    if (gpio_value != 12 && gpio_value != 13 && gpio_value != 26 && gpio_value != 18) {
+                        return refuse_hardware_config(error_message, "ports[].gpio", "one of 12, 13, 26, 18");
+                    }
+                    if (!seen_gpio_lines.insert(gpio_value).second) {
+                        return refuse_hardware_config(error_message, "ports[].gpio",
+                                                      "each of 12, 13, 26, 18 at most once");
                     }
                     alpacacore::vendor::zwo::AsiairPortConfig pc;
                     pc.name = p.value("name", std::string("Port ") + std::to_string(ports.size() + 1));
@@ -9228,44 +9347,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "svbony" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_SVBONY
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto camera = alpacacore::vendor::svbony::create_svbony_camera(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered SVBONY camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "SVBONY support not enabled. Rebuild with -DALPACACORE_ENABLE_SVBONY=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "gphoto" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_GPHOTO
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto camera = alpacacore::vendor::gphoto::create_gphoto_camera(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered gphoto camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "gphoto support not enabled. Rebuild with -DALPACACORE_ENABLE_GPHOTO=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "touptek" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_TOUPTEK
         int camera_index = config_get(config, "cameraIndex", 0);
@@ -9386,6 +9467,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         // lines (BCM GPIO 18/10/17/4).
         auto powerbox_config = alpacacore::vendor::touptek::default_stellavita_config();
         powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
+        if (!gpio_chip_is_board_chip(powerbox_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
+            return false;
+        }
         powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
         // Per-port PWM/name overrides applied positionally onto the fixed
         // Port 1..4 layout.
@@ -9422,78 +9506,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         return false;
 #else
         error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "playerone" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto camera = alpacacore::vendor::playerone::create_playerone_camera(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered Player One camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "playerone" && device_type_str == "filterwheel") {
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-        int wheel_index = config_get(config, "filterwheelIndex", 0);
-
-        auto wheel = alpacacore::vendor::playerone::create_playerone_filterwheel(device_number, wheel_index);
-
-        if (config_has(config, "filterNames")) {
-            const auto& names_value = config.at("filterNames");
-            if (!names_value.is_array()) {
-                error_message = "Player One filter wheel filterNames must be an array";
-                return false;
-            }
-            for (const auto& name : names_value) {
-                if (!name.is_string()) {
-                    error_message = "Player One filter wheel filterNames must be an array of strings";
-                    return false;
-                }
-            }
-            wheel->set_names(names_value.get<std::vector<std::string>>());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
-            util::log_info("Registered Player One Phoenix filter wheel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "playerone" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto sw = alpacacore::vendor::playerone::create_playerone_switch(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-            util::log_info("Registered Player One thermal switch (dew heater/fan)");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Player One support not enabled. Rebuild with -DALPACACORE_ENABLE_PLAYERONE=ON";
         return false;
 #endif
     }
@@ -9880,8 +9892,9 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         }
     } catch (const std::exception& ex) {
         // Unknown device_type: fall through to the vendor-specific chain.
-        util::log_debug("sanitize_device_config: device type \"" + device_type + "\" is not catalog-recognized (" +
-                        ex.what() + "); falling through to the vendor-specific chain");
+        util::log_debug("sanitize_device_config: device type \"" + util::escape_for_log(device_type) +
+                        "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
+                        "); falling through to the vendor-specific chain");
     }
 
     if (catalog_handled) {
@@ -9942,20 +9955,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         } else if (connection_type == "network") {
             copy_if_present("host");
             copy_if_present("tcpPort");
-        }
-    } else if (vendor == "skywatcher") {
-        copy_if_present("connectionType");
-        copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
-        copy_if_present("siteLatitude");
-        copy_if_present("siteLongitude");
-        copy_if_present("siteElevation");
-        std::string connection_type = config_get(config, "connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        } else if (connection_type == "network") {
-            copy_if_present("host");
-            copy_if_present("udpPort");
         }
     } else if (vendor == "onstep") {
         // OnStep is USB-serial only — no "network" branch (see the
@@ -10044,8 +10043,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
     } else if (vendor == "qhy") {
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
-    } else if (vendor == "svbony" || vendor == "gphoto") {
-        copy_if_present("cameraIndex");
     } else if (vendor == "touptek") {
         if (device_type == "switch") {
             // Two switch backends share (touptek, switch): the StellaVita
@@ -10073,14 +10070,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("cameraIndex");
             copy_if_present("focuserIndex");
             copy_if_present("focuserId");
-        }
-    } else if (vendor == "playerone") {
-        if (device_type == "filterwheel") {
-            copy_if_present("filterwheelIndex");
-            copy_if_present("filterNames");
-        } else {
-            // Camera and the thermal switch both bind by camera index.
-            copy_if_present("cameraIndex");
         }
     } else if (vendor == "celestron") {
         copy_if_present("connectionType");
@@ -10126,9 +10115,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
             copy_if_present("portPath");
             copy_if_present("baudRate");
         }
-    } else if (vendor == "bisque") {
-        copy_if_present("host");
-        copy_if_present("tcpPort");
     }
 
     copy_if_present("responseTimeoutMs");

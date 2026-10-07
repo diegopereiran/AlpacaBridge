@@ -125,7 +125,12 @@ add_library(AlpacaCore::alpacacore ALIAS alpacacore)
 add_library(alpacacore_builtins STATIC
     src/catalog/builtin_catalog.cpp
     src/vendors/astroasis/astroasis_schema.cpp
+    src/vendors/skywatcher/skywatcher_schema.cpp
     src/vendors/weewx/weewx_schema.cpp
+    src/vendors/svbony/svbony_schema.cpp
+    src/vendors/gphoto/gphoto_schema.cpp
+    src/vendors/playerone/playerone_schema.cpp
+    src/vendors/bisque/bisque_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -165,6 +170,9 @@ if(ALPACACORE_ENABLE_SKYWATCHER)
     add_subdirectory(src/vendors/skywatcher)
     if(TARGET alpacacore_skywatcher)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_skywatcher)
+        # Guards the Sky-Watcher factory registration in register_builtin_factories(),
+        # as for Astroasis below.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_SKYWATCHER)
     endif()
 endif()
 
@@ -204,6 +212,8 @@ if(ALPACACORE_ENABLE_SVBONY)
     add_subdirectory(src/vendors/svbony)
     if(TARGET alpacacore_svbony)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_svbony)
+        # register_builtin_factories() guards its SVBONY factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_SVBONY)
     endif()
 endif()
 
@@ -211,6 +221,8 @@ if(ALPACACORE_ENABLE_GPHOTO)
     add_subdirectory(src/vendors/gphoto)
     if(TARGET alpacacore_gphoto)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_gphoto)
+        # register_builtin_factories() guards its gphoto factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_GPHOTO)
     endif()
 endif()
 
@@ -225,6 +237,8 @@ if(ALPACACORE_ENABLE_BISQUE)
     add_subdirectory(src/vendors/bisque)
     if(TARGET alpacacore_bisque)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_bisque)
+        # register_builtin_factories() guards its Bisque factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_BISQUE)
     endif()
 endif()
 
@@ -239,6 +253,8 @@ if(ALPACACORE_ENABLE_PLAYERONE)
     add_subdirectory(src/vendors/playerone)
     if(TARGET alpacacore_playerone)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_playerone)
+        # register_builtin_factories() guards its Player One factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_PLAYERONE)
     endif()
 endif()
 
