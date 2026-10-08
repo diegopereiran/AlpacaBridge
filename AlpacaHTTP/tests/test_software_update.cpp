@@ -387,6 +387,16 @@ int main() {
                "https://raw.githubusercontent.com/open-astro/AlpacaBridge/v4.1.0/docs/releases/4.1.0.md");
         EXPECT(expand_version_template(alpacahttp::util::kDefaultReleaseUrl, "4.1.0") ==
                "https://github.com/open-astro/AlpacaBridge/releases/tag/v4.1.0");
+        // A beta is X.Y.Z~betaN in the apt index but tagged vX.Y.Z-beta.N with
+        // notes in docs/releases/X.Y.Z-beta.N.md (scripts/release_tag.py).
+        EXPECT(expand_version_template(alpacahttp::util::kDefaultReleaseNotesUrl, "5.0.0~beta2") ==
+               "https://raw.githubusercontent.com/open-astro/AlpacaBridge/v5.0.0-beta.2/docs/releases/5.0.0-beta.2.md");
+        EXPECT(expand_version_template(alpacahttp::util::kDefaultReleaseUrl, "5.0.0~beta2") ==
+               "https://github.com/open-astro/AlpacaBridge/releases/tag/v5.0.0-beta.2");
+        EXPECT(expand_version_template("{version}", "5.0.0~beta10") == "5.0.0-beta.10");
+        // Anything that is not the beta spelling passes through untouched.
+        EXPECT(expand_version_template("{version}", "5.0.0~rc1") == "5.0.0~rc1");
+        EXPECT(expand_version_template("{version}", "5.0.0~beta") == "5.0.0~beta");
     }
 
     // --- release notes: fetched only when an update is available, from the
