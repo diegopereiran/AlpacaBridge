@@ -462,9 +462,9 @@ std::string tag_spelling(const std::string& version) {
     const auto pos = version.find(marker);
     if (pos == std::string::npos) return version;
     const std::string number = version.substr(pos + marker.size());
-    const bool numeric = !number.empty() && number[0] != '0' &&
-                         std::all_of(number.begin(), number.end(),
-                                     [](unsigned char c) { return std::isdigit(c) != 0; });
+    const bool numeric =
+        !number.empty() && number[0] != '0' &&
+        std::all_of(number.begin(), number.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
     if (!numeric) return version;
     return version.substr(0, pos) + "-beta." + number;
 }
