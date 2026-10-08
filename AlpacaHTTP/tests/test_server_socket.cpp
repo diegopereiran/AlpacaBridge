@@ -522,12 +522,12 @@ int main() {
     {
         // case: Large binary responses remain framed across vectored sends
         constexpr int kCameraNumber = 9898;
-        constexpr int kImageWidth = 3072;
-        constexpr int kImageHeight = 2048;
+        constexpr int kImageWidth = 1024;
+        constexpr int kImageHeight = 1024;
         const std::size_t pixel_count = static_cast<std::size_t>(kImageWidth) * kImageHeight;
         std::vector<std::int32_t> pixels(pixel_count);
         for (std::size_t i = 0; i < pixels.size(); ++i) {
-            pixels[i] = static_cast<std::int32_t>(i & 0xff);
+            pixels[i] = static_cast<std::int32_t>(i);
         }
         auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
         camera->set_image_array({std::move(pixels), kImageWidth, kImageHeight, 2});
@@ -537,14 +537,14 @@ int main() {
         const std::string image_request = "GET /api/v1/camera/" + std::to_string(kCameraNumber) +
                                           "/imagearray HTTP/1.1\r\nHost: localhost\r\n"
                                           "Accept: application/imagebytes\r\n\r\n";
-        const std::size_t payload_size = 44 + pixel_count;
+        const std::size_t payload_size = 44 + pixel_count * sizeof(std::int32_t);
         auto set_receive_timeout = [](int fd) {
             timeval timeout{};
             timeout.tv_sec = 30;
             EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
         };
 
-        // Read the full 6 MiB body, then issue another request on the same
+        // Read the full 4 MiB body, then issue another request on the same
         // keep-alive connection. The payload contains embedded NUL bytes.
         {
             int fd = connect_local(port);
@@ -558,8 +558,13 @@ int main() {
             EXPECT(response.find("Content-Type: application/imagebytes\r\n") != std::string::npos);
             EXPECT(response.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
             EXPECT(response.size() == headers_end + 4 + payload_size);
-            EXPECT(response[headers_end + 4 + 44] == '\0');
-            EXPECT(response[headers_end + 4 + 44 + kImageHeight] == '\1');
+            const std::size_t pixels_start = headers_end + 4 + 44;
+            EXPECT(response[pixels_start] == '\0');
+            const std::size_t second_x_pixel = pixels_start + kImageHeight * sizeof(std::int32_t);
+            EXPECT(response[second_x_pixel] == '\1');
+            EXPECT(response[second_x_pixel + 1] == '\0');
+            EXPECT(response[second_x_pixel + 2] == '\0');
+            EXPECT(response[second_x_pixel + 3] == '\0');
             EXPECT(response.find("Connection: keep-alive\r\n") != std::string::npos);
 
             send_all(fd, kGet11);
