@@ -1271,59 +1271,38 @@ void append_uint32_le(std::string& out, std::uint32_t value) {
     out.append(bytes, sizeof(bytes));
 }
 
-void append_uint16_le(std::string& out, std::uint16_t value) {
-    char bytes[2];
-    bytes[0] = static_cast<char>(value & 0xFF);
-    bytes[1] = static_cast<char>((value >> 8) & 0xFF);
-    out.append(bytes, sizeof(bytes));
-}
-
-void append_int16_le(std::string& out, std::int16_t value) {
-    append_uint16_le(out, static_cast<std::uint16_t>(value));
-}
-
-void append_uint8(std::string& out, std::uint8_t value) {
-    out.push_back(static_cast<char>(value));
-}
-
-void append_int32_le(std::string& out, std::int32_t value) {
-    append_uint32_le(out, static_cast<std::uint32_t>(value));
-}
-
 std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
                                       const ImageBytesFormat& format,
                                       std::uint32_t client_tx_id,
                                       std::uint32_t server_tx_id) {
-    std::uint32_t width = image.width > 0 ? static_cast<std::uint32_t>(image.width) : 0;
-    std::uint32_t height = image.height > 0 ? static_cast<std::uint32_t>(image.height) : 0;
-    std::uint32_t rank = image.rank > 0 ? static_cast<std::uint32_t>(image.rank) : 0;
-    std::uint32_t planes = 0;
-    if (rank == 3) {
-        planes = 3;
-        if (width > 0 && height > 0) {
-            auto expected = static_cast<std::uint64_t>(width) * height * planes;
-            if (expected == 0 || expected > image.data.size()) {
-                planes = 3;
-            }
-        }
+    if ((image.rank != 2 && image.rank != 3) || image.width <= 0 || image.height <= 0) {
+        throw std::length_error("Camera image has invalid rank or dimensions");
     }
 
-    std::uint64_t pixel_count = 0;
-    if (width > 0 && height > 0) {
-        std::uint64_t base = static_cast<std::uint64_t>(width) * height;
-        if (rank == 3) {
-            base *= (planes == 0 ? 3 : planes);
-        }
-        pixel_count = base;
+    const auto width = static_cast<std::size_t>(image.width);
+    const auto height = static_cast<std::size_t>(image.height);
+    const std::size_t channels = image.rank == 3 ? 3 : 1;
+    constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
+    if (width > kMaxSize / height) {
+        throw std::length_error("Camera image dimensions overflow the payload size");
     }
-
-    std::uint64_t data_bytes = pixel_count * format.bytes_per_element;
-    if (data_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        data_bytes = 0;
+    const std::size_t pixels = width * height;
+    if (pixels > kMaxSize / channels) {
+        throw std::length_error("Camera image dimensions overflow the payload size");
     }
+    const std::size_t element_count = pixels * channels;
+    if (format.bytes_per_element == 0 ||
+        element_count > (kMaxSize - kImageBytesMetadataSize) / format.bytes_per_element) {
+        throw std::length_error("Camera image payload size overflows addressable memory");
+    }
+    if (element_count != image.data.size()) {
+        throw std::length_error("Camera image data length does not match its dimensions");
+    }
+    const std::size_t data_bytes = element_count * format.bytes_per_element;
+    const std::size_t payload_size = kImageBytesMetadataSize + data_bytes;
 
     std::string body;
-    body.reserve(kImageBytesMetadataSize + static_cast<std::size_t>(data_bytes));
+    body.reserve(payload_size);
 
     append_uint32_le(body, kImageBytesMetadataVersion);
     append_uint32_le(body, 0);
@@ -1332,65 +1311,65 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
     append_uint32_le(body, static_cast<std::uint32_t>(kImageBytesMetadataSize));
     append_uint32_le(body, format.image_element_type);
     append_uint32_le(body, format.transmission_element_type);
-    append_uint32_le(body, rank);
-    append_uint32_le(body, width);
-    append_uint32_le(body, height);
-    append_uint32_le(body, rank == 3 ? planes : 0);
+    append_uint32_le(body, static_cast<std::uint32_t>(image.rank));
+    append_uint32_le(body, static_cast<std::uint32_t>(width));
+    append_uint32_le(body, static_cast<std::uint32_t>(height));
+    append_uint32_le(body, image.rank == 3 ? 3 : 0);
+    body.resize(payload_size);
 
-    if (pixel_count == 0) {
-        return body;
-    }
-
-    auto append_value = [&](std::int32_t value) {
-        switch (format.transmission_element_type) {
-            case kImageTypeByte: {
-                std::uint8_t out = 0;
-                if (value > 0) {
-                    out = static_cast<std::uint8_t>(std::min<std::int32_t>(
-                        value, std::numeric_limits<std::uint8_t>::max()));
+    const auto pack_pixels = [&](auto write_element) {
+        auto* output = body.data() + kImageBytesMetadataSize;
+        constexpr std::size_t kBlock = 64;
+        for (std::size_t by = 0; by < height; by += kBlock) {
+            const auto by_end = std::min(by + kBlock, height);
+            for (std::size_t bx = 0; bx < width; bx += kBlock) {
+                const auto bx_end = std::min(bx + kBlock, width);
+                for (std::size_t y = by; y < by_end; ++y) {
+                    for (std::size_t x = bx; x < bx_end; ++x) {
+                        const std::size_t src = (y * width + x) * channels;
+                        const std::size_t dst = (x * height + y) * channels;
+                        for (std::size_t channel = 0; channel < channels; ++channel) {
+                            write_element(output + (dst + channel) * format.bytes_per_element,
+                                          image.data[src + channel]);
+                        }
+                    }
                 }
-                append_uint8(body, out);
-                break;
             }
-            case kImageTypeUInt16: {
-                std::uint16_t out = 0;
-                if (value > 0) {
-                    out = static_cast<std::uint16_t>(std::min<std::int32_t>(
-                        value, std::numeric_limits<std::uint16_t>::max()));
-                }
-                append_uint16_le(body, out);
-                break;
-            }
-            case kImageTypeInt16: {
-                std::int16_t out = 0;
-                if (value < std::numeric_limits<std::int16_t>::min()) {
-                    out = std::numeric_limits<std::int16_t>::min();
-                } else if (value > std::numeric_limits<std::int16_t>::max()) {
-                    out = std::numeric_limits<std::int16_t>::max();
-                } else {
-                    out = static_cast<std::int16_t>(value);
-                }
-                append_int16_le(body, out);
-                break;
-            }
-            case kImageTypeInt32:
-            default:
-                append_int32_le(body, value);
-                break;
         }
     };
 
-    if (rank == 2 && width > 0 && height > 0) {
-        std::vector<std::int32_t> transposed = transpose_xy(image.data, width, height, 1);
-        for (std::int32_t value : transposed) {
-            append_value(value);
-        }
-    } else if (rank == 3 && width > 0 && height > 0) {
-        std::uint32_t channels = planes == 0 ? 3 : planes;
-        std::vector<std::int32_t> transposed = transpose_xy(image.data, width, height, channels);
-        for (std::int32_t value : transposed) {
-            append_value(value);
-        }
+    switch (format.transmission_element_type) {
+        case kImageTypeByte:
+            pack_pixels([](char* output, std::int32_t value) {
+                output[0] = static_cast<char>(static_cast<std::uint8_t>(
+                    std::clamp<std::int32_t>(value, 0, std::numeric_limits<std::uint8_t>::max())));
+            });
+            break;
+        case kImageTypeUInt16:
+            pack_pixels([](char* output, std::int32_t value) {
+                const auto packed = static_cast<std::uint16_t>(
+                    std::clamp<std::int32_t>(value, 0, std::numeric_limits<std::uint16_t>::max()));
+                output[0] = static_cast<char>(packed & 0xFF);
+                output[1] = static_cast<char>((packed >> 8) & 0xFF);
+            });
+            break;
+        case kImageTypeInt16:
+            pack_pixels([](char* output, std::int32_t value) {
+                const auto packed = static_cast<std::uint16_t>(std::clamp<std::int32_t>(
+                    value, std::numeric_limits<std::int16_t>::min(), std::numeric_limits<std::int16_t>::max()));
+                output[0] = static_cast<char>(packed & 0xFF);
+                output[1] = static_cast<char>((packed >> 8) & 0xFF);
+            });
+            break;
+        case kImageTypeInt32:
+        default:
+            pack_pixels([](char* output, std::int32_t value) {
+                const auto packed = static_cast<std::uint32_t>(value);
+                for (unsigned shift = 0; shift < 32; shift += 8) {
+                    output[shift / 8] = static_cast<char>((packed >> shift) & 0xFF);
+                }
+            });
+            break;
     }
 
     return body;
