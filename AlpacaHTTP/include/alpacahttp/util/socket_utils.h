@@ -127,7 +127,7 @@ inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t
             return true;
         }
 
-        struct msghdr message{};
+        struct msghdr message {};
         message.msg_iov = vectors.data() + index;
         message.msg_iovlen = vectors.size() - index;
         const ssize_t sent = sendmsg(handle, &message, MSG_NOSIGNAL);
