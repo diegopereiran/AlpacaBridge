@@ -47,7 +47,9 @@ newest build of either kind.
    `X.Y.0~beta1` (or the next `~betaN`), updates the README badge, and adds
    `docs/releases/X.Y.0-beta.N.md`, generated with
    `python3 scripts/changelog_fragments.py --preview --version X.Y.0~betaN`. Tag the merge
-   `vX.Y.0-beta.N`. The `changelog.d/` fragments are not consumed.
+   `vX.Y.0-beta.N`. The `changelog.d/` fragments are not consumed. A legacy
+   `## [A.B.C] - UNRELEASED` heading in `CHANGELOG.md` is renamed to `X.Y.0` (heading only), so
+   the `.deb` build does not warn that it disagrees with `VERSION`.
 2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file. The `.deb` is
    published to the apt `beta` component only (outside this repository).
 3. **Fix.** A bug found in beta is fixed by a PR against `stable/X.Y`. It is not fixed on `main`

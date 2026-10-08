@@ -23,7 +23,9 @@ Pick the mode from the argument and the branch (ask when unclear):
   the next beta. Follow the steps below with these differences: the release PR branch
   `release/X.Y.Z-beta.N` is cut from `stable/X.Y` and its PR targets `stable/X.Y`; `VERSION` and the
   README badge are `X.Y.0~betaN` (Step 2.1-2.2; the badge date is the beta date); skip Step 2.3: the
-  fragments are NOT consumed and `CHANGELOG.md` is not touched; skip Step 2.4-2.5 unless they are
+  fragments are NOT consumed and `CHANGELOG.md` keeps its entries; the one edit there is a legacy
+  `## [A.B.C] - UNRELEASED` heading whose label is not `X.Y.0`, renamed to `## [X.Y.0] - UNRELEASED`
+  (heading only), so the `.deb` build does not warn about the label; skip Step 2.4-2.5 unless they are
   stale; Step 3 writes `docs/releases/X.Y.0-beta.N.md`, starting from
   `python3 scripts/changelog_fragments.py --preview --version X.Y.0~betaN` translated by the Step 3
   rules (it opens with a line saying it is a beta); Step 6 tags `vX.Y.0-beta.N` on `stable/X.Y`

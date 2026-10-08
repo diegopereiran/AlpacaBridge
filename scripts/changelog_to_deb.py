@@ -202,6 +202,13 @@ def self_test():
     text, err = run("1.1.0~beta1", released, {"x.md": fragment})
     check("beta stanza", text.startswith("pkg (1.1.0~beta1) UNRELEASED; urgency=low") and "  * Fixed: a more\n" in text)
     check("beta no warning", err == "")
+    # A legacy UNRELEASED label names the beta's base version: no mismatch.
+    legacy = "## [1.1.0] - UNRELEASED\n\n### Fixed\n- **b**\n\n" + released
+    text, err = run("1.1.0~beta1", legacy, {})
+    check("beta under its base label: stanza", text.startswith("pkg (1.1.0~beta1) UNRELEASED; urgency=low"))
+    check("beta under its base label: no warning", err == "")
+    text, err = run("1.2.0~beta1", legacy, {})
+    check("beta under another label: warning", "is labeled [1.1.0]" in err)
     if shutil.which("dpkg"):
         order = ["5.0.0~beta1", "5.0.0~beta2", "5.0.0", "5.0.1", "5.1.0~beta1"]
         for lo, hi in zip(order, order[1:]):
@@ -254,7 +261,9 @@ def main():
             )
     else:
         bullets = (unreleased["bullets"] if unreleased else []) + frag_bullets
-        if unreleased and VERSION_RE.match(unreleased["label"]) and unreleased["label"] != args.version:
+        # A beta (5.0.0~beta1) matches the label of its base version ([5.0.0]).
+        base = changelog_fragments.base_version(args.version)
+        if unreleased and VERSION_RE.match(unreleased["label"]) and unreleased["label"] != base:
             print(
                 "warning: VERSION is %s but CHANGELOG.md's unreleased section "
                 "is labeled [%s]; using %s for the top stanza. Align the two "
