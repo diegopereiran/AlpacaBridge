@@ -1087,12 +1087,26 @@ std::string build_image_array_payload(const alpacacore::ImageArray& image,
     const ImageShape shape = validate_image_shape(image);
     validate_image_data_length(image, shape);
     constexpr std::size_t kBaseJsonSize = 256;
-    constexpr std::size_t kEstimatedBytesPerElement = 12;
     constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
-    if (shape.element_count > (kMaxSize - kBaseJsonSize) / kEstimatedBytesPerElement) {
+    const auto [min_value, max_value] = std::minmax_element(image.data.begin(), image.data.end());
+    const std::size_t max_value_chars = std::max(std::to_string(*min_value).size(), std::to_string(*max_value).size());
+    const std::size_t bytes_per_value = max_value_chars + 1;  // one delimiter per value
+    const std::size_t pixels = shape.element_count / shape.channels;
+    std::size_t bracket_groups = shape.width + 1;
+    if (image.rank == 3) {
+        if (pixels > kMaxSize - bracket_groups) {
+            throw_invalid_camera_image("JSON payload size overflows addressable memory");
+        }
+        bracket_groups += pixels;
+    }
+    if (bracket_groups > (kMaxSize - kBaseJsonSize) / 2) {
         throw_invalid_camera_image("JSON payload size overflows addressable memory");
     }
-    const std::size_t estimate = kBaseJsonSize + shape.element_count * kEstimatedBytesPerElement;
+    const std::size_t fixed_json_size = kBaseJsonSize + bracket_groups * 2;
+    if (shape.element_count > (kMaxSize - fixed_json_size) / bytes_per_value) {
+        throw_invalid_camera_image("JSON payload size overflows addressable memory");
+    }
+    const std::size_t estimate = fixed_json_size + shape.element_count * bytes_per_value;
 
     std::string body;
     body.reserve(estimate);
@@ -1344,6 +1358,7 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
     append_uint32_le(body, static_cast<std::uint32_t>(kImageBytesMetadataSize));
     append_uint32_le(body, format.image_element_type);
     append_uint32_le(body, format.transmission_element_type);
+    // validate_image_shape() above restricts rank to 2 or 3 before this narrowing.
     append_uint32_le(body, static_cast<std::uint32_t>(image.rank));
     append_uint32_le(body, static_cast<std::uint32_t>(shape.width));
     append_uint32_le(body, static_cast<std::uint32_t>(shape.height));

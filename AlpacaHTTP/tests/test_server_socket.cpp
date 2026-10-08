@@ -178,9 +178,13 @@ bool wait_for_restart_done(const alpacahttp::Server& server, int budget_ms) {
     return !server.restart_in_progress_for_test();
 }
 
-int connect_local(std::uint16_t port) {
+int connect_local(std::uint16_t port, int receive_buffer = 0) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     EXPECT(fd >= 0);
+    if (receive_buffer > 0) {
+        // Set before connect so the small receive window is negotiated in SYN.
+        EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)) == 0);
+    }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -594,10 +598,8 @@ int main() {
             const auto one_worker_port = wait_for_bound_port(one_worker_server, 2000);
             EXPECT(one_worker_port != 0);
 
-            int fd = connect_local(one_worker_port);
+            int fd = connect_local(one_worker_port, 4096);
             EXPECT(fd >= 0);
-            int receive_buffer = 4096;
-            EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)) == 0);
             set_receive_timeout(fd);
             send_all(fd, image_request);
             const std::string headers = read_response_headers(fd);

@@ -86,31 +86,6 @@ inline bool socket_set_recv_timeout(SocketHandle handle, int seconds) {
     return setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
 }
 
-// Send the whole payload, looping over short sends and retrying EINTR.
-// MSG_NOSIGNAL is always passed so a peer drop mid-send returns an error
-// instead of delivering SIGPIPE (which would kill the server). Mirrors
-// util::send_all in AlpacaCore's serial_io.h (AlpacaHTTP cannot depend on
-// AlpacaCore, so the loop is implemented locally). Returns false on any
-// unrecoverable error, timeout (EAGAIN/EWOULDBLOCK from SO_SNDTIMEO), or a
-// 0 return (no infinite spin).
-inline bool socket_send_all(SocketHandle handle, const char* buffer, std::size_t length) {
-    std::size_t total_sent = 0;
-    while (total_sent < length) {
-        ssize_t n = send(handle, buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        if (n == 0) {
-            return false;
-        }
-        total_sent += static_cast<std::size_t>(n);
-    }
-    return true;
-}
-
 // Send two buffers as one logical write without concatenating them. Keeping
 // headers and bodies in one sendmsg call avoids the small-write Nagle/delayed-
 // ACK stall while large bodies do not need a second full response copy.
