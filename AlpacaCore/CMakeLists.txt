@@ -1,16 +1,19 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Read version from workspace VERSION file
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" PROJECT_VERSION LIMIT_COUNT 1)
-string(STRIP "${PROJECT_VERSION}" PROJECT_VERSION)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" ALPACABRIDGE_VERSION LIMIT_COUNT 1)
+string(STRIP "${ALPACABRIDGE_VERSION}" ALPACABRIDGE_VERSION)
+# project() takes integer components only; a beta VERSION (5.0.0~beta1) keeps its
+# full string for the version defines below.
+string(REGEX REPLACE "~.*$" "" ALPACABRIDGE_BASE_VERSION "${ALPACABRIDGE_VERSION}")
 
-project(AlpacaCore VERSION ${PROJECT_VERSION} LANGUAGES CXX)
+project(AlpacaCore VERSION ${ALPACABRIDGE_BASE_VERSION} LANGUAGES CXX)
 
 # Expose the workspace version (from the VERSION file) to all AlpacaCore targets,
 # including the per-vendor driver libraries added via add_subdirectory below, so
 # that DriverVersion reflects the AlpacaBridge release instead of a hardcoded value.
 # Directory-scoped so it reaches every target created after this point.
-add_compile_definitions(ALPACACORE_VERSION="${PROJECT_VERSION}")
+add_compile_definitions(ALPACACORE_VERSION="${ALPACABRIDGE_VERSION}")
 
 # C++20 required
 set(CMAKE_CXX_STANDARD 20)

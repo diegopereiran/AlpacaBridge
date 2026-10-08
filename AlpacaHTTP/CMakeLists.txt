@@ -1,10 +1,13 @@
 cmake_minimum_required(VERSION 3.15)
 
 # Read version from workspace VERSION file
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" PROJECT_VERSION LIMIT_COUNT 1)
-string(STRIP "${PROJECT_VERSION}" PROJECT_VERSION)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" ALPACABRIDGE_VERSION LIMIT_COUNT 1)
+string(STRIP "${ALPACABRIDGE_VERSION}" ALPACABRIDGE_VERSION)
+# project() takes integer components only; a beta VERSION (5.0.0~beta1) keeps its
+# full string for the version defines below.
+string(REGEX REPLACE "~.*$" "" ALPACABRIDGE_BASE_VERSION "${ALPACABRIDGE_VERSION}")
 
-project(AlpacaHTTP VERSION ${PROJECT_VERSION} LANGUAGES CXX)
+project(AlpacaHTTP VERSION ${ALPACABRIDGE_BASE_VERSION} LANGUAGES CXX)
 
 # Git branch/commit for the running build, shown in the web UI so a dev build
 # checked out on a feature branch doesn't read as an official release
@@ -289,7 +292,7 @@ endif()
 
 # Create library
 add_library(alpacahttp STATIC ${ALPACAHTTP_SOURCES})
-target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${PROJECT_VERSION}\")
+target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${ALPACABRIDGE_VERSION}\")
 # The join test hook (ScopedJoinHooksForTest) is process-wide mutable state and
 # sits on every production stop()/wait() join path, so it is compiled only into
 # test builds. debian/rules configures with ALPACAHTTP_BUILD_TESTS=OFF, so no

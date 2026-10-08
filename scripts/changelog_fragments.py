@@ -520,7 +520,7 @@ def self_test() -> int:
         bnew = assemble(FIXTURE, d, "1.4.0~beta2", "2026-02-03")
         expect("## [1.4.0] - 2026-02-03" in bnew and "~beta" not in bnew, "--release on a beta VERSION did not write the base heading")
 
-    # end to end through the CLI, then changelog_section.py reads the result
+        # end to end through the CLI, then changelog_section.py reads the result
         cl = root / "CHANGELOG.md"
         cl.write_text(FIXTURE, encoding="utf-8")
         here = Path(__file__).resolve().parent

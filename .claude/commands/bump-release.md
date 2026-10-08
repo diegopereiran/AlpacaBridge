@@ -170,7 +170,7 @@ entry.
    ```
 
    Then commit (with the session's attribution trailer) and push the branch.
-3. Open the PR with `gh pr create` titled `Release X.Y.Z`. The body is
+3. Open the PR with `gh pr create` (beta and stable modes: `--base stable/X.Y`) titled `Release X.Y.Z`. The body is
    `.github/PULL_REQUEST_TEMPLATE.md` filled in (the `pr-template` job refuses any other shape):
    the two-sentence summary from the notes under **What Changed**, plus "Notes for the GitHub
    Release: `docs/releases/X.Y.Z.md`."; "No issue exists" and the release under **Linked Issues
