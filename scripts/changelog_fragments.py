@@ -628,7 +628,7 @@ def main() -> int:
     args.changelog.write_text(new, encoding="utf-8")
     for p in fragment_files(args.fragments):
         p.unlink()
-    print("Wrote [%s] - %s to %s" % (args.release, args.date, args.changelog))
+    print("Wrote [%s] - %s to %s" % (base_version(args.release), args.date, args.changelog))
     return 0
 
 

@@ -71,8 +71,8 @@ gh release list --limit 1
   `## [X.Y.Z] - UNRELEASED` section). If neither exists and the top heading is already dated, the
   release has been cut; go to Step 6 (tag) if no tag exists, otherwise report and stop.
 - Run `python3 scripts/changelog_fragments.py --check` (it must pass), then
-  `python3 scripts/changelog_fragments.py --bump`: it prints the proposed `X.Y.Z` from the latest
-  dated release (a legacy UNRELEASED label is a floor) per the SemVer rule in AGENTS.md ("Version
+  `python3 scripts/changelog_fragments.py --bump --version "$(tr -d '[:space:]' < VERSION)"`: it prints the proposed `X.Y.Z` from the latest
+  dated release (a legacy UNRELEASED label and a beta `VERSION` are floors) per the SemVer rule in AGENTS.md ("Version
   bump policy"): a `Breaking changes` subsection means major, an unqualified `Added` means minor,
   otherwise patch. `X.Y.Z` must be greater than the latest release tag; use the proposal unless
   the user names a higher one. `--preview` prints the section that Step 2 will write.
