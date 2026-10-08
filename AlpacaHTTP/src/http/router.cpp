@@ -1006,41 +1006,77 @@ void append_int(std::string& out, std::int64_t value) {
 // nearly every pixel, and a page fault on many, across a multi-hundred-MB
 // buffer.
 //
-// This copies once into a scratch buffer already in the target X-major
-// order, blocked so each block's source and destination footprint stays
-// cache-resident. Callers then do a plain sequential scan over the result,
-// which is provably the exact same value at the exact same output position
-// as the original unblocked x-outer/y-inner loop would have produced --
-// blocking must change only *when* a value is read relative to when it is
-// written, never *which* output offset it ends up at (unlike the read loop,
-// reordering that would silently corrupt image data, not just be slow).
+// Both JSON and ImageBytes use the same blocked X-major traversal. Blocking
+// changes only when a value is read relative to when it is written, never
+// which output offset it ends up at.
 //
 // Measured 5.2x faster overall (5.4s -> 1.0s for a 6016x4016 Int32 frame) on
-// an RK3568-class ARM SBC -- enough to clear ConformU's 10s
-// ImageArrayVariant timeout that the naive pattern was blowing through on
-// real DSLR-resolution frames from AlpacaCore's libgphoto2 driver.
-std::vector<std::int32_t> transpose_xy(const std::vector<std::int32_t>& data, std::uint32_t width, std::uint32_t height,
-                                       std::uint32_t channels) {
-    std::vector<std::int32_t> out(static_cast<std::size_t>(width) * height * channels, 0);
-    constexpr std::uint32_t kBlock = 64;
-    for (std::uint32_t by = 0; by < height; by += kBlock) {
-        std::uint32_t by_end = std::min(by + kBlock, height);
-        for (std::uint32_t bx = 0; bx < width; bx += kBlock) {
-            std::uint32_t bx_end = std::min(bx + kBlock, width);
-            for (std::uint32_t y = by; y < by_end; ++y) {
-                for (std::uint32_t x = bx; x < bx_end; ++x) {
-                    std::size_t src_base = (static_cast<std::size_t>(y) * width + x) * channels;
-                    std::size_t dst_base = (static_cast<std::size_t>(x) * height + y) * channels;
-                    for (std::uint32_t c = 0; c < channels; ++c) {
-                        std::size_t src_idx = src_base + c;
-                        if (src_idx < data.size()) {
-                            out[dst_base + c] = data[src_idx];
-                        }
-                    }
+// an RK3568-class ARM SBC with AlpacaCore's libgphoto2 driver. Larger sensors
+// and other cameras still need their own timing validation.
+template <typename Visitor>
+void for_each_xy_blocked(std::size_t width, std::size_t height, Visitor&& visit) {
+    constexpr std::size_t kBlock = 64;
+    for (std::size_t by = 0; by < height; by += kBlock) {
+        const auto by_end = std::min(by + kBlock, height);
+        for (std::size_t bx = 0; bx < width; bx += kBlock) {
+            const auto bx_end = std::min(bx + kBlock, width);
+            for (std::size_t y = by; y < by_end; ++y) {
+                for (std::size_t x = bx; x < bx_end; ++x) {
+                    visit(x, y);
                 }
             }
         }
     }
+}
+
+[[noreturn]] void throw_invalid_camera_image(const char* reason) {
+    throw alpacacore::AlpacaException(std::string("Camera returned invalid image data: ") + reason,
+                                      alpacacore::AlpacaError::DriverException);
+}
+
+struct ImageShape {
+    std::size_t width;
+    std::size_t height;
+    std::size_t channels;
+    std::size_t element_count;
+};
+
+ImageShape validate_image_shape(const alpacacore::ImageArray& image) {
+    if ((image.rank != 2 && image.rank != 3) || image.width <= 0 || image.height <= 0) {
+        throw_invalid_camera_image("invalid rank or dimensions");
+    }
+
+    const auto width = static_cast<std::size_t>(image.width);
+    const auto height = static_cast<std::size_t>(image.height);
+    const std::size_t channels = image.rank == 3 ? 3 : 1;
+    constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
+    if (width > kMaxSize / height) {
+        throw_invalid_camera_image("dimensions overflow the payload size");
+    }
+    const std::size_t pixels = width * height;
+    if (pixels > kMaxSize / channels) {
+        throw_invalid_camera_image("dimensions overflow the payload size");
+    }
+    const std::size_t element_count = pixels * channels;
+    return {width, height, channels, element_count};
+}
+
+void validate_image_data_length(const alpacacore::ImageArray& image, const ImageShape& shape) {
+    if (shape.element_count != image.data.size()) {
+        throw_invalid_camera_image("data length does not match dimensions");
+    }
+}
+
+std::vector<std::int32_t> transpose_xy(const std::vector<std::int32_t>& data, std::size_t width, std::size_t height,
+                                       std::size_t channels) {
+    std::vector<std::int32_t> out(data.size());
+    for_each_xy_blocked(width, height, [&](std::size_t x, std::size_t y) {
+        const std::size_t src_base = (y * width + x) * channels;
+        const std::size_t dst_base = (x * height + y) * channels;
+        for (std::size_t c = 0; c < channels; ++c) {
+            out[dst_base + c] = data[src_base + c];
+        }
+    });
     return out;
 }
 
@@ -1048,16 +1084,15 @@ std::string build_image_array_payload(const alpacacore::ImageArray& image,
                                       int type,
                                       std::uint32_t client_tx_id,
                                       std::uint32_t server_tx_id) {
-    std::size_t estimate = 256;
-    if (image.width > 0 && image.height > 0) {
-        std::size_t pixels = static_cast<std::size_t>(image.width) *
-                             static_cast<std::size_t>(image.height);
-        std::size_t per_value = 6;
-        if (image.rank == 3) {
-            pixels *= 3;
-        }
-        estimate += pixels * per_value;
+    const ImageShape shape = validate_image_shape(image);
+    validate_image_data_length(image, shape);
+    constexpr std::size_t kBaseJsonSize = 256;
+    constexpr std::size_t kEstimatedBytesPerElement = 12;
+    constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
+    if (shape.element_count > (kMaxSize - kBaseJsonSize) / kEstimatedBytesPerElement) {
+        throw_invalid_camera_image("JSON payload size overflows addressable memory");
     }
+    const std::size_t estimate = kBaseJsonSize + shape.element_count * kEstimatedBytesPerElement;
 
     std::string body;
     body.reserve(estimate);
@@ -1071,10 +1106,10 @@ std::string build_image_array_payload(const alpacacore::ImageArray& image,
     append_int(body, image.rank);
     body.append(",\"Value\":");
 
-    if (image.rank == 2 && image.width > 0 && image.height > 0) {
-        auto width = static_cast<std::uint32_t>(image.width);
-        auto height = static_cast<std::uint32_t>(image.height);
-        std::vector<std::int32_t> transposed = transpose_xy(image.data, width, height, 1);
+    if (image.rank == 2) {
+        const auto width = static_cast<std::uint32_t>(shape.width);
+        const auto height = static_cast<std::uint32_t>(shape.height);
+        std::vector<std::int32_t> transposed = transpose_xy(image.data, shape.width, shape.height, shape.channels);
         body.push_back('[');
         for (std::uint32_t x = 0; x < width; ++x) {
             if (x > 0) {
@@ -1090,10 +1125,10 @@ std::string build_image_array_payload(const alpacacore::ImageArray& image,
             body.push_back(']');
         }
         body.push_back(']');
-    } else if (image.rank == 3 && image.width > 0 && image.height > 0) {
-        auto width = static_cast<std::uint32_t>(image.width);
-        auto height = static_cast<std::uint32_t>(image.height);
-        std::vector<std::int32_t> transposed = transpose_xy(image.data, width, height, 3);
+    } else {
+        const auto width = static_cast<std::uint32_t>(shape.width);
+        const auto height = static_cast<std::uint32_t>(shape.height);
+        std::vector<std::int32_t> transposed = transpose_xy(image.data, shape.width, shape.height, shape.channels);
         body.push_back('[');
         for (std::uint32_t x = 0; x < width; ++x) {
             if (x > 0) {
@@ -1117,8 +1152,6 @@ std::string build_image_array_payload(const alpacacore::ImageArray& image,
             body.push_back(']');
         }
         body.push_back(']');
-    } else {
-        body.append("[]");
     }
 
     body.push_back('}');
@@ -1272,30 +1305,33 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
                                       const ImageBytesFormat& format,
                                       std::uint32_t client_tx_id,
                                       std::uint32_t server_tx_id) {
-    if ((image.rank != 2 && image.rank != 3) || image.width <= 0 || image.height <= 0) {
-        throw std::length_error("Camera image has invalid rank or dimensions");
-    }
-
-    const auto width = static_cast<std::size_t>(image.width);
-    const auto height = static_cast<std::size_t>(image.height);
-    const std::size_t channels = image.rank == 3 ? 3 : 1;
+    const ImageShape shape = validate_image_shape(image);
     constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
-    if (width > kMaxSize / height) {
-        throw std::length_error("Camera image dimensions overflow the payload size");
+    std::size_t expected_bytes_per_element = 0;
+    switch (format.transmission_element_type) {
+        case kImageTypeByte:
+            expected_bytes_per_element = sizeof(std::uint8_t);
+            break;
+        case kImageTypeUInt16:
+            expected_bytes_per_element = sizeof(std::uint16_t);
+            break;
+        case kImageTypeInt16:
+            expected_bytes_per_element = sizeof(std::int16_t);
+            break;
+        case kImageTypeInt32:
+            expected_bytes_per_element = sizeof(std::int32_t);
+            break;
+        default:
+            throw_invalid_camera_image("unsupported transmission element type");
     }
-    const std::size_t pixels = width * height;
-    if (pixels > kMaxSize / channels) {
-        throw std::length_error("Camera image dimensions overflow the payload size");
+    if (format.bytes_per_element != expected_bytes_per_element) {
+        throw_invalid_camera_image("transmission element size does not match its type");
     }
-    const std::size_t element_count = pixels * channels;
-    if (format.bytes_per_element == 0 ||
-        element_count > (kMaxSize - kImageBytesMetadataSize) / format.bytes_per_element) {
-        throw std::length_error("Camera image payload size overflows addressable memory");
+    if (shape.element_count > (kMaxSize - kImageBytesMetadataSize) / expected_bytes_per_element) {
+        throw_invalid_camera_image("payload size overflows addressable memory");
     }
-    if (element_count != image.data.size()) {
-        throw std::length_error("Camera image data length does not match its dimensions");
-    }
-    const std::size_t data_bytes = element_count * format.bytes_per_element;
+    validate_image_data_length(image, shape);
+    const std::size_t data_bytes = shape.element_count * expected_bytes_per_element;
     const std::size_t payload_size = kImageBytesMetadataSize + data_bytes;
 
     std::string body;
@@ -1309,30 +1345,20 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
     append_uint32_le(body, format.image_element_type);
     append_uint32_le(body, format.transmission_element_type);
     append_uint32_le(body, static_cast<std::uint32_t>(image.rank));
-    append_uint32_le(body, static_cast<std::uint32_t>(width));
-    append_uint32_le(body, static_cast<std::uint32_t>(height));
+    append_uint32_le(body, static_cast<std::uint32_t>(shape.width));
+    append_uint32_le(body, static_cast<std::uint32_t>(shape.height));
     append_uint32_le(body, image.rank == 3 ? 3 : 0);
     body.resize(payload_size);
 
     const auto pack_pixels = [&](auto write_element) {
         auto* output = body.data() + kImageBytesMetadataSize;
-        constexpr std::size_t kBlock = 64;
-        for (std::size_t by = 0; by < height; by += kBlock) {
-            const auto by_end = std::min(by + kBlock, height);
-            for (std::size_t bx = 0; bx < width; bx += kBlock) {
-                const auto bx_end = std::min(bx + kBlock, width);
-                for (std::size_t y = by; y < by_end; ++y) {
-                    for (std::size_t x = bx; x < bx_end; ++x) {
-                        const std::size_t src = (y * width + x) * channels;
-                        const std::size_t dst = (x * height + y) * channels;
-                        for (std::size_t channel = 0; channel < channels; ++channel) {
-                            write_element(output + (dst + channel) * format.bytes_per_element,
-                                          image.data[src + channel]);
-                        }
-                    }
-                }
+        for_each_xy_blocked(shape.width, shape.height, [&](std::size_t x, std::size_t y) {
+            const std::size_t src = (y * shape.width + x) * shape.channels;
+            const std::size_t dst = (x * shape.height + y) * shape.channels;
+            for (std::size_t channel = 0; channel < shape.channels; ++channel) {
+                write_element(output + (dst + channel) * format.bytes_per_element, image.data[src + channel]);
             }
-        }
+        });
     };
 
     switch (format.transmission_element_type) {
@@ -1359,7 +1385,6 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
             });
             break;
         case kImageTypeInt32:
-        default:
             pack_pixels([](char* output, std::int32_t value) {
                 const auto packed = static_cast<std::uint32_t>(value);
                 for (unsigned shift = 0; shift < 32; shift += 8) {
@@ -1367,6 +1392,8 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
                 }
             });
             break;
+        default:
+            throw_invalid_camera_image("unsupported transmission element type");
     }
 
     return body;

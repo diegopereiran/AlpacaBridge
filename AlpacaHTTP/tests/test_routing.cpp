@@ -1136,15 +1136,20 @@ int main() {
         EXPECT(json["Value"] == nlohmann::json::array({nlohmann::json::array({0, 3}), nlohmann::json::array({1, 4}),
                                                        nlohmann::json::array({2, 5})}));
 
-        camera->set_image_array({{1}, 2, 1, 2});
-        const auto malformed_response = request_image("application/imagebytes");
-        EXPECT(malformed_response.get_header("Content-Type") == "application/json");
-        EXPECT(nlohmann::json::parse(malformed_response.body()).value("ErrorNumber", 0) != 0);
-
-        camera->set_image_array({{}, std::numeric_limits<int>::max(), std::numeric_limits<int>::max(), 3});
-        const auto overflow_response = request_image("application/imagebytes");
-        EXPECT(overflow_response.get_header("Content-Type") == "application/json");
-        EXPECT(nlohmann::json::parse(overflow_response.body()).value("ErrorNumber", 0) != 0);
+        auto expect_invalid_image = [&](alpacacore::ImageArray image) {
+            camera->set_image_array(std::move(image));
+            for (const std::string& accept : {std::string{}, std::string{"application/imagebytes"}}) {
+                const auto response = request_image(accept);
+                EXPECT(response.get_header("Content-Type") == "application/json");
+                const auto error = nlohmann::json::parse(response.body());
+                EXPECT(error.value("ErrorNumber", 0) == alpacacore::AlpacaError::DriverException);
+                EXPECT(error.value("ErrorMessage", "").find("Camera returned invalid image data") != std::string::npos);
+            }
+        };
+        expect_invalid_image({{1}, 2, 1, 2});
+        expect_invalid_image({{1}, 0, 1, 2});
+        expect_invalid_image({{1}, 1, 1, 0});
+        expect_invalid_image({{}, std::numeric_limits<int>::max(), std::numeric_limits<int>::max(), 3});
 
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
     }

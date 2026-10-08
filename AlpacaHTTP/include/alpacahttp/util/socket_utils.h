@@ -18,8 +18,10 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -105,6 +107,52 @@ inline bool socket_send_all(SocketHandle handle, const char* buffer, std::size_t
             return false;
         }
         total_sent += static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
+// Send two buffers as one logical write without concatenating them. Keeping
+// headers and bodies in one sendmsg call avoids the small-write Nagle/delayed-
+// ACK stall while large bodies do not need a second full response copy.
+inline bool socket_send_allv(SocketHandle handle, const char* first, std::size_t first_length, const char* second,
+                             std::size_t second_length) {
+    std::array<iovec, 2> vectors{
+        {{const_cast<char*>(first), first_length}, {const_cast<char*>(second), second_length}}};
+    std::size_t index = 0;
+    while (index < vectors.size()) {
+        while (index < vectors.size() && vectors[index].iov_len == 0) {
+            ++index;
+        }
+        if (index == vectors.size()) {
+            return true;
+        }
+
+        struct msghdr message{};
+        message.msg_iov = vectors.data() + index;
+        message.msg_iovlen = vectors.size() - index;
+        const ssize_t sent = sendmsg(handle, &message, MSG_NOSIGNAL);
+        if (sent < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (sent == 0) {
+            return false;
+        }
+
+        std::size_t remaining = static_cast<std::size_t>(sent);
+        while (remaining > 0 && index < vectors.size()) {
+            auto& vector = vectors[index];
+            if (remaining < vector.iov_len) {
+                vector.iov_base = static_cast<char*>(vector.iov_base) + remaining;
+                vector.iov_len -= remaining;
+                remaining = 0;
+            } else {
+                remaining -= vector.iov_len;
+                ++index;
+            }
+        }
     }
     return true;
 }

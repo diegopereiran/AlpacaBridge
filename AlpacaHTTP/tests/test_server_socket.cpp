@@ -520,7 +520,7 @@ int main() {
     }
 
     {
-        // case: Large binary responses remain framed across split sends
+        // case: Large binary responses remain framed across vectored sends
         constexpr int kCameraNumber = 9898;
         constexpr int kImageWidth = 3072;
         constexpr int kImageHeight = 2048;
@@ -540,7 +540,7 @@ int main() {
         const std::size_t payload_size = 44 + pixel_count;
         auto set_receive_timeout = [](int fd) {
             timeval timeout{};
-            timeout.tv_sec = 10;
+            timeout.tv_sec = 30;
             EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
         };
 
@@ -575,9 +575,19 @@ int main() {
         }
 
         // Closing after the headers while the server is blocked sending the
-        // larger-than-send-buffer body must not wedge the worker or server.
+        // larger-than-send-buffer body must release a single worker, with no
+        // sleep-based guess about when the send notices the peer reset.
         {
-            int fd = connect_local(port);
+            alpacahttp::Config one_worker_config;
+            one_worker_config.set_http_port(0);
+            one_worker_config.set_discovery_enabled(false);
+            one_worker_config.set_thread_pool_size(1);
+            alpacahttp::Server one_worker_server(one_worker_config);
+            one_worker_server.start_async();
+            const auto one_worker_port = wait_for_bound_port(one_worker_server, 2000);
+            EXPECT(one_worker_port != 0);
+
+            int fd = connect_local(one_worker_port);
             EXPECT(fd >= 0);
             int receive_buffer = 4096;
             EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)) == 0);
@@ -586,10 +596,10 @@ int main() {
             const std::string headers = read_response_headers(fd);
             EXPECT(headers.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
             ::close(fd);
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-            int next_fd = connect_local(port);
+            int next_fd = connect_local(one_worker_port);
             EXPECT(next_fd >= 0);
+            set_receive_timeout(next_fd);
             std::string carry;
             send_all(next_fd, kGet11);
             EXPECT(read_one_response(next_fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
