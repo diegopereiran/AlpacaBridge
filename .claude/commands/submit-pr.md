@@ -84,6 +84,23 @@ git remote -v | grep upstream
   > `git remote add upstream https://github.com/open-astro/AlpacaBridge.git`"
 - PRs from forks target `open-astro/AlpacaBridge:main` as the base.
 
+### Base branch (`--base`) and merge-down mode (`--merge-down`)
+
+The base is `main` unless the user passes `--base stable/X.Y`: a fix for a release in its beta
+(see `docs/beta-channel.md`). Only bug and stability fixes go there (no features, refactors or new
+drivers); say so and stop if the diff is not one. With `--base stable/X.Y`, read every `main` in
+Steps 3-7 as `stable/X.Y` (`git log stable/X.Y..HEAD`, `gh pr create --base stable/X.Y`, and
+`PREFLIGHT_BASE=origin/stable/X.Y` for the pre-flight), and the changelog fragment is still required.
+
+`--merge-down stable/X.Y` opens the `stable/X.Y` -> `main` PR that follows each beta tag, the stable
+tag and each hotfix. Run it from a clean checkout of up-to-date `stable/X.Y`, skip the fragment,
+version and Falsified-by questions (the commits were already reviewed on the branch), and create the
+PR with `gh pr create --base main --head stable/X.Y --title "Merge stable/X.Y into main"`, a body
+that fills `.github/PULL_REQUEST_TEMPLATE.md` (what the tag carried; "No issue exists"). Merge it with
+`/pr-checker`, which uses the merge-commit method, **never squash**: squashing would hide the branch
+history and make the next merge down conflict again. A version-file conflict follows the rule in
+`.claude/commands/bump-release.md` (Merge down).
+
 ## Step 3 — Analyze the branch for PR content
 
 Gather all changes on this branch relative to `main`:

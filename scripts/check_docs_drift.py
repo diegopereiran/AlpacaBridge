@@ -324,23 +324,28 @@ def check_cppcheck_suppress_sync():
 
 # --- check 4: VERSION vs README badge ---------------------------------------
 
-def check_version_matches_readme():
-    failures = []
-    version = read("VERSION").strip()
-    readme = read("README.md")
+# A beta VERSION spells its Debian pre-release suffix `~betaN` (5.0.0~beta1);
+# the README badge carries the same spelling.
+VERSION_SUFFIX = r"[0-9.]+(?:~beta[0-9]+)?"
+README_BADGE_RE = re.compile(
+    r"^####\s*\[(" + VERSION_SUFFIX + r")\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", re.MULTILINE)
 
-    m = re.search(r"^####\s*\[([0-9.]+)\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", readme, re.MULTILINE)
+
+def _version_badge_findings(version, readme):
+    """Check 4 over the VERSION text and README text. Pure, so --self-test can drive it."""
+    m = README_BADGE_RE.search(readme)
     if not m:
-        failures.append("could not find the version badge line in README.md")
-        return failures
-
-    badge_version = m.group(1)
-    if badge_version != version:
-        failures.append(
+        return ["could not find the version badge line in README.md"]
+    if m.group(1) != version.strip():
+        return [
             "VERSION (%s) does not match the README badge version (%s)"
-            % (version, badge_version)
-        )
-    return failures
+            % (version.strip(), m.group(1))
+        ]
+    return []
+
+
+def check_version_matches_readme():
+    return _version_badge_findings(read("VERSION"), read("README.md"))
 
 
 # --- check 5: the blocking-get_connected() list vs the code -----------------
@@ -1863,7 +1868,7 @@ SUPPORTED_UPDATED_RE = re.compile(r"^## Updated (\S+)\s*$", re.MULTILINE)
 # overshoots it at once. Relative to the badge, not to today, so the check
 # stays pure.
 MAX_UPDATED_DAYS_AHEAD = 366
-README_BADGE_DATE_RE = re.compile(r"^####\s*\[[0-9.]+\]\s*-\s*(\S+)\s*&middot;\s*\[Changelog\]", re.MULTILINE)
+README_BADGE_DATE_RE = re.compile(r"^####\s*\[[0-9.]+(?:~beta[0-9]+)?\]\s*-\s*(\S+)\s*&middot;\s*\[Changelog\]", re.MULTILINE)
 
 
 def _iso_date(text):
@@ -2655,6 +2660,19 @@ def self_test():
     lines = readme_headline_counts_summary(comma_readme, hl_supported, comma_map, hl_extras)
     check("counts: the summary keeps a declared comma item whole in the paste-ready headline",
           lines[1] == "brands: 4 (Four)" and "Canon, Nikon and Sony DSLRs" in lines[3])
+
+    # check 4: VERSION vs README badge, with the ~betaN suffix.
+    b_readme = "#### [5.0.0~beta2] - 2026-11-01 &middot; [Changelog](CHANGELOG.md)\n"
+    check("version badge: a beta VERSION and its beta badge agree",
+          _version_badge_findings("5.0.0~beta2\n", b_readme) == [])
+    check("version badge: a beta badge against the base VERSION is flagged",
+          len(_version_badge_findings("5.0.0\n", b_readme)) == 1)
+    check("version badge: a stable VERSION and badge still agree",
+          _version_badge_findings("4.2.0\n", b_readme.replace("5.0.0~beta2", "4.2.0")) == [])
+    check("version badge: a missing badge line is flagged",
+          len(_version_badge_findings("4.2.0", "# no badge\n")) == 1)
+    check("updated date: a beta badge still yields its release date",
+          _updated_date_findings("# S\n\n## Updated 2026-11-01\n", b_readme) == [])
 
     # check 16: SUPPORTED-DRIVERS.md Updated date vs README badge date (issue #692).
     ud_supported = "# Supported\n\n## Updated 2026-09-27\nintro\n"

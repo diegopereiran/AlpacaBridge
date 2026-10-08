@@ -146,6 +146,8 @@ def self_test():
     """Drive main() over fixture trees: the fragment bullets and the warning."""
     import contextlib
     import io
+    import shutil
+    import subprocess
     import tempfile
 
     released = "## [1.0.0] - 2026-01-01\n\n### Added\n- **old**\n"
@@ -194,6 +196,17 @@ def self_test():
     text, err = run("1.0.0", released, {"x.md": fragment})
     check("warning", "already released" in err and "UNRELEASED section" in err)
     check("no bullet in released stanza", "Fixed: a more" not in text)
+
+    # A beta VERSION (5.0.0~beta1) heads the changelog with the fragments' notes
+    # and sorts below the stable release it leads up to.
+    text, err = run("1.1.0~beta1", released, {"x.md": fragment})
+    check("beta stanza", text.startswith("pkg (1.1.0~beta1) UNRELEASED; urgency=low") and "  * Fixed: a more\n" in text)
+    check("beta no warning", err == "")
+    if shutil.which("dpkg"):
+        order = ["5.0.0~beta1", "5.0.0~beta2", "5.0.0", "5.0.1", "5.1.0~beta1"]
+        for lo, hi in zip(order, order[1:]):
+            r = subprocess.run(["dpkg", "--compare-versions", lo, "lt", hi])
+            check("dpkg order %s < %s" % (lo, hi), r.returncode == 0)
 
     if failures:
         print("changelog_to_deb self-test FAILED: %s" % ", ".join(failures), file=sys.stderr)

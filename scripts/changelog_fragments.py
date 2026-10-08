@@ -30,7 +30,9 @@ SUMMARY_HEADING_RE = re.compile(
     r"^<summary><strong>\[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}|UNRELEASED))?\s*</strong></summary>\s*$"
 )
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+BARE_RE = re.compile(r"^\d+\.\d+\.\d+$")  # a dated CHANGELOG heading is always a bare X.Y.Z
+# A VERSION file may carry the Debian pre-release suffix of a beta (5.0.0~beta2).
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:~beta\d+)?$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CATEGORY_RE = re.compile(r"^### (.+?)\s*$")
 BASE_CATEGORIES = [
@@ -194,8 +196,13 @@ def block_starts(lines: list[str]) -> list[int]:
     return starts
 
 
+def base_version(v: str) -> str:
+    """5.0.0~beta2 -> 5.0.0; a bare version is returned unchanged."""
+    return v.split("~", 1)[0]
+
+
 def version_tuple(v: str) -> tuple:
-    return tuple(int(x) for x in v.split("."))
+    return tuple(int(x) for x in base_version(v).split("."))
 
 
 def section_headers(lines: list[str]) -> list[tuple[str, str | None]]:
@@ -208,7 +215,7 @@ def section_headers(lines: list[str]) -> list[tuple[str, str | None]]:
 
 
 def latest_released(lines: list[str]) -> str:
-    dated = [v for v, d in section_headers(lines) if d and d != "UNRELEASED" and VERSION_RE.match(v)]
+    dated = [v for v, d in section_headers(lines) if d and d != "UNRELEASED" and BARE_RE.match(v)]
     if not dated:
         raise SystemExit("ERROR: CHANGELOG.md has no dated '## [X.Y.Z] - YYYY-MM-DD' release")
     return max(dated, key=version_tuple)
@@ -268,7 +275,7 @@ def collect(lines: list[str], directory: Path) -> tuple[Entries, tuple[int, int,
     return merge_entries(groups), legacy, len(frags)
 
 
-def propose_bump(lines: list[str], directory: Path) -> str:
+def propose_bump(lines: list[str], directory: Path, current: str | None = None) -> str:
     base = latest_released(lines)
     fragment_entries = merge_entries([e for _, e in load_fragments(directory)])
     major, minor, patch = version_tuple(base)
@@ -279,15 +286,19 @@ def propose_bump(lines: list[str], directory: Path) -> str:
     else:
         proposed = (major, minor, patch + 1)
     legacy = legacy_unreleased(lines)
-    if legacy and VERSION_RE.match(legacy[2]):
+    if legacy and BARE_RE.match(legacy[2]):
         proposed = max(proposed, version_tuple(legacy[2]))
+    if current:
+        # A beta VERSION (5.0.0~beta2) is a floor: its stable release is its base version.
+        proposed = max(proposed, version_tuple(current))
     return ".".join(str(x) for x in proposed)
 
 
 def assemble(text: str, directory: Path, version: str, date: str) -> str:
     """Return the new CHANGELOG.md text (pure; the caller deletes the fragments)."""
     if not VERSION_RE.match(version):
-        raise SystemExit("ERROR: %r is not a bare X.Y.Z version" % version)
+        raise SystemExit("ERROR: %r is not an X.Y.Z (or X.Y.Z~betaN) version" % version)
+    version = base_version(version)  # the dated heading never carries the beta suffix
     if not DATE_RE.match(date):
         raise SystemExit("ERROR: %r is not a YYYY-MM-DD date" % date)
     lines = text.split("\n")
@@ -295,7 +306,7 @@ def assemble(text: str, directory: Path, version: str, date: str) -> str:
         raise SystemExit(
             "ERROR: %s is not greater than the latest dated release %s" % (version, latest_released(lines))
         )
-    proposed = propose_bump(lines, directory)
+    proposed = propose_bump(lines, directory, None)
     if version_tuple(version) < version_tuple(proposed):
         raise SystemExit("ERROR: %s is below the proposed bump %s for these fragments" % (version, proposed))
     entries, legacy, _ = collect(lines, directory)
@@ -499,7 +510,17 @@ def self_test() -> int:
         except SystemExit:
             pass
 
-        # end to end through the CLI, then changelog_section.py reads the result
+        # beta VERSION spelling (~betaN)
+        expect(VERSION_RE.match("5.0.0~beta2") and not VERSION_RE.match("5.0.0~rc1")
+               and not VERSION_RE.match("5.0.0~beta") and not VERSION_RE.match("5.0~beta1"),
+               "VERSION_RE does not accept exactly X.Y.Z[~betaN]")
+        expect(base_version("5.0.0~beta2") == "5.0.0" and base_version("4.2.0") == "4.2.0", "base_version wrong")
+        expect(propose_bump(FIXTURE.split("\n"), d, "1.5.0~beta2") == "1.5.0", "--bump on a beta VERSION is not its base")
+        expect(propose_bump(FIXTURE.split("\n"), d, "1.0.0~beta1") == "1.3.0", "a lower beta base lowered the bump")
+        bnew = assemble(FIXTURE, d, "1.4.0~beta2", "2026-02-03")
+        expect("## [1.4.0] - 2026-02-03" in bnew and "~beta" not in bnew, "--release on a beta VERSION did not write the base heading")
+
+    # end to end through the CLI, then changelog_section.py reads the result
         cl = root / "CHANGELOG.md"
         cl.write_text(FIXTURE, encoding="utf-8")
         here = Path(__file__).resolve().parent
@@ -564,7 +585,8 @@ def main() -> int:
         "--fragments", default="changelog.d", type=Path, metavar="DIR", help="fragment directory (default: %(default)s)"
     )
     opts.add_argument(
-        "--version", metavar="X.Y.Z", help="with --preview: version for the heading (default: the --bump result)"
+        "--version", metavar="X.Y.Z", help="with --preview: version for the heading (default: the --bump result); with --bump: the current "
+        "VERSION, a beta counts as its base version"
     )
     opts.add_argument("--date", metavar="YYYY-MM-DD", help="with --release: release date (required)")
     args = ap.parse_args()
@@ -589,9 +611,13 @@ def main() -> int:
         return 1
 
     if args.bump:
-        print(propose_bump(lines, args.fragments))
+        if args.version and not VERSION_RE.match(args.version):
+            ap.error("--version %r is not X.Y.Z or X.Y.Z~betaN" % args.version)
+        print(propose_bump(lines, args.fragments, args.version))
         return 0
     if args.preview:
+        if args.version and not VERSION_RE.match(args.version):
+            ap.error("--version %r is not X.Y.Z or X.Y.Z~betaN" % args.version)
         version = args.version or propose_bump(lines, args.fragments)
         print("\n".join(render_section("## [%s]" % version, entries)).rstrip())
         return 0

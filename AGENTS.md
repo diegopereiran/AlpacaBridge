@@ -926,7 +926,20 @@ vendor that ignores either ships a silently broken form:
   - `/usr/sbin/fxload` — QHY firmware loader.
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
-- To cut a release, run `/bump-release` (`.claude/commands/bump-release.md`): it bumps the `VERSION` file, assembles the `changelog.d/` fragments into the dated `## [X.Y.Z]` CHANGELOG.md section (`scripts/changelog_fragments.py --release`), updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
+- To cut a release or a beta, run `/bump-release` (`.claude/commands/bump-release.md`; beta and stable modes, [beta channel](docs/beta-channel.md)): it bumps the `VERSION` file, assembles the `changelog.d/` fragments into the dated `## [X.Y.Z]` CHANGELOG.md section (`scripts/changelog_fragments.py --release`), updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
+
+### Beta channel and stable branches
+
+Development stays on `main`; a release is not cut from `main` alone. `/bump-release` cuts
+`stable/X.Y` from `main`, tags betas `vX.Y.Z-beta.N` on it (`VERSION` `X.Y.Z~betaN`, the Debian
+spelling; `release.yml` maps the tag through `scripts/release_tag.py`), promotes the same branch
+to `vX.Y.Z`, and every beta tag and the promotion are merged back into `main` with a merge commit
+(never squash). `main` carrying a beta `VERSION` between merge downs is expected. The stable branch
+takes bug and stability fixes only, landed on the branch (PR with `--base stable/X.Y`), never
+cherry-picked; `stable/X.Y` retires when the next release is promoted, not when its branch is cut.
+Cutting, tagging, promoting and the merge-down PR stay with the upstream maintainer and
+diegopereiran. Branch model, promotion criteria, opt-in steps and the three version spellings:
+[docs/beta-channel.md](docs/beta-channel.md).
 
 ### Version bump policy (SemVer)
 

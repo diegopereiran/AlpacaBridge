@@ -10,6 +10,12 @@
 # merges it, tags the merge commit and pushes the tag. The notes file, when
 # present, becomes the Release body with a link to the CHANGELOG section;
 # otherwise the CHANGELOG section itself is used.
+#
+# Beta tags (vX.Y.Z-beta.N, cut from a stable/X.Y branch by `/bump-release`
+# in beta mode, docs/beta-channel.md) differ in three ways: VERSION holds
+# X.Y.Z~betaN, there is no dated CHANGELOG section (the fragments are not
+# consumed), and the notes come only from docs/releases/X.Y.Z-beta.N.md. The
+# GitHub Release is marked a pre-release.
 
 name: Release
 
@@ -17,6 +23,7 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
 
 permissions:
   contents: write
@@ -32,10 +39,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify tag matches VERSION
+      - name: Map tag to VERSION
+        id: tag
         run: |
           set -euo pipefail
-          tag_version="${GITHUB_REF_NAME#v}"
+          python3 scripts/release_tag.py --self-test
+          # version=<VERSION spelling, ~betaN for a beta>, prerelease=true|false, notes_name=<tag without v>
+          python3 scripts/release_tag.py "${GITHUB_REF_NAME}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Verify tag matches VERSION
+        env:
+          TAG_VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag_version="${TAG_VERSION}"
           file_version="$(tr -d '[:space:]' < VERSION)"
           if [ "${tag_version}" != "${file_version}" ]; then
             echo "ERROR: tag ${GITHUB_REF_NAME} does not match VERSION file (${file_version})." >&2
@@ -45,8 +62,28 @@ jobs:
           echo "Tag ${GITHUB_REF_NAME} matches VERSION ${file_version}."
 
       - name: Build release notes
+        env:
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          NOTES_NAME: ${{ steps.tag.outputs.notes_name }}
         run: |
           set -euo pipefail
+          if [ "${PRERELEASE}" = "true" ]; then
+            # A beta has no dated CHANGELOG section; its notes file is required.
+            if [ ! -f "docs/releases/${NOTES_NAME}.md" ]; then
+              echo "ERROR: beta tag ${GITHUB_REF_NAME} needs docs/releases/${NOTES_NAME}.md." >&2
+              exit 1
+            fi
+            cp "docs/releases/${NOTES_NAME}.md" release-notes.md
+            [ "$(tail -c1 release-notes.md)" = "" ] || echo "" >> release-notes.md
+            {
+              echo ""
+              echo "This is a beta. Opt in: https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docs/beta-channel.md"
+            } >> release-notes.md
+            echo "::group::Release notes"
+            cat release-notes.md
+            echo "::endgroup::"
+            exit 0
+          fi
           version="${GITHUB_REF_NAME#v}"
           # Always run the extractor: it fails if the CHANGELOG section is
           # missing or still UNRELEASED, so a tag can never publish an uncut
@@ -84,13 +121,16 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
           set -euo pipefail
+          flag=()
+          if [ "${PRERELEASE}" = "true" ]; then flag=(--prerelease); fi
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "Release ${GITHUB_REF_NAME} already exists; updating notes."
             gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-              --title "${GITHUB_REF_NAME}" --notes-file release-notes.md
+              --title "${GITHUB_REF_NAME}" --notes-file release-notes.md "${flag[@]}"
           else
             gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-              --title "${GITHUB_REF_NAME}" --notes-file release-notes.md --verify-tag
+              --title "${GITHUB_REF_NAME}" --notes-file release-notes.md --verify-tag "${flag[@]}"
           fi

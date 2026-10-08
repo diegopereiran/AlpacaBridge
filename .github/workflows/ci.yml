@@ -38,6 +38,7 @@ on:
   push:
     branches:
       - main
+      - "stable/**"
   workflow_dispatch:
 
 # A newer push to the same ref makes in-flight runs obsolete — cancel them so
