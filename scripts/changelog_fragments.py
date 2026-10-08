@@ -32,7 +32,7 @@ SUMMARY_HEADING_RE = re.compile(
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
 BARE_RE = re.compile(r"^\d+\.\d+\.\d+$")  # a dated CHANGELOG heading is always a bare X.Y.Z
 # A VERSION file may carry the Debian pre-release suffix of a beta (5.0.0~beta2).
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:~beta\d+)?$")
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:~beta[1-9]\d*)?$")  # betas count from 1, as release_tag.py's TAG_RE
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CATEGORY_RE = re.compile(r"^### (.+?)\s*$")
 BASE_CATEGORIES = [
@@ -275,6 +275,27 @@ def collect(lines: list[str], directory: Path) -> tuple[Entries, tuple[int, int,
     return merge_entries(groups), legacy, len(frags)
 
 
+def beta_bump_warning(current: str | None, branch: str | None) -> str | None:
+    """Why a --bump with a beta VERSION on a branch other than stable/X.Y is suspect.
+
+    After a merge down, main carries the beta VERSION, so a bump there proposes
+    the version the stable branch already owns (docs/beta-channel.md). None when
+    the VERSION is not a beta, the branch is a stable branch, or it is unknown.
+    """
+    if not current or base_version(current) == current or branch is None or branch.startswith("stable/"):
+        return None
+    return ("WARNING: VERSION %s is a beta but this is branch %r, not stable/X.Y: the proposed version belongs "
+            "to the stable branch, run /bump-release there (docs/beta-channel.md)" % (current, branch))
+
+
+def current_branch() -> str | None:
+    try:
+        r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
 def propose_bump(lines: list[str], directory: Path, current: str | None = None) -> str:
     base = latest_released(lines)
     fragment_entries = merge_entries([e for _, e in load_fragments(directory)])
@@ -512,11 +533,20 @@ def self_test() -> int:
 
         # beta VERSION spelling (~betaN)
         expect(VERSION_RE.match("5.0.0~beta2") and not VERSION_RE.match("5.0.0~rc1")
-               and not VERSION_RE.match("5.0.0~beta") and not VERSION_RE.match("5.0~beta1"),
+               and not VERSION_RE.match("5.0.0~beta") and not VERSION_RE.match("5.0~beta1")
+               and not VERSION_RE.match("5.0.0~beta0") and not VERSION_RE.match("5.0.0~beta01"),
                "VERSION_RE does not accept exactly X.Y.Z[~betaN]")
         expect(base_version("5.0.0~beta2") == "5.0.0" and base_version("4.2.0") == "4.2.0", "base_version wrong")
         expect(propose_bump(FIXTURE.split("\n"), d, "1.5.0~beta2") == "1.5.0", "--bump on a beta VERSION is not its base")
         expect(propose_bump(FIXTURE.split("\n"), d, "1.0.0~beta1") == "1.3.0", "a lower beta base lowered the bump")
+        expect(beta_bump_warning("5.0.0~beta2", "main") is not None
+               and beta_bump_warning("5.0.0~beta2", "feature/x") is not None,
+               "a beta VERSION off a stable branch did not warn")
+        expect(beta_bump_warning("5.0.0~beta2", "stable/5.0") is None
+               and beta_bump_warning("5.0.0", "main") is None
+               and beta_bump_warning("5.0.0~beta2", None) is None
+               and beta_bump_warning(None, "main") is None,
+               "beta_bump_warning warned where it should not")
         bnew = assemble(FIXTURE, d, "1.4.0~beta2", "2026-02-03")
         expect("## [1.4.0] - 2026-02-03" in bnew and "~beta" not in bnew, "--release on a beta VERSION did not write the base heading")
 
@@ -524,6 +554,21 @@ def self_test() -> int:
         cl = root / "CHANGELOG.md"
         cl.write_text(FIXTURE, encoding="utf-8")
         here = Path(__file__).resolve().parent
+        # --version is validated on the CLI for --bump and --preview
+        for mode, bad in (("--bump", "5.0.0~rc1"), ("--preview", "5.0~beta1"), ("--bump", "5.0.0~beta0")):
+            rej = subprocess.run(
+                [sys.executable, str(here / "changelog_fragments.py"), "--changelog", str(cl),
+                 "--fragments", str(d), mode, "--version", bad],
+                capture_output=True, text=True,
+            )
+            expect(rej.returncode != 0 and "is not X.Y.Z or X.Y.Z~betaN" in rej.stderr,
+                   "%s --version %s was not rejected" % (mode, bad))
+        ok = subprocess.run(
+            [sys.executable, str(here / "changelog_fragments.py"), "--changelog", str(cl),
+             "--fragments", str(d), "--bump", "--version", "1.5.0~beta2"],
+            capture_output=True, text=True,
+        )
+        expect(ok.returncode == 0 and ok.stdout.strip() == "1.5.0", "--bump --version 1.5.0~beta2 on the CLI: " + ok.stderr.strip())
         r = subprocess.run(
             [sys.executable, str(here / "changelog_fragments.py"), "--changelog", str(cl),
              "--fragments", str(d), "--release", "1.3.0", "--date", "2026-02-03"],
@@ -613,6 +658,9 @@ def main() -> int:
     if args.bump:
         if args.version and not VERSION_RE.match(args.version):
             ap.error("--version %r is not X.Y.Z or X.Y.Z~betaN" % args.version)
+        warning = beta_bump_warning(args.version, current_branch())
+        if warning:
+            print(warning, file=sys.stderr)
         print(propose_bump(lines, args.fragments, args.version))
         return 0
     if args.preview:

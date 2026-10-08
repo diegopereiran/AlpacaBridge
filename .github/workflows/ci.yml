@@ -98,6 +98,12 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
         run: ./run_all_tests.sh
 
+      - name: Configure with a beta VERSION
+        # The checkout's VERSION is always a stable X.Y.Z here, so nothing above
+        # exercises the ~betaN split in the two CMakeLists (docs/beta-channel.md).
+        # Configure-only, from a copy of the tree with VERSION 5.0.0~beta1.
+        run: scripts/check_beta_configure.sh
+
   build-vendors:
     name: Build + test (all vendors, arm64)
     runs-on: ubuntu-24.04-arm

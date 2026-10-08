@@ -12,6 +12,7 @@ X.Y.Z~betaN (the Debian pre-release spelling, so 5.0.0~beta1 < 5.0.0~beta2 <
 Usage: python3 scripts/release_tag.py <tag>
 Self-test: python3 scripts/release_tag.py --self-test
 """
+import os
 import re
 import subprocess
 import sys
@@ -30,6 +31,22 @@ def map_tag(tag):
     return base, False, tag[1:]
 
 
+CASES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "release_tag_cases.txt")
+
+
+def read_cases(path=CASES_FILE):
+    """(tag, VERSION) pairs from release_tag_cases.txt, comments and blanks skipped."""
+    pairs = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            tag, version = line.split()
+            pairs.append((tag, version))
+    return pairs
+
+
 def self_test():
     failures = []
 
@@ -40,6 +57,16 @@ def self_test():
     check("stable", map_tag("v4.2.0") == ("4.2.0", False, "4.2.0"))
     check("beta", map_tag("v5.0.0-beta.2") == ("5.0.0~beta2", True, "5.0.0-beta.2"))
     check("beta 10", map_tag("v5.0.0-beta.10")[0] == "5.0.0~beta10")
+    # The shared pairs also drive AlpacaHTTP/tests/test_software_update.cpp
+    # (the update card maps a VERSION back to its tag spelling).
+    pairs = read_cases()
+    check("release_tag_cases.txt has a beta and a stable pair",
+          any("~" in v for _, v in pairs) and any("~" not in v for _, v in pairs))
+    for tag, version in pairs:
+        mapped, pre, notes = map_tag(tag)
+        check("case %s -> %s" % (tag, version), mapped == version)
+        check("case %s notes name" % tag, notes == tag[1:])
+        check("case %s prerelease flag" % tag, pre == ("~" in version))
     for bad in ("5.0.0", "v5.0", "v5.0.0-beta", "v5.0.0-beta.0", "v5.0.0-beta.01", "v5.0.0-rc.1",
                 "v5.0.0-beta.1-x", "v5.0.0~beta1", "v5.0.0-beta.1\n", ""):
         try:

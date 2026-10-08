@@ -26,6 +26,7 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -397,6 +398,25 @@ int main() {
         // Anything that is not the beta spelling passes through untouched.
         EXPECT(expand_version_template("{version}", "5.0.0~rc1") == "5.0.0~rc1");
         EXPECT(expand_version_template("{version}", "5.0.0~beta") == "5.0.0~beta");
+        // scripts/release_tag_cases.txt pins this mapping and release_tag.py's
+        // inverse to the same pairs: "<tag> <VERSION>" per line, '#' comments.
+        {
+            const std::filesystem::path cases =
+                std::filesystem::path(ALPACAHTTP_REPO_ROOT) / "scripts" / "release_tag_cases.txt";
+            std::ifstream in(cases);
+            EXPECT(in.is_open());
+            int pairs = 0;
+            std::string line;
+            while (std::getline(in, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                std::istringstream fields(line);
+                std::string tag, version;
+                EXPECT(static_cast<bool>(fields >> tag >> version));
+                EXPECT(expand_version_template("v{version}", version) == tag);
+                ++pairs;
+            }
+            EXPECT(pairs >= 2);
+        }
     }
 
     // --- release notes: fetched only when an update is available, from the

@@ -29,9 +29,14 @@ Pick the mode from the argument and the branch (ask when unclear):
   but run Step 2.5: the badge date is now the beta date, and docs-drift check 16 fails while the
   `## Updated` line in `SUPPORTED-DRIVERS.md` is older than it; Step 3 writes `docs/releases/X.Y.0-beta.N.md`, starting from
   `python3 scripts/changelog_fragments.py --preview --version X.Y.0~betaN` translated by the Step 3
-  rules (it opens with a line saying it is a beta); Step 6 tags `vX.Y.0-beta.N` on `stable/X.Y`
-  (`release.yml` publishes a pre-release, no dated CHANGELOG section needed) and then runs the
-  **Merge down** below. Publishing the `.deb` to the apt `beta` component happens outside this repo.
+  rules (it opens with a line saying it is a beta; the beta scope rule in Step 3 says what the
+  second and later betas repeat); Step 5 and Step 6 use the beta spellings shown there; before the
+  first beta tag of a branch, Step 6 dry-runs `release.yml`; Step 6 tags `vX.Y.0-beta.N` on
+  `stable/X.Y` (`release.yml` publishes a pre-release, no dated CHANGELOG section needed) and then
+  runs the **Merge down** below. Publishing the `.deb` to the apt `beta` component happens outside
+  this repo. Every driver's `DriverVersion` reads `X.Y.0~betaN` during the beta (it is
+  `alpacacore::kVersion`); ConformU only logs that string (`DeviceTesterBaseClass.cs`, the
+  `DriverVersion` switch: OK for any non-empty value), so it is not a conformance failure.
 - **Stable** (`/bump-release` on `stable/X.Y`, or a hotfix `X.Y.Z`): the checklist below, with
   every `main` read as `stable/X.Y`: the release PR targets `stable/X.Y`, Step 2.3 consumes the
   fragments (`--release X.Y.0` accepts a beta `VERSION` and writes the bare heading), Step 6 tags
@@ -152,6 +157,12 @@ translate it. Rules for the file:
   periods), no headers deeper than `##`. Internal-only entries (CI gates, test seams, skills,
   review-bot changes, doc drift checks) collapse into one closing line under "Fixes" at most, or
   are left out.
+- **Beta scope** (beta mode): the notes cover everything since the last stable release, because
+  `--preview --version X.Y.0~betaN` renders every fragment on the branch and a beta tester may
+  join at any beta. From the second beta on, add a `## New since X.Y.0-beta.(N-1)` section right
+  after the summary, listing only the fragments added since the previous beta tag
+  (`git diff --name-only vX.Y.0-beta.(N-1) -- changelog.d/`), translated by the same rules; the
+  rest of the file is the full picture, restated.
 - Show the user the notes and get an OK before continuing; wording is their call.
 
 ## Step 4 — Record the release in the CHANGELOG (first run only)
@@ -172,8 +183,18 @@ entry.
    release notes in docs/releases/X.Y.Z.md.
    ```
 
+   Beta mode uses the tag spelling and names what did not change:
+
+   ```
+   Release X.Y.0-beta.N
+
+   VERSION and README badge set to X.Y.0~betaN / YYYY-MM-DD; fragments kept; plain-language
+   beta notes in docs/releases/X.Y.0-beta.N.md.
+   ```
+
    Then commit (with the session's attribution trailer) and push the branch.
-3. Open the PR with `gh pr create` (beta and stable modes: `--base stable/X.Y`) titled `Release X.Y.Z`. The body is
+3. Open the PR with `gh pr create` (beta and stable modes: `--base stable/X.Y`) titled `Release X.Y.Z`
+   (beta: `Release X.Y.0-beta.N`). The body is
    `.github/PULL_REQUEST_TEMPLATE.md` filled in (the `pr-template` job refuses any other shape):
    the two-sentence summary from the notes under **What Changed**, plus "Notes for the GitHub
    Release: `docs/releases/X.Y.Z.md`."; "No issue exists" and the release under **Linked Issues
@@ -187,9 +208,27 @@ entry.
 
 ```bash
 git checkout stable/X.Y && git pull --ff-only
-test "$(tr -d '[:space:]' < VERSION)" = "X.Y.Z"   # beta: X.Y.0~betaN, tag vX.Y.0-beta.N
+test "$(tr -d '[:space:]' < VERSION)" = "X.Y.Z"
 git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin vX.Y.Z
+```
+
+Beta mode (the tag spelling differs from `VERSION`; `release_tag.py` rejects any other form):
+
+```bash
+git checkout stable/X.Y && git pull --ff-only
+test "$(tr -d '[:space:]' < VERSION)" = "X.Y.0~betaN"
+test -f docs/beta-channel.md   # the Release body links this file at the tag
+git tag -a vX.Y.0-beta.N -m "Release X.Y.0-beta.N"
+git push origin vX.Y.0-beta.N
+```
+
+Before the first beta tag of a branch, dry-run the workflow against the merged branch and read
+its "Build release notes" step; it stops before publishing anything:
+
+```bash
+gh workflow run release.yml --ref stable/X.Y -f tag=vX.Y.0-beta.N
+gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 ```
 
 Then wait for the `Release` workflow (it is text-only and finishes in under a minute):
