@@ -2724,9 +2724,8 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         // telescope -- including the client's own Slewing polls -- counts
         // as activity, with no per-endpoint list to keep in sync.
         //
-        // A synchronous call (SlewToCoordinates chief among them) can block
-        // inside dispatch_device_method() below for the length of a whole
-        // goto, well past the watchdog interval, while THIS client is
+        // A long-running call can block inside dispatch_device_method() below
+        // for longer than the watchdog interval, while THIS client is
         // actively waiting on its own response -- note_client_activity()
         // only stamps once, at intake, so on its own it does not cover that
         // (review finding: the watchdog could abort a client's own in-flight
@@ -3696,8 +3695,8 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "canslew") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_slew());
+                AlpacaResponse alpaca_response =
+                    make_success_response(client_tx_id, server_tx_id, false);  // #775: synchronous slews are not served
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -3720,8 +3719,8 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "canslewaltaz") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, telescope->get_can_slew_alt_az());
+                AlpacaResponse alpaca_response =
+                    make_success_response(client_tx_id, server_tx_id, false);  // #775: synchronous slews are not served
                 response.set_body(alpaca_response);
                 return response;
             }
@@ -4352,12 +4351,10 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "slewtoaltaz") {
-                double altitude = parse_double("Altitude");
-                double azimuth = parse_double("Azimuth");
-                telescope->slew_to_alt_az(altitude, azimuth);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
+                // any parameter parse, target write or driver call.
+                throw alpacacore::AlpacaException("Synchronous slews are not implemented; use the async form",
+                                                  alpacacore::AlpacaError::MethodNotImplemented);
             }
             else if (method_name == "synctoaltaz") {
                 double altitude = parse_double("Altitude");
@@ -4392,10 +4389,10 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "slewtotarget") {
-                telescope->slew_to_target();
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
+                // any parameter parse, target write or driver call.
+                throw alpacacore::AlpacaException("Synchronous slews are not implemented; use the async form",
+                                                  alpacacore::AlpacaError::MethodNotImplemented);
             }
             else if (method_name == "slewtotargetasync") {
                 telescope->slew_to_target_async();
@@ -4404,14 +4401,10 @@ Response Router::dispatch_telescope_method(
                 return response;
             }
             else if (method_name == "slewtocoordinates") {
-                double ra = parse_double("RightAscension");
-                double dec = parse_double("Declination");
-                telescope->set_target_right_ascension(ra);
-                telescope->set_target_declination(dec);
-                telescope->slew_to_coordinates(ra, dec);
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                // #775: ASCOM's slew FAQ steers clients to the async forms; refuse before
+                // any parameter parse, target write or driver call.
+                throw alpacacore::AlpacaException("Synchronous slews are not implemented; use the async form",
+                                                  alpacacore::AlpacaError::MethodNotImplemented);
             }
             else if (method_name == "slewtocoordinatesasync") {
                 double ra = parse_double("RightAscension");
