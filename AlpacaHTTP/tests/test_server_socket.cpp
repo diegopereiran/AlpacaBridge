@@ -613,6 +613,7 @@ int main() {
             send_all(next_fd, kGet11);
             EXPECT(read_one_response(next_fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
             ::close(next_fd);
+            one_worker_server.stop();
         }
 
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
