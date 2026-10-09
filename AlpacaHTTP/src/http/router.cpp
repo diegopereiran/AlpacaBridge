@@ -8814,6 +8814,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         }
         binding.identity.serial = configured_serial;
         binding.identity.camera_name = configured_name;
+        bool duplicate_serial = false;
+        bool duplicate_unique_id = false;
         {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             for (const auto& other : persisted_devices_) {
@@ -8829,9 +8831,37 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                         !has_control_bytes(uid_it->get<std::string>())) {
                         unique_id = uid_it->get<std::string>();
                     }
-                } else if (has_serial && !serial_it->get<std::string>().empty()) {
-                    binding.claimed_serials.insert(serial_it->get<std::string>());
+                } else {
+                    if (has_serial && !serial_it->get<std::string>().empty()) {
+                        binding.claimed_serials.insert(serial_it->get<std::string>());
+                        duplicate_serial = duplicate_serial || serial_it->get<std::string>() == configured_serial;
+                    }
+                    const auto other_uid = other.find("uniqueId");
+                    if (unique_id_supplied && other_uid != other.end() && other_uid->is_string() &&
+                        other_uid->get<std::string>() == unique_id) {
+                        duplicate_unique_id = true;
+                    }
                 }
+            }
+        }
+
+        // One serial or UniqueID names one camera: another entry holding it
+        // would bind the same body twice (or report one UniqueID twice).
+        if (configured_serial.empty()) {
+            duplicate_serial = false;
+        }
+        if (duplicate_serial || duplicate_unique_id) {
+            const char* field = duplicate_serial ? "serialNumber" : "uniqueId";
+            if (source == ConfigSource::Api) {
+                error_message = std::string("Invalid value for ") + field + ": another ZWO camera already uses it";
+                return false;
+            }
+            util::log_warning(std::string("Ignoring duplicate ZWO camera ") + field + " in the stored entry");
+            if (duplicate_serial) {
+                configured_serial.clear();
+                binding.identity.serial.clear();
+            } else {
+                unique_id.clear();
             }
         }
 

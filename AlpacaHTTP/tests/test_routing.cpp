@@ -2510,6 +2510,31 @@ int main() {
         EXPECT(not_hex_json.value("ErrorNumber", 0) == 0x401);
     }
     {
+        // case: zwo camera refuses a serial or uniqueId another entry holds (#914)
+        const auto configure = [&](int number, const char* field, const char* value) {
+            nlohmann::json body = {{"vendor", "zwo"},
+                                   {"deviceType", "camera"},
+                                   {"deviceNumber", number},
+                                   {"cameraIndex", number - 9600},
+                                   {field, value}};
+            return nlohmann::json::parse(
+                route_request(router, "POST", "/management/v1/configuredevice", body.dump()).body());
+        };
+        EXPECT(configure(9608, "serialNumber", "0c190e111d020900").value("ErrorNumber", -1) == 0);
+        const auto dup_serial = configure(9609, "serialNumber", "0c190e111d020900");
+        EXPECT(dup_serial.value("ErrorNumber", 0) == 0x401);
+        EXPECT(dup_serial.value("ErrorMessage", std::string()).find("serialNumber") != std::string::npos);
+        remove_device(router, "zwo", "camera", 9608);
+        EXPECT(configure(9609, "serialNumber", "0c190e111d020900").value("ErrorNumber", -1) == 0);
+        remove_device(router, "zwo", "camera", 9609);
+
+        EXPECT(configure(9608, "uniqueId", "ZWO_UID_00112233445566ff").value("ErrorNumber", -1) == 0);
+        const auto dup_uid = configure(9609, "uniqueId", "ZWO_UID_00112233445566ff");
+        EXPECT(dup_uid.value("ErrorNumber", 0) == 0x401);
+        EXPECT(dup_uid.value("ErrorMessage", std::string()).find("uniqueId") != std::string::npos);
+        remove_device(router, "zwo", "camera", 9608);
+    }
+    {
         // zwo / filterwheel
         const auto cfg =
             roundtrip_config(router,

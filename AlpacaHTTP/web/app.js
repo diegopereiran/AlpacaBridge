@@ -251,6 +251,11 @@ function resetDeviceForm() {
     // setEditMode(false)); call it explicitly too so this helper is
     // self-contained and doesn't silently rely on that listener existing.
     setEditMode(false);
+    // Hidden inputs keep script-set values through form.reset().
+    for (const id of ['zwo-camera-serial', 'zwo-camera-name', 'zwo-camera-unique-id',
+        'zwo-camera-loaded-index', 'zwo-camera-loaded-id']) {
+        setFormValue(id, '');
+    }
     // Re-run the vendor option/sub-section toggles against the reset values so
     // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
     updateVendorOptions();
@@ -717,6 +722,12 @@ function zwoCameraIdentityFields(formData) {
     const indexValue = String(formData.get('cameraIndex') ?? '');
     const idValue = String(formData.get('cameraId') ?? '');
     const fields = {};
+    // Only an edit of that entry resends them; an add never inherits the
+    // hidden values of a camera edited earlier.
+    const form = document.getElementById('device-form');
+    if (!form || form.dataset.editing !== 'true') {
+        return fields;
+    }
     if (loadedIndex === '' && loadedId === '') {
         return fields;
     }
