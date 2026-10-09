@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <ctime>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <numbers>
@@ -1843,9 +1844,28 @@ public:
                 // read must answer normally again.
                 last_slew_error_.clear();
                 auto& protocol = CelestronProtocolWrapper::instance();
-                protocol.cancel_goto();
-                protocol.move_axis_fixed_rate(0, 0);
-                protocol.move_axis_fixed_rate(1, 0);
+                // Try every stop on its own, so one lost command cannot skip the others (#781).
+                std::string stop_error;
+                const auto try_stop = [&stop_error](const std::function<void()>& stop) {
+                    try {
+                        stop();
+                    } catch (const std::exception& ex) {
+                        if (stop_error.empty()) {
+                            stop_error = ex.what();
+                        }
+                    } catch (...) {
+                        if (stop_error.empty()) {
+                            stop_error = "unknown exception";
+                        }
+                    }
+                };
+                try_stop([&protocol]() { protocol.cancel_goto(); });
+                try_stop([&protocol]() { protocol.move_axis_fixed_rate(0, 0); });
+                try_stop([&protocol]() { protocol.move_axis_fixed_rate(1, 0); });
+                if (!stop_error.empty()) {
+                    // The mount may still be moving: leave Slewing and the slew state as they were.
+                    throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
+                }
                 pulse_guide_active_.fill(false);
                 pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
                 homing_ = false;
