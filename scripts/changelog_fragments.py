@@ -282,8 +282,9 @@ def beta_bump_warning(current: str | None, branch: str | None) -> str | None:
     the version the stable branch already owns (docs/beta-channel.md). None when
     the VERSION is not a beta, the branch is a stable branch, or it is unknown.
     """
-    if not current or base_version(current) == current or branch in (None, "HEAD") or branch.startswith("stable/"):
-        return None  # "HEAD": a detached checkout (CI), no branch to judge
+    if (not current or base_version(current) == current or branch in (None, "HEAD")
+            or branch.startswith(("stable/", "release/"))):
+        return None  # "HEAD": a detached checkout (CI); release/: the PR branch /bump-release cuts
     return ("WARNING: VERSION %s is a beta but this is branch %r, not stable/X.Y: the proposed version belongs "
             "to the stable branch, run /bump-release there (docs/beta-channel.md)" % (current, branch))
 
@@ -317,9 +318,10 @@ def propose_bump(lines: list[str], directory: Path, current: str | None = None) 
 
 def assemble(text: str, directory: Path, version: str, date: str) -> str:
     """Return the new CHANGELOG.md text (pure; the caller deletes the fragments)."""
-    if not VERSION_RE.match(version):
-        raise SystemExit("ERROR: %r is not an X.Y.Z (or X.Y.Z~betaN) version" % version)
-    version = base_version(version)  # the dated heading never carries the beta suffix
+    # A beta never consumes the fragments (docs/beta-channel.md): /bump-release
+    # beta mode skips this step, and stable mode writes VERSION X.Y.0 first.
+    if not BARE_RE.match(version):
+        raise SystemExit("ERROR: %r is not a bare X.Y.Z version (a beta is not released this way)" % version)
     if not DATE_RE.match(date):
         raise SystemExit("ERROR: %r is not a YYYY-MM-DD date" % date)
     lines = text.split("\n")
@@ -546,10 +548,15 @@ def self_test() -> int:
                and beta_bump_warning("5.0.0", "main") is None
                and beta_bump_warning("5.0.0~beta2", None) is None
                and beta_bump_warning("5.0.0~beta2", "HEAD") is None
+               and beta_bump_warning("5.0.0~beta2", "release/5.0.0-beta.2") is None
                and beta_bump_warning(None, "main") is None,
                "beta_bump_warning warned where it should not")
-        bnew = assemble(FIXTURE, d, "1.4.0~beta2", "2026-02-03")
-        expect("## [1.4.0] - 2026-02-03" in bnew and "~beta" not in bnew, "--release on a beta VERSION did not write the base heading")
+        try:
+            assemble(FIXTURE, d, "1.4.0~beta2", "2026-02-03")
+            expect(False, "--release on a beta VERSION was accepted (it would consume the fragments mid-beta)")
+        except SystemExit as e:
+            expect("not a bare X.Y.Z" in str(e), "--release on a beta VERSION: wrong error: %s" % e)
+        expect([p.name for p in d.iterdir()] != ["README.md"], "fragments were deleted by the rejected --release")
 
         # end to end through the CLI, then changelog_section.py reads the result
         cl = root / "CHANGELOG.md"
@@ -677,7 +684,7 @@ def main() -> int:
     args.changelog.write_text(new, encoding="utf-8")
     for p in fragment_files(args.fragments):
         p.unlink()
-    print("Wrote [%s] - %s to %s" % (base_version(args.release), args.date, args.changelog))
+    print("Wrote [%s] - %s to %s" % (args.release, args.date, args.changelog))
     return 0
 
 

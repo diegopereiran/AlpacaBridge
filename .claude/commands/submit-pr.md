@@ -93,12 +93,32 @@ Steps 3-7 as `stable/X.Y` (`git log stable/X.Y..HEAD`, `gh pr create --base stab
 `PREFLIGHT_BASE=origin/stable/X.Y` for the pre-flight), and the changelog fragment is still required.
 
 `--merge-down stable/X.Y` opens the `stable/X.Y` -> `main` PR that follows each beta tag, the stable
-tag and each hotfix. Run it from a clean checkout of up-to-date `stable/X.Y`, skip the fragment,
-version and Falsified-by questions (the commits were already reviewed on the branch), and create the
-PR with `gh pr create --base main --head stable/X.Y --title "Merge stable/X.Y into main"`, a body
-that fills `.github/PULL_REQUEST_TEMPLATE.md` (what the tag carried; "No issue exists"). Merge it with
+tag and each hotfix. Its head is a short-lived branch cut from the stable branch, **never
+`stable/X.Y` itself**: the repository deletes a PR's head branch on merge
+(`delete_branch_on_merge`), and `/pr-checker`'s update-branch step merges `main` into the head, which
+on `stable/X.Y` would put `main`'s unreleased work on the stable branch. First confirm an active
+ruleset protects the stable branches, or stop and ask the maintainer to add one:
+
+```bash
+gh api repos/open-astro/AlpacaBridge/rulesets \
+  --jq '.[] | select(.enforcement=="active") | "\(.id) \(.conditions.ref_name.include|join(","))"'
+# one line must name refs/heads/stable/** (or stable/*); then its rules must include deletion and non_fast_forward:
+gh api repos/open-astro/AlpacaBridge/rulesets/<id> --jq '[.rules[].type]'
+```
+
+Then, from a clean checkout of up-to-date `stable/X.Y`:
+
+```bash
+git checkout -b merge-down/X.Y stable/X.Y && git push -u origin merge-down/X.Y
+gh pr create --base main --head merge-down/X.Y --title "Merge stable/X.Y into main"
+```
+
+Skip the fragment, version and Falsified-by questions (the commits were already reviewed on the
+branch; the `falsified-by` job skips a `merge-down/*` head for the same reason). The body fills
+`.github/PULL_REQUEST_TEMPLATE.md` (what the tag carried; "No issue exists"). Merge it with
 `/pr-checker`, which uses the merge-commit method, **never squash**: squashing would hide the branch
-history and make the next merge down conflict again. A version-file conflict follows the rule in
+history and make the next merge down conflict again. `merge-down/X.Y` is deleted on merge, as
+intended; `stable/X.Y` is untouched. A version-file conflict follows the rule in
 `.claude/commands/bump-release.md` (Merge down).
 
 ## Step 3 — Analyze the branch for PR content

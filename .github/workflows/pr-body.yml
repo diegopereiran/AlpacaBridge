@@ -21,6 +21,11 @@ permissions:
 jobs:
   falsified-by:
     name: falsified-by (PR body)
+    # A merge-down PR (head merge-down/X.Y, docs/beta-channel.md) carries the
+    # fix PRs already merged into stable/X.Y; each of those PRs passed this
+    # check with its own Falsified-by lines, and against main's merge-base
+    # every one of their test cases would read as new again.
+    if: ${{ !startsWith(github.head_ref, 'merge-down/') }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:

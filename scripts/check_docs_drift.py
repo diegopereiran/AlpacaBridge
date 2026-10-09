@@ -159,6 +159,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import changelog_fragments  # noqa: E402  (VERSION_RE, the one spelling of X.Y.Z[~betaN])
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -325,10 +328,11 @@ def check_cppcheck_suppress_sync():
 # --- check 4: VERSION vs README badge ---------------------------------------
 
 # A beta VERSION spells its Debian pre-release suffix `~betaN` (5.0.0~beta1);
-# the README badge carries the same spelling. Betas count from 1, as in
-# scripts/release_tag.py (TAG_RE) and scripts/changelog_fragments.py (VERSION_RE).
-VERSION_SUFFIX = r"[0-9]+\.[0-9]+\.[0-9]+(?:~beta[1-9][0-9]*)?"
-VERSION_FORM_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:~beta[1-9][0-9]*)?$")
+# the README badge carries the same spelling. The form is owned by
+# scripts/changelog_fragments.py (VERSION_RE; release_tag.py's TAG_RE is its
+# tag-side twin) and only borrowed here, so there is one Python spelling.
+VERSION_FORM_RE = changelog_fragments.VERSION_RE
+VERSION_SUFFIX = VERSION_FORM_RE.pattern.removeprefix("^").removesuffix("$")
 README_BADGE_RE = re.compile(
     r"^####\s*\[(" + VERSION_SUFFIX + r")\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", re.MULTILINE)
 
@@ -2680,6 +2684,8 @@ def self_test():
           _version_badge_findings("5.0.0~beta0\n", b0_readme) == ["VERSION (5.0.0~beta0) is not X.Y.Z or X.Y.Z~betaN (betas count from 1)"])
     check("version badge: a badge that is not X.Y.Z is not a badge",
           len(_version_badge_findings("4.2.0\n", b_readme.replace("5.0.0~beta2", "4.2"))) == 1)
+    check("version badge: the form is changelog_fragments.VERSION_RE itself",
+          VERSION_FORM_RE is changelog_fragments.VERSION_RE and README_BADGE_RE.search(b_readme) is not None)
     check("version badge: ~beta10 is accepted",
           _version_badge_findings("5.0.0~beta10\n", b_readme.replace("5.0.0~beta2", "5.0.0~beta10")) == [])
     check("updated date: a ~beta0 badge is not read as a release date",

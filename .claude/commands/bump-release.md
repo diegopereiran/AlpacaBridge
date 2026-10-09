@@ -39,17 +39,22 @@ Pick the mode from the argument and the branch (ask when unclear):
   `DriverVersion` switch: OK for any non-empty value), so it is not a conformance failure.
 - **Stable** (`/bump-release` on `stable/X.Y`, or a hotfix `X.Y.Z`): the checklist below, with
   every `main` read as `stable/X.Y`: the release PR targets `stable/X.Y`, Step 2.3 consumes the
-  fragments (`--release X.Y.0` accepts a beta `VERSION` and writes the bare heading), Step 6 tags
+  fragments (Step 2.1 wrote `VERSION` `X.Y.0` first; `--release` takes a bare `X.Y.Z` only and
+  refuses a `~betaN`, so it cannot consume the fragments during a beta), Step 6 tags
   `vX.Y.Z` on `stable/X.Y`, then run the **Merge down**. Check the promotion criteria first: 14
   days since the last beta tag with no open regression, a full maintainer rig session on the final
   beta, ConformU re-run for every driver touched in the beta. A hotfix needs no beta round.
 - **Plain release from `main`** is no longer the normal path; use it only when the maintainer says so.
 
 **Merge down** (after every beta tag, after the stable tag, after a hotfix): open a PR
-`stable/X.Y` -> `main` and merge it with the merge-commit method, never squash (`/submit-pr
---merge-down stable/X.Y`, then `/pr-checker`). That method is a repository setting, not part of
-this repo: before the first merge down confirm `gh api repos/open-astro/AlpacaBridge --jq
-.allow_merge_commit` prints `true` (it did on 2026-10-09), or the skill hard-stops at the merge. `main` carrying a beta `VERSION` until then is
+`stable/X.Y` -> `main` from a short-lived `merge-down/X.Y` head (never `stable/X.Y` itself) and
+merge it with the merge-commit method, never squash (`/submit-pr --merge-down stable/X.Y`, then
+`/pr-checker`). Two repository settings decide whether that is safe, and neither is in this repo:
+before the first merge down confirm `gh api repos/open-astro/AlpacaBridge --jq .allow_merge_commit`
+prints `true` (it did on 2026-10-09 NZ) and that an active ruleset covers `refs/heads/stable/**`
+with `deletion` and `non_fast_forward` rules (the `/submit-pr` merge-down section has the
+commands; on 2026-10-09 NZ none did and `delete_branch_on_merge` was on). Without the ruleset,
+stop and ask the maintainer to add it. `main` carrying a beta `VERSION` until then is
 expected. The first merge down after promotion carries the dated CHANGELOG section, `VERSION`, badge
 and the fragment deletions. Conflict rule when the receiving branch is not the one the version came
 from (a hotfix merged into `main` or a newer `stable/X.(Y+1)`): the receiving branch keeps its own

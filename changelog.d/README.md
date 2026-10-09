@@ -117,8 +117,8 @@ python3 scripts/changelog_fragments.py --self-test
 **Beta and stable branches.** A fix PR against `stable/X.Y` adds its fragment as on `main`. A beta
 (`VERSION` `X.Y.0~betaN`) does not consume fragments: its notes come from `--preview --version`
 into `docs/releases/X.Y.0-beta.N.md`. Fragments are consumed once, when `/bump-release` promotes
-the branch to the stable release (`--release X.Y.0`, which accepts a `~betaN` argument and writes
-the bare `## [X.Y.0]` heading), and the final merge down carries that deletion to `main`. See
+the branch to the stable release (`--release X.Y.0`; it refuses a `~betaN` argument, so a beta
+cannot consume them by mistake), and the final merge down carries that deletion to `main`. See
 [beta-channel.md](../docs/beta-channel.md).
 
 A legacy `## [X.Y.Z] - UNRELEASED` section still in `CHANGELOG.md` is merged into

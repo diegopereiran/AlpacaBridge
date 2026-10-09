@@ -55,7 +55,10 @@ newest build of either kind.
 3. **Fix.** A bug found in beta is fixed by a PR against `stable/X.Y`. It is not fixed on `main`
    first and cherry-picked. A fix for code the branch does not have goes to `main` as usual.
 4. **Re-beta and merge down.** Each batch of fixes becomes the next beta tag. After every beta
-   tag, one PR merges `stable/X.Y` into `main` with the merge-commit method (never squash).
+   tag, one PR merges `stable/X.Y` into `main` with the merge-commit method (never squash). Its
+   head is a short-lived `merge-down/X.Y` branch cut from `stable/X.Y`, never the stable branch
+   itself (the head of a merged PR is deleted, and updating a PR head merges `main` into it); a
+   ruleset protecting `stable/**` against deletion and force-pushes is required first.
    Between merge downs `main` carries the beta `VERSION` (for example `5.0.0~beta2`), its README
    badge and `docs/releases/5.0.0-beta.N.md`. That is expected, not drift.
 5. **Promote.** `/bump-release` runs on `stable/X.Y`: `VERSION` becomes `X.Y.0`, the fragments are
@@ -119,4 +122,5 @@ The web UI update check compares versions by Debian rules, where `5.0.0-beta.1` 
 Debian order: `5.0.0~beta1 < 5.0.0~beta2 < 5.0.0 < 5.0.1 < 5.1.0~beta1`, so a beta user moves to
 the stable release when it ships and on to the next beta after, with no manual switching.
 `changelog_fragments.py` reads a beta `VERSION` as its base version (`--bump --version
-5.0.0~beta2` prints `5.0.0` at least; `--release` writes the bare `## [5.0.0]` heading).
+5.0.0~beta2` prints `5.0.0` at least; `--release` takes the bare `5.0.0` only, so a beta never
+consumes the fragments).

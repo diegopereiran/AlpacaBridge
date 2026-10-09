@@ -14,7 +14,8 @@ decide (see **Hard stops**).
 ## Base branches other than `main`
 
 A PR may target `stable/X.Y` (a fix during a beta) or be a merge-down PR `stable/X.Y` -> `main`
-(`docs/beta-channel.md`). For a PR whose base is `stable/X.Y`, read `main` / `origin/main` in the
+(`docs/beta-channel.md`; its head is `merge-down/X.Y`, cut from the stable branch, so the
+update-branch and conflict steps below act on that branch and never on `stable/X.Y`). For a PR whose base is `stable/X.Y`, read `main` / `origin/main` in the
 steps below as that base (`gh pr view <N> --json baseRefName` says which), including the behind
 check and the format and conformu-report diffs. Those two kinds of PR (base `stable/X.Y`, and a
 merge-down into `main`) are merged with `gh pr merge <N> --merge` (merge commit); an ordinary PR

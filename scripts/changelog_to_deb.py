@@ -153,7 +153,8 @@ def self_test():
     released = "## [1.0.0] - 2026-01-01\n\n### Added\n- **old**\n"
     fragment = "### Fixed\n- **a**\n  more\n"
 
-    def run(version, changelog, fragments):
+    def run(version, changelog, fragments, date=None, expect_rc=None):
+        """(stdout text of the written changelog, stderr). expect_rc: main() must exit with it."""
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
@@ -167,10 +168,19 @@ def self_test():
                 "changelog_to_deb.py", "--changelog", str(root / "CHANGELOG.md"),
                 "--out", str(out), "--package", "pkg", "--version", version,
                 "--maintainer", "T <t@example.com>",
-            ]
+            ] + (["--date", date] if date else [])
             try:
                 with contextlib.redirect_stderr(err):
-                    main()
+                    try:
+                        main()
+                        rc = 0
+                    except SystemExit as e:
+                        rc = e.code if isinstance(e.code, int) else 2
+                        if expect_rc is None:
+                            raise
+                if expect_rc is not None:
+                    check("exit code for %s" % version, rc == expect_rc)
+                    return "", err.getvalue()
             finally:
                 sys.argv = argv
             return out.read_text(encoding="utf-8"), err.getvalue()
@@ -199,15 +209,23 @@ def self_test():
 
     # A beta VERSION (5.0.0~beta1) heads the changelog with the fragments' notes
     # and sorts below the stable release it leads up to.
-    text, err = run("1.1.0~beta1", released, {"x.md": fragment})
-    check("beta stanza", text.startswith("pkg (1.1.0~beta1) UNRELEASED; urgency=low") and "  * Fixed: a more\n" in text)
+    # A beta is a published build: its stanza is a release stanza (distribution
+    # "beta", dated noon UTC on the --date it was cut, never UNRELEASED or now()),
+    # so two builds of the same beta tag are byte-identical.
+    text, err = run("1.1.0~beta1", released, {"x.md": fragment}, date="2026-11-01")
+    check("beta stanza", text.startswith("pkg (1.1.0~beta1) beta; urgency=low") and "  * Fixed: a more\n" in text)
+    check("beta stanza date", "Sun, 01 Nov 2026 12:00:00 +0000" in text.split("pkg (1.0.0)")[0])
     check("beta no warning", err == "")
+    again, _ = run("1.1.0~beta1", released, {"x.md": fragment}, date="2026-11-01")
+    check("beta stanza reproducible", again == text)
+    _, err = run("1.1.0~beta1", released, {"x.md": fragment}, expect_rc=2)
+    check("beta without --date is refused", "--date" in err)
     # A legacy UNRELEASED label names the beta's base version: no mismatch.
     legacy = "## [1.1.0] - UNRELEASED\n\n### Fixed\n- **b**\n\n" + released
-    text, err = run("1.1.0~beta1", legacy, {})
-    check("beta under its base label: stanza", text.startswith("pkg (1.1.0~beta1) UNRELEASED; urgency=low"))
+    text, err = run("1.1.0~beta1", legacy, {}, date="2026-11-01")
+    check("beta under its base label: stanza", text.startswith("pkg (1.1.0~beta1) beta; urgency=low"))
     check("beta under its base label: no warning", err == "")
-    text, err = run("1.2.0~beta1", legacy, {})
+    text, err = run("1.2.0~beta1", legacy, {}, date="2026-11-01")
     check("beta under another label: warning", "is labeled [1.1.0]" in err)
     if shutil.which("dpkg"):
         order = ["5.0.0~beta1", "5.0.0~beta2", "5.0.0", "5.0.1", "5.1.0~beta1"]
@@ -231,6 +249,9 @@ def main():
     ap.add_argument("--package", required=True, help="Debian source package name")
     ap.add_argument("--version", required=True, help="version being built (from VERSION)")
     ap.add_argument("--maintainer", required=True, help='"Name <email>"')
+    ap.add_argument("--date", metavar="YYYY-MM-DD",
+                    help="for a beta --version: the day it was cut (the README badge date); its stanza is dated "
+                    "noon UTC that day so the build is reproducible. Required for a beta, ignored otherwise.")
     args = ap.parse_args()
 
     if not VERSION_RE.match(args.version):
@@ -270,7 +291,15 @@ def main():
                 "before release." % (args.version, unreleased["label"], args.version),
                 file=sys.stderr,
             )
-        stanzas.append((args.version, "UNRELEASED", bullets, datetime.datetime.now().astimezone()))
+        if base != args.version:
+            # A beta is a published build, not unreleased work: a release stanza
+            # in the "beta" distribution, dated like a release (noon UTC on the
+            # cut date) so two builds of the same tag are byte-identical.
+            if not args.date or not re.match(r"^\d{4}-\d{2}-\d{2}$", args.date):
+                ap.error("--version %s is a beta: pass --date YYYY-MM-DD (the README badge date)" % args.version)
+            stanzas.append((args.version, "beta", bullets, section_date({"date": args.date})))
+        else:
+            stanzas.append((args.version, "UNRELEASED", bullets, datetime.datetime.now().astimezone()))
 
     for s in released:
         stanzas.append((s["label"], "stable", s["bullets"], section_date(s)))
