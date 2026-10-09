@@ -4659,7 +4659,8 @@ int main() {
             // persisted at create; check its shape, then compare the rest.
             const auto strip_generated_unique_id = [&](nlohmann::json& config) {
                 if (vendor == "zwo" && device_type == "camera" && config.contains("uniqueId")) {
-                    EXPECT(config["uniqueId"].is_string() && config["uniqueId"].get<std::string>().rfind("ZWO_UID_", 0) == 0);
+                    EXPECT(config["uniqueId"].is_string() &&
+                           config["uniqueId"].get<std::string>().rfind("ZWO_UID_", 0) == 0);
                     config.erase("uniqueId");
                 }
             };
