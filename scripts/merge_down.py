@@ -12,9 +12,15 @@ reads as new again, so the gate skips it. Only the real shape is exempt:
     of the other);
   - the base is the branch the name targets (main, or stable/X.Z);
   - the head is a branch of this repository (CI passes --same-repo);
-  - every non-merge commit the PR adds is already on stable/X.Y. Merge
-    commits are allowed: the head merges the receiving branch in to resolve
-    the version files (the receiving branch keeps its own VERSION and badge).
+  - every non-merge commit the PR adds is already on stable/X.Y;
+  - no merge commit the PR adds changes a test file beyond what git's own
+    merge of its parents produces. The head merges the receiving branch in
+    to resolve the version files (the receiving branch keeps its own VERSION
+    and badge), and a conflict resolution may edit anything else too, but a
+    test case written into a merge would otherwise skip this gate unseen.
+    Each merge is re-merged with `git merge-tree --write-tree` (git 2.38+) and
+    compared with the commit; a merge down whose test-file conflicts had to
+    be resolved by hand goes through the gate like any other PR.
 
 Usage:
   merge_down.py --exempt --head-ref H --base-ref B --base-rev REV
@@ -30,6 +36,8 @@ import sys
 import tempfile
 
 HEAD_RE = re.compile(r"^merge-down/(\d+\.\d+)-to-(main|\d+\.\d+)$")
+# Where the gate looks for new test cases (scripts/check_falsified_by.py).
+TEST_DIRS = ("AlpacaCore/tests/", "AlpacaHTTP/tests/")
 
 
 def parse_head(head_ref):
@@ -77,7 +85,38 @@ def exempt(head_ref, base_ref, base_rev, head_rev="HEAD", stable_remote="origin"
     extra = r.stdout.split()
     if extra:
         return False, "%d commit(s) are not on %s, e.g. %s" % (len(extra), stable, extra[0][:12])
+    merges = git("rev-list", "--merges", "%s..%s" % (base_rev, head_rev), cwd=cwd)
+    if merges.returncode != 0:
+        return False, "git rev-list failed: %s" % merges.stderr.strip()
+    for merge in merges.stdout.split():
+        edited = merge_edits(merge, cwd)
+        if edited is None:
+            return False, "could not re-merge %s to inspect it" % merge[:12]
+        tests = [p for p in edited if p.startswith(TEST_DIRS)]
+        if tests:
+            return False, "merge %s changes test files beyond the automatic merge: %s" % (merge[:12], ", ".join(tests))
     return True, "merge down of stable/%s into %s: every commit it adds is already on %s" % (source, target, stable)
+
+
+def merge_edits(merge, cwd=None):
+    """Paths where a two-parent merge commit differs from git's own merge of its parents.
+
+    Empty for a merge git made unaided; a resolved conflict or an edit made in
+    the merge shows up here. None when the merge cannot be re-run (an octopus
+    merge, or a git without merge-tree --write-tree).
+    """
+    parents = git("rev-list", "--parents", "-n", "1", merge, cwd=cwd).stdout.split()[1:]
+    if len(parents) != 2:
+        return None
+    # Exit 1 means conflicts; the first line is still the tree, markers included.
+    r = git("merge-tree", "--write-tree", "--no-messages", parents[0], parents[1], cwd=cwd)
+    if r.returncode not in (0, 1) or not r.stdout:
+        return None
+    tree = r.stdout.split()[0]
+    d = git("diff", "--name-only", tree, merge, cwd=cwd)
+    if d.returncode != 0:
+        return None
+    return d.stdout.split()
 
 
 def self_test():
@@ -131,6 +170,29 @@ def self_test():
         check("a fork head is not exempt", not ex(same_repo=False))
         check("a wrong base is not exempt", not ex(base_ref="stable/5.1"))
         check("a bad head name is not exempt", not ex(head="merge-down/foo"))
+        # A version file resolved in a follow-up merge is fine; a test case
+        # written into a merge is not.
+        g("checkout", "-q", "main")
+        commit("main-later")
+        base = g("rev-parse", "main")
+        g("checkout", "-q", "merge-down/5.0-to-main")
+        g("merge", "-q", "--no-commit", "main")
+        with open(os.path.join(tmp, "VERSION"), "w", encoding="utf-8") as f:
+            f.write("4.2.0\n")
+        g("add", "VERSION")
+        g("commit", "-qm", "merge main, keep its VERSION")
+        check("a merge that edits only the version files is exempt", ex())
+        g("checkout", "-q", "-b", "evil", "merge-down/5.0-to-main~1")
+        g("merge", "-q", "--no-commit", "main")
+        os.makedirs(os.path.join(tmp, "AlpacaCore", "tests"), exist_ok=True)
+        with open(os.path.join(tmp, "AlpacaCore", "tests", "test_x.cpp"), "w", encoding="utf-8") as f:
+            f.write('TEST_CASE("smuggled") {}\n')
+        g("add", "AlpacaCore/tests/test_x.cpp")
+        g("commit", "-qm", "merge main")
+        check("a test case written into a merge is not exempt", not ex(head_rev="evil"))
+        check("merge_edits names the test file",
+              merge_edits(g("rev-parse", "evil"), cwd=tmp) == ["AlpacaCore/tests/test_x.cpp"])
+        g("checkout", "-q", "merge-down/5.0-to-main")
         commit("smuggled")
         check("a commit not on stable/5.0 is not exempt", not ex())
     for f in failures:

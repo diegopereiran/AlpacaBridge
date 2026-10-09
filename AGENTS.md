@@ -926,7 +926,7 @@ vendor that ignores either ships a silently broken form:
   - `/usr/sbin/fxload` — QHY firmware loader.
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
-- To cut a release or a beta, run `/bump-release` (`.claude/commands/bump-release.md`; beta and stable modes, [beta channel](docs/beta-channel.md)): it bumps the `VERSION` file, assembles the `changelog.d/` fragments into the dated `## [X.Y.Z]` CHANGELOG.md section (`scripts/changelog_fragments.py --release`), updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
+- To cut a release or a beta, run `/bump-release` (`.claude/commands/bump-release.md`; beta and stable modes, [beta channel](docs/beta-channel.md)). A stable release bumps the `VERSION` file, assembles the `changelog.d/` fragments into the dated `## [X.Y.Z]` CHANGELOG.md section (`scripts/changelog_fragments.py --release`), updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge. A beta sets `VERSION` `X.Y.0~betaN` and the badge, writes `docs/releases/X.Y.0-beta.N.md` from `--preview`, consumes no fragments and writes no dated section — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
 
 ### Beta channel and stable branches
 

@@ -236,7 +236,9 @@ git push origin vX.Y.0-beta.N
 ```
 
 Before the first beta tag of a branch, dry-run the workflow against the merged branch and read
-its "Build release notes" step; it stops before publishing anything:
+its "Build release notes" step; it stops before publishing anything. Dispatch it with
+`--ref stable/X.Y` and no other ref: a dry run has no tag, so the branch check tests the tip of the
+dispatched branch, and from any other branch it fails even when the eventual tag would pass:
 
 ```bash
 gh workflow run release.yml --ref stable/X.Y -f tag=vX.Y.0-beta.N

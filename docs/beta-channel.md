@@ -95,7 +95,10 @@ newest build of either kind.
   and is consumed at promotion.
 - CI and CodeQL also run on pushes to `stable/**`.
 - Branch protection on `stable/*` matches `main` (required checks, no direct pushes); it is set in
-  GitHub settings, not in this repository.
+  GitHub settings, not in this repository. Classic branch protection is not enough for the merge
+  downs: an active **ruleset** on `refs/heads/stable/**` with the `deletion` and `non_fast_forward`
+  rules must exist first. `/submit-pr --merge-down` checks for it and stops without it; the
+  repository has none until a maintainer adds it.
 
 ## Promotion criteria
 
