@@ -94,11 +94,13 @@ newest build of either kind.
   each adds its `changelog.d/` fragment as usual; the fragment travels to `main` in the merge down
   and is consumed at promotion.
 - CI and CodeQL also run on pushes to `stable/**`.
-- Branch protection on `stable/*` matches `main` (required checks, no direct pushes); it is set in
-  GitHub settings, not in this repository. Classic branch protection is not enough for the merge
-  downs: an active **ruleset** on `refs/heads/stable/**` with the `deletion` and `non_fast_forward`
-  rules must exist first. `/submit-pr --merge-down` checks for it and stops without it; the
-  repository has none until a maintainer adds it.
+- Protection on `stable/**` matches `main` (required checks, pull requests only, no deletion or
+  force-push). It is the repository ruleset "stable branch protection" (id 24766374, #924), set in
+  GitHub settings, not in this repository; it also allows only the merge-commit method and does
+  not enforce status checks on branch creation, so cutting `stable/X.Y` from `main` is not
+  blocked. Classic branch protection is not enough for the merge downs: `/submit-pr --merge-down`
+  checks that an active ruleset on `refs/heads/stable/**` has the `deletion` and
+  `non_fast_forward` rules and stops without it.
 
 ## Promotion criteria
 

@@ -56,9 +56,9 @@ Pick the mode from the argument and the branch (ask when unclear):
 settings decide whether that is safe, and neither is in this repo: before the first merge down
 confirm `gh api repos/open-astro/AlpacaBridge --jq .allow_merge_commit` prints `true` (it did on
 2026-10-09 NZ) and that an active ruleset covers `refs/heads/stable/**` with `deletion` and
-`non_fast_forward` rules (the `/submit-pr` merge-down section has the commands; on 2026-10-09 NZ
-none did and `delete_branch_on_merge` was on). Without the ruleset, stop and ask the maintainer to
-add it. **Version files:** the receiving branch keeps its own `VERSION` and README badge, so `main`
+`non_fast_forward` rules (the `/submit-pr` merge-down section has the commands;
+`delete_branch_on_merge` is on). Ruleset 24766374, "stable branch protection", has covered it
+since 2026-10-09 (#924). If the query no longer lists it, stop and ask the maintainer to restore it. **Version files:** the receiving branch keeps its own `VERSION` and README badge, so `main`
 never carries a beta `VERSION` and dev builds from `main` never report one; the exception is a
 merge into `main` that brings a stable release newer than `main`'s `VERSION` (the promotion, or a
 hotfix before the next promotion), which takes the stable side's `VERSION` and badge. The first
