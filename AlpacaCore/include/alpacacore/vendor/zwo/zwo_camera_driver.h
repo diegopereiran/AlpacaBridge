@@ -56,7 +56,7 @@ struct ZwoCameraBinding {
 };
 
 /// Every connected camera with its serial (opens each one briefly).
-std::vector<ZwoEnumeratedCamera> enumerate_zwo_cameras();
+std::vector<ZwoEnumeratedCamera> enumerate_zwo_cameras(const std::string& only_model_name = {});
 
 /// Create a camera driver for a config entry. See ZwoCameraBinding.
 std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding);

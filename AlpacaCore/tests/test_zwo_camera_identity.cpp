@@ -139,6 +139,29 @@ TEST_CASE("ZWO camera identity - an entry without serial or name binds by id, th
     CHECK(resolve_zwo_camera(by_index, {}, {}).failure == ZwoResolveFailure::NoCameras);
 }
 
+TEST_CASE("ZWO camera identity - an id or index hint never binds a camera another entry claims",
+          "[zwo][camera][identity][unit]") {
+    // An entry re-added by the web form without its serial, after the
+    // enumeration order flipped: the hint points at the other entry's camera.
+    ZwoConfiguredIdentity by_id;
+    by_id.camera_id = 101;
+    by_id.camera_index = 1;
+    ZwoConfiguredIdentity by_index;
+    by_index.camera_index = 1;
+
+    const std::vector<ZwoEnumeratedCamera> found{mini(0), pro(1)};
+    const std::set<std::string> claimed{kProSerial};
+    const auto id_result = resolve_zwo_camera(by_id, found, claimed);
+    CHECK_FALSE(id_result.camera.has_value());
+    CHECK(id_result.failure == ZwoResolveFailure::NotFound);
+    const auto index_result = resolve_zwo_camera(by_index, found, claimed);
+    CHECK_FALSE(index_result.camera.has_value());
+    CHECK(index_result.failure == ZwoResolveFailure::NotFound);
+    // Unclaimed, the same hints still bind.
+    CHECK(resolve_zwo_camera(by_id, found, {}).camera->index == 1);
+    CHECK(resolve_zwo_camera(by_index, found, {}).camera->index == 1);
+}
+
 TEST_CASE("ZWO camera identity - UniqueID", "[zwo][camera][identity][unit]") {
     using alpacacore::vendor::zwo::generate_zwo_unique_id;
     using alpacacore::vendor::zwo::zwo_unique_id;

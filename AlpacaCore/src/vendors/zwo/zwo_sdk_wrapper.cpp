@@ -297,7 +297,7 @@ std::vector<ZWOCameraInfo> ZWOSDKWrapper::enumerate_cameras() {
     return result;
 }
 
-std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras() {
+std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras(const std::string& only_model_name) {
     std::vector<ZwoEnumeratedCamera> result;
     const auto cameras = enumerate_cameras();
     result.reserve(cameras.size());
@@ -307,6 +307,12 @@ std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras() {
         camera.index = index++;
         camera.camera_id = info.camera_id;
         camera.name = info.name;
+        if (!only_model_name.empty() && trim_zwo_name(info.name) != only_model_name) {
+            // Not the model the entry names: leave this body alone, another
+            // process may hold it.
+            result.push_back(std::move(camera));
+            continue;
+        }
         bool opened = false;
         try {
             open_camera(info.camera_id);

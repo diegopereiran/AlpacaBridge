@@ -83,9 +83,14 @@ ZwoResolveResult resolve_zwo_camera(const ZwoConfiguredIdentity& entry, const st
     }
 
     // An entry saved before serial binding: the id, then the index, as before.
+    // A camera whose serial another entry claims is never taken here: the hint
+    // may point at it after the enumeration order flipped.
+    const auto claimed = [&](const ZwoEnumeratedCamera& camera) {
+        return !camera.serial.empty() && serials_claimed_by_other_entries.count(camera.serial) != 0;
+    };
     if (entry.camera_id.has_value()) {
         for (const auto& camera : found) {
-            if (camera.camera_id == entry.camera_id.value()) {
+            if (camera.camera_id == entry.camera_id.value() && !claimed(camera)) {
                 return found_camera(camera);
             }
         }
@@ -96,6 +101,10 @@ ZwoResolveResult resolve_zwo_camera(const ZwoConfiguredIdentity& entry, const st
         const int index = entry.camera_index.value();
         if (index < 0 || index >= static_cast<int>(found.size())) {
             return failed(ZwoResolveFailure::IndexOutOfRange, "Camera index not found");
+        }
+        if (claimed(found[static_cast<std::size_t>(index)])) {
+            return failed(ZwoResolveFailure::NotFound, "ZWO camera at index " + std::to_string(index) +
+                                                           " belongs to another device entry");
         }
         return found_camera(found[static_cast<std::size_t>(index)]);
     }

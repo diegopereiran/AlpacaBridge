@@ -112,7 +112,9 @@ public:
     /// open camera, so each one is opened through the ref-counted
     /// open_camera()/close_camera() pair (a camera already open in this
     /// process stays open). A failed serial read leaves the serial empty.
-    std::vector<ZwoEnumeratedCamera> enumerate_identified_cameras();
+    /// With `only_model_name` (already trimmed) set, only cameras of that
+    /// model are opened; the others are listed with an empty serial.
+    std::vector<ZwoEnumeratedCamera> enumerate_identified_cameras(const std::string& only_model_name = {});
     bool get_camera_info_by_id(int camera_id, ZWOCameraInfo& info);
     bool get_camera_info_by_index(int camera_index, ZWOCameraInfo& info);
 

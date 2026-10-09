@@ -1280,7 +1280,7 @@ private:
     }
 
     int resolve_camera_id_locked() {
-        const auto found = ZWOSDKWrapper::instance().enumerate_identified_cameras();
+        const auto found = ZWOSDKWrapper::instance().enumerate_identified_cameras(trim_zwo_name(binding_.identity.camera_name));
         const auto result = resolve_zwo_camera(binding_.identity, found, binding_.claimed_serials);
         if (!result.camera.has_value()) {
             ALPACA_LOG_WARN("ZWO", result.message);
@@ -1673,8 +1673,8 @@ std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const Z
     return std::make_unique<ZWOCameraDriver>(device_number, binding);
 }
 
-std::vector<ZwoEnumeratedCamera> enumerate_zwo_cameras() {
-    return ZWOSDKWrapper::instance().enumerate_identified_cameras();
+std::vector<ZwoEnumeratedCamera> enumerate_zwo_cameras(const std::string& only_model_name) {
+    return ZWOSDKWrapper::instance().enumerate_identified_cameras(trim_zwo_name(only_model_name));
 }
 
 } // namespace alpacacore::vendor::zwo

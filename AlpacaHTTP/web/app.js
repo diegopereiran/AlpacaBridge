@@ -707,6 +707,36 @@ function setEditMode(isEditing) {
     }
 }
 
+// The serial, model name and UniqueID the server learned for a ZWO camera
+// (#914). An edit removes the entry and adds it again, so the form resends
+// them; only while the index and id are the ones the form loaded. A changed
+// index or id points the entry at another body, which then learns its own.
+function zwoCameraIdentityFields(formData) {
+    const loadedIndex = String(document.getElementById('zwo-camera-loaded-index')?.value ?? '');
+    const loadedId = String(document.getElementById('zwo-camera-loaded-id')?.value ?? '');
+    const indexValue = String(formData.get('cameraIndex') ?? '');
+    const idValue = String(formData.get('cameraId') ?? '');
+    const fields = {};
+    if (loadedIndex === '' && loadedId === '') {
+        return fields;
+    }
+    if (indexValue !== loadedIndex || idValue !== loadedId) {
+        return fields;
+    }
+    const pairs = [
+        ['serialNumber', 'zwoCameraSerial'],
+        ['cameraName', 'zwoCameraName'],
+        ['uniqueId', 'zwoCameraUniqueId'],
+    ];
+    for (const [key, name] of pairs) {
+        const value = formData.get(name);
+        if (typeof value === 'string' && value !== '') {
+            fields[key] = value;
+        }
+    }
+    return fields;
+}
+
 function setFormValue(elementId, value) {
     const element = document.getElementById(elementId);
     if (!element) {
@@ -1202,6 +1232,14 @@ function startEditDevice(device) {
     }
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
+    // #914: remember the identity the server learned for a ZWO camera, and the
+    // index/id the form loaded it with, so the submit can resend it unchanged.
+    const keepZwoIdentity = vendor === 'zwo' && deviceType === 'camera';
+    setFormValue('zwo-camera-serial', keepZwoIdentity ? config.serialNumber : '');
+    setFormValue('zwo-camera-name', keepZwoIdentity ? config.cameraName : '');
+    setFormValue('zwo-camera-unique-id', keepZwoIdentity ? config.uniqueId : '');
+    setFormValue('zwo-camera-loaded-index', keepZwoIdentity ? config.cameraIndex : '');
+    setFormValue('zwo-camera-loaded-id', keepZwoIdentity ? config.cameraId : '');
     setFormValue('filterwheel-index', config.filterwheelIndex);
     setFormValue('filterwheel-id', config.filterwheelId);
     const filterNamesField = document.getElementById('filterwheel-names');
@@ -4071,6 +4109,9 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (!Number.isNaN(cameraId)) {
                     deviceData.cameraId = cameraId;
                 }
+            }
+            if (normalizedType === 'camera') {
+                Object.assign(deviceData, zwoCameraIdentityFields(formData));
             }
         }
         if (normalizedType === 'filterwheel') {

@@ -2472,6 +2472,44 @@ int main() {
         remove_device(router, "zwo", "camera", 9601);
     }
     {
+        // case: zwo camera identity keys round trip and refuse control bytes (#914)
+        // The form resends the learned identity after remove + add.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9608},
+                                           {"cameraIndex", 1},
+                                           {"cameraId", 7},
+                                           {"serialNumber", "0c190e111d020900"},
+                                           {"cameraName", "ZWO ASI533MC Pro"},
+                                           {"uniqueId", "ZWO_UID_00112233445566ff"}},
+                                          "Camera", 9608);
+        EXPECT(cfg.value("serialNumber", std::string()) == "0c190e111d020900");
+        EXPECT(cfg.value("cameraName", std::string()) == "ZWO ASI533MC Pro");
+        EXPECT(cfg.value("uniqueId", std::string()) == "ZWO_UID_00112233445566ff");
+        remove_device(router, "zwo", "camera", 9608);
+
+        for (const char* field : {"serialNumber", "cameraName", "uniqueId"}) {
+            nlohmann::json bad = {{"vendor", "zwo"},
+                                  {"deviceType", "camera"},
+                                  {"deviceNumber", 9608},
+                                  {"cameraIndex", 1},
+                                  {field, "0c19\nforged log line"}};
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", bad.dump());
+            const auto json = nlohmann::json::parse(response.body());
+            EXPECT(json.value("ErrorNumber", 0) == 0x401);
+            EXPECT(json.value("ErrorMessage", std::string()).find(field) != std::string::npos);
+        }
+        nlohmann::json not_hex = {{"vendor", "zwo"},
+                                  {"deviceType", "camera"},
+                                  {"deviceNumber", 9608},
+                                  {"cameraIndex", 1},
+                                  {"serialNumber", "not-hex!"}};
+        const auto not_hex_json =
+            nlohmann::json::parse(route_request(router, "POST", "/management/v1/configuredevice", not_hex.dump()).body());
+        EXPECT(not_hex_json.value("ErrorNumber", 0) == 0x401);
+    }
+    {
         // zwo / filterwheel
         const auto cfg =
             roundtrip_config(router,

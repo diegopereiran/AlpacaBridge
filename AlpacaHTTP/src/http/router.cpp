@@ -8759,9 +8759,42 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #ifdef ALPACACORE_ENABLE_ZWO
         const int camera_id = config_get(config, "cameraId", -1);
         const int camera_index = config_get(config, "cameraIndex", -1);
-        const std::string configured_serial = config_get(config, "serialNumber", "");
-        const std::string configured_name = config_get(config, "cameraName", "");
+        std::string configured_serial = config_get(config, "serialNumber", "");
+        std::string configured_name = config_get(config, "cameraName", "");
         std::string unique_id = config_get(config, "uniqueId", "");
+
+        // The three identity strings reach log lines and the file, so a client
+        // cannot put control bytes (a forged log line) or a non-hex serial in
+        // them. The API refuses; a stored entry loses the bad key and relearns.
+        const auto has_control_bytes = [](const std::string& text) {
+            return std::any_of(text.begin(), text.end(), [](char ch) {
+                const auto byte = static_cast<unsigned char>(ch);
+                return byte < 0x20 || byte == 0x7f;
+            });
+        };
+        const auto is_hex_serial = [](const std::string& text) {
+            return text.size() <= 64 && std::all_of(text.begin(), text.end(), [](char ch) {
+                       return std::isxdigit(static_cast<unsigned char>(ch)) != 0;
+                   });
+        };
+        const auto check_identity_field = [&](const char* field, std::string& value, bool valid) {
+            if (valid) {
+                return true;
+            }
+            if (source == ConfigSource::Api) {
+                error_message = std::string("Invalid value for ") + field;
+                return false;
+            }
+            util::log_warning(std::string("Ignoring invalid ZWO camera ") + field + " in the stored entry");
+            value.clear();
+            return true;
+        };
+        if (!check_identity_field("serialNumber", configured_serial, is_hex_serial(configured_serial)) ||
+            !check_identity_field("cameraName", configured_name, !has_control_bytes(configured_name)) ||
+            !check_identity_field("uniqueId", unique_id, !has_control_bytes(unique_id))) {
+            return false;
+        }
+        const bool unique_id_supplied = !unique_id.empty();
 
         if (camera_id < 0 && camera_index < 0 && configured_serial.empty() && configured_name.empty()) {
             error_message = "ZWO camera requires cameraIndex or cameraId";
@@ -8792,7 +8825,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 const bool has_serial = serial_it != other.end() && serial_it->is_string();
                 if (key->device_number == device_number) {
                     const auto uid_it = other.find("uniqueId");
-                    if (unique_id.empty() && uid_it != other.end() && uid_it->is_string()) {
+                    if (unique_id.empty() && uid_it != other.end() && uid_it->is_string() &&
+                        !has_control_bytes(uid_it->get<std::string>())) {
                         unique_id = uid_it->get<std::string>();
                     }
                 } else if (has_serial && !serial_it->get<std::string>().empty()) {
@@ -8807,7 +8841,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::string learned_name = configured_name;
         try {
             const auto resolved = alpacacore::vendor::zwo::resolve_zwo_camera(
-                binding.identity, alpacacore::vendor::zwo::enumerate_zwo_cameras(), binding.claimed_serials);
+                binding.identity, alpacacore::vendor::zwo::enumerate_zwo_cameras(alpacacore::vendor::zwo::trim_zwo_name(configured_name)),
+                binding.claimed_serials);
             if (resolved.camera.has_value()) {
                 const auto& found = resolved.camera.value();
                 binding.identity.camera_id = found.camera_id;
@@ -8836,7 +8871,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (configured_name.empty() && !learned_name.empty()) {
                 (*learned_config)["cameraName"] = learned_name;
             }
-            if (config_get(config, "uniqueId", "").empty() && !unique_id.empty()) {
+            if (!unique_id_supplied && !unique_id.empty()) {
                 (*learned_config)["uniqueId"] = unique_id;
             }
         }
