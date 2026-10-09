@@ -282,8 +282,8 @@ def beta_bump_warning(current: str | None, branch: str | None) -> str | None:
     the version the stable branch already owns (docs/beta-channel.md). None when
     the VERSION is not a beta, the branch is a stable branch, or it is unknown.
     """
-    if not current or base_version(current) == current or branch is None or branch.startswith("stable/"):
-        return None
+    if not current or base_version(current) == current or branch in (None, "HEAD") or branch.startswith("stable/"):
+        return None  # "HEAD": a detached checkout (CI), no branch to judge
     return ("WARNING: VERSION %s is a beta but this is branch %r, not stable/X.Y: the proposed version belongs "
             "to the stable branch, run /bump-release there (docs/beta-channel.md)" % (current, branch))
 
@@ -545,6 +545,7 @@ def self_test() -> int:
         expect(beta_bump_warning("5.0.0~beta2", "stable/5.0") is None
                and beta_bump_warning("5.0.0", "main") is None
                and beta_bump_warning("5.0.0~beta2", None) is None
+               and beta_bump_warning("5.0.0~beta2", "HEAD") is None
                and beta_bump_warning(None, "main") is None,
                "beta_bump_warning warned where it should not")
         bnew = assemble(FIXTURE, d, "1.4.0~beta2", "2026-02-03")

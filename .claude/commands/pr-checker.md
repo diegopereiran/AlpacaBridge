@@ -16,8 +16,10 @@ decide (see **Hard stops**).
 A PR may target `stable/X.Y` (a fix during a beta) or be a merge-down PR `stable/X.Y` -> `main`
 (`docs/beta-channel.md`). For a PR whose base is `stable/X.Y`, read `main` / `origin/main` in the
 steps below as that base (`gh pr view <N> --json baseRefName` says which), including the behind
-check and the format and conformu-report diffs. Every merge uses `gh pr merge <N> --merge`
-(merge commit). A merge-down PR is **never squashed**: refuse `--squash` and `--rebase` on it, and when
+check and the format and conformu-report diffs. Those two kinds of PR (base `stable/X.Y`, and a
+merge-down into `main`) are merged with `gh pr merge <N> --merge` (merge commit); an ordinary PR
+into `main` keeps the method the steps below already use. A merge-down PR is **never squashed**:
+refuse `--squash` and `--rebase` on it, and when
 `update-branch` is needed use the merge-based one. Version-file conflicts in it follow the
 Merge down rule in `.claude/commands/bump-release.md`.
 

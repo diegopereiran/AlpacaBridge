@@ -327,7 +327,7 @@ def check_cppcheck_suppress_sync():
 # A beta VERSION spells its Debian pre-release suffix `~betaN` (5.0.0~beta1);
 # the README badge carries the same spelling. Betas count from 1, as in
 # scripts/release_tag.py (TAG_RE) and scripts/changelog_fragments.py (VERSION_RE).
-VERSION_SUFFIX = r"[0-9.]+(?:~beta[1-9][0-9]*)?"
+VERSION_SUFFIX = r"[0-9]+\.[0-9]+\.[0-9]+(?:~beta[1-9][0-9]*)?"
 VERSION_FORM_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:~beta[1-9][0-9]*)?$")
 README_BADGE_RE = re.compile(
     r"^####\s*\[(" + VERSION_SUFFIX + r")\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", re.MULTILINE)
@@ -2678,6 +2678,8 @@ def self_test():
     b0_readme = b_readme.replace("5.0.0~beta2", "5.0.0~beta0")
     check("version badge: ~beta0 is rejected even when VERSION and badge agree",
           _version_badge_findings("5.0.0~beta0\n", b0_readme) == ["VERSION (5.0.0~beta0) is not X.Y.Z or X.Y.Z~betaN (betas count from 1)"])
+    check("version badge: a badge that is not X.Y.Z is not a badge",
+          len(_version_badge_findings("4.2.0\n", b_readme.replace("5.0.0~beta2", "4.2"))) == 1)
     check("version badge: ~beta10 is accepted",
           _version_badge_findings("5.0.0~beta10\n", b_readme.replace("5.0.0~beta2", "5.0.0~beta10")) == [])
     check("updated date: a ~beta0 badge is not read as a release date",

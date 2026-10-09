@@ -19,6 +19,14 @@ esac
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 git -C "${ROOT_DIR}" archive --format=tar HEAD | tar -xf - -C "${tmp}"
+# HEAD is what CI tests; in the local pre-flight an uncommitted edit to the
+# version handling must be tested too, so overlay those files when dirty.
+for f in AlpacaCore/CMakeLists.txt AlpacaHTTP/CMakeLists.txt; do
+  if [ -n "$(git -C "${ROOT_DIR}" status --porcelain -- "${f}")" ]; then
+    echo "note: ${f} has uncommitted changes; testing the working copy"
+    cp "${ROOT_DIR}/${f}" "${tmp}/${f}"
+  fi
+done
 printf '%s\n' "${BETA}" > "${tmp}/VERSION"
 
 fail=0
