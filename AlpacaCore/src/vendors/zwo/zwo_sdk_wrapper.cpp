@@ -319,6 +319,7 @@ std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras(con
             opened = true;
             camera.serial = get_serial_number(info.camera_id);
         } catch (const std::exception&) {
+            // A body that will not open or read has no usable serial.
             camera.serial.clear();
         }
         if (opened) {
@@ -326,6 +327,7 @@ std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras(con
                 close_camera(info.camera_id);
             } catch (const std::exception&) {
                 // The serial is already read; a throwing close is not ours to report.
+                opened = false;
             }
         }
         result.push_back(std::move(camera));

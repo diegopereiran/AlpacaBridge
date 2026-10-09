@@ -4654,7 +4654,16 @@ int main() {
             const std::string vendor = c.posted.value("vendor", "");
             const std::string device_type = c.posted.value("deviceType", "");
 
-            const auto api = api_attempt(router, c.posted, c.alpaca_type);
+            auto api = api_attempt(router, c.posted, c.alpaca_type);
+            // #914: a ZWO camera without a serial gets a generated UniqueID
+            // persisted at create; check its shape, then compare the rest.
+            const auto strip_generated_unique_id = [&](nlohmann::json& config) {
+                if (vendor == "zwo" && device_type == "camera" && config.contains("uniqueId")) {
+                    EXPECT(config["uniqueId"].is_string() && config["uniqueId"].get<std::string>().rfind("ZWO_UID_", 0) == 0);
+                    config.erase("uniqueId");
+                }
+            };
+            strip_generated_unique_id(api.config);
             if (!api.ok || api.config != c.expected) {
                 std::cerr << "#647 API round trip differs for " << c.label << "\n  error:    " << api.message
                           << "\n  expected: " << c.expected.dump() << "\n  actual:   " << api.config.dump() << "\n";
@@ -4663,7 +4672,8 @@ int main() {
             EXPECT(api.config == c.expected);
             remove_device(router, vendor, device_type, number);
 
-            const auto persisted = persisted_attempt(c.posted, c.alpaca_type);
+            auto persisted = persisted_attempt(c.posted, c.alpaca_type);
+            strip_generated_unique_id(persisted.config);
             if (!persisted.listed || persisted.config != c.expected || !persisted.warnings.empty()) {
                 std::cerr << "#647 persisted round trip differs for " << c.label << "\n  listed:   " << persisted.listed
                           << "\n  expected: " << c.expected.dump() << "\n  actual:   " << persisted.config.dump()
