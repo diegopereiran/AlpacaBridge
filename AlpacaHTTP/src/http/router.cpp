@@ -8845,6 +8845,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             }
         }
 
+        // The UniqueID the stored entry already holds (supplied or read back by
+        // device number); a write-back is due only when the value differs.
+        const std::string stored_unique_id = unique_id;
+
         // One serial or UniqueID names one camera: another entry holding it
         // would bind the same body twice (or report one UniqueID twice).
         if (configured_serial.empty()) {
@@ -8857,10 +8861,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 return false;
             }
             util::log_warning(std::string("Ignoring duplicate ZWO camera ") + field + " in the stored entry");
+            // Each duplicated field is cleared and relearned on its own.
             if (duplicate_serial) {
                 configured_serial.clear();
                 binding.identity.serial.clear();
-            } else {
+            }
+            if (duplicate_unique_id) {
                 unique_id.clear();
             }
         }
@@ -8905,7 +8911,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (configured_name.empty() && !learned_name.empty()) {
                 (*learned_config)["cameraName"] = learned_name;
             }
-            if (!unique_id_supplied && !unique_id.empty()) {
+            if (!unique_id.empty() && unique_id != stored_unique_id) {
                 (*learned_config)["uniqueId"] = unique_id;
             }
         }

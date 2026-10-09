@@ -2611,13 +2611,30 @@ int main() {
                                            {"uniqueId", "ZWO_UID_00112233445566ff"}}})
                        .dump();
         }
-        alpacahttp::Router stored;
-        for (const int number : {9712, 9713, 9714}) {
-            EXPECT(!listed_entry(stored, "Camera", number).is_null());
+        std::vector<std::string> first_ids;
+        {
+            alpacahttp::Router stored;
+            for (const int number : {9713, 9714}) {
+                EXPECT(!listed_entry(stored, "Camera", number).is_null());
+                first_ids.push_back(listed_config(stored, "Camera", number).value("uniqueId", std::string()));
+            }
+            EXPECT(!listed_entry(stored, "Camera", 9712).is_null());
+            // Entries that shared a UniqueID each get their own, written back.
+            EXPECT(first_ids[0].rfind("ZWO_UID_", 0) == 0 || first_ids[1].rfind("ZWO_UID_", 0) == 0);
+            EXPECT(first_ids[0] != first_ids[1]);
+            EXPECT(first_ids[0] != "ZWO_UID_00112233445566ff" && first_ids[1] != "ZWO_UID_00112233445566ff");
         }
-        for (const int number : {9712, 9713, 9714}) {
-            remove_device(stored, "zwo", "camera", number);
+        {
+            // A second start over the same file reports the same ids.
+            alpacahttp::Router again;
+            EXPECT(listed_config(again, "Camera", 9713).value("uniqueId", std::string()) == first_ids[0]);
+            EXPECT(listed_config(again, "Camera", 9714).value("uniqueId", std::string()) == first_ids[1]);
+            for (const int number : {9712, 9713, 9714}) {
+                remove_device(again, "zwo", "camera", number);
+            }
         }
+        // Falsified by: keeping unique_id_supplied as the write-back condition (the regenerated ids
+        // are not stored and differ on the second load) or clearing only the serial of a pair.
         // Falsified by: making the Persisted arm of check_identity_field or the duplicate block return
         // false (the entry would be skipped and not listed).
     }
