@@ -134,9 +134,14 @@ that release is now the newest. Everything else, `docs/releases/` notes included
 it is (each notes file is named for its version, so none conflict). Keep the receiving side with:
 
 ```bash
-git checkout "origin/${BASE_BRANCH}" -- VERSION
-python3 -c 'import re,sys; p="README.md"; s=open(p).read(); open(p,"w").write(re.sub(r"^#### \[.*$", lambda m: sys.argv[1], s, count=1, flags=re.M))' \
-  "$(git show "origin/${BASE_BRANCH}:README.md" | grep -m1 '^#### \[')"
+KEEP="origin/${BASE_BRANCH}"
+# The promotion / hotfix-into-main exception: a newer, non-beta stable VERSION wins.
+[ "${TGT}" = main ] && python3 -c 'import sys; sys.path.insert(0, "scripts"); from changelog_fragments import is_beta, version_tuple as v; s, m = sys.argv[1:]; sys.exit(0 if not is_beta(s) and v(s) > v(m) else 1)' \
+  "$(git show "origin/stable/${SRC}:VERSION")" "$(git show origin/main:VERSION)" && KEEP="origin/stable/${SRC}"
+git checkout "${KEEP}" -- VERSION
+# Replaces the badge line, or the whole conflict hunk when both sides changed it.
+python3 -c 'import re,sys; p="README.md"; s=open(p).read(); b=r"(?:#### \[.*\n)+"; open(p,"w").write(re.sub(r"^(?:<{7} .*\n" + b + r"(?:\|{7}.*\n(?:#### \[.*\n)*)?={7}\n" + b + r">{7} .*$|#### \[.*$)", lambda m: sys.argv[1], s, count=1, flags=re.M))' \
+  "$(git show "${KEEP}:README.md" | grep -m1 '^#### \[')"
 git add VERSION README.md
 ```
 
@@ -145,6 +150,8 @@ branch's sections. Resolve any other conflict by hand, then check and push:
 
 ```bash
 python3 scripts/check_docs_drift.py          # VERSION and badge agree (check 4)
+# Stop on an unresolved conflict: check 4 reads only the first badge line, so it passes over markers.
+[ -z "$(git diff --name-only --diff-filter=U)" ] && ! git diff --cached | grep -qE '^\+(<{7}|>{7})( |$)' &&
 git commit --no-edit
 git push -u origin "${HEAD_BRANCH}"
 gh pr create --base "${BASE_BRANCH}" --head "${HEAD_BRANCH}" --title "Merge stable/${SRC} into ${BASE_BRANCH}"
