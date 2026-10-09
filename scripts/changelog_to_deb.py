@@ -17,9 +17,14 @@ Mapping:
     inline code, and links are stripped.
   - If --version names a release that has no dated section yet, the top
     stanza is synthesized from the "## [X.Y.Z] - UNRELEASED" section with
-    distribution UNRELEASED and the current time. The script warns when the
-    UNRELEASED label disagrees with --version, and when unreleased work
-    would be missing from a released version's changelog.
+    distribution UNRELEASED and the current time. A beta --version
+    (X.Y.Z~betaN, docs/beta-channel.md) is a published build instead: its
+    top stanza has distribution "beta" and is dated noon UTC on --date,
+    which is then required (build_deb.sh passes the README badge date, the
+    day the beta was cut), so two builds of one beta tag are byte-identical.
+    The script warns when the UNRELEASED label disagrees with --version,
+    and when unreleased work would be missing from a released version's
+    changelog.
   - Unreleased work also lives in changelog.d/ fragments (see
     changelog.d/README.md): their bullets are appended to the synthesized
     stanza, and count as unreleased work for the warning above.
