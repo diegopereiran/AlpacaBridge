@@ -65,13 +65,18 @@ jobs:
       - name: Verify tag matches VERSION
         env:
           TAG_VERSION: ${{ steps.tag.outputs.version }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
           set -euo pipefail
           tag_version="${TAG_VERSION}"
           file_version="$(tr -d '[:space:]' < VERSION)"
           if [ "${tag_version}" != "${file_version}" ]; then
             echo "ERROR: tag ${RELEASE_TAG} does not match VERSION file (${file_version})." >&2
-            echo "Cut the release on a PR first (VERSION, README badge, dated CHANGELOG), then tag the merge." >&2
+            if [ "${PRERELEASE}" = "true" ]; then
+              echo "Cut the beta on a PR first (VERSION ${tag_version}, README badge, docs/releases/${RELEASE_TAG#v}.md; no dated CHANGELOG section), then tag the merge on stable/X.Y." >&2
+            else
+              echo "Cut the release on a PR first (VERSION, README badge, dated CHANGELOG), then tag the merge." >&2
+            fi
             exit 1
           fi
           echo "Tag ${RELEASE_TAG} matches VERSION ${file_version}."

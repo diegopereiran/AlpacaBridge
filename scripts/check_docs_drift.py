@@ -325,14 +325,18 @@ def check_cppcheck_suppress_sync():
 # --- check 4: VERSION vs README badge ---------------------------------------
 
 # A beta VERSION spells its Debian pre-release suffix `~betaN` (5.0.0~beta1);
-# the README badge carries the same spelling.
-VERSION_SUFFIX = r"[0-9.]+(?:~beta[0-9]+)?"
+# the README badge carries the same spelling. Betas count from 1, as in
+# scripts/release_tag.py (TAG_RE) and scripts/changelog_fragments.py (VERSION_RE).
+VERSION_SUFFIX = r"[0-9.]+(?:~beta[1-9][0-9]*)?"
+VERSION_FORM_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:~beta[1-9][0-9]*)?$")
 README_BADGE_RE = re.compile(
     r"^####\s*\[(" + VERSION_SUFFIX + r")\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", re.MULTILINE)
 
 
 def _version_badge_findings(version, readme):
     """Check 4 over the VERSION text and README text. Pure, so --self-test can drive it."""
+    if not VERSION_FORM_RE.match(version.strip()):
+        return ["VERSION (%s) is not X.Y.Z or X.Y.Z~betaN (betas count from 1)" % version.strip()]
     m = README_BADGE_RE.search(readme)
     if not m:
         return ["could not find the version badge line in README.md"]
@@ -1868,7 +1872,7 @@ SUPPORTED_UPDATED_RE = re.compile(r"^## Updated (\S+)\s*$", re.MULTILINE)
 # overshoots it at once. Relative to the badge, not to today, so the check
 # stays pure.
 MAX_UPDATED_DAYS_AHEAD = 366
-README_BADGE_DATE_RE = re.compile(r"^####\s*\[[0-9.]+(?:~beta[0-9]+)?\]\s*-\s*(\S+)\s*&middot;\s*\[Changelog\]", re.MULTILINE)
+README_BADGE_DATE_RE = re.compile(r"^####\s*\[" + VERSION_SUFFIX + r"\]\s*-\s*(\S+)\s*&middot;\s*\[Changelog\]", re.MULTILINE)
 
 
 def _iso_date(text):
@@ -2671,6 +2675,13 @@ def self_test():
           _version_badge_findings("4.2.0\n", b_readme.replace("5.0.0~beta2", "4.2.0")) == [])
     check("version badge: a missing badge line is flagged",
           len(_version_badge_findings("4.2.0", "# no badge\n")) == 1)
+    b0_readme = b_readme.replace("5.0.0~beta2", "5.0.0~beta0")
+    check("version badge: ~beta0 is rejected even when VERSION and badge agree",
+          _version_badge_findings("5.0.0~beta0\n", b0_readme) == ["VERSION (5.0.0~beta0) is not X.Y.Z or X.Y.Z~betaN (betas count from 1)"])
+    check("version badge: ~beta10 is accepted",
+          _version_badge_findings("5.0.0~beta10\n", b_readme.replace("5.0.0~beta2", "5.0.0~beta10")) == [])
+    check("updated date: a ~beta0 badge is not read as a release date",
+          len(_updated_date_findings("# S\n\n## Updated 2026-11-01\n", b0_readme)) == 1)
     check("updated date: a beta badge still yields its release date",
           _updated_date_findings("# S\n\n## Updated 2026-11-01\n", b_readme) == [])
 

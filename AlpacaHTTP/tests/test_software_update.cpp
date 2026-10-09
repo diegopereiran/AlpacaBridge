@@ -408,7 +408,10 @@ int main() {
             int pairs = 0;
             std::string line;
             while (std::getline(in, line)) {
-                if (line.empty() || line[0] == '#') continue;
+                // Same rule as release_tag.py's read_cases(): strip, then skip
+                // blanks and '#' comments (CRLF and indentation included).
+                const auto first = line.find_first_not_of(" \t\r");
+                if (first == std::string::npos || line[first] == '#') continue;
                 std::istringstream fields(line);
                 std::string tag, version;
                 EXPECT(static_cast<bool>(fields >> tag >> version));
