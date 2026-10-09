@@ -354,7 +354,8 @@ if python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs
    && python3 scripts/changelog_section.py --self-test \
    && python3 scripts/changelog_fragments.py --self-test \
    && python3 scripts/changelog_fragments.py --check \
-   && python3 scripts/changelog_to_deb.py --self-test; then
+   && python3 scripts/changelog_to_deb.py --self-test \
+   && python3 scripts/release_tag.py --self-test; then
   record PASS "docs drift check"
 else
   record FAIL "docs drift check"
@@ -394,6 +395,19 @@ if ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh; then
   record PASS "build+test (vendors OFF)"
 else
   record FAIL "build+test (vendors OFF)"
+fi
+
+# --- gate 3b: configure with a beta VERSION ---------------------------------
+#
+# Mirrors the build-test CI step: a copy of the tree with VERSION 5.0.0~beta1
+# must configure, with project() on the base version and the version defines
+# on the full string (docs/beta-channel.md). Configure-only.
+
+section "Configure with a beta VERSION"
+if scripts/check_beta_configure.sh; then
+  record PASS "beta VERSION configure"
+else
+  record FAIL "beta VERSION configure"
 fi
 
 # --- gate 4: build + unit tests, all vendors -------------------------------

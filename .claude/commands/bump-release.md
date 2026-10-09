@@ -47,7 +47,9 @@ Pick the mode from the argument and the branch (ask when unclear):
 
 **Merge down** (after every beta tag, after the stable tag, after a hotfix): open a PR
 `stable/X.Y` -> `main` and merge it with the merge-commit method, never squash (`/submit-pr
---merge-down stable/X.Y`, then `/pr-checker`). `main` carrying a beta `VERSION` until then is
+--merge-down stable/X.Y`, then `/pr-checker`). That method is a repository setting, not part of
+this repo: before the first merge down confirm `gh api repos/open-astro/AlpacaBridge --jq
+.allow_merge_commit` prints `true` (it did on 2026-10-09), or the skill hard-stops at the merge. `main` carrying a beta `VERSION` until then is
 expected. The first merge down after promotion carries the dated CHANGELOG section, `VERSION`, badge
 and the fragment deletions. Conflict rule when the receiving branch is not the one the version came
 from (a hotfix merged into `main` or a newer `stable/X.(Y+1)`): the receiving branch keeps its own
@@ -228,7 +230,8 @@ its "Build release notes" step; it stops before publishing anything:
 
 ```bash
 gh workflow run release.yml --ref stable/X.Y -f tag=vX.Y.0-beta.N
-gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+sleep 10   # the new run is not listed at once; the filters keep an older tag run out
+gh run watch "$(gh run list --workflow=release.yml --event workflow_dispatch --branch stable/X.Y --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 ```
 
 Then wait for the `Release` workflow (it is text-only and finishes in under a minute):

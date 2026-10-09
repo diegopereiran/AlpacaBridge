@@ -154,13 +154,13 @@ jobs:
           PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
           set -euo pipefail
-          flag=()
-          if [ "${PRERELEASE}" = "true" ]; then flag=(--prerelease); fi
+          # Explicit on both paths: a re-run of a stable tag clears a pre-release
+          # mark that was set by hand, instead of leaving it as it was.
           if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "Release ${RELEASE_TAG} already exists; updating notes."
             gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
-              --title "${RELEASE_TAG}" --notes-file release-notes.md "${flag[@]}"
+              --title "${RELEASE_TAG}" --notes-file release-notes.md --prerelease="${PRERELEASE}"
           else
             gh release create "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
-              --title "${RELEASE_TAG}" --notes-file release-notes.md --verify-tag "${flag[@]}"
+              --title "${RELEASE_TAG}" --notes-file release-notes.md --verify-tag --prerelease="${PRERELEASE}"
           fi

@@ -717,6 +717,12 @@ jobs:
         # this script; nothing else exercises that path.
         run: python3 scripts/changelog_to_deb.py --self-test
 
+      - name: Self-test the release tag mapping
+        # release.yml runs this too, but only on a tag push or a dry run; here
+        # a broken tag/VERSION mapping (scripts/release_tag_cases.txt) fails
+        # the PR that caused it instead of the first beta tag.
+        run: python3 scripts/release_tag.py --self-test
+
   connect-error-hook:
     name: Connect-error hook
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
