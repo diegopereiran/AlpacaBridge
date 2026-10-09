@@ -2591,13 +2591,24 @@ int main() {
         std::filesystem::create_directories(file.parent_path());
         {
             std::ofstream out(file, std::ios::trunc);
-            out << nlohmann::json::array(
-                       {{{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9712}, {"cameraIndex", 0},
-                         {"serialNumber", "not-hex!"}, {"cameraName", "ZWO ASI120MM Mini"}},
-                        {{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9713}, {"cameraIndex", 1},
-                         {"serialNumber", "0c190e111d020900"}, {"uniqueId", "ZWO_UID_00112233445566ff"}},
-                        {{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9714}, {"cameraIndex", 2},
-                         {"serialNumber", "0c190e111d020900"}, {"uniqueId", "ZWO_UID_00112233445566ff"}}})
+            out << nlohmann::json::array({{{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9712},
+                                           {"cameraIndex", 0},
+                                           {"serialNumber", "not-hex!"},
+                                           {"cameraName", "ZWO ASI120MM Mini"}},
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9713},
+                                           {"cameraIndex", 1},
+                                           {"serialNumber", "0c190e111d020900"},
+                                           {"uniqueId", "ZWO_UID_00112233445566ff"}},
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9714},
+                                           {"cameraIndex", 2},
+                                           {"serialNumber", "0c190e111d020900"},
+                                           {"uniqueId", "ZWO_UID_00112233445566ff"}}})
                        .dump();
         }
         alpacahttp::Router stored;
