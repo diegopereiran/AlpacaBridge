@@ -2626,6 +2626,9 @@ int main() {
             EXPECT(first_ids[0] != "ZWO_UID_00112233445566ff");
             EXPECT(first_ids[1] == "ZWO_UID_00112233445566ff");
             EXPECT(first_ids[0] != first_ids[1]);
+            // Two stored entries sharing a serial: the first drops it, the second keeps it.
+            EXPECT(listed_config(stored, "Camera", 9713).value("serialNumber", std::string()).empty());
+            EXPECT(listed_config(stored, "Camera", 9714).value("serialNumber", std::string()) == "0c190e111d020900");
         }
         {
             // A second start over the same file reports the same ids.

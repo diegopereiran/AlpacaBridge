@@ -8817,6 +8817,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         binding.identity.camera_name = configured_name;
         bool duplicate_serial = false;
         bool duplicate_unique_id = false;
+        bool cleared_duplicate_serial = false;
         {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             for (const auto& other : persisted_devices_) {
@@ -8862,6 +8863,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (duplicate_serial) {
                 configured_serial.clear();
                 binding.identity.serial.clear();
+                cleared_duplicate_serial = true;
             }
             if (duplicate_unique_id) {
                 unique_id.clear();
@@ -8904,6 +8906,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         if (learned_config != nullptr) {
             if (configured_serial.empty() && !learned_serial.empty()) {
                 (*learned_config)["serialNumber"] = learned_serial;
+            } else if (cleared_duplicate_serial) {
+                // Persist the clear for this entry, so the entry processed
+                // after it no longer sees a duplicate and keeps the serial.
+                (*learned_config)["serialNumber"] = std::string();
             }
             if (configured_name.empty() && !learned_name.empty()) {
                 (*learned_config)["cameraName"] = learned_name;
