@@ -53,9 +53,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
         with:
           persist-credentials: false
-          # Full history: the branch check below asks which branches contain
-          # the tagged commit, which a depth-1 checkout cannot answer.
-          fetch-depth: 0
+          # Depth 1: only the beta step needs history, and it deepens the
+          # checkout itself, for its own stable/X.Y branch only.
 
       - name: Map tag to VERSION
         id: tag
@@ -65,29 +64,38 @@ jobs:
           # version=<VERSION spelling, ~betaN for a beta>, prerelease=true|false, notes_name=<tag without v>
           python3 scripts/release_tag.py "${RELEASE_TAG}" | tee -a "${GITHUB_OUTPUT}"
 
-      - name: Require a beta tag on a stable branch
-        # Beta tags only. After a merge down, main carries the beta VERSION and
-        # notes file too, so the VERSION check alone would let a beta tag
-        # pushed on main publish main's unreleased work as a beta
-        # (docs/beta-channel.md: a beta is always tagged on stable/X.Y). A
-        # stable tag is not branch-checked: it is gated by its bare VERSION and
-        # dated CHANGELOG section, which only /bump-release writes, and a
-        # plain release from main stays possible when the maintainer asks for
-        # one. A dry run is checked the same way as the tag it names.
+      - name: Require a beta tag on its own stable branch
+        # Beta tags only: vX.Y.Z-beta.N must sit on stable/X.Y for its own X.Y
+        # (docs/beta-channel.md). Any stable/* is not enough: a newer stable
+        # branch cut from main contains all of main's older history, so a 5.0
+        # beta tag on a main commit would pass as "on stable/5.1" and publish
+        # main's unreleased work. A stable tag is not branch-checked: it is
+        # gated by its bare VERSION and dated CHANGELOG section, which only
+        # /bump-release writes, and a plain release from main stays possible
+        # when the maintainer asks for one. A dry run is checked the same way
+        # as the tag it names.
         if: steps.tag.outputs.prerelease == 'true'
+        env:
+          TAG_VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -euo pipefail
-          if ! git fetch --no-tags --quiet origin '+refs/heads/stable/*:refs/remotes/origin/stable/*'; then
-            echo "::warning::could not fetch refs/heads/stable/*; using the refs the checkout already has"
-          fi
-          on_stable="$(git branch -r --contains HEAD --list 'origin/stable/*' | sed 's/^[ *]*//' || true)"
-          if [ -z "${on_stable}" ]; then
-            echo "ERROR: beta tag ${RELEASE_TAG} (${GITHUB_SHA}) is not on any stable/X.Y branch." >&2
-            echo "Tag the merge commit on stable/X.Y (docs/beta-channel.md); a beta never sits on main." >&2
-            git branch -r --contains HEAD >&2 || true
+          base="${TAG_VERSION%%~*}"
+          branch="stable/${base%.*}"
+          # --unshallow: the depth-1 checkout has no history to compare, and
+          # this fetches the full history of this one branch only (git refuses
+          # the flag on a complete clone, so it is passed only when shallow).
+          deepen=()
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then deepen=(--unshallow); fi
+          if ! git fetch --no-tags --quiet "${deepen[@]}" origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"; then
+            echo "ERROR: could not fetch ${branch}; beta tag ${RELEASE_TAG} must be cut from it." >&2
             exit 1
           fi
-          echo "${RELEASE_TAG} is on: ${on_stable}"
+          if ! git merge-base --is-ancestor HEAD "refs/remotes/origin/${branch}"; then
+            echo "ERROR: beta tag ${RELEASE_TAG} ($(git rev-parse HEAD)) is not on ${branch}." >&2
+            echo "Tag the merge commit on ${branch} (docs/beta-channel.md); a beta never sits on main or another stable branch." >&2
+            exit 1
+          fi
+          echo "${RELEASE_TAG} is on ${branch}."
 
       - name: Verify tag matches VERSION
         env:

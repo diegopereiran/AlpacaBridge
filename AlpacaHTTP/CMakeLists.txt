@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.15)
 
-# Read version from workspace VERSION file
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" ALPACABRIDGE_VERSION LIMIT_COUNT 1)
-string(STRIP "${ALPACABRIDGE_VERSION}" ALPACABRIDGE_VERSION)
-# project() takes integer components only; a beta VERSION (5.0.0~beta1) keeps its
-# full string for the version defines below.
-string(REGEX REPLACE "~.*$" "" ALPACABRIDGE_BASE_VERSION "${ALPACABRIDGE_VERSION}")
+# Read version from workspace VERSION file: project() takes the numeric part
+# (ALPACABRIDGE_BASE_VERSION), the version defines below keep the full string
+# (ALPACABRIDGE_VERSION, 5.0.0~beta1 for a beta).
+include("${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/cmake/AlpacaBridgeVersion.cmake")
+alpacabridge_read_version("${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
 
 project(AlpacaHTTP VERSION ${ALPACABRIDGE_BASE_VERSION} LANGUAGES CXX)
 

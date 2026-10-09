@@ -98,10 +98,11 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
         run: ./run_all_tests.sh
 
-      - name: Configure with a beta VERSION
-        # Pins the ~betaN split in the two CMakeLists (docs/beta-channel.md)
-        # whatever the checkout's VERSION is: the script configures a copy of
-        # the tree with VERSION 5.0.0~beta1 and compiles nothing.
+      - name: Check the beta VERSION split
+        # Pins the ~betaN split both CMakeLists share
+        # (AlpacaCore/cmake/AlpacaBridgeVersion.cmake, docs/beta-channel.md)
+        # whatever the checkout's VERSION is: cmake -P over sample values, no
+        # configure, no compile.
         run: scripts/check_beta_configure.sh
 
   build-vendors:
@@ -722,6 +723,11 @@ jobs:
         # a broken tag/VERSION mapping (scripts/release_tag_cases.txt) fails
         # the PR that caused it instead of the first beta tag.
         run: python3 scripts/release_tag.py --self-test
+
+      - name: Self-test the merge-down exemption
+        # pr-body.yml runs it on every PR as well; here a change to it is
+        # tested by the PR that makes it, whatever that PR's head is named.
+        run: python3 scripts/merge_down.py --self-test
 
   connect-error-hook:
     name: Connect-error hook

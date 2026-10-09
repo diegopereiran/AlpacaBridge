@@ -31,9 +31,17 @@ SUMMARY_HEADING_RE = re.compile(
     r"^<summary><strong>\[([^\]]+)\](?: - (\d{4}-\d{2}-\d{2}|UNRELEASED))?\s*</strong></summary>\s*$"
 )
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
-BARE_RE = re.compile(r"^\d+\.\d+\.\d+$")  # a dated CHANGELOG heading is always a bare X.Y.Z
-# A VERSION file may carry the Debian pre-release suffix of a beta (5.0.0~beta2).
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:~beta[1-9]\d*)?$")  # betas count from 1, as release_tag.py's TAG_RE
+# The one spelling of a VERSION (docs/beta-channel.md). A VERSION file may carry
+# the Debian pre-release suffix of a beta (5.0.0~beta2); betas count from 1, as
+# release_tag.py's TAG_RE. The patterns are plain strings with no capturing
+# group, so other scripts can embed them (check_docs_drift.py's badge regexes)
+# without shifting their own group numbers; shell scripts ask --is-beta.
+BARE_PATTERN = r"\d+\.\d+\.\d+"
+BETA_SUFFIX_PATTERN = r"~beta[1-9]\d*"
+VERSION_PATTERN = BARE_PATTERN + "(?:" + BETA_SUFFIX_PATTERN + ")?"
+BARE_RE = re.compile("^" + BARE_PATTERN + "$")  # a dated CHANGELOG heading is always a bare X.Y.Z
+BETA_RE = re.compile("^" + BARE_PATTERN + BETA_SUFFIX_PATTERN + "$")
+VERSION_RE = re.compile("^" + VERSION_PATTERN + "$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CATEGORY_RE = re.compile(r"^### (.+?)\s*$")
 BASE_CATEGORIES = [
@@ -202,6 +210,11 @@ def base_version(v: str) -> str:
     return v.split("~", 1)[0]
 
 
+def is_beta(v: str) -> bool:
+    """True only for the published pre-release form X.Y.Z~betaN (not ~rc1, ~beta0, ~beta)."""
+    return BETA_RE.match(v) is not None
+
+
 def version_tuple(v: str) -> tuple:
     return tuple(int(x) for x in base_version(v).split("."))
 
@@ -279,11 +292,13 @@ def collect(lines: list[str], directory: Path) -> tuple[Entries, tuple[int, int,
 def beta_bump_warning(current: str | None, branch: str | None) -> str | None:
     """Why a --bump with a beta VERSION on a branch other than stable/X.Y is suspect.
 
-    After a merge down, main carries the beta VERSION, so a bump there proposes
-    the version the stable branch already owns (docs/beta-channel.md). None when
-    the VERSION is not a beta, the branch is a stable branch, or it is unknown.
+    Only stable/X.Y (and the release/ PR branch cut from it) carries a beta
+    VERSION: a merge down keeps the receiving branch's VERSION and badge
+    (docs/beta-channel.md), so a beta VERSION anywhere else means one was not
+    kept, and a bump there proposes the version the stable branch owns. None
+    when the VERSION is not a beta, the branch is a stable branch, or it is unknown.
     """
-    if (not current or base_version(current) == current or branch in (None, "HEAD")
+    if (not current or not is_beta(current) or branch in (None, "HEAD")
             or branch.startswith(("stable/", "release/"))):
         return None  # "HEAD": a detached checkout (CI); release/: the PR branch /bump-release cuts
     return ("WARNING: VERSION %s is a beta but this is branch %r, not stable/X.Y: the proposed version belongs "
@@ -304,7 +319,12 @@ def default_version_floor(changelog: Path) -> str | None:
     if not version_file.is_file():
         return None
     text = version_file.read_text(encoding="utf-8").strip()
-    return text if VERSION_RE.match(text) else None
+    if not VERSION_RE.match(text):
+        # Say so: a silently dropped floor proposes a lower version than the one VERSION names.
+        print("WARNING: %s holds %r, which is not X.Y.Z or X.Y.Z~betaN; it is not used as the version floor"
+              % (version_file, text), file=sys.stderr)
+        return None
+    return text
 
 
 def propose_bump(lines: list[str], directory: Path, current: str | None = None) -> str:
@@ -553,6 +573,11 @@ def self_test() -> int:
                and not VERSION_RE.match("5.0.0~beta0") and not VERSION_RE.match("5.0.0~beta01"),
                "VERSION_RE does not accept exactly X.Y.Z[~betaN]")
         expect(base_version("5.0.0~beta2") == "5.0.0" and base_version("4.2.0") == "4.2.0", "base_version wrong")
+        expect(is_beta("5.0.0~beta2") and not is_beta("5.0.0") and not is_beta("5.0.0~rc1")
+               and not is_beta("5.0.0~beta0") and not is_beta("5.0.0~beta"), "is_beta wrong")
+        # Embeddable: no capturing group, so a caller's group numbers cannot shift.
+        expect(re.compile(VERSION_PATTERN).groups == 0 and re.compile(BETA_SUFFIX_PATTERN).groups == 0,
+               "VERSION_PATTERN gained a capturing group")
         expect(propose_bump(FIXTURE.split("\n"), d, "1.5.0~beta2") == "1.5.0", "--bump on a beta VERSION is not its base")
         expect(propose_bump(FIXTURE.split("\n"), d, "1.0.0~beta1") == "1.3.0", "a lower beta base lowered the bump")
         expect(beta_bump_warning("5.0.0~beta2", "main") is not None
@@ -582,6 +607,13 @@ def self_test() -> int:
         expect(default_version_floor(root / "CHANGELOG.md") == "1.5.0~beta2", "VERSION beside the changelog not read")
         (root / "VERSION").unlink()
         expect(default_version_floor(root / "CHANGELOG.md") is None, "a missing VERSION file is not None")
+        (root / "VERSION").write_text("1.5.0~rc1\n", encoding="utf-8")
+        warned = io.StringIO()
+        with contextlib.redirect_stderr(warned):
+            floor_rc = default_version_floor(root / "CHANGELOG.md")
+        expect(floor_rc is None and "not used as the version floor" in warned.getvalue(),
+               "an unparseable VERSION was dropped as the floor without a warning")
+        (root / "VERSION").unlink()
 
         # end to end through the CLI, then changelog_section.py reads the result
         cl = root / "CHANGELOG.md"
@@ -596,6 +628,10 @@ def self_test() -> int:
             )
             expect(rej.returncode != 0 and "is not X.Y.Z or X.Y.Z~betaN" in rej.stderr,
                    "%s --version %s was not rejected" % (mode, bad))
+        for v, rc in (("5.0.0~beta2", 0), ("5.0.0", 1), ("5.0.0~beta0", 2), ("5.0.0~rc1", 2)):
+            got = subprocess.run([sys.executable, str(here / "changelog_fragments.py"), "--is-beta", v],
+                                 capture_output=True, text=True).returncode
+            expect(got == rc, "--is-beta %s exited %d, not %d" % (v, got, rc))
         ok = subprocess.run(
             [sys.executable, str(here / "changelog_fragments.py"), "--changelog", str(cl),
              "--fragments", str(d), "--bump", "--version", "1.5.0~beta2"],
@@ -664,6 +700,11 @@ def main() -> int:
         metavar="X.Y.Z",
         help="write the dated X.Y.Z section to the changelog and delete the fragments (needs --date)",
     )
+    mode.add_argument(
+        "--is-beta",
+        metavar="VERSION",
+        help="exit 0 if VERSION is X.Y.Z~betaN, 1 if it is a bare X.Y.Z, 2 otherwise (for shell scripts)",
+    )
     mode.add_argument("--self-test", action="store_true", help="run the script's built-in tests")
     opts.add_argument(
         "--changelog", default="CHANGELOG.md", type=Path, metavar="PATH", help="changelog file (default: %(default)s)"
@@ -680,6 +721,13 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
+    if args.is_beta is not None:
+        if is_beta(args.is_beta):
+            return 0
+        if BARE_RE.match(args.is_beta):
+            return 1
+        print("ERROR: %r is not X.Y.Z or X.Y.Z~betaN" % args.is_beta, file=sys.stderr)
+        return 2
     if args.check:
         return check(args.fragments)
 

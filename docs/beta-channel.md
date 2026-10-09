@@ -56,24 +56,30 @@ newest build of either kind.
    first and cherry-picked. A fix for code the branch does not have goes to `main` as usual.
 4. **Re-beta and merge down.** Each batch of fixes becomes the next beta tag. After every beta
    tag, one PR merges `stable/X.Y` into `main` with the merge-commit method (never squash). Its
-   head is a short-lived `merge-down/X.Y` branch cut from `stable/X.Y`, never the stable branch
-   itself (the head of a merged PR is deleted, and updating a PR head merges `main` into it); a
-   ruleset protecting `stable/**` against deletion and force-pushes is required first.
-   Between merge downs `main` carries the beta `VERSION` (for example `5.0.0~beta2`), its README
-   badge and `docs/releases/5.0.0-beta.N.md`. That is expected, not drift.
+   head is a short-lived `merge-down/X.Y-to-main` branch cut from `stable/X.Y`, never the stable
+   branch itself (the head of a merged PR is deleted, and updating a PR head merges `main` into
+   it); a ruleset protecting `stable/**` against deletion and force-pushes is required first.
+   **Version files:** every merge down keeps the receiving branch's `VERSION` and README badge, so
+   `main` never carries a beta `VERSION` and a dev build from `main` never reports the same version
+   as a published beta. The one exception is a merge into `main` that brings a stable release
+   newer than `main`'s `VERSION` (step 6, or a hotfix before the next promotion): that release is
+   now the newest, so its `VERSION` and badge come across. `docs/releases/` notes and code come
+   across as they are. `/submit-pr --merge-down` resolves this in the head before the PR opens.
 5. **Promote.** `/bump-release` runs on `stable/X.Y`: `VERSION` becomes `X.Y.0`, the fragments are
    assembled into the dated section, tag `vX.Y.0`. The package goes to both apt components.
 6. **Final merge down.** Merge `stable/X.Y` into `main` once more. It carries the dated CHANGELOG
-   section, the `VERSION` and badge bump, and the deletion of the consumed fragments. If `main`
-   touched the same lines as a branch fix since the last merge down, the maintainer resolves the
-   conflict by hand; merging after every beta keeps these small.
+   section, the `VERSION` and badge bump (the exception above), and the deletion of the consumed
+   fragments. If `main` touched the same lines as a branch fix since the last merge down, the
+   maintainer resolves the conflict by hand; merging after every beta keeps these small.
 7. **Hotfix.** A stable regression becomes `X.Y.1` on the same branch: fixed on `stable/X.Y`,
    tagged, then merged down. No beta round is needed unless the maintainer wants one. Once
-   `stable/X.(Y+1)` exists, merge the hotfix down into both it and `main`. Those merges conflict on
-   the version files; the rule is fixed: the receiving branch keeps its own `VERSION`, README
-   badge and `docs/releases/` files; in `CHANGELOG.md` the dated `## [X.Y.1]` section is inserted
-   in version order below the receiving branch's sections; only the code fix and its consumed
-   fragment come across as they are.
+   `stable/X.(Y+1)` exists, merge the hotfix down into both it and `main`, as two PRs with two
+   heads (`merge-down/X.Y-to-main` and `merge-down/X.Y-to-X.(Y+1)`; `/submit-pr --merge-down
+   stable/X.Y --into stable/X.(Y+1)` for the second), so merging one never deletes the other's
+   head. The version-file rule above applies to both; in `CHANGELOG.md` the dated `## [X.Y.1]`
+   section is inserted in version order below the receiving branch's sections; the code fix and
+   its consumed fragment come across as they are. The falsified-by gate exempts both PRs
+   (`scripts/merge_down.py`).
 8. **Retire.** `stable/X.Y` stays maintained for hotfixes while the next branch is in beta, and
    retires when the next minor or major is promoted, not when its branch is cut. A retired branch
    stays for history and gets no further tags.

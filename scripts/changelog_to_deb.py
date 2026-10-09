@@ -50,10 +50,10 @@ SUMMARY_HEADING_RE = re.compile(
 )
 CATEGORY_RE = re.compile(r"^### (.+?)\s*$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+[A-Za-z0-9.~+-]*$")
-# The one published pre-release form (docs/beta-channel.md), the same spelling
-# build_deb.sh keys its --date on. Any other ~suffix (an ~rc1 or ~dev1 test
-# build) is unreleased work and gets the UNRELEASED stanza as before.
-BETA_RE = re.compile(r"^\d+\.\d+\.\d+~beta[1-9]\d*$")
+# The one published pre-release form (docs/beta-channel.md) is owned by
+# changelog_fragments.is_beta(), which build_deb.sh also asks (--is-beta). Any
+# other ~suffix (an ~rc1 or ~dev1 test build) is unreleased work and gets the
+# UNRELEASED stanza as before.
 
 # Order matters: links first (their text may contain emphasis), then
 # emphasis/code markers, innermost first.
@@ -239,6 +239,9 @@ def self_test():
     # Only ~betaN is a published pre-release; another ~suffix is unreleased work, no --date needed.
     text, err = run("1.1.0~rc1", released, {"x.md": fragment})
     check("~rc1 is not a beta stanza", text.startswith("pkg (1.1.0~rc1) UNRELEASED; urgency=low") and err == "")
+    # Only a beta matches its base label; an ~rc1 under [1.1.0] still warns.
+    _, err = run("1.1.0~rc1", legacy, {})
+    check("~rc1 under its base label: warning", "is labeled [1.1.0]" in err)
     # An impossible date is refused cleanly, not with a traceback.
     _, err = run("1.1.0~beta1", released, {"x.md": fragment}, date="2026-02-30", expect_rc=2)
     check("impossible --date is refused", "not a real date" in err)
@@ -297,8 +300,10 @@ def main():
             )
     else:
         bullets = (unreleased["bullets"] if unreleased else []) + frag_bullets
-        # A beta (5.0.0~beta1) matches the label of its base version ([5.0.0]).
-        base = changelog_fragments.base_version(args.version)
+        # A beta (5.0.0~beta1) matches the label of its base version ([5.0.0]);
+        # any other ~suffix (~rc1) must match the label exactly, as before.
+        is_beta = changelog_fragments.is_beta(args.version)
+        base = changelog_fragments.base_version(args.version) if is_beta else args.version
         if unreleased and VERSION_RE.match(unreleased["label"]) and unreleased["label"] != base:
             print(
                 "warning: VERSION is %s but CHANGELOG.md's unreleased section "
@@ -306,7 +311,7 @@ def main():
                 "before release." % (args.version, unreleased["label"], args.version),
                 file=sys.stderr,
             )
-        if BETA_RE.match(args.version):
+        if is_beta:
             # A beta is a published build, not unreleased work: a release stanza
             # in the "beta" distribution, dated like a release (noon UTC on the
             # cut date) so two builds of the same tag are byte-identical.

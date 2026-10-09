@@ -115,9 +115,11 @@ python3 scripts/changelog_fragments.py --self-test
 ```
 
 Without `--version`, `--bump` and `--preview` read the `VERSION` file beside the changelog as the
-floor, so the two always name the same version. A beta `VERSION` left on `main` by a merge down
-therefore raises the proposal to its base (`5.0.0~beta2` floors it at `5.0.0`) even when the
-fragments alone would justify less; that is the version the stable branch already owns.
+floor, so the two always name the same version. On `stable/X.Y` a beta `VERSION` therefore raises
+the proposal to its base (`5.0.0~beta2` floors it at `5.0.0`) even when the fragments alone would
+justify less; that is the version the branch is heading for. A merge down keeps the receiving
+branch's `VERSION`, so `main` never holds a beta, and `--bump` warns if it finds one off a stable
+branch. A `VERSION` that is neither `X.Y.Z` nor `X.Y.Z~betaN` is reported and not used as a floor.
 
 **Beta and stable branches.** A fix PR against `stable/X.Y` adds its fragment as on `main`. A beta
 (`VERSION` `X.Y.0~betaN`) does not consume fragments: its notes come from `--preview --version`

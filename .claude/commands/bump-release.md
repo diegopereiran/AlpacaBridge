@@ -45,25 +45,28 @@ Pick the mode from the argument and the branch (ask when unclear):
   days since the last beta tag with no open regression, a full maintainer rig session on the final
   beta, ConformU re-run for every driver touched in the beta. A hotfix needs no beta round.
 - **Plain release from `main`** is no longer the normal path; use it only when the maintainer says so
-  (a stable tag is not branch-checked by `release.yml`; a beta tag must sit on `stable/X.Y` or the
+  (a stable tag is not branch-checked by `release.yml`; a beta tag must sit on its own `stable/X.Y` or the
   workflow refuses it).
 
-**Merge down** (after every beta tag, after the stable tag, after a hotfix): open a PR
-`stable/X.Y` -> `main` from a short-lived `merge-down/X.Y` head (never `stable/X.Y` itself) and
-merge it with the merge-commit method, never squash (`/submit-pr --merge-down stable/X.Y`, then
-`/pr-checker`). Two repository settings decide whether that is safe, and neither is in this repo:
-before the first merge down confirm `gh api repos/open-astro/AlpacaBridge --jq .allow_merge_commit`
-prints `true` (it did on 2026-10-09 NZ) and that an active ruleset covers `refs/heads/stable/**`
-with `deletion` and `non_fast_forward` rules (the `/submit-pr` merge-down section has the
-commands; on 2026-10-09 NZ none did and `delete_branch_on_merge` was on). Without the ruleset,
-stop and ask the maintainer to add it. `main` carrying a beta `VERSION` until then is
-expected. The first merge down after promotion carries the dated CHANGELOG section, `VERSION`, badge
-and the fragment deletions. Conflict rule when the receiving branch is not the one the version came
-from (a hotfix merged into `main` or a newer `stable/X.(Y+1)`): the receiving branch keeps its own
-`VERSION`, README badge and `docs/releases/` files; the dated `## [X.Y.Z]` section is inserted in
-version order below the receiving branch's sections; only the code fix and its consumed fragment
-come across unchanged. After the final merge down of a promotion, the previous `stable/` branch
-retires (no further tags); it is not retired at the cut. Keep `release/X.Y.Z` as the short-lived
+**Merge down** (after every beta tag, after the stable tag, after a hotfix): open a PR from
+`stable/X.Y` into `main` (and, for a hotfix while `stable/X.Z` is in beta, a second one into
+`stable/X.Z`), each from its own short-lived `merge-down/X.Y-to-<main|X.Z>` head (never
+`stable/X.Y` itself), and merge it with the merge-commit method, never squash
+(`/submit-pr --merge-down stable/X.Y [--into stable/X.Z]`, then `/pr-checker`). Two repository
+settings decide whether that is safe, and neither is in this repo: before the first merge down
+confirm `gh api repos/open-astro/AlpacaBridge --jq .allow_merge_commit` prints `true` (it did on
+2026-10-09 NZ) and that an active ruleset covers `refs/heads/stable/**` with `deletion` and
+`non_fast_forward` rules (the `/submit-pr` merge-down section has the commands; on 2026-10-09 NZ
+none did and `delete_branch_on_merge` was on). Without the ruleset, stop and ask the maintainer to
+add it. **Version files:** the receiving branch keeps its own `VERSION` and README badge, so `main`
+never carries a beta `VERSION` and dev builds from `main` never report one; the exception is a
+merge into `main` that brings a stable release newer than `main`'s `VERSION` (the promotion, or a
+hotfix before the next promotion), which takes the stable side's `VERSION` and badge. The first
+merge down after promotion therefore carries the dated CHANGELOG section, `VERSION`, badge and the
+fragment deletions. A dated `## [X.Y.Z]` section is inserted in version order below the receiving
+branch's sections; `docs/releases/` notes and the code come across as they are. After the final
+merge down of a promotion, the previous `stable/` branch retires (no further tags); it is not
+retired at the cut. Keep `release/X.Y.Z` as the short-lived
 release PR branch name; never name a long-lived branch `release/...`.
 
 ## Step 1 — Preconditions

@@ -35,15 +35,22 @@ CASES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "release_t
 
 
 def read_cases(path=CASES_FILE):
-    """(tag, VERSION) pairs from release_tag_cases.txt, comments and blanks skipped."""
+    """(tag, VERSION) pairs from release_tag_cases.txt.
+
+    The same rule as the C++ reader in AlpacaHTTP/tests/test_software_update.cpp:
+    a '#' starts a comment (whole line or trailing), blank lines are skipped, and
+    every other line holds exactly two fields. Anything else raises ValueError
+    naming the line, never a bare unpack traceback.
+    """
     pairs = []
     with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
+        for n, line in enumerate(f, 1):
+            fields = line.split("#", 1)[0].split()
+            if not fields:
                 continue
-            tag, version = line.split()
-            pairs.append((tag, version))
+            if len(fields) != 2:
+                raise ValueError("%s:%d: expected '<tag> <VERSION>', got %r" % (path, n, line.rstrip("\n")))
+            pairs.append((fields[0], fields[1]))
     return pairs
 
 
@@ -59,11 +66,34 @@ def self_test():
     check("beta 10", map_tag("v5.0.0-beta.10")[0] == "5.0.0~beta10")
     # The shared pairs also drive AlpacaHTTP/tests/test_software_update.cpp
     # (the update card maps a VERSION back to its tag spelling).
-    pairs = read_cases()
+    try:
+        pairs = read_cases()
+    except ValueError as e:
+        failures.append(str(e))
+        pairs = []
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        sample = os.path.join(tmp, "cases.txt")
+        with open(sample, "w", encoding="utf-8") as f:
+            f.write("# c\n\nv5.0.0 5.0.0  # trailing comment\n  v5.0.0-beta.1 5.0.0~beta1\r\n")
+        check("trailing comments and CRLF are read", read_cases(sample) == [("v5.0.0", "5.0.0"), ("v5.0.0-beta.1", "5.0.0~beta1")])
+        with open(sample, "w", encoding="utf-8") as f:
+            f.write("v5.0.0 5.0.0 extra\n")
+        try:
+            read_cases(sample)
+            failures.append("a three-field line was accepted")
+        except ValueError as e:
+            check("a three-field line names its line", ":1:" in str(e))
     check("release_tag_cases.txt has a beta and a stable pair",
           any("~" in v for _, v in pairs) and any("~" not in v for _, v in pairs))
+    # The tag side is spelled here, the VERSION side in changelog_fragments.py:
+    # every mapped version must be what that module calls a VERSION and a beta.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import changelog_fragments
     for tag, version in pairs:
         mapped, pre, notes = map_tag(tag)
+        check("case %s is a VERSION to changelog_fragments" % tag, changelog_fragments.VERSION_RE.match(mapped) is not None)
+        check("case %s beta agrees with changelog_fragments.is_beta" % tag, changelog_fragments.is_beta(mapped) == pre)
         check("case %s -> %s" % (tag, version), mapped == version)
         check("case %s notes name" % tag, notes == tag[1:])
         check("case %s prerelease flag" % tag, pre == ("~" in version))

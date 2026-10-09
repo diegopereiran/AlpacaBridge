@@ -408,13 +408,15 @@ int main() {
             int pairs = 0;
             std::string line;
             while (std::getline(in, line)) {
-                // Same rule as release_tag.py's read_cases(): strip, then skip
-                // blanks and '#' comments (CRLF and indentation included).
-                const auto first = line.find_first_not_of(" \t\r");
-                if (first == std::string::npos || line[first] == '#') continue;
+                // Same rule as release_tag.py's read_cases(): a '#' starts a
+                // comment (whole line or trailing), blanks are skipped, and
+                // every other line holds exactly two fields.
+                line = line.substr(0, line.find('#'));
                 std::istringstream fields(line);
-                std::string tag, version;
-                EXPECT(static_cast<bool>(fields >> tag >> version));
+                std::string tag, version, extra;
+                if (!(fields >> tag)) continue;
+                EXPECT(static_cast<bool>(fields >> version));
+                EXPECT(!(fields >> extra));
                 EXPECT(expand_version_template("v{version}", version) == tag);
                 ++pairs;
             }

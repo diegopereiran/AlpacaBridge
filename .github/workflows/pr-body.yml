@@ -21,13 +21,6 @@ permissions:
 jobs:
   falsified-by:
     name: falsified-by (PR body)
-    # A merge-down PR (head merge-down/X.Y, docs/beta-channel.md) carries the
-    # fix PRs already merged into stable/X.Y; each of those PRs passed this
-    # check with its own Falsified-by lines, and against main's merge-base
-    # every one of their test cases would read as new again. Only a real
-    # merge down counts: a head in this repository (a fork branch with that
-    # name is not one) and the base main.
-    if: ${{ !(startsWith(github.head_ref, 'merge-down/') && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
@@ -37,7 +30,31 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Merge-down exemption
+        id: merge_down
+        # A merge down (docs/beta-channel.md) carries test cases already listed
+        # on the fix PRs that landed them on stable/X.Y; against this base every
+        # one reads as new again. scripts/merge_down.py exempts only the real
+        # shape: a merge-down/X.Y-to-<target> head in this repository, the base
+        # it names (main or stable/X.Z), and no commit that is not already on
+        # stable/X.Y. The head name is untrusted text: env only.
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          python3 scripts/merge_down.py --self-test
+          if python3 scripts/merge_down.py --exempt --head-ref "${HEAD_REF}" --base-ref "${BASE_REF}" \
+               --base-rev "${BASE_SHA}" --head-rev "${HEAD_SHA}" --same-repo "${SAME_REPO}"; then
+            echo "exempt=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exempt=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Check Falsified by lines
+        if: steps.merge_down.outputs.exempt != 'true'
         # The PR body is untrusted text (fork PRs): it reaches the script only
         # through the environment, never through a `${{ }}` expansion in `run:`.
         env:
