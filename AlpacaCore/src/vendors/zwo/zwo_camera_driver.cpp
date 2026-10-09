@@ -1280,7 +1280,8 @@ private:
     }
 
     int resolve_camera_id_locked() {
-        const auto found = ZWOSDKWrapper::instance().enumerate_identified_cameras(trim_zwo_name(binding_.identity.camera_name));
+        const auto found =
+            ZWOSDKWrapper::instance().enumerate_identified_cameras(trim_zwo_name(binding_.identity.camera_name));
         const auto result = resolve_zwo_camera(binding_.identity, found, binding_.claimed_serials);
         if (!result.camera.has_value()) {
             ALPACA_LOG_WARN("ZWO", result.message);

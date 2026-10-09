@@ -8841,7 +8841,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         std::string learned_name = configured_name;
         try {
             const auto resolved = alpacacore::vendor::zwo::resolve_zwo_camera(
-                binding.identity, alpacacore::vendor::zwo::enumerate_zwo_cameras(alpacacore::vendor::zwo::trim_zwo_name(configured_name)),
+                binding.identity,
+                alpacacore::vendor::zwo::enumerate_zwo_cameras(alpacacore::vendor::zwo::trim_zwo_name(configured_name)),
                 binding.claimed_serials);
             if (resolved.camera.has_value()) {
                 const auto& found = resolved.camera.value();

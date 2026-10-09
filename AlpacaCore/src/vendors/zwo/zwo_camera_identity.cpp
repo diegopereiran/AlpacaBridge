@@ -103,8 +103,8 @@ ZwoResolveResult resolve_zwo_camera(const ZwoConfiguredIdentity& entry, const st
             return failed(ZwoResolveFailure::IndexOutOfRange, "Camera index not found");
         }
         if (claimed(found[static_cast<std::size_t>(index)])) {
-            return failed(ZwoResolveFailure::NotFound, "ZWO camera at index " + std::to_string(index) +
-                                                           " belongs to another device entry");
+            return failed(ZwoResolveFailure::NotFound,
+                          "ZWO camera at index " + std::to_string(index) + " belongs to another device entry");
         }
         return found_camera(found[static_cast<std::size_t>(index)]);
     }

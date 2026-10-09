@@ -2505,8 +2505,8 @@ int main() {
                                   {"deviceNumber", 9608},
                                   {"cameraIndex", 1},
                                   {"serialNumber", "not-hex!"}};
-        const auto not_hex_json =
-            nlohmann::json::parse(route_request(router, "POST", "/management/v1/configuredevice", not_hex.dump()).body());
+        const auto not_hex_json = nlohmann::json::parse(
+            route_request(router, "POST", "/management/v1/configuredevice", not_hex.dump()).body());
         EXPECT(not_hex_json.value("ErrorNumber", 0) == 0x401);
     }
     {
