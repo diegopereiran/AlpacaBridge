@@ -465,6 +465,8 @@ std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     return key;
 }
 
+bool is_zwo_camera_key(const PersistedKey& key) { return key.vendor == "zwo" && key.device_type == "camera"; }
+
 // Throw a parameter-validation failure with an explicit ASCOM error code, so
 // the ErrorNumber on the wire is deterministic rather than inferred from the
 // message text. A missing or unparseable parameter is InvalidValue (0x401).
@@ -7111,7 +7113,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         }
 
         std::string error_message;
-        if (!register_device_from_config(config, error_message)) {
+        nlohmann::json learned_config = nlohmann::json::object();
+        if (!register_device_from_config(config, error_message, ConfigSource::Api, &learned_config)) {
             if (error_message.empty()) {
                 error_message = "Failed to register device. Please verify the configuration.";
             }
@@ -7132,7 +7135,9 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        add_or_replace_persisted_device(sanitize_device_config(config));
+        nlohmann::json stored_config = config;
+        stored_config.update(learned_config);
+        add_or_replace_persisted_device(sanitize_device_config(stored_config));
         save_persisted_devices();
 
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
@@ -8306,8 +8311,8 @@ std::string Router::normalize_persisted_connection_type(ConfigSource source, con
     return "serial";
 }
 
-bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message,
-                                         ConfigSource source) {
+bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message, ConfigSource source,
+                                         nlohmann::json* learned_config) {
     std::string device_type_str = config_get(config, "deviceType", "");
     std::string vendor = config_get(config, "vendor", "");
     int device_number = config_get(config, "deviceNumber", -1);
@@ -8752,18 +8757,92 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
     if (vendor == "zwo" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_ZWO
-        int camera_id = config_get(config, "cameraId", -1);
-        int camera_index = config_get(config, "cameraIndex", -1);
+        const int camera_id = config_get(config, "cameraId", -1);
+        const int camera_index = config_get(config, "cameraIndex", -1);
+        const std::string configured_serial = config_get(config, "serialNumber", "");
+        const std::string configured_name = config_get(config, "cameraName", "");
+        std::string unique_id = config_get(config, "uniqueId", "");
 
-        std::unique_ptr<alpacacore::CameraDriver> camera;
-        if (camera_id >= 0) {
-            camera = alpacacore::vendor::zwo::create_zwo_camera(device_number, camera_id);
-        } else if (camera_index >= 0) {
-            camera = alpacacore::vendor::zwo::create_zwo_camera_by_index(device_number, camera_index);
-        } else {
+        if (camera_id < 0 && camera_index < 0 && configured_serial.empty() && configured_name.empty()) {
             error_message = "ZWO camera requires cameraIndex or cameraId";
             return false;
         }
+
+        // Camera identity (#914): the serial, not the enumeration order, says
+        // which physical camera this entry is. The serials other entries bind
+        // are read from the persisted list; a re-configure that does not
+        // resend uniqueId keeps the one already stored for this number.
+        alpacacore::vendor::zwo::ZwoCameraBinding binding;
+        if (camera_id >= 0) {
+            binding.identity.camera_id = camera_id;
+        }
+        if (camera_index >= 0) {
+            binding.identity.camera_index = camera_index;
+        }
+        binding.identity.serial = configured_serial;
+        binding.identity.camera_name = configured_name;
+        {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            for (const auto& other : persisted_devices_) {
+                const auto key = persisted_key(other);
+                if (!key || !is_zwo_camera_key(*key)) {
+                    continue;
+                }
+                const auto serial_it = other.find("serialNumber");
+                const bool has_serial = serial_it != other.end() && serial_it->is_string();
+                if (key->device_number == device_number) {
+                    const auto uid_it = other.find("uniqueId");
+                    if (unique_id.empty() && uid_it != other.end() && uid_it->is_string()) {
+                        unique_id = uid_it->get<std::string>();
+                    }
+                } else if (has_serial && !serial_it->get<std::string>().empty()) {
+                    binding.claimed_serials.insert(serial_it->get<std::string>());
+                }
+            }
+        }
+
+        // A camera that is not plugged in yet still registers with the
+        // identity it was configured with; connect reports why it is absent.
+        std::string learned_serial = configured_serial;
+        std::string learned_name = configured_name;
+        try {
+            const auto resolved = alpacacore::vendor::zwo::resolve_zwo_camera(
+                binding.identity, alpacacore::vendor::zwo::enumerate_zwo_cameras(), binding.claimed_serials);
+            if (resolved.camera.has_value()) {
+                const auto& found = resolved.camera.value();
+                binding.identity.camera_id = found.camera_id;
+                binding.identity.camera_index = found.index;
+                if (learned_serial.empty()) {
+                    learned_serial = found.serial;
+                }
+                if (learned_name.empty()) {
+                    learned_name = alpacacore::vendor::zwo::trim_zwo_name(found.name);
+                }
+            }
+        } catch (const std::exception& e) {
+            util::log_warning(std::string("ZWO camera enumeration failed: ") + e.what());
+        }
+        binding.identity.serial = learned_serial;
+        binding.identity.camera_name = learned_name;
+        if (learned_serial.empty() && unique_id.empty()) {
+            unique_id = alpacacore::vendor::zwo::generate_zwo_unique_id();
+        }
+        binding.unique_id = unique_id;
+
+        if (learned_config != nullptr) {
+            if (configured_serial.empty() && !learned_serial.empty()) {
+                (*learned_config)["serialNumber"] = learned_serial;
+            }
+            if (configured_name.empty() && !learned_name.empty()) {
+                (*learned_config)["cameraName"] = learned_name;
+            }
+            if (config_get(config, "uniqueId", "").empty() && !unique_id.empty()) {
+                (*learned_config)["uniqueId"] = unique_id;
+            }
+        }
+
+        std::unique_ptr<alpacacore::CameraDriver> camera =
+            alpacacore::vendor::zwo::create_zwo_camera_bound(device_number, binding);
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
             util::log_info("Registered ZWO camera");
@@ -9899,6 +9978,12 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         }
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
+        if (device_type == "camera") {
+            // #914: the identity a camera entry binds by.
+            copy_if_present("serialNumber");
+            copy_if_present("cameraName");
+            copy_if_present("uniqueId");
+        }
         copy_if_present("switchType");
         // ASIAIR Pro (Pi 4, libgpiod) and ASIAIR Plus (RK3568, pwm_gpio.ko)
         // both persist per-port configuration. Without these the user's
@@ -10256,8 +10341,31 @@ void Router::load_persisted_devices() {
     for (const auto& entry : payload) {
         std::string error_message;
         try {
-            if (!register_device_from_config(entry, error_message, ConfigSource::Persisted)) {
+            nlohmann::json learned_config = nlohmann::json::object();
+            if (!register_device_from_config(entry, error_message, ConfigSource::Persisted, &learned_config)) {
                 util::log_warning("Skipping persisted device: " + error_message);
+            } else if (!learned_config.empty()) {
+                // #914: what the registration learned about the device (a ZWO
+                // camera's serial, model name, UniqueID) goes back into the
+                // stored entry, so the next start binds by it.
+                const auto learned_key = persisted_key(entry);
+                bool stored = false;
+                {
+                    std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+                    for (auto& saved : persisted_devices_) {
+                        const auto key = persisted_key(saved);
+                        if (learned_key && key && key->vendor == learned_key->vendor &&
+                            key->device_type == learned_key->device_type &&
+                            key->device_number == learned_key->device_number) {
+                            saved.update(learned_config);
+                            stored = true;
+                            break;
+                        }
+                    }
+                }
+                if (stored) {
+                    save_persisted_devices();
+                }
             }
         } catch (const std::exception& e) {
             util::log_error("Failed to load persisted device: " + std::string(e.what()));

@@ -297,6 +297,36 @@ std::vector<ZWOCameraInfo> ZWOSDKWrapper::enumerate_cameras() {
     return result;
 }
 
+std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras() {
+    std::vector<ZwoEnumeratedCamera> result;
+    const auto cameras = enumerate_cameras();
+    result.reserve(cameras.size());
+    int index = 0;
+    for (const auto& info : cameras) {
+        ZwoEnumeratedCamera camera;
+        camera.index = index++;
+        camera.camera_id = info.camera_id;
+        camera.name = info.name;
+        bool opened = false;
+        try {
+            open_camera(info.camera_id);
+            opened = true;
+            camera.serial = get_serial_number(info.camera_id);
+        } catch (const std::exception&) {
+            camera.serial.clear();
+        }
+        if (opened) {
+            try {
+                close_camera(info.camera_id);
+            } catch (const std::exception&) {
+                // The serial is already read; a throwing close is not ours to report.
+            }
+        }
+        result.push_back(std::move(camera));
+    }
+    return result;
+}
+
 bool ZWOSDKWrapper::get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) {
     // Not ASIGetCameraPropertyByID: it answers only for an opened camera
     // (ASI_ERROR_CAMERA_CLOSED otherwise, SDK 1.41 on the Pi rig, issue #738),
