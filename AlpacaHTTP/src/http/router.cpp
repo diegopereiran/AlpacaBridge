@@ -10417,14 +10417,14 @@ void Router::load_persisted_devices() {
                 const auto learned_key = persisted_key(entry);
                 bool stored = false;
                 if (learned_key.has_value()) {
-                    const PersistedKey wanted = *learned_key;
+                    const PersistedKey& wanted = *learned_key;
                     std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
                     for (auto& saved : persisted_devices_) {
                         const auto key = persisted_key(saved);
                         if (!key.has_value()) {
                             continue;
                         }
-                        const PersistedKey have = *key;
+                        const PersistedKey& have = *key;
                         if (have.vendor == wanted.vendor && have.device_type == wanted.device_type &&
                             have.device_number == wanted.device_number) {
                             saved.update(learned_config);
