@@ -44,7 +44,9 @@ Pick the mode from the argument and the branch (ask when unclear):
   `vX.Y.Z` on `stable/X.Y`, then run the **Merge down**. Check the promotion criteria first: 14
   days since the last beta tag with no open regression, a full maintainer rig session on the final
   beta, ConformU re-run for every driver touched in the beta. A hotfix needs no beta round.
-- **Plain release from `main`** is no longer the normal path; use it only when the maintainer says so.
+- **Plain release from `main`** is no longer the normal path; use it only when the maintainer says so
+  (a stable tag is not branch-checked by `release.yml`; a beta tag must sit on `stable/X.Y` or the
+  workflow refuses it).
 
 **Merge down** (after every beta tag, after the stable tag, after a hotfix): open a PR
 `stable/X.Y` -> `main` from a short-lived `merge-down/X.Y` head (never `stable/X.Y` itself) and

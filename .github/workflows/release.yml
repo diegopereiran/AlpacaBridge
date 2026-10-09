@@ -57,23 +57,6 @@ jobs:
           # the tagged commit, which a depth-1 checkout cannot answer.
           fetch-depth: 0
 
-      - name: Require the tagged commit on a stable branch
-        # After a merge down, main carries the beta VERSION and notes file too,
-        # so the VERSION check alone would let a tag pushed on main publish
-        # main's unreleased work as a beta (docs/beta-channel.md: every tag
-        # sits on stable/X.Y). A dry run is checked the same way.
-        run: |
-          set -euo pipefail
-          git fetch --no-tags --quiet origin '+refs/heads/stable/*:refs/remotes/origin/stable/*' || true
-          on_stable="$(git branch -r --contains HEAD --list 'origin/stable/*' | sed 's/^[ *]*//' || true)"
-          if [ -z "${on_stable}" ]; then
-            echo "ERROR: ${RELEASE_TAG} (${GITHUB_SHA}) is not on any stable/X.Y branch." >&2
-            echo "Tag the merge commit on stable/X.Y (docs/beta-channel.md); a beta or stable tag never sits on main." >&2
-            git branch -r --contains HEAD >&2 || true
-            exit 1
-          fi
-          echo "${RELEASE_TAG} is on: ${on_stable}"
-
       - name: Map tag to VERSION
         id: tag
         run: |
@@ -81,6 +64,30 @@ jobs:
           python3 scripts/release_tag.py --self-test
           # version=<VERSION spelling, ~betaN for a beta>, prerelease=true|false, notes_name=<tag without v>
           python3 scripts/release_tag.py "${RELEASE_TAG}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Require a beta tag on a stable branch
+        # Beta tags only. After a merge down, main carries the beta VERSION and
+        # notes file too, so the VERSION check alone would let a beta tag
+        # pushed on main publish main's unreleased work as a beta
+        # (docs/beta-channel.md: a beta is always tagged on stable/X.Y). A
+        # stable tag is not branch-checked: it is gated by its bare VERSION and
+        # dated CHANGELOG section, which only /bump-release writes, and a
+        # plain release from main stays possible when the maintainer asks for
+        # one. A dry run is checked the same way as the tag it names.
+        if: steps.tag.outputs.prerelease == 'true'
+        run: |
+          set -euo pipefail
+          if ! git fetch --no-tags --quiet origin '+refs/heads/stable/*:refs/remotes/origin/stable/*'; then
+            echo "::warning::could not fetch refs/heads/stable/*; using the refs the checkout already has"
+          fi
+          on_stable="$(git branch -r --contains HEAD --list 'origin/stable/*' | sed 's/^[ *]*//' || true)"
+          if [ -z "${on_stable}" ]; then
+            echo "ERROR: beta tag ${RELEASE_TAG} (${GITHUB_SHA}) is not on any stable/X.Y branch." >&2
+            echo "Tag the merge commit on stable/X.Y (docs/beta-channel.md); a beta never sits on main." >&2
+            git branch -r --contains HEAD >&2 || true
+            exit 1
+          fi
+          echo "${RELEASE_TAG} is on: ${on_stable}"
 
       - name: Verify tag matches VERSION
         env:
