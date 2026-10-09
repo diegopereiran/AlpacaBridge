@@ -8794,6 +8794,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             !check_identity_field("uniqueId", unique_id, !has_control_bytes(unique_id))) {
             return false;
         }
+        const std::string supplied_unique_id = unique_id;
         const bool unique_id_supplied = !unique_id.empty();
 
         if (camera_id < 0 && camera_index < 0 && configured_serial.empty() && configured_name.empty()) {
@@ -8844,10 +8845,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                 }
             }
         }
-
-        // The UniqueID the stored entry already holds (supplied or read back by
-        // device number); a write-back is due only when the value differs.
-        const std::string stored_unique_id = unique_id;
 
         // One serial or UniqueID names one camera: another entry holding it
         // would bind the same body twice (or report one UniqueID twice).
@@ -8911,7 +8908,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             if (configured_name.empty() && !learned_name.empty()) {
                 (*learned_config)["cameraName"] = learned_name;
             }
-            if (!unique_id.empty() && unique_id != stored_unique_id) {
+            if (!unique_id.empty() && unique_id != supplied_unique_id) {
                 (*learned_config)["uniqueId"] = unique_id;
             }
         }

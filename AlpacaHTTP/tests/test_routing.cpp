@@ -2620,9 +2620,12 @@ int main() {
             }
             EXPECT(!listed_entry(stored, "Camera", 9712).is_null());
             // Entries that shared a UniqueID each get their own, written back.
-            EXPECT(first_ids[0].rfind("ZWO_UID_", 0) == 0 || first_ids[1].rfind("ZWO_UID_", 0) == 0);
+            // Duplicates are checked against the entries already loaded: 9713 is regenerated,
+            // 9714 then holds the only copy and keeps its id.
+            EXPECT(first_ids[0].rfind("ZWO_UID_", 0) == 0);
+            EXPECT(first_ids[0] != "ZWO_UID_00112233445566ff");
+            EXPECT(first_ids[1] == "ZWO_UID_00112233445566ff");
             EXPECT(first_ids[0] != first_ids[1]);
-            EXPECT(first_ids[0] != "ZWO_UID_00112233445566ff" && first_ids[1] != "ZWO_UID_00112233445566ff");
         }
         {
             // A second start over the same file reports the same ids.
@@ -2633,6 +2636,29 @@ int main() {
                 remove_device(again, "zwo", "camera", number);
             }
         }
+        {
+            // A stored row that failed to load (no index or id) keeps its UniqueID
+            // when a configuredevice without uniqueId replaces it.
+            {
+                std::ofstream out(file, std::ios::trunc);
+                out << nlohmann::json::array({{{"vendor", "zwo"},
+                                               {"deviceType", "camera"},
+                                               {"deviceNumber", 9715},
+                                               {"uniqueId", "ZWO_UID_0011223344556677"}}})
+                           .dump();
+            }
+            alpacahttp::Router failed;
+            nlohmann::json body = {
+                {"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9715}, {"cameraIndex", 1}};
+            const auto reply = nlohmann::json::parse(
+                route_request(failed, "POST", "/management/v1/configuredevice", body.dump()).body());
+            EXPECT(reply.value("ErrorNumber", -1) == 0);
+            EXPECT(listed_config(failed, "Camera", 9715).value("uniqueId", std::string()) ==
+                   "ZWO_UID_0011223344556677");
+            remove_device(failed, "zwo", "camera", 9715);
+        }
+        // Falsified by: comparing the write-back against the UniqueID read back by device number
+        // instead of the supplied one (the stored id is dropped by the entry replace).
         // Falsified by: keeping unique_id_supplied as the write-back condition (the regenerated ids
         // are not stored and differ on the second load) or clearing only the serial of a pair.
         // Falsified by: making the Persisted arm of check_identity_field or the duplicate block return
