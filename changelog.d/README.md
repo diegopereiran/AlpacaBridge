@@ -114,6 +114,11 @@ python3 scripts/changelog_fragments.py --bump --version 5.0.0~beta2      # a bet
 python3 scripts/changelog_fragments.py --self-test
 ```
 
+Without `--version`, `--bump` and `--preview` read the `VERSION` file beside the changelog as the
+floor, so the two always name the same version. A beta `VERSION` left on `main` by a merge down
+therefore raises the proposal to its base (`5.0.0~beta2` floors it at `5.0.0`) even when the
+fragments alone would justify less; that is the version the stable branch already owns.
+
 **Beta and stable branches.** A fix PR against `stable/X.Y` adds its fragment as on `main`. A beta
 (`VERSION` `X.Y.0~betaN`) does not consume fragments: its notes come from `--preview --version`
 into `docs/releases/X.Y.0-beta.N.md`. Fragments are consumed once, when `/bump-release` promotes
