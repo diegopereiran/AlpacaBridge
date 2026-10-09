@@ -8867,6 +8867,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 
         // A camera that is not plugged in yet still registers with the
         // identity it was configured with; connect reports why it is absent.
+        // Known limit: an entry with only an index/id hint learns whatever
+        // serial sits at that hint. With two saved cameras and only one
+        // plugged in, the first entry can learn the other body's serial.
         std::string learned_serial = configured_serial;
         std::string learned_name = configured_name;
         try {

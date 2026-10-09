@@ -2535,6 +2535,54 @@ int main() {
         remove_device(router, "zwo", "camera", 9608);
     }
     {
+        // case: zwo camera without a serial learns a UniqueID on the API and persisted paths (#914)
+        // No camera is attached in CI, so the registration generates ZWO_UID_...
+        // and hands it back as learned config; the API merge and the load-time
+        // write-back are the only things that put it in the stored entry.
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9710}, {"cameraIndex", 1}}, "Camera",
+            9710);
+        const std::string api_uid = cfg.value("uniqueId", std::string());
+        EXPECT(api_uid.rfind("ZWO_UID_", 0) == 0);
+        remove_device(router, "zwo", "camera", 9710);
+
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        const auto write_file = [&](const std::string& text) {
+            std::ofstream out(file, std::ios::trunc);
+            out << text;
+        };
+        write_file(nlohmann::json::array(
+                       {{{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9711}, {"cameraIndex", 1}}})
+                       .dump());
+        std::string stored_text;
+        std::string first_uid;
+        {
+            alpacahttp::Router first;
+            const auto listed = listed_entry(first, "Camera", 9711);
+            EXPECT(!listed.is_null());
+            first_uid = listed.value("Config", nlohmann::json::object()).value("uniqueId", std::string());
+            EXPECT(first_uid.rfind("ZWO_UID_", 0) == 0);
+            std::ifstream in(file);
+            stored_text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            const auto stored = nlohmann::json::parse(stored_text);
+            EXPECT(stored.is_array() && stored.size() == 1);
+            EXPECT(stored[0].value("uniqueId", std::string()) == first_uid);
+            remove_device(first, "zwo", "camera", 9711);
+        }
+        write_file(stored_text);
+        {
+            alpacahttp::Router second;
+            const auto listed = listed_entry(second, "Camera", 9711);
+            EXPECT(!listed.is_null());
+            EXPECT(listed.value("Config", nlohmann::json::object()).value("uniqueId", std::string()) == first_uid);
+            remove_device(second, "zwo", "camera", 9711);
+        }
+        // Falsified by: removing the learned_config write-back in load_persisted_devices or the
+        // stored_config.update(learned_config) merge in the configuredevice handler.
+    }
+    {
         // zwo / filterwheel
         const auto cfg =
             roundtrip_config(router,
