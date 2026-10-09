@@ -53,6 +53,26 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
         with:
           persist-credentials: false
+          # Full history: the branch check below asks which branches contain
+          # the tagged commit, which a depth-1 checkout cannot answer.
+          fetch-depth: 0
+
+      - name: Require the tagged commit on a stable branch
+        # After a merge down, main carries the beta VERSION and notes file too,
+        # so the VERSION check alone would let a tag pushed on main publish
+        # main's unreleased work as a beta (docs/beta-channel.md: every tag
+        # sits on stable/X.Y). A dry run is checked the same way.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin '+refs/heads/stable/*:refs/remotes/origin/stable/*' || true
+          on_stable="$(git branch -r --contains HEAD --list 'origin/stable/*' | sed 's/^[ *]*//' || true)"
+          if [ -z "${on_stable}" ]; then
+            echo "ERROR: ${RELEASE_TAG} (${GITHUB_SHA}) is not on any stable/X.Y branch." >&2
+            echo "Tag the merge commit on stable/X.Y (docs/beta-channel.md); a beta or stable tag never sits on main." >&2
+            git branch -r --contains HEAD >&2 || true
+            exit 1
+          fi
+          echo "${RELEASE_TAG} is on: ${on_stable}"
 
       - name: Map tag to VERSION
         id: tag

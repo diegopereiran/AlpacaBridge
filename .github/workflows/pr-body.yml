@@ -24,8 +24,10 @@ jobs:
     # A merge-down PR (head merge-down/X.Y, docs/beta-channel.md) carries the
     # fix PRs already merged into stable/X.Y; each of those PRs passed this
     # check with its own Falsified-by lines, and against main's merge-base
-    # every one of their test cases would read as new again.
-    if: ${{ !startsWith(github.head_ref, 'merge-down/') }}
+    # every one of their test cases would read as new again. Only a real
+    # merge down counts: a head in this repository (a fork branch with that
+    # name is not one) and the base main.
+    if: ${{ !(startsWith(github.head_ref, 'merge-down/') && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:

@@ -2852,6 +2852,15 @@ def self_test():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         sys.exit(self_test())
+    if "--badge-date" in sys.argv:
+        # The README badge's release date, by the same regex check 16 reads it
+        # with; scripts/build_deb.sh dates a beta's changelog stanza from it.
+        b = README_BADGE_DATE_RE.search(read("README.md"))
+        if not b or _iso_date(b.group(1)) is None:
+            print("could not find a dated version badge line in README.md", file=sys.stderr)
+            sys.exit(1)
+        print(b.group(1))
+        sys.exit(0)
     if "--counts" in sys.argv:
         sys.exit(print_counts())
     sys.exit(main())

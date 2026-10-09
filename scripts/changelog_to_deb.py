@@ -50,6 +50,10 @@ SUMMARY_HEADING_RE = re.compile(
 )
 CATEGORY_RE = re.compile(r"^### (.+?)\s*$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+[A-Za-z0-9.~+-]*$")
+# The one published pre-release form (docs/beta-channel.md), the same spelling
+# build_deb.sh keys its --date on. Any other ~suffix (an ~rc1 or ~dev1 test
+# build) is unreleased work and gets the UNRELEASED stanza as before.
+BETA_RE = re.compile(r"^\d+\.\d+\.\d+~beta[1-9]\d*$")
 
 # Order matters: links first (their text may contain emphasis), then
 # emphasis/code markers, innermost first.
@@ -232,6 +236,12 @@ def self_test():
     check("beta under its base label: no warning", err == "")
     text, err = run("1.2.0~beta1", legacy, {}, date="2026-11-01")
     check("beta under another label: warning", "is labeled [1.1.0]" in err)
+    # Only ~betaN is a published pre-release; another ~suffix is unreleased work, no --date needed.
+    text, err = run("1.1.0~rc1", released, {"x.md": fragment})
+    check("~rc1 is not a beta stanza", text.startswith("pkg (1.1.0~rc1) UNRELEASED; urgency=low") and err == "")
+    # An impossible date is refused cleanly, not with a traceback.
+    _, err = run("1.1.0~beta1", released, {"x.md": fragment}, date="2026-02-30", expect_rc=2)
+    check("impossible --date is refused", "not a real date" in err)
     if shutil.which("dpkg"):
         order = ["5.0.0~beta1", "5.0.0~beta2", "5.0.0", "5.0.1", "5.1.0~beta1"]
         for lo, hi in zip(order, order[1:]):
@@ -296,13 +306,17 @@ def main():
                 "before release." % (args.version, unreleased["label"], args.version),
                 file=sys.stderr,
             )
-        if base != args.version:
+        if BETA_RE.match(args.version):
             # A beta is a published build, not unreleased work: a release stanza
             # in the "beta" distribution, dated like a release (noon UTC on the
             # cut date) so two builds of the same tag are byte-identical.
-            if not args.date or not re.match(r"^\d{4}-\d{2}-\d{2}$", args.date):
+            if not args.date or not changelog_fragments.DATE_RE.match(args.date):
                 ap.error("--version %s is a beta: pass --date YYYY-MM-DD (the README badge date)" % args.version)
-            stanzas.append((args.version, "beta", bullets, section_date({"date": args.date})))
+            try:
+                beta_date = section_date({"date": args.date})
+            except ValueError as e:
+                ap.error("--date %s is not a real date (%s)" % (args.date, e))
+            stanzas.append((args.version, "beta", bullets, beta_date))
         else:
             stanzas.append((args.version, "UNRELEASED", bullets, datetime.datetime.now().astimezone()))
 

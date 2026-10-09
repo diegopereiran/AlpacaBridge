@@ -21,15 +21,18 @@ fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
-git -C "${ROOT_DIR}" archive --format=tar HEAD | tar -xf - -C "${tmp}"
-# HEAD is what CI tests; in the local pre-flight an uncommitted edit to the
-# version handling must be tested too, so overlay those files when dirty.
-for f in AlpacaCore/CMakeLists.txt AlpacaHTTP/CMakeLists.txt; do
-  if [ -n "$(git -C "${ROOT_DIR}" status --porcelain -- "${f}")" ]; then
-    echo "note: ${f} has uncommitted changes; testing the working copy"
-    cp "${ROOT_DIR}/${f}" "${tmp}/${f}"
-  fi
-done
+# The working tree as it is (tracked and untracked files, nothing ignored), so
+# an uncommitted edit is what the pre-flight tests and CI's clean checkout is
+# HEAD. Only what a vendors-OFF configure reads: AlpacaCore/external is 122 MB
+# of vendor SDKs the configure does not touch, so it stays out (12 MB copied
+# instead of 137 MB).
+(
+  cd "${ROOT_DIR}"
+  git ls-files --cached --others --exclude-standard -z -- VERSION AlpacaCore AlpacaHTTP ':!AlpacaCore/external' \
+    | while IFS= read -r -d '' f; do [ -e "${f}" ] && printf '%s\0' "${f}"; done \
+    | tar --null -T - -cf - \
+    | tar -xf - -C "${tmp}"
+)
 printf '%s\n' "${BETA}" > "${tmp}/VERSION"
 
 build="${tmp}/build"

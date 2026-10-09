@@ -251,7 +251,10 @@ The body must start with the plain-language notes, not the CHANGELOG bullets. If
 failed (tag/VERSION mismatch, an undated CHANGELOG section), fix the cause on a new PR, delete and re-push
 the tag after it merges (`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`), and verify
 again. If the workflow never ran, the tag landed on a commit without `release.yml`; create the
-Release by hand with `gh release create vX.Y.Z --notes-file docs/releases/X.Y.Z.md --verify-tag`.
+Release by hand with `gh release create vX.Y.Z --notes-file docs/releases/X.Y.Z.md --verify-tag`
+(beta: `gh release create vX.Y.0-beta.N --prerelease --notes-file docs/releases/X.Y.0-beta.N.md
+--verify-tag`; without `--prerelease` the beta would become the Latest release above the current
+stable).
 
 ## Step 7 — Wrap up
 

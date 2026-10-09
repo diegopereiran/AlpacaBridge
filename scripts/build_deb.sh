@@ -25,10 +25,8 @@ fi
 DATE_ARGS=()
 case "${VERSION}" in
   *~beta*)
-    BADGE_DATE="$(python3 -c '
-import re, sys
-m = re.search(r"^####\s*\[[^\]]+\]\s*-\s*(\d{4}-\d{2}-\d{2})\s*&middot;", open("README.md", encoding="utf-8").read(), re.M)
-sys.exit("README.md has no dated version badge line") if not m else print(m.group(1))')"
+    # The same parser docs-drift check 16 uses, so the two cannot drift apart.
+    BADGE_DATE="$(python3 scripts/check_docs_drift.py --badge-date)"
     DATE_ARGS=(--date "${BADGE_DATE}")
     ;;
 esac

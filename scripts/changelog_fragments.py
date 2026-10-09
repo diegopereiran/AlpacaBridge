@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import datetime
 import re
 import subprocess
 import sys
@@ -297,6 +298,15 @@ def current_branch() -> str | None:
     return r.stdout.strip() or None if r.returncode == 0 else None
 
 
+def default_version_floor(changelog: Path) -> str | None:
+    """The VERSION file beside the changelog, the floor --bump and --preview use without --version."""
+    version_file = changelog.resolve().parent / "VERSION"
+    if not version_file.is_file():
+        return None
+    text = version_file.read_text(encoding="utf-8").strip()
+    return text if VERSION_RE.match(text) else None
+
+
 def propose_bump(lines: list[str], directory: Path, current: str | None = None) -> str:
     base = latest_released(lines)
     fragment_entries = merge_entries([e for _, e in load_fragments(directory)])
@@ -324,6 +334,10 @@ def assemble(text: str, directory: Path, version: str, date: str) -> str:
         raise SystemExit("ERROR: %r is not a bare X.Y.Z version (a beta is not released this way)" % version)
     if not DATE_RE.match(date):
         raise SystemExit("ERROR: %r is not a YYYY-MM-DD date" % date)
+    try:
+        datetime.date.fromisoformat(date)
+    except ValueError as e:
+        raise SystemExit("ERROR: %r is not a real date (%s)" % (date, e))
     lines = text.split("\n")
     if version_tuple(version) <= version_tuple(latest_released(lines)):
         raise SystemExit(
@@ -557,6 +571,17 @@ def self_test() -> int:
         except SystemExit as e:
             expect("not a bare X.Y.Z" in str(e), "--release on a beta VERSION: wrong error: %s" % e)
         expect([p.name for p in d.iterdir()] != ["README.md"], "fragments were deleted by the rejected --release")
+        try:
+            assemble(FIXTURE, d, "1.4.0", "2026-02-30")
+            expect(False, "--release with an impossible date was accepted")
+        except SystemExit as e:
+            expect("not a real date" in str(e), "--release impossible date: wrong error: %s" % e)
+        # --preview and --bump read the VERSION file beside the changelog as the floor
+        # when --version is not given, so both propose the same version on a stable branch.
+        (root / "VERSION").write_text("1.5.0~beta2\n", encoding="utf-8")
+        expect(default_version_floor(root / "CHANGELOG.md") == "1.5.0~beta2", "VERSION beside the changelog not read")
+        (root / "VERSION").unlink()
+        expect(default_version_floor(root / "CHANGELOG.md") is None, "a missing VERSION file is not None")
 
         # end to end through the CLI, then changelog_section.py reads the result
         cl = root / "CHANGELOG.md"
@@ -577,6 +602,15 @@ def self_test() -> int:
             capture_output=True, text=True,
         )
         expect(ok.returncode == 0 and ok.stdout.strip() == "1.5.0", "--bump --version 1.5.0~beta2 on the CLI: " + ok.stderr.strip())
+        (root / "VERSION").write_text("1.5.0~beta2\n", encoding="utf-8")
+        for mode, want in (("--bump", "1.5.0"), ("--preview", "## [1.5.0]")):
+            floor = subprocess.run(
+                [sys.executable, str(here / "changelog_fragments.py"), "--changelog", str(cl), "--fragments", str(d), mode],
+                capture_output=True, text=True,
+            )
+            expect(floor.returncode == 0 and floor.stdout.splitlines()[0].strip() == want,
+                   "%s without --version ignored the VERSION file beside the changelog: %r" % (mode, floor.stdout[:40]))
+        (root / "VERSION").unlink()
         r = subprocess.run(
             [sys.executable, str(here / "changelog_fragments.py"), "--changelog", str(cl),
              "--fragments", str(d), "--release", "1.3.0", "--date", "2026-02-03"],
@@ -639,7 +673,7 @@ def main() -> int:
     )
     opts.add_argument(
         "--version", metavar="X.Y.Z", help="with --preview: version for the heading (default: the --bump result); with --bump: the current "
-        "VERSION, a beta counts as its base version"
+        "VERSION, a beta counts as its base version (default: the VERSION file beside the changelog)"
     )
     opts.add_argument("--date", metavar="YYYY-MM-DD", help="with --release: release date (required)")
     args = ap.parse_args()
@@ -666,15 +700,17 @@ def main() -> int:
     if args.bump:
         if args.version and not VERSION_RE.match(args.version):
             ap.error("--version %r is not X.Y.Z or X.Y.Z~betaN" % args.version)
-        warning = beta_bump_warning(args.version, current_branch())
+        current = args.version or default_version_floor(args.changelog)
+        warning = beta_bump_warning(current, current_branch())
         if warning:
             print(warning, file=sys.stderr)
-        print(propose_bump(lines, args.fragments, args.version))
+        print(propose_bump(lines, args.fragments, current))
         return 0
     if args.preview:
         if args.version and not VERSION_RE.match(args.version):
             ap.error("--version %r is not X.Y.Z or X.Y.Z~betaN" % args.version)
-        version = args.version or propose_bump(lines, args.fragments)
+        # Same floor as --bump, so the preview shows the section Step 2 writes.
+        version = args.version or propose_bump(lines, args.fragments, default_version_floor(args.changelog))
         print("\n".join(render_section("## [%s]" % version, entries)).rstrip())
         return 0
 

@@ -308,6 +308,11 @@ section "Falsified-by (PR body)"
 if python3 scripts/check_falsified_by.py --self-test; then
   if [ -z "${PR_BODY_FILE:-}" ]; then
     record SKIP "falsified-by (no PR body)"
+  elif [[ "$(git branch --show-current 2>/dev/null)" == merge-down/* ]]; then
+    # Same exemption as the falsified-by CI job: a merge-down PR carries test
+    # cases already gated on their fix PRs against stable/X.Y, and every one
+    # of them reads as new against main's merge-base (docs/beta-channel.md).
+    record SKIP "falsified-by (merge-down head)"
   elif [ ! -f "${PR_BODY_FILE}" ]; then
     echo "falsified-by: PR_BODY_FILE is set but ${PR_BODY_FILE} does not exist"
     record FAIL "falsified-by"
