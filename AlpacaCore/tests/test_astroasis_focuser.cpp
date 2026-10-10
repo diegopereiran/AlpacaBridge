@@ -51,7 +51,7 @@ struct FakeHidState {
     int halts = 0;         // cmd 0x37
     int position = 1234;
     bool moving = false;
-    bool dead = false;  // reads time out, as a pulled cable does
+    bool dead = false;         // reads time out, as a pulled cable does
     bool fail_config = false;  // MaxStep (0x30) goes unanswered
     int closes = 0;
     std::vector<std::uint8_t> pending;
