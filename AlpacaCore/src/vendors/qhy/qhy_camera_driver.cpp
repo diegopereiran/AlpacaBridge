@@ -925,6 +925,8 @@ public:
         }
         if (exposure_status_ == QHYExposureStatus::Success) {
             try {
+                // Worker validation protects the cached SDK frame; retain this
+                // boundary check before converting it to the requested Alpaca shape.
                 ImageArray image = build_image_array_locked();
                 alpacacore::util::validate_image_array(image);
                 return image;
@@ -1766,9 +1768,8 @@ public:
             }
             std::string invalid_frame;
             if (ok) {
-                if (w == 0 || h == 0 || w < static_cast<uint32_t>(num_x_) || h < static_cast<uint32_t>(num_y_)) {
-                    invalid_frame =
-                        "Camera returned invalid image data: frame dimensions are smaller than the requested ROI";
+                if (w == 0 || h == 0) {
+                    invalid_frame = "Camera returned invalid image data: frame dimensions must be positive";
                 } else if ((bpp != 8 && bpp != 16) || (channels != 1 && channels != 3) || (channels == 3 && bpp != 8)) {
                     invalid_frame = "Camera returned invalid image data: unsupported frame format";
                 } else if (static_cast<std::size_t>(w) > std::numeric_limits<std::size_t>::max() / h) {

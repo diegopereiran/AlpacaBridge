@@ -201,6 +201,7 @@ public:
     std::deque<int> cfw_position_script;
     bool read_directly = false;  // start_single_frame's return
     bool frame_ok = true;        // get_single_frame's return
+    std::vector<uint8_t> frame_bytes;
     std::optional<uint32_t> mem_length_override;
     std::optional<uint32_t> frame_width;
     std::optional<uint32_t> frame_height;
@@ -580,7 +581,11 @@ public:
             // root-causing an ASan report.
             const uint32_t promised = last_mem_length_;
             const uint32_t safe = (promised == 0) ? current : std::min(current, promised);
-            std::memset(buffer, 0, static_cast<std::size_t>(safe));
+            if (frame_bytes.empty()) {
+                std::memset(buffer, 0, static_cast<std::size_t>(safe));
+            } else {
+                std::memcpy(buffer, frame_bytes.data(), std::min(static_cast<std::size_t>(safe), frame_bytes.size()));
+            }
         }
         return frame_ok;
     }

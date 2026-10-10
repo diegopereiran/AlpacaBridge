@@ -39,6 +39,15 @@ FakeToupTekSDK make_fake_with_camera() {
     return fake;
 }
 
+bool eventually(const std::function<bool()>& predicate, std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return predicate();
+}
+
 }  // namespace
 
 TEST_CASE("ToupTek camera - connect-path failure releases the shared open (r18 #1)",
@@ -289,5 +298,43 @@ TEST_CASE("ToupTek camera - malformed frame fails ImageReady and a later valid f
     CHECK(image.height == 2);
     CHECK(image.rank == 2);
     CHECK(image.data == std::vector<std::int32_t>{1, 2, 3, 4});
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - aborting a held image wait leaves ImageReady false without an error",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.hold_wait_image(true);
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] { return fake.call_count("wait_image") > 0; }));
+
+    driver->abort_exposure();
+    CHECK_FALSE(driver->get_image_ready());
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - malformed exposure failure clears on reconnect", "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    fake.delivered_dimensions = std::pair<unsigned, unsigned>{0, 2};
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] {
+        try {
+            (void)driver->get_image_ready();
+        } catch (const AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException;
+        }
+        return false;
+    }));
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_image_ready());
     driver->set_connected(false);
 }
