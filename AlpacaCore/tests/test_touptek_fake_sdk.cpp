@@ -353,7 +353,7 @@ TEST_CASE("ToupTek camera - dimensions above INT_MAX fail before conversion", "[
         return false;
     };
     const auto over_limit = static_cast<unsigned>(std::numeric_limits<int>::max()) + 1U;
-    for (const auto dimensions : {std::pair<unsigned, unsigned>{over_limit, 2U}, {2U, over_limit}}) {
+    for (const auto& dimensions : {std::pair<unsigned, unsigned>{over_limit, 2U}, {2U, over_limit}}) {
         fake.delivered_dimensions = dimensions;
         driver->start_exposure(0.01, true);
         REQUIRE(eventually([&] { return has_dimension_limit_error([&] { (void)driver->get_image_ready(); }); }));
