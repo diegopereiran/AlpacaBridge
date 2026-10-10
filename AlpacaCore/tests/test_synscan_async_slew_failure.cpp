@@ -53,6 +53,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 
 struct FakeSynScanState {
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
+    std::atomic<bool> reject_tracking{false};  // true: swallow the tracking write 'T' -> the wrapper times out
     std::atomic<bool> mute{false};
     std::atomic<unsigned char> model_id{50};
     std::atomic<int> goto_count{0};
@@ -89,6 +90,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
         if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R') {
             st->record(chunk);
         }
+        if (chunk[0] == 'T' && st->reject_tracking.load()) return "";
         switch (chunk[0]) {
             case 'K':  // protocol echo: "K" + byte -> byte + "#" (the connect-time link check)
                 return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
@@ -269,6 +271,25 @@ TEST_CASE("SynScan AbortSlew - a stop failure still reaps the cancelled slew tas
     const int before = st->goto_count.load();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     CHECK(wait_until([&] { return st->goto_count.load() > before; }, 5000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan AbortSlew - a failed tracking restore still clears Slewing (#830)",
+          "[synscan][telescope][async][abort]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE_NOTHROW(driver->set_tracking(true));
+    REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
+    REQUIRE(driver->get_slewing());
+
+    st->reject_tracking.store(true);
+    CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    st->reject_tracking.store(false);
+    CHECK(driver->get_slewing() == false);
     driver->set_connected(false);
 }
 

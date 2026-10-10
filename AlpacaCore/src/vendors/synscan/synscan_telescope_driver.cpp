@@ -1759,12 +1759,6 @@ public:
                     // The mount may still be moving: leave Slewing and the slew state as they were.
                     throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
                 }
-                if (tracking_mode_cached_ > 0) {
-                    // Stopping an RA guide pulse also stops sidereal tracking.
-                    // AbortSlew owns this stop, so restore the currently
-                    // requested mode only after both axes have stopped.
-                    protocol.set_tracking_mode(tracking_mode_cached_);
-                }
                 parking_ = false;  // an aborted park never reaches AtPark
                 ++motion_generation_;
                 slewing_cached_ = false;
@@ -1777,6 +1771,14 @@ public:
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
                 manual_axis_slewing_[0] = false;
                 manual_axis_slewing_[1] = false;
+                if (tracking_mode_cached_ > 0) {
+                    // Stopping an RA guide pulse also stops sidereal tracking.
+                    // AbortSlew owns this stop, so restore the currently
+                    // requested mode only after both axes have stopped. The motion
+                    // state is already clear, so a throwing write cannot leave
+                    // Slewing true over stopped axes (#830).
+                    protocol.set_tracking_mode(tracking_mode_cached_);
+                }
             }
         } catch (...) {
             reap_slew_task();
