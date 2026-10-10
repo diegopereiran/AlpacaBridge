@@ -301,6 +301,8 @@ private:
     Status read_status() const {
         ensure_connected();
         const int id = focuser_id_value();
+        // The refill runs under the cache's own mutex and must not take mutex_
+        // (lock order: driver mutex_ before the cache mutex).
         return status_cache_.get([this, id] {
             Status fresh;
             fresh.moving = sdk_.is_moving(id);

@@ -358,6 +358,9 @@ private:
     Status read_status() const {
         ensure_connected();
         const int id = rotator_id_value();
+        // The refill runs under the cache's own mutex and must not take mutex_:
+        // callers hold mutex_ around cache operations (set_reverse), so taking it
+        // here would invert the lock order.
         return status_cache_.get([this, id] {
             Status fresh;
             fresh.is_moving = sdk_.get_motion_status(id).is_moving;

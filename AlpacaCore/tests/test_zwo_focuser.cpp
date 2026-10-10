@@ -45,6 +45,7 @@ public:
     bool moving{false};
     double temperature{12.5};
     bool fail_reads{false};
+    bool fail_temperature{false};
     int moving_calls{0};
     int position_calls{0};
     int temperature_calls{0};
@@ -77,7 +78,7 @@ public:
         return position;
     }
     void move(int, int target) override { position = target; }
-    void stop(int) override {}
+    void stop(int) override { moving = false; }
     int get_max_step(int) override {
         ++max_step_calls;
         return max_step;
@@ -88,6 +89,9 @@ public:
     }
     double get_temperature(int) override {
         ++temperature_calls;
+        if (fail_temperature) {
+            throw std::runtime_error("temp sensor down");
+        }
         return temperature;
     }
     std::string get_serial_number(int) override { return "EAF-SN-1"; }
@@ -272,4 +276,36 @@ TEST_CASE("ZWO EAF Focuser Driver - A dead link refuses reads instead of serving
 
     sdk.fail_reads = false;
     CHECK(driver->get_position() == 500);
+}
+
+// Falsified by: zwo_focuser_driver.cpp halt() dropping its
+// status_cache_.invalidate() (IsMoving keeps answering true for a TTL).
+TEST_CASE("ZWO EAF Focuser Driver - Halt drops the cached frame", "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    sdk.moving = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_is_moving() == true);
+    driver->halt();
+    CHECK(driver->get_is_moving() == false);
+}
+
+// Falsified by: zwo_focuser_driver.cpp read_status() letting the temperature
+// failure escape the refill (Position stops answering) or dropping the SDK text.
+TEST_CASE("ZWO EAF Focuser Driver - A temperature failure leaves Position answering",
+          "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    sdk.fail_temperature = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 500);
+    try {
+        (void)driver->get_temperature();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("temp sensor down") != std::string::npos);
+    }
 }

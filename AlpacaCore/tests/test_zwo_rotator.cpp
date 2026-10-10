@@ -56,6 +56,7 @@ public:
     int degree_calls{0};
     int reverse_calls{0};
     bool fail_reads{false};
+    bool moving{false};
 
     std::vector<Info> enumerate_rotators() override { return {Info{id, "CAA", max_degree}}; }
     bool get_rotator_info_by_id(int rotator_id, Info& info) override {
@@ -73,7 +74,7 @@ public:
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
-        return {};
+        return {moving, false};
     }
     double get_degree(int) override {
         ++degree_calls;
@@ -91,7 +92,7 @@ public:
         last_move_mechanical = angle;
         degree = reverse ? 360.0 - angle : angle;
     }
-    void stop(int) override {}
+    void stop(int) override { moving = false; }
     void sync_degree(int, double angle) override { degree = angle; }
     double get_max_degree(int) override { return max_degree; }
     double get_temperature(int) override { return 20.0; }
@@ -443,4 +444,32 @@ TEST_CASE("ZWO CAA Rotator Driver - Relative move starts from the live angle", "
     sdk.degree = 50.0;
     driver->move(10.0);
     CHECK(sdk.last_move_absolute == 60.0);
+}
+
+// Falsified by: zwo_rotator_driver.cpp halt() dropping its
+// status_cache_.invalidate() (IsMoving keeps answering true for a TTL).
+TEST_CASE("ZWO CAA Rotator Driver - Halt drops the cached frame", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.moving = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_is_moving() == true);
+    driver->halt();
+    CHECK(driver->get_is_moving() == false);
+}
+
+// Falsified by: zwo_rotator_driver.cpp move_mechanical() dropping its
+// status_cache_.invalidate() (Position keeps the pre-move angle for a TTL).
+TEST_CASE("ZWO CAA Rotator Driver - A mechanical move drops the cached frame", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 10.0);
+    driver->move_mechanical(120.0);
+    CHECK(driver->get_position() == 120.0);
 }
