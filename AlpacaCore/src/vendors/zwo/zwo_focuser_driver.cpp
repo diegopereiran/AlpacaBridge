@@ -292,8 +292,8 @@ private:
     struct Status {
         bool moving{};
         int position{};
-        std::optional<double> temperature;  // absent when the SDK would not report it
-        std::string temperature_error;      // why, for the Temperature getter
+        std::optional<double> temperature;                         // absent when the SDK would not report it
+        std::string temperature_error;                             // why, for the Temperature getter
         int temperature_error_code{AlpacaError::DriverException};  // the wrapper's mapped code
     };
 
