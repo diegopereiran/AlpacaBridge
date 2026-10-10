@@ -52,6 +52,8 @@ struct FakeHidState {
     int position = 1234;
     bool moving = false;
     bool dead = false;  // reads time out, as a pulled cable does
+    bool fail_config = false;  // MaxStep (0x30) goes unanswered
+    int closes = 0;
     std::vector<std::uint8_t> pending;
 
     int transactions() {
@@ -65,7 +67,10 @@ public:
     explicit FakeHidTransport(std::shared_ptr<FakeHidState> state) : state_(std::move(state)) {}
 
     bool open(const std::string&) override { return true; }
-    void close() override {}
+    void close() override {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        ++state_->closes;
+    }
 
     int write(const std::uint8_t* data, std::size_t length) override {
         std::lock_guard<std::mutex> lock(state_->mutex);
@@ -94,6 +99,7 @@ public:
                 break;
             case 0x30:
                 ++state_->config_reads;
+                if (state_->fail_config) break;
                 resp.push_back(18);
                 be32(0xFFFFFFFF);
                 be32(50000);
@@ -179,6 +185,23 @@ TEST_CASE("Astroasis Focuser Driver - Move and Halt invalidate the status cache"
     CHECK(driver->get_is_moving());
     driver->halt();
     CHECK_FALSE(driver->get_is_moving());
+}
+
+// Falsified by: astroasis_focuser_driver.cpp delete protocol_.disconnect() in the MaxStep catch at connect.
+TEST_CASE("Astroasis Focuser Driver - failed MaxStep read at connect closes the handle", "[astroasis][focuser][unit]") {
+    auto state = std::make_shared<FakeHidState>();
+    auto driver = make_fake_focuser(state);
+    state->fail_config = true;
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        CHECK(state->closes >= 1);
+        state->fail_config = false;
+    }
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_max_step() == 50000);
 }
 
 // Falsified by: astroasis_focuser_driver.cpp status_cache_ threshold raised from 3 to 100 (the link never latches).
