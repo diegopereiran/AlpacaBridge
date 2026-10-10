@@ -13,8 +13,8 @@ evidence) are defined in [CONTEXT.md](CONTEXT.md); module names are in
 [the architecture overview](docs/architecture.md#modules).
 
 Issues live in GitHub Issues on `open-astro/AlpacaBridge`, via the `gh` CLI —
-see `docs/agents/issue-tracker.md` for conventions, including the `[P1]`-`[P5]`
-priority prefix every issue title carries.
+see `docs/agents/issue-tracker.md` for conventions, including the `P1`-`P5`
+priority label every open issue carries.
 
 ## Load the complete instructions before working
 
@@ -338,7 +338,7 @@ target and completes it by polling `AtPark`/`Slewing`. Never block through a par
 The proven shape (SkyWatcher, then SynScan / Celestron in issue #208; Bisque pending on `fix/bisque-async-park`): reap the
 slew task, snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
 `parking_` flag, then dispatch the slew + completion poll + tracking stop in the joinable
-task thread, releasing the mutex between polls (`task_wait_for`, cancellable). `AtPark` and
+task thread, releasing the mutex between polls (`ctx.wait_for()` on the operation slot, cancellable). `AtPark` and
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
 `parking_`; the task polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
@@ -549,7 +549,7 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   ("<device> communications compromised: <reason>", the iOptron `device_faulted_` vocabulary),
   *commanded values included*: "what we last asked for" is no more trustworthy than the stale
   frame once the device is unreachable. Use `DriverException`, not `NotConnected`: `Connected`
-  stays true (the client decides whether to reconnect) so `NotConnected` would contradict it.
+  stays true while the fault is young (past `util::kLinkStalenessBound` a driver that adopted [decision 0009](docs/decisions/0009-link-loss-and-relink-policy.md) drops it) so `NotConnected` would contradict it.
   Where ASCOM has a word for "unknown" (`CoverState`/`CalibratorState::Unknown`) return it
   instead of throwing on the read; commands still throw.
 - **Static metadata keeps answering** (names, descriptions, ranges, `CanWrite`, driver-side
