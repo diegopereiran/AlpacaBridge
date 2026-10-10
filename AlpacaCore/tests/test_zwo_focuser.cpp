@@ -314,8 +314,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A temperature failure leaves Position answer
     }
 }
 
-TEST_CASE("ZWO EAF Focuser Driver - A temperature error keeps its mapped code",
-          "[zwo][focuser][unit][fake-sdk]") {
+TEST_CASE("ZWO EAF Focuser Driver - A temperature error keeps its mapped code", "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
     sdk.temperature_not_supported = true;
     auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
