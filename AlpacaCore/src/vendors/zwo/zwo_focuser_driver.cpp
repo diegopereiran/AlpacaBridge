@@ -266,7 +266,7 @@ public:
         const auto status = read_status();
         if (!status.temperature.has_value()) {
             throw AlpacaException("Focuser temperature is not available: " + status.temperature_error,
-                                  AlpacaError::DriverException);
+                                  status.temperature_error_code);
         }
         return *status.temperature;
     }
@@ -294,6 +294,7 @@ private:
         int position{};
         std::optional<double> temperature;  // absent when the SDK would not report it
         std::string temperature_error;      // why, for the Temperature getter
+        int temperature_error_code{AlpacaError::DriverException};  // the wrapper's mapped code
     };
 
     static constexpr std::chrono::milliseconds kStatusTtl{100};
@@ -309,8 +310,12 @@ private:
             fresh.position = sdk_.get_position(id);
             try {
                 fresh.temperature = sdk_.get_temperature(id);
+            } catch (const AlpacaException& e) {
+                // Temperature is optional: moving/position still answer. Keep the
+                // wrapper's mapped code (NotImplemented, NotConnected, ...).
+                fresh.temperature_error = e.what();
+                fresh.temperature_error_code = e.error_code();
             } catch (const std::exception& e) {
-                // Temperature is optional: moving/position still answer.
                 fresh.temperature_error = e.what();
             }
             return fresh;

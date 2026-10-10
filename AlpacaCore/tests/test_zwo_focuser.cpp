@@ -46,6 +46,7 @@ public:
     double temperature{12.5};
     bool fail_reads{false};
     bool fail_temperature{false};
+    bool temperature_not_supported{false};
     int moving_calls{0};
     int position_calls{0};
     int temperature_calls{0};
@@ -89,6 +90,9 @@ public:
     }
     double get_temperature(int) override {
         ++temperature_calls;
+        if (temperature_not_supported) {
+            throw alpacacore::AlpacaException("EAF temperature not supported", alpacacore::AlpacaError::NotImplemented);
+        }
         if (fail_temperature) {
             throw std::runtime_error("temp sensor down");
         }
@@ -307,5 +311,21 @@ TEST_CASE("ZWO EAF Focuser Driver - A temperature failure leaves Position answer
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).find("temp sensor down") != std::string::npos);
+    }
+}
+
+TEST_CASE("ZWO EAF Focuser Driver - A temperature error keeps its mapped code",
+          "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    sdk.temperature_not_supported = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 500);
+    try {
+        (void)driver->get_temperature();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::NotImplemented);
     }
 }

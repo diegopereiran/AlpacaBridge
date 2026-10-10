@@ -99,6 +99,8 @@ public:
     }
 
     /// After a write that changes device state: the next read goes to the device.
+    /// Writes do not check the latch here: an SDK-backed driver's own call fails if
+    /// the device is gone.
     void invalidate() {
         std::lock_guard<std::mutex> lock(mutex_);
         status_.reset();
