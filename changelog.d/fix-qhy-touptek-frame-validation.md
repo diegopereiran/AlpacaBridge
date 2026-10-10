@@ -3,6 +3,7 @@
 
 ### Fixed
 - **QHY and ToupTek camera frame publication** (AlpacaCore, issue #913): validate SDK frame metadata and buffer capacity before reporting exposure success; abort and reconnect discard stale exposure state.
+- **QHY stress-registration guidance** (developer docs): update `/driver-build` to identify the registered fake-SDK camera stress case.
 
 ### Added (tests)
-- **Shared camera image shape validation and QHY/ToupTek regressions** (issue #913): cover malformed-frame recovery after reconnect, aborted waits, QHY short-frame padding, SDK metadata, and connected QHY exposure stress.
+- **Shared camera image shape validation and QHY/ToupTek regressions** (issue #913): cover malformed-frame recovery after reconnect, no-frame failure, aborted waits, QHY short-frame padding, SDK metadata, and connected QHY exposure stress.
