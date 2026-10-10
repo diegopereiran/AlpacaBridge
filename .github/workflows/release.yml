@@ -222,6 +222,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       NOTES_NAME: ${{ needs.release.outputs.notes_name }}
+      DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Install packaging tools
         run: |
