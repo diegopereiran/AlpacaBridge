@@ -90,13 +90,10 @@ public:
         // concurrent by-index enumeration's bus scan (bounded; see accepted
         // cost (1) on that mutex in astroasis_protocol_wrapper.cpp) — but
         // connected_ is stored false before it, so the flip never waits on
-        // THAT lock. It can still wait on this driver's mutex_, behind an
-        // in-flight get_status() HID transaction (up to kDefaultTimeoutMs) or
-        // a connect handshake -- that wait predates this file's hid_global_mutex(),
-        // but is now strictly larger: an in-flight connect can itself be queued
-        // on hid_global_mutex() behind a concurrent enumeration's bus scan, which
-        // widens how long disconnect() can wait on mutex_ before it ever reaches
-        // the close.
+        // THAT lock. It can still wait on this driver's mutex_ behind a connect
+        // handshake, which can itself be queued on hid_global_mutex() behind a
+        // concurrent enumeration's bus scan. Getters no longer take mutex_; a
+        // status refill holds the cache mutex and Impl::mutex_ instead.
         stop_connection_thread();
         try {
             set_connected(false);

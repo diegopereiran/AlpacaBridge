@@ -50,8 +50,9 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // gain.
 //
 // Lock order (AGENTS.md "driver mutex_ -> operation lock -> SDK-wrapper
-// mutex"): driver mutex_ -> Impl::mutex_ -> this. Nothing may take Impl::mutex_
-// while holding it; enumerate_astroasis_focusers() takes only this one.
+// mutex"): driver mutex_ -> status-cache mutex ->
+// Impl::mutex_ -> this. Nothing may take Impl::mutex_ while holding it;
+// enumerate_astroasis_focusers() takes only this one.
 //
 // File-local because Astroasis is the only vendor linking hidapi. If a second
 // one ever does, this must be promoted to a shared header -- two separate
@@ -62,8 +63,9 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // that must be copied out before hid_free_enumeration), so a by-index device
 // creation on an HTTP thread can stall another focuser's connect/disconnect for
 // tens of milliseconds on a busy USB tree -- and, since AstroasisFocuserDriver
-// holds its own mutex_ across protocol_.connect()/disconnect(), every property
-// read on that focuser queued behind them for the same duration. Bounded,
+// holds its own mutex_ across protocol_.connect()/disconnect(), a property
+// getter on that focuser fails fast with NotConnected for the same duration
+// (a status refill queues on the cache mutex and Impl::mutex_ only). Bounded,
 // never a deadlock. (2) A
 // function-local static is destroyed at exit, before any static-lifetime object
 // constructed earlier. What keeps that unreachable is NOT heap ownership: the

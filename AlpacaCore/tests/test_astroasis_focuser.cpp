@@ -181,6 +181,7 @@ TEST_CASE("Astroasis Focuser Driver - Move and Halt invalidate the status cache"
     CHECK_FALSE(driver->get_is_moving());
 }
 
+// Falsified by: astroasis_focuser_driver.cpp status_cache_ threshold raised from 3 to 100 (the link never latches).
 TEST_CASE("Astroasis Focuser Driver - dead link never serves cached values", "[astroasis][focuser][unit]") {
     auto state = std::make_shared<FakeHidState>();
     auto driver = make_fake_focuser(state);
@@ -189,11 +190,23 @@ TEST_CASE("Astroasis Focuser Driver - dead link never serves cached values", "[a
 
     state->dead = true;
     std::this_thread::sleep_for(std::chrono::milliseconds(150));  // past the TTL
-    for (int i = 0; i < 5; ++i) {
-        CHECK_THROWS_AS(driver->get_position(), alpacacore::AlpacaException);
+    // The first reads below the threshold report the raw HID failure.
+    for (int i = 0; i < 2; ++i) {
+        try {
+            (void)driver->get_position();
+            FAIL("expected a throw");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(std::string(ex.what()).find("communications compromised") == std::string::npos);
+        }
     }
-    // Latched after the threshold: DriverException, Connected untouched.
-    require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
+    // Third failure latches: DriverException naming the compromised link, Connected untouched.
+    try {
+        (void)driver->get_position();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
     CHECK(driver->get_connected());
 
     state->dead = false;
