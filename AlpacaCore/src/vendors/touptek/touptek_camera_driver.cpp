@@ -1302,8 +1302,9 @@ public:
                                                 got_w, got_h);
 
                 if (!got || !exposure_active_.load()) {
-                    ALPACA_LOG_WARN("ToupTek",
-                        "Exposure failed or aborted before frame arrived");
+                    const char* failure_message = got ? "A frame arrived after the exposure was no longer active"
+                                                      : "The camera failed to deliver the exposure frame";
+                    ALPACA_LOG_WARN("ToupTek", failure_message);
                     // Publish the false-transition under readout_mutex_ so the
                     // invariant "exposure_active_ only changes under readout_mutex_"
                     // holds on the exposure thread's own exit paths too (matching
@@ -1315,16 +1316,9 @@ public:
                         std::lock_guard<std::mutex> rlock(readout_mutex_);
                         exposure_active_.store(false);
                     }
-                    if (!got) {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        if (abort_generation_.load() == abort_generation) {
-                            exposure_failure_ = "The camera failed to deliver the exposure frame";
-                        }
-                    } else {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        if (abort_generation_.load() == abort_generation) {
-                            exposure_failure_ = "Camera exposure stopped before a valid frame was delivered";
-                        }
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (abort_generation_.load() == abort_generation) {
+                        exposure_failure_ = failure_message;
                     }
                     return;
                 }

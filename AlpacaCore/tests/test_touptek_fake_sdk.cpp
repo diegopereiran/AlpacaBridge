@@ -22,8 +22,10 @@
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -341,7 +343,6 @@ TEST_CASE("ToupTek camera - dimensions above INT_MAX fail before conversion", "[
     driver->set_connected(true);
     driver->set_num_x(2);
     driver->set_num_y(2);
-    driver->start_exposure(0.01, true);
 
     const auto has_dimension_limit_error = [](auto&& read) {
         try {
@@ -359,6 +360,74 @@ TEST_CASE("ToupTek camera - dimensions above INT_MAX fail before conversion", "[
         REQUIRE(eventually([&] { return has_dimension_limit_error([&] { (void)driver->get_image_ready(); }); }));
         CHECK(has_dimension_limit_error([&] { (void)driver->get_image_array(); }));
     }
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - a frame arriving after the watchdog fails both image readers",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    fake.delivered_dimensions = std::pair<unsigned, unsigned>{2U, 2U};
+
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool wait_image_entered = false;
+    bool release_wait_image = false;
+    fake.before_call = [&](const std::string& method) {
+        if (method != "wait_image") return;
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        wait_image_entered = true;
+        gate_cv.notify_all();
+        gate_cv.wait(lock, [&] { return release_wait_image; });
+    };
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    driver->start_exposure(0.01, true);
+
+    bool waiting = false;
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        waiting = gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return wait_image_entered; });
+    }
+    CHECK(waiting);
+    if (!waiting) {
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            release_wait_image = true;
+        }
+        gate_cv.notify_all();
+        driver->set_connected(false);
+        return;
+    }
+
+    const bool watchdog_expired = eventually(
+        [&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }, std::chrono::seconds(17));
+    CHECK(watchdog_expired);
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        release_wait_image = true;
+    }
+    gate_cv.notify_all();
+    if (!watchdog_expired) {
+        driver->set_connected(false);
+        return;
+    }
+
+    const auto is_late_frame_failure = [](auto&& read) {
+        try {
+            read();
+        } catch (const AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException &&
+                   std::string(e.what()).find("frame arrived after the exposure was no longer active") !=
+                       std::string::npos;
+        }
+        return false;
+    };
+    REQUIRE(eventually([&] { return is_late_frame_failure([&] { (void)driver->get_image_ready(); }); }));
+    CHECK(is_late_frame_failure([&] { (void)driver->get_image_array(); }));
     driver->set_connected(false);
 }
 

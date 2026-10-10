@@ -6,4 +6,4 @@
 - **QHY stress-registration guidance** (developer docs): update `/driver-build` to identify the registered fake-SDK camera stress case.
 
 ### Added (tests)
-- **Shared camera image shape validation and QHY/ToupTek regressions** (issue #913): cover malformed-frame recovery after reconnect, no-frame failure, oversized ToupTek dimensions, aborted waits, QHY short-frame padding, SDK metadata, and connected QHY exposure stress.
+- **Shared camera image shape validation and QHY/ToupTek regressions** (issue #913): cover malformed-frame recovery after reconnect, no-frame and late-frame failures, oversized ToupTek dimensions, aborted waits, QHY short-frame padding, SDK metadata, and connected QHY exposure stress.

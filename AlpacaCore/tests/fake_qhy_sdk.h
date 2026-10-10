@@ -117,6 +117,10 @@ namespace alpacacore::test {
  *   here, while the same change on hardware would flip has_cooler. Set the
  *   struct field (or use default_cooled_camera()) instead. Tracked in
  *   issue #337.
+ * - get_single_frame() sizes its fake copy from bits_, even when frame_bpp
+ *   overrides the returned metadata. This is safe for malformed-format tests
+ *   because the driver rejects the metadata before consuming the frame; don't
+ *   use that override to model a valid frame with different byte packing.
  *
  * ROI UNITS — `roi_` is in BINNED pixels, matching the only caller: the driver
  * passes max_width / bin_x to set_resolution() from set_bin_locked(), and
