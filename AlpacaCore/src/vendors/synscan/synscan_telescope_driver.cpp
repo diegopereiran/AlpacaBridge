@@ -161,6 +161,18 @@ std::string synscan_model_id_to_name(int model_id) {
 
 } // namespace
 
+double park_ra_from_hour_angle(double lst_hours, double hour_angle_hours) {
+    double ra = std::fmod(lst_hours - hour_angle_hours, 24.0);
+    if (ra < 0.0) {
+        ra += 24.0;
+    }
+    // A tiny negative remainder plus 24.0 rounds to exactly 24.0.
+    if (ra >= 24.0) {
+        ra -= 24.0;
+    }
+    return ra;
+}
+
 class SynScanTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
@@ -1078,10 +1090,7 @@ public:
                 // without location) still leaves the last known longitude here.
                 const double lst =
                     compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
-                park_target_first = std::fmod(lst - park_hour_angle_hours_, 24.0);
-                if (park_target_first < 0.0) {
-                    park_target_first += 24.0;
-                }
+                park_target_first = park_ra_from_hour_angle(lst, park_hour_angle_hours_);
                 park_target_second = park_dec_degrees_;
                 validate_ra_dec(park_target_first, park_target_second, "Park");
             }
