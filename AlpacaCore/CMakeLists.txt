@@ -139,6 +139,8 @@ add_library(alpacacore_builtins STATIC
     src/vendors/synscan/synscan_schema.cpp
     src/vendors/qhy/qhy_schema.cpp
     src/vendors/touptek/touptek_schema.cpp
+    src/vendors/gemini/gemini_schema.cpp
+    src/vendors/wandererastro/wandererastro_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -212,6 +214,7 @@ if(ALPACACORE_ENABLE_GEMINI)
     add_subdirectory(src/vendors/gemini)
     if(TARGET alpacacore_gemini)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_gemini)
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_GEMINI)
     endif()
 endif()
 
@@ -219,6 +222,7 @@ if(ALPACACORE_ENABLE_WANDERERASTRO)
     add_subdirectory(src/vendors/wandererastro)
     if(TARGET alpacacore_wandererastro)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_wandererastro)
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_WANDERERASTRO)
     endif()
 endif()
 

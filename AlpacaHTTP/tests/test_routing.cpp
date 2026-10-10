@@ -2472,6 +2472,202 @@ int main() {
         remove_device(router, "zwo", "camera", 9601);
     }
     {
+        // case: zwo camera identity keys round trip and refuse control bytes (#914)
+        // The form resends the learned identity after remove + add.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9608},
+                                           {"cameraIndex", 1},
+                                           {"cameraId", 7},
+                                           {"serialNumber", "0c190e111d020900"},
+                                           {"cameraName", "ZWO ASI533MC Pro"},
+                                           {"uniqueId", "ZWO_UID_00112233445566ff"}},
+                                          "Camera", 9608);
+        EXPECT(cfg.value("serialNumber", std::string()) == "0c190e111d020900");
+        EXPECT(cfg.value("cameraName", std::string()) == "ZWO ASI533MC Pro");
+        EXPECT(cfg.value("uniqueId", std::string()) == "ZWO_UID_00112233445566ff");
+        remove_device(router, "zwo", "camera", 9608);
+
+        for (const char* field : {"serialNumber", "cameraName", "uniqueId"}) {
+            nlohmann::json bad = {{"vendor", "zwo"},
+                                  {"deviceType", "camera"},
+                                  {"deviceNumber", 9608},
+                                  {"cameraIndex", 1},
+                                  {field, "0c19\nforged log line"}};
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice", bad.dump());
+            const auto json = nlohmann::json::parse(response.body());
+            EXPECT(json.value("ErrorNumber", 0) == 0x401);
+            EXPECT(json.value("ErrorMessage", std::string()).find(field) != std::string::npos);
+        }
+        nlohmann::json not_hex = {{"vendor", "zwo"},
+                                  {"deviceType", "camera"},
+                                  {"deviceNumber", 9608},
+                                  {"cameraIndex", 1},
+                                  {"serialNumber", "not-hex!"}};
+        const auto not_hex_json = nlohmann::json::parse(
+            route_request(router, "POST", "/management/v1/configuredevice", not_hex.dump()).body());
+        EXPECT(not_hex_json.value("ErrorNumber", 0) == 0x401);
+    }
+    {
+        // case: zwo camera refuses a serial or uniqueId another entry holds (#914)
+        const auto configure = [&](int number, const char* field, const char* value) {
+            nlohmann::json body = {{"vendor", "zwo"},
+                                   {"deviceType", "camera"},
+                                   {"deviceNumber", number},
+                                   {"cameraIndex", number - 9600},
+                                   {field, value}};
+            return nlohmann::json::parse(
+                route_request(router, "POST", "/management/v1/configuredevice", body.dump()).body());
+        };
+        EXPECT(configure(9608, "serialNumber", "0c190e111d020900").value("ErrorNumber", -1) == 0);
+        const auto dup_serial = configure(9609, "serialNumber", "0c190e111d020900");
+        EXPECT(dup_serial.value("ErrorNumber", 0) == 0x401);
+        EXPECT(dup_serial.value("ErrorMessage", std::string()).find("serialNumber") != std::string::npos);
+        remove_device(router, "zwo", "camera", 9608);
+        EXPECT(configure(9609, "serialNumber", "0c190e111d020900").value("ErrorNumber", -1) == 0);
+        remove_device(router, "zwo", "camera", 9609);
+
+        EXPECT(configure(9608, "uniqueId", "ZWO_UID_00112233445566ff").value("ErrorNumber", -1) == 0);
+        const auto dup_uid = configure(9609, "uniqueId", "ZWO_UID_00112233445566ff");
+        EXPECT(dup_uid.value("ErrorNumber", 0) == 0x401);
+        EXPECT(dup_uid.value("ErrorMessage", std::string()).find("uniqueId") != std::string::npos);
+        remove_device(router, "zwo", "camera", 9608);
+    }
+    {
+        // case: zwo camera without a serial learns a UniqueID on the API and persisted paths (#914)
+        // No camera is attached in CI, so the registration generates ZWO_UID_...
+        // and hands it back as learned config; the API merge and the load-time
+        // write-back are the only things that put it in the stored entry.
+        const auto cfg = roundtrip_config(
+            router, {{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9710}, {"cameraIndex", 1}}, "Camera",
+            9710);
+        const std::string api_uid = cfg.value("uniqueId", std::string());
+        EXPECT(api_uid.rfind("ZWO_UID_", 0) == 0);
+        remove_device(router, "zwo", "camera", 9710);
+
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        const auto write_file = [&](const std::string& text) {
+            std::ofstream out(file, std::ios::trunc);
+            out << text;
+        };
+        write_file(nlohmann::json::array(
+                       {{{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9711}, {"cameraIndex", 1}}})
+                       .dump());
+        std::string stored_text;
+        std::string first_uid;
+        {
+            alpacahttp::Router first;
+            const auto listed = listed_entry(first, "Camera", 9711);
+            EXPECT(!listed.is_null());
+            first_uid = listed.value("Config", nlohmann::json::object()).value("uniqueId", std::string());
+            EXPECT(first_uid.rfind("ZWO_UID_", 0) == 0);
+            std::ifstream in(file);
+            stored_text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            const auto stored = nlohmann::json::parse(stored_text);
+            EXPECT(stored.is_array() && stored.size() == 1);
+            EXPECT(stored[0].value("uniqueId", std::string()) == first_uid);
+            remove_device(first, "zwo", "camera", 9711);
+        }
+        write_file(stored_text);
+        {
+            alpacahttp::Router second;
+            const auto listed = listed_entry(second, "Camera", 9711);
+            EXPECT(!listed.is_null());
+            EXPECT(listed.value("Config", nlohmann::json::object()).value("uniqueId", std::string()) == first_uid);
+            remove_device(second, "zwo", "camera", 9711);
+        }
+        // Falsified by: removing the learned_config write-back in load_persisted_devices or the
+        // stored_config.update(learned_config) merge in the configuredevice handler.
+    }
+    {
+        // case: zwo camera stored entries with a bad or duplicate identity stay listed (#914)
+        // The API refuses these values; a file that already holds them must
+        // load the entry with the key dropped instead of skipping the device.
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        {
+            std::ofstream out(file, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9712},
+                                           {"cameraIndex", 0},
+                                           {"serialNumber", "not-hex!"},
+                                           {"cameraName", "ZWO ASI120MM Mini"}},
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9713},
+                                           {"cameraIndex", 1},
+                                           {"serialNumber", "0c190e111d020900"},
+                                           {"uniqueId", "ZWO_UID_00112233445566ff"}},
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9714},
+                                           {"cameraIndex", 2},
+                                           {"serialNumber", "0c190e111d020900"},
+                                           {"uniqueId", "ZWO_UID_00112233445566ff"}}})
+                       .dump();
+        }
+        std::vector<std::string> first_ids;
+        {
+            alpacahttp::Router stored;
+            for (const int number : {9713, 9714}) {
+                EXPECT(!listed_entry(stored, "Camera", number).is_null());
+                first_ids.push_back(listed_config(stored, "Camera", number).value("uniqueId", std::string()));
+            }
+            EXPECT(!listed_entry(stored, "Camera", 9712).is_null());
+            // Entries that shared a UniqueID each get their own, written back.
+            // Duplicates are checked against the entries already loaded: 9713 is regenerated,
+            // 9714 then holds the only copy and keeps its id.
+            EXPECT(first_ids[0].rfind("ZWO_UID_", 0) == 0);
+            EXPECT(first_ids[0] != "ZWO_UID_00112233445566ff");
+            EXPECT(first_ids[1] == "ZWO_UID_00112233445566ff");
+            EXPECT(first_ids[0] != first_ids[1]);
+            // Two stored entries sharing a serial: the first drops it, the second keeps it.
+            EXPECT(listed_config(stored, "Camera", 9713).value("serialNumber", std::string()).empty());
+            EXPECT(listed_config(stored, "Camera", 9714).value("serialNumber", std::string()) == "0c190e111d020900");
+        }
+        {
+            // A second start over the same file reports the same ids.
+            alpacahttp::Router again;
+            EXPECT(listed_config(again, "Camera", 9713).value("uniqueId", std::string()) == first_ids[0]);
+            EXPECT(listed_config(again, "Camera", 9714).value("uniqueId", std::string()) == first_ids[1]);
+            for (const int number : {9712, 9713, 9714}) {
+                remove_device(again, "zwo", "camera", number);
+            }
+        }
+        {
+            // A stored row that failed to load (no index or id) keeps its UniqueID
+            // when a configuredevice without uniqueId replaces it.
+            {
+                std::ofstream out(file, std::ios::trunc);
+                out << nlohmann::json::array({{{"vendor", "zwo"},
+                                               {"deviceType", "camera"},
+                                               {"deviceNumber", 9715},
+                                               {"uniqueId", "ZWO_UID_0011223344556677"}}})
+                           .dump();
+            }
+            alpacahttp::Router failed;
+            nlohmann::json body = {
+                {"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9715}, {"cameraIndex", 1}};
+            const auto reply = nlohmann::json::parse(
+                route_request(failed, "POST", "/management/v1/configuredevice", body.dump()).body());
+            EXPECT(reply.value("ErrorNumber", -1) == 0);
+            EXPECT(listed_config(failed, "Camera", 9715).value("uniqueId", std::string()) ==
+                   "ZWO_UID_0011223344556677");
+            remove_device(failed, "zwo", "camera", 9715);
+        }
+        // Falsified by: comparing the write-back against the UniqueID read back by device number
+        // instead of the supplied one (the stored id is dropped by the entry replace).
+        // Falsified by: keeping unique_id_supplied as the write-back condition (the regenerated ids
+        // are not stored and differ on the second load) or clearing only the serial of a pair.
+        // Falsified by: making the Persisted arm of check_identity_field or the duplicate block return
+        // false (the entry would be skipped and not listed).
+    }
+    {
         // zwo / filterwheel
         const auto cfg =
             roundtrip_config(router,
@@ -4527,9 +4723,12 @@ int main() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
+        // The catalog sanitize keeps the declared fields of each type (ADR 0004): the focuser and the
+        // switch no longer keep each other's index keys, and a declared portPath/baudRate survives
+        // connectionType "auto".
         add("gemini", "focuser", "Focuser", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1,"panelIndex":2})",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1,"panelIndex":2})");
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1})");
         add("gemini", "focuser", "Focuser", "auto", R"({"connectionType":"auto","focuserIndex":1})",
             R"({"connectionType":"auto","focuserIndex":1})");  // #659
         add("gemini", "covercalibrator", "CoverCalibrator", "lite",
@@ -4540,10 +4739,10 @@ int main() {
             R"({"flatPanelModel":"v2","connectionType":"serial","portPath":"/dev/ttyUSB9","baudRate":19200,"panelIndex":3})");
         add("gemini", "covercalibrator", "CoverCalibrator", "pro",
             R"({"flatPanelModel":"pro","connectionType":"auto","panelIndex":1,"portPath":"/dev/x","baudRate":9})",
-            R"({"flatPanelModel":"pro","connectionType":"auto","panelIndex":1})");
+            R"({"flatPanelModel":"pro","connectionType":"auto","panelIndex":1,"portPath":"/dev/x","baudRate":9})");
         add("gemini", "switch", "Switch", "pdh-adv3 auto",
             R"({"switchType":"pdh-adv3","connectionType":"auto","hubIndex":1,"focuserIndex":4})",
-            R"({"switchType":"pdh-adv3","connectionType":"auto","hubIndex":1,"focuserIndex":4})");
+            R"({"switchType":"pdh-adv3","connectionType":"auto","hubIndex":1})");
         add("gemini", "switch", "Switch", "pdh-adv3 serial",
             R"({"switchType":"pdh-adv3","connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"hubIndex":1})",
             R"({"switchType":"pdh-adv3","connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"hubIndex":1})");
@@ -4560,7 +4759,7 @@ int main() {
         // wandererastro covercalibrator and filterwheel had no roundtrip_config() case before #647.
         add("wandererastro", "covercalibrator", "CoverCalibrator", "auto",
             R"({"connectionType":"auto","coverIndex":1,"portPath":"/dev/x"})",
-            R"({"connectionType":"auto","coverIndex":1})");
+            R"({"connectionType":"auto","coverIndex":1,"portPath":"/dev/x"})");  // declared fields survive (ADR 0004)
         add("wandererastro", "covercalibrator", "CoverCalibrator", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":19200,"coverIndex":1})",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":19200,"coverIndex":1})");
@@ -4594,7 +4793,17 @@ int main() {
             const std::string vendor = c.posted.value("vendor", "");
             const std::string device_type = c.posted.value("deviceType", "");
 
-            const auto api = api_attempt(router, c.posted, c.alpaca_type);
+            auto api = api_attempt(router, c.posted, c.alpaca_type);
+            // #914: a ZWO camera without a serial gets a generated UniqueID
+            // persisted at create; check its shape, then compare the rest.
+            const auto strip_generated_unique_id = [&](nlohmann::json& config) {
+                if (vendor == "zwo" && device_type == "camera" && config.contains("uniqueId")) {
+                    EXPECT(config["uniqueId"].is_string() &&
+                           config["uniqueId"].get<std::string>().rfind("ZWO_UID_", 0) == 0);
+                    config.erase("uniqueId");
+                }
+            };
+            strip_generated_unique_id(api.config);
             if (!api.ok || api.config != c.expected) {
                 std::cerr << "#647 API round trip differs for " << c.label << "\n  error:    " << api.message
                           << "\n  expected: " << c.expected.dump() << "\n  actual:   " << api.config.dump() << "\n";
@@ -4603,7 +4812,8 @@ int main() {
             EXPECT(api.config == c.expected);
             remove_device(router, vendor, device_type, number);
 
-            const auto persisted = persisted_attempt(c.posted, c.alpaca_type);
+            auto persisted = persisted_attempt(c.posted, c.alpaca_type);
+            strip_generated_unique_id(persisted.config);
             if (!persisted.listed || persisted.config != c.expected || !persisted.warnings.empty()) {
                 std::cerr << "#647 persisted round trip differs for " << c.label << "\n  listed:   " << persisted.listed
                           << "\n  expected: " << c.expected.dump() << "\n  actual:   " << persisted.config.dump()
@@ -4836,13 +5046,24 @@ int main() {
             {"config normalized: QHY CFW3 connectionType \"serial\" requires portPath"}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-        drop_pin("gemini", "switch", "Switch", kPortRequired);
+        // The catalog turns the refusal into a normalize warning for a saved config, and the factory
+        // then throws the same text, so the device is dropped as before.
+        pin("serial with empty portPath is DROPPED (#508 item 1)", "gemini", "switch", "Switch",
+            R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
+            {"config normalized: " + kPortRequired}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        drop_pin("wandererastro", "covercalibrator", "CoverCalibrator", kPortRequired);
-        drop_pin("wandererastro", "rotator", "Rotator", kPortRequired);
-        drop_pin("wandererastro", "filterwheel", "FilterWheel", kPortRequired);
-        drop_pin("wandererastro", "switch", "Switch", kPortRequired);
+        // The catalog turns each refusal into a normalize warning for a saved config, and the factory
+        // then throws the same text, so the device is dropped as before.
+        for (const auto& [device_type, alpaca_type] :
+             {std::pair<std::string, std::string>{"covercalibrator", "CoverCalibrator"},
+              {"rotator", "Rotator"},
+              {"filterwheel", "FilterWheel"},
+              {"switch", "Switch"}}) {
+            pin("serial with empty portPath is DROPPED (#508 item 1)", "wandererastro", device_type, alpaca_type,
+                R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
+                {"config normalized: " + kPortRequired}, {});
+        }
 #endif
 
         // #508 item 1, the arms that fall through to by-index auto-detect on an
@@ -7003,8 +7224,9 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
-    // ToupTek and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is false.
+    // and the Bisque, Celestron, Gemini, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
+    // ToupTek, WandererAstro and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is
+    // false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -7014,7 +7236,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 20);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 27);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7085,6 +7307,20 @@ int main() {
             }
             if (entry.value("vendor", "") == "svbony") {
 #ifdef ALPACACORE_ENABLE_SVBONY
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "gemini") {
+#ifdef ALPACACORE_ENABLE_GEMINI
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "wandererastro") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
                 entry["available"] = true;
 #else
                 entry["available"] = false;

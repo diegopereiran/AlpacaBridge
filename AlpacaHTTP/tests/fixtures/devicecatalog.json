@@ -51,6 +51,47 @@
     ]
   },
   {
+    "vendor": "gemini",
+    "deviceType": "covercalibrator",
+    "displayName": "Gemini Flat Panel",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_GEMINI",
+    "fields": [
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "baudRate", "type": "int", "default": 9600, "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "flatPanelModel", "type": "string", "default": "lite", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "panelIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
+    "vendor": "gemini",
+    "deviceType": "focuser",
+    "displayName": "Gemini Focuser",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_GEMINI",
+    "fields": [
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "baudRate", "type": "int", "default": 9600, "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "focuserIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
+    "vendor": "gemini",
+    "deviceType": "switch",
+    "displayName": "Gemini Power & Data Hub",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_GEMINI",
+    "fields": [
+      {"key": "switchType", "type": "string", "default": "pdh-adv3", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "baudRate", "type": "int", "default": 19200, "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "hubIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
     "vendor": "gphoto",
     "deviceType": "camera",
     "displayName": "gphoto Camera (libgphoto2)",
@@ -263,6 +304,60 @@
         {"key": "name", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
         {"key": "pwm", "type": "bool", "default": false, "required": false, "secret": false, "role": "Plain"}
         ]}
+    ]
+  },
+  {
+    "vendor": "wandererastro",
+    "deviceType": "covercalibrator",
+    "displayName": "WandererAstro WandererCover",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_WANDERERASTRO",
+    "fields": [
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "baudRate", "type": "int", "default": 19200, "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "coverIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
+    "vendor": "wandererastro",
+    "deviceType": "filterwheel",
+    "displayName": "WandererAstro SFW Filter Wheel",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_WANDERERASTRO",
+    "fields": [
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "baudRate", "type": "int", "default": 19200, "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "wandererFilterwheelIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"},
+      {"key": "filterNames", "type": "stringList", "required": false, "secret": false, "role": "Plain"}
+    ]
+  },
+  {
+    "vendor": "wandererastro",
+    "deviceType": "rotator",
+    "displayName": "WandererAstro WandererRotator Mini",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_WANDERERASTRO",
+    "fields": [
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "baudRate", "type": "int", "default": 19200, "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "rotatorIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
+    "vendor": "wandererastro",
+    "deviceType": "switch",
+    "displayName": "WandererAstro WandererBox Pro V3",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_WANDERERASTRO",
+    "fields": [
+      {"key": "switchType", "type": "string", "default": "wandererbox-pro-v3", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "baudRate", "type": "int", "default": 19200, "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "boxIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
     ]
   },
   {
