@@ -23,7 +23,10 @@
 
 #include <chrono>
 #include <functional>
+#include <limits>
+#include <string>
 #include <thread>
+#include <utility>
 
 #include "catch2_compat.h"
 #include "fake_touptek_sdk.h"
@@ -328,6 +331,34 @@ TEST_CASE("ToupTek camera - no delivered frame fails ImageReady and ImageArray",
         return 0;
     };
     CHECK(image_array_error() == alpacacore::AlpacaError::DriverException);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - dimensions above INT_MAX fail before conversion", "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    driver->start_exposure(0.01, true);
+
+    const auto has_dimension_limit_error = [](auto&& read) {
+        try {
+            read();
+        } catch (const AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException &&
+                   std::string(e.what()).find("ToupTek frame dimensions exceed supported limits") != std::string::npos;
+        }
+        return false;
+    };
+    const auto over_limit = static_cast<unsigned>(std::numeric_limits<int>::max()) + 1U;
+    for (const auto dimensions : {std::pair<unsigned, unsigned>{over_limit, 2U}, {2U, over_limit}}) {
+        fake.delivered_dimensions = dimensions;
+        driver->start_exposure(0.01, true);
+        REQUIRE(eventually([&] { return has_dimension_limit_error([&] { (void)driver->get_image_ready(); }); }));
+        CHECK(has_dimension_limit_error([&] { (void)driver->get_image_array(); }));
+    }
     driver->set_connected(false);
 }
 
