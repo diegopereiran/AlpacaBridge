@@ -15,6 +15,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
+#include <alpacacore/util/logging.h>
 
 #include <chrono>
 #include <exception>
@@ -52,8 +53,12 @@ class TtlStatusCache {
 public:
     using clock = std::chrono::steady_clock;
 
-    TtlStatusCache(std::string device_label, std::chrono::milliseconds ttl, int fault_threshold = 3)
-        : label_(std::move(device_label)), ttl_(ttl), fault_threshold_(fault_threshold) {}
+    TtlStatusCache(std::string device_label, std::chrono::milliseconds ttl, int fault_threshold = 3,
+                   std::string log_component = "Device")
+        : label_(std::move(device_label)),
+          log_component_(std::move(log_component)),
+          ttl_(ttl),
+          fault_threshold_(fault_threshold) {}
 
     template <typename Fetch>
     Status get(Fetch&& fetch) {
@@ -64,19 +69,33 @@ public:
         }
         try {
             Status fresh = fetch();
-            health_.on_reply();
+            if (health_.on_reply()) {
+                ALPACA_LOG_INFO(log_component_, label_ + " communications restored");
+            }
             status_ = fresh;
             filled_at_ = clock::now();
             return fresh;
         } catch (const std::exception& e) {
             status_.reset();
-            health_.note_failure(e.what(), fault_threshold_);
+            if (const auto latched = health_.note_failure(e.what(), fault_threshold_)) {
+                ALPACA_LOG_ERROR(log_component_, label_ + " communications compromised: " + *latched);
+            } else if (!health_.faulted()) {
+                ALPACA_LOG_WARN(log_component_, label_ + " status read failed: " + e.what() + " (" +
+                                                    std::to_string(health_.consecutive_failures()) + " consecutive)");
+            }
             if (health_.faulted()) {
                 throw AlpacaException(label_ + " communications compromised: " + health_.fault(),
                                       AlpacaError::DriverException);
             }
             throw;
         }
+    }
+
+    /// The latched fault reason, empty while the link is healthy. For writable
+    /// device settings held in driver memory, which must not be served either.
+    std::string fault() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return health_.fault();
     }
 
     /// After a write that changes device state: the next read goes to the device.
@@ -94,9 +113,10 @@ public:
 
 private:
     std::string label_;
+    std::string log_component_;
     std::chrono::milliseconds ttl_;
     int fault_threshold_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::optional<Status> status_;
     clock::time_point filled_at_{};
     PolledLinkHealth health_;

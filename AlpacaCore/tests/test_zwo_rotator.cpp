@@ -388,7 +388,59 @@ TEST_CASE("ZWO CAA Rotator Driver - A dead link refuses reads instead of serving
     CHECK(driver->get_connected() == true);
     CHECK(driver->get_device_state().size() == 1);  // TimeStamp only
 
+    // Reverse is a writable setting held in memory: it refuses too while latched.
+    try {
+        (void)driver->get_reverse();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+
     // Recovery needs no reconnect.
     sdk.fail_reads = false;
     CHECK(driver->get_position() == 10.0);
+    CHECK(driver->get_reverse() == false);
+}
+
+// Falsified by: zwo_rotator_driver.cpp sync() dropping its pre-read
+// status_cache_.invalidate() (the offset is taken against the cached 10, giving 40).
+TEST_CASE("ZWO CAA Rotator Driver - Sync takes its offset from the live angle", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    sdk.degree = 50.0;
+    driver->sync(0.0);
+    wait_past_status_ttl();  // the offset must hold against the live angle, not the cached frame
+    CHECK(driver->get_position() == 0.0);
+}
+
+// Falsified by: zwo_rotator_driver.cpp set_reverse() dropping its
+// status_cache_.invalidate() (Position keeps the pre-reverse 10).
+TEST_CASE("ZWO CAA Rotator Driver - Reverse change drops the cached frame", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    sdk.degree = 350.0;
+    driver->set_reverse(true);
+    CHECK(driver->get_position() == 350.0);
+}
+
+// Falsified by: zwo_rotator_driver.cpp move() dropping its pre-read
+// status_cache_.invalidate() (the target is built from the cached 10, giving 20).
+TEST_CASE("ZWO CAA Rotator Driver - Relative move starts from the live angle", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    sdk.degree = 50.0;
+    driver->move(10.0);
+    CHECK(sdk.last_move_absolute == 60.0);
 }

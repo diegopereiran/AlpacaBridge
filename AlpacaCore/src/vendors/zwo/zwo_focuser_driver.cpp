@@ -43,7 +43,7 @@ public:
           focuser_info_(),
           focuser_info_valid_(false),
           connected_(false),
-          status_cache_("ZWO EAF", kStatusTtl) {}
+          status_cache_("ZWO EAF", kStatusTtl, 3, "ZWO") {}
 
     ~ZWOEAFFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -265,7 +265,8 @@ public:
     double get_temperature() const override {
         const auto status = read_status();
         if (!status.temperature.has_value()) {
-            throw AlpacaException("Focuser temperature is not available", AlpacaError::DriverException);
+            throw AlpacaException("Focuser temperature is not available: " + status.temperature_error,
+                                  AlpacaError::DriverException);
         }
         return *status.temperature;
     }
@@ -292,6 +293,7 @@ private:
         bool moving{};
         int position{};
         std::optional<double> temperature;  // absent when the SDK would not report it
+        std::string temperature_error;      // why, for the Temperature getter
     };
 
     static constexpr std::chrono::milliseconds kStatusTtl{100};
@@ -305,8 +307,9 @@ private:
             fresh.position = sdk_.get_position(id);
             try {
                 fresh.temperature = sdk_.get_temperature(id);
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            } catch (const std::exception& e) {
                 // Temperature is optional: moving/position still answer.
+                fresh.temperature_error = e.what();
             }
             return fresh;
         });

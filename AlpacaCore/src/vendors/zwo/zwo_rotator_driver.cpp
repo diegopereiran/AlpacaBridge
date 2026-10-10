@@ -51,7 +51,7 @@ public:
           has_target_position_(false),
           sync_offset_(0.0),
           connected_(false),
-          status_cache_("ZWO CAA", kStatusTtl) {}
+          status_cache_("ZWO CAA", kStatusTtl, 3, "ZWO") {}
 
     ~ZWOCAARotatorDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -223,6 +223,10 @@ public:
 
     bool get_reverse() const override {
         ensure_connected();
+        // Reverse is a writable device setting held in memory: a dead link must not serve it.
+        if (const std::string fault = status_cache_.fault(); !fault.empty()) {
+            throw AlpacaException("ZWO CAA communications compromised: " + fault, AlpacaError::DriverException);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         return reverse_;
     }
