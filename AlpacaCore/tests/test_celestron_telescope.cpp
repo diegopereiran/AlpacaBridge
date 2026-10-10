@@ -17,11 +17,17 @@
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -72,13 +78,6 @@ TEST_CASE("Celestron Telescope Driver - Defaults", "[celestron][telescope][unit]
     REQUIRE_FALSE(driver->get_can_pulse_guide());
     REQUIRE_FALSE(driver->get_can_set_guide_rates());
     REQUIRE(driver->get_can_set_tracking());
-    REQUIRE(driver->get_can_move_axis(0));
-    REQUIRE(driver->get_can_move_axis(1));
-    REQUIRE_FALSE(driver->get_can_move_axis(2));
-
-    // Out-of-range axis raises InvalidValue even while disconnected (#516).
-    require_alpaca_error([&]() { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { (void)driver->get_can_move_axis(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("Celestron Telescope Driver - Device metadata", "[celestron][telescope][unit]") {
@@ -260,10 +259,7 @@ TEST_CASE("Celestron Telescope Driver - Telescope Properties", "[celestron][tele
            eq == alpacacore::EquatorialSystem::J2000 ||
            eq == alpacacore::EquatorialSystem::Other));
 
-    auto align = driver->get_alignment_mode();
-    CHECK((align == alpacacore::AlignmentMode::AltAz ||
-           align == alpacacore::AlignmentMode::Polar ||
-           align == alpacacore::AlignmentMode::GermanPolar));
+    require_alpaca_error([&] { (void)driver->get_alignment_mode(); }, alpacacore::AlpacaError::NotConnected);
 
     auto rates = driver->get_tracking_rates();
     CHECK_FALSE(rates.empty());
@@ -278,19 +274,36 @@ TEST_CASE("Celestron Telescope Driver - ASCOM Error Codes", "[celestron][telesco
 
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
 
-    // TODO: Celestron check_connected() throws DriverException (0x500) instead of
-    // NotConnected (0x407). Fix the driver, then change these to AlpacaError::NotConnected.
-    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::DriverException);
-    require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_altitude(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_tracking(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->set_tracking(true); }, alpacacore::AlpacaError::NotConnected);
 
     require_alpaca_error([&]() { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_declination(-90.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// open-astro#769: MoveAxis validates its arguments before the connection check
+// (AGENTS.md error precedence), so a disconnected driver answers a bad
+// argument with InvalidValue rather than NotConnected.
+TEST_CASE("Celestron Telescope Driver - MoveAxis argument errors precede NotConnected",
+          "[celestron][telescope][unit]") {
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+
+    require_alpaca_error([&]() { driver->move_axis(2, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(0, std::numeric_limits<double>::quiet_NaN()); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move_axis(0, 1000.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    // Valid arguments still reach the connection check.
+    require_alpaca_error([&]() { driver->move_axis(0, 0.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 // open-astro#346, the shape #304 fixed on the Sky-Watcher driver: ASCOM treats
@@ -388,6 +401,244 @@ TEST_CASE("Celestron Telescope Driver - a far-off client UTCDate is logged once 
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_utc_date(far);
     CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+// ── PulseGuide on one axis leaves the other axis's pulse alone (#813) ────────
+//
+// MC_AUX_GUIDE takes at most 255 cs, so a longer pulse is continued by a
+// chunk-chain thread. With one thread and one end time shared by both axes, a
+// Dec pulse reaped the RA chain (the rest of a long RA pulse was never sent)
+// and overwrote the RA end time (IsPulseGuiding went false while RA guided).
+
+namespace {
+
+// Records the MC_AUX_GUIDE duration byte (cs) of each pulse sent to one motor.
+class AuxGuideLog {
+public:
+    void add(const std::string& command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        commands_.push_back(command);
+    }
+
+    std::vector<int> guide_chunks_cs(char motor) {
+        const std::string needle{'P', '\x03', motor, '\x26'};
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<int> chunks;
+        for (const auto& command : commands_) {
+            for (auto pos = command.find(needle); pos != std::string::npos; pos = command.find(needle, pos + 1)) {
+                if (pos + 5 < command.size()) {
+                    chunks.push_back(static_cast<unsigned char>(command[pos + 5]));
+                }
+            }
+        }
+        return chunks;
+    }
+
+private:
+    std::mutex mutex_;
+    std::vector<std::string> commands_;
+};
+
+std::unique_ptr<alpacacore::TelescopeDriver> connect_pulse_guide_mount(alpacacore::test::FakeMountServer& server) {
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 500;  // see the UTCDate case above
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // The canned reply answers the AUX-bus probe, so an autoguider port is found.
+    REQUIRE(driver->get_can_pulse_guide());
+    return driver;
+}
+
+}  // namespace
+
+TEST_CASE("Celestron Telescope Driver - a Dec pulse does not cut the chunk chain of a long RA pulse",
+          "[celestron][telescope][unit][pulseguide]") {
+    auto log = std::make_shared<AuxGuideLog>();
+    alpacacore::test::FakeMountServer server([log](const std::string& command) {
+        log->add(command);
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->pulse_guide(2, 5000);  // East, RA: 255 cs now, 245 cs chained at ~2.55 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    driver->pulse_guide(0, 3000);  // North, Dec: 255 cs now, 45 cs chained
+    std::this_thread::sleep_until(t0 + std::chrono::milliseconds(4600));
+
+    // The RA pulse runs until t0 + 5.0 s, plus the 1 s completion delay.
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(log->guide_chunks_cs('\x10') == std::vector<int>{255, 245});
+    CHECK(log->guide_chunks_cs('\x11') == std::vector<int>{255, 45});
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Telescope Driver - a short Dec pulse does not end IsPulseGuiding of a running RA pulse",
+          "[celestron][telescope][unit][pulseguide]") {
+    alpacacore::test::FakeMountServer server([](const std::string&) { return std::string("00000000,00000000#"); });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->pulse_guide(2, 2000);  // East, RA, 2.0 s (one chunk)
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    driver->pulse_guide(0, 200);  // North, Dec, 0.2 s: ends (with the delay) at ~1.3 s
+    std::this_thread::sleep_until(t0 + std::chrono::milliseconds(1800));
+    CHECK(driver->get_is_pulse_guiding());  // RA guides until t0 + 2.0 s + 1 s delay
+
+    std::this_thread::sleep_until(t0 + std::chrono::milliseconds(3300));
+    CHECK_FALSE(driver->get_is_pulse_guiding());  // both axes ended
+    driver->set_connected(false);
+}
+
+// #627: `x < min || x > max` is false for NaN, so NaN passed every range check
+// and was stored (targets, elevation) or reached the mount (the site latitude
+// and longitude setters check the connection only AFTER the range, so a NaN
+// used to surface as NotConnected instead of InvalidValue).
+TEST_CASE("Celestron Telescope Driver - non-finite input is rejected", "[celestron][telescope][unit][nonfinite]") {
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("TargetDeclination") {
+        require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_target_declination(); }, alpacacore::AlpacaError::ValueNotSet);
+    }
+    SECTION("TargetRightAscension") {
+        require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { (void)driver->get_target_right_ascension(); },
+                             alpacacore::AlpacaError::ValueNotSet);
+    }
+    SECTION("SiteElevation") {
+        require_alpaca_error([&]() { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SiteLatitude") {
+        require_alpaca_error([&]() { driver->set_site_latitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SiteLongitude") {
+        require_alpaca_error([&]() { driver->set_site_longitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+}
+
+// #627: Celestron's guide-rate setter only exists when the AUX bus probe found
+// an autoguider port, so it is reachable only on a connected driver. The
+// canned reply makes every bus probe answer, which the CanSetGuideRates
+// precondition below confirms. NaN used to be converted to a percentage and
+// written to the mount.
+TEST_CASE("Celestron Telescope Driver - non-finite guide rate is rejected", "[celestron][telescope][unit][nonfinite]") {
+    alpacacore::test::FakeMountServer server([](const std::string&) { return std::string("00000000,00000000#"); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 500;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(driver->get_can_set_guide_rates());
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+}
+
+// #627: `validate_ra_dec` is `ra < 0 || ra >= 24` / `dec < -90 || dec > 90`,
+// both false for NaN, so a NaN coordinate went through slew and sync to the
+// mount. Both check the connection before validating, so this needs a
+// connected driver.
+TEST_CASE("Celestron Telescope Driver - non-finite slew and sync coordinates are rejected",
+          "[celestron][telescope][unit][nonfinite]") {
+    alpacacore::test::FakeMountServer server([](const std::string&) { return std::string("00000000,00000000#"); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 500;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("SlewToCoordinatesAsync RightAscension") {
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(nan, 45.0); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SlewToCoordinatesAsync Declination") {
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, nan); },
+                             alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SyncToCoordinates RightAscension") {
+        require_alpaca_error([&]() { driver->sync_to_coordinates(nan, 45.0); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    SECTION("SyncToCoordinates Declination") {
+        require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+
+    driver->set_connected(false);
+}
+
+// #781: AbortSlew ran the cancel and both axis stops bare, so a throw from the
+// first skipped the other two, and a stop lost on a dead link was reported as a
+// clean abort. Every stop is tried, a failure throws DriverException afterwards
+// and Slewing is left alone; the success path is unchanged.
+TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not send", "[celestron][telescope][unit]") {
+    auto log = std::make_shared<std::vector<std::string>>();
+    auto log_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([log, log_mutex](const std::string& command) {
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        log->push_back(command);
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->move_axis(0, 1.0);
+    REQUIRE(driver->get_slewing());
+
+    SECTION("success clears Slewing and sends the cancel and both axis stops") {
+        {
+            std::lock_guard<std::mutex> lock(*log_mutex);
+            log->clear();
+        }
+        REQUIRE_NOTHROW(driver->abort_slew());
+        CHECK_FALSE(driver->get_slewing());
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        CHECK(std::count(log->begin(), log->end(), std::string("M")) == 1);
+        const auto axis_stops = std::count_if(log->begin(), log->end(), [](const std::string& c) {
+            return c.size() >= 5 && c[0] == 'P' && c[1] == '\x02' && (c[3] == '\x24' || c[3] == '\x25') && c[4] == '\0';
+        });
+        CHECK(axis_stops == 4);  // each axis gets both stop directions
+    }
+
+    SECTION("a dropped link throws DriverException and leaves Slewing true") {
+        REQUIRE(server.drop_connections());
+        try {
+            driver->abort_slew();
+            FAIL("AbortSlew returned success although the stops could not be sent");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+        }
+        CHECK(driver->get_slewing());
+    }
+
     driver->set_connected(false);
 }
 

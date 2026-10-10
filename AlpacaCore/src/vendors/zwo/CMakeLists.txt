@@ -54,6 +54,7 @@ if(ALPACACORE_ENABLE_ZWO)
 
     set(ZWO_SOURCES
         zwo_sdk_wrapper.cpp
+        zwo_camera_identity.cpp
         zwo_camera_driver.cpp
         zwo_switch_driver.cpp
         zwo_asiair_protocol_wrapper.cpp
@@ -78,8 +79,11 @@ if(ALPACACORE_ENABLE_ZWO)
         ${ZWO_EAF_INCLUDE}
         ${ZWO_EFW_INCLUDE}
         ${ZWO_CAA_INCLUDE}
-        ${ALPACACORE_ROOT}/external/ZWO/asiair-plus
     )
+
+    # Base drivers, logging and AsyncConnectable live in alpacacore; this vendor
+    # links down to it, never the reverse (open-astro#710).
+    target_link_libraries(alpacacore_zwo PRIVATE alpacacore)
 
     target_link_libraries(alpacacore_zwo PRIVATE ${ZWO_LIB_PATH} ${ZWO_EAF_LIB_PATH} ${ZWO_EFW_LIB_PATH} ${ZWO_CAA_LIB_PATH})
 

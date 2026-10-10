@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/units.h>
@@ -55,10 +56,12 @@ public:
      */
     iOptronTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                            std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect)
+                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+                           util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
         : AsyncConnectable("iOptron"),
           device_number_(device_number),
           connection_info_(connection_info),
+          connection_resolver_(std::move(connection_resolver)),
           connected_(false),
           mount_info_(),
           target_ra_hours_(0.0),
@@ -180,6 +183,13 @@ public:
         return connected_;
     }
 
+    // Reads only the published copy under its own narrow mutex, never the coarse
+    // mutex_ that set_connected() holds across the connect.
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        return link_fault_text_;
+    }
+
     // Base always spawns (the old spawn-skip `if (connect == get_connected())`
     // is gone — it masked the no-op-connect flag-consumption bug, PR #115
     // round 4). A connect() on an already-connected mount costs one short
@@ -229,9 +239,27 @@ public:
             ALPACA_LOG_INFO("iOptron", "Attempting to connect...");
             auto& protocol = iOptronProtocolWrapper::instance();
             ALPACA_LOG_INFO("iOptron", "Got protocol instance");
-            
-            ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
-            if (protocol.connect(connection_info_)) {
+
+            // Auto-detected devices resolve their port or host here, not in the
+            // factory: a persisted device is constructed at server start-up,
+            // when a Wi-Fi mount has often not joined the network yet (#659).
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
+                    ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
+                    if (!protocol.connect(info)) {
+                        ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
+                        // A refused TCP connect or a vanished serial node means the
+                        // resolved endpoint is gone: re-scan. A node that is present
+                        // but would not open is not stale (busy, permissions).
+                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to iOptron mount");
+                        }
+                        throw AlpacaException("Failed to connect to iOptron mount");
+                    }
+                },
+                "iOptron");
+            {
                 ALPACA_LOG_INFO("iOptron", "protocol.connect() returned true");
                 connected_ = true;
                 site_info_valid_ = false;
@@ -244,6 +272,7 @@ public:
                 device_faulted_ = false;
                 device_fault_count_ = 0;
                 last_device_error_.clear();
+                publish_link_fault_locked();
                 dec_guide_calibration_attempted_ = false;
                 dec_guide_calibrated_ = false;
                 dec_guide_inverted_ = true;
@@ -289,6 +318,7 @@ public:
                 sync_offset_ra_hours_ = 0.0;
                 sync_offset_dec_degrees_ = 0.0;
                 slew_in_progress_ = false;
+                last_slew_error_.clear();
                 prefetch_mount_state_locked();
                 try {
                     mount_info_ = protocol.get_mount_info();
@@ -299,13 +329,10 @@ public:
                 std::string mount_desc = mount_info_.model_name.empty()
                     ? "unknown model"
                     : mount_info_.model_name + " (" + mount_info_.model_code + ")";
-                ALPACA_LOG_INFO("iOptron", "Connected to " + mount_desc + " over " +
-                                            std::string(connection_info_.type == ConnectionType::Serial
-                                                            ? "Serial/USB"
-                                                            : "Network"));
-            } else {
-                ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
-                throw AlpacaException("Failed to connect to iOptron mount");
+                ALPACA_LOG_INFO(
+                    "iOptron",
+                    "Connected to " + mount_desc + " over " +
+                        std::string(connection_info_.type == ConnectionType::Serial ? "Serial/USB" : "Network"));
             }
         } else {
             ALPACA_LOG_INFO("iOptron", "Disconnecting...");
@@ -319,6 +346,7 @@ public:
             device_faulted_ = false;
             device_fault_count_ = 0;
             last_device_error_.clear();
+            publish_link_fault_locked();
             dec_guide_calibration_attempted_ = false;
             dec_guide_calibrated_ = false;
             dec_guide_inverted_ = true;
@@ -363,6 +391,7 @@ public:
             target_ra_hours_ = 0.0;
             target_dec_degrees_ = 0.0;
             slew_in_progress_ = false;
+            last_slew_error_.clear();
             disconnect_protocol = true;
         }
 
@@ -389,7 +418,7 @@ public:
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
         (void)action_parameters;  // Unused - no actions supported
-        throw AlpacaException("Action not supported: " + std::string(action_name));
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
     
     bool can_action(std::string_view action_name) const override {
@@ -675,6 +704,9 @@ public:
     }
     
     void set_guide_rate(const GuideRate& rate) override {
+        if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
+            throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         
@@ -773,9 +805,9 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
+        validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra_dec(ra, dec, "DestinationSideOfPier");
 
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
@@ -843,7 +875,7 @@ public:
     
     void set_site_elevation(double elevation) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException(
                 "Site elevation must be between -300 and 10000 meters",
                 AlpacaError::InvalidValue
@@ -859,16 +891,16 @@ public:
         ensure_site_info_cached_locked();
         return site_latitude_cached_;
     }
-    
+
     void set_site_latitude(double latitude) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException(
                 "Site latitude must be between -90 and 90 degrees",
                 AlpacaError::InvalidValue
             );
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_latitude(latitude);
         protocol.set_hemisphere(latitude >= 0.0);
@@ -877,7 +909,7 @@ public:
         site_info_valid_ = true;
         last_site_info_fetch_ = std::chrono::steady_clock::now();
     }
-    
+
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -885,16 +917,16 @@ public:
         ensure_site_info_cached_locked();
         return site_longitude_cached_;
     }
-    
+
     void set_site_longitude(double longitude) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException(
                 "Site longitude must be between -180 and 180 degrees",
                 AlpacaError::InvalidValue
             );
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
@@ -908,12 +940,8 @@ public:
         }
         return (axis == 0 || axis == 1);
     }
-    
-    void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        ensure_not_parked_locked("MoveAxis");
 
+    void move_axis(int axis, double rate) override {
         if (axis != 0 && axis != 1) {
             throw AlpacaException("Axis must be 0 (Primary) or 1 (Secondary)",
                                   AlpacaError::InvalidValue);
@@ -923,6 +951,10 @@ public:
         if (!is_axis_rate_supported(abs_rate)) {
             throw AlpacaException("Axis rate out of range", AlpacaError::InvalidValue);
         }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        ensure_not_parked_locked("MoveAxis");
 
         const bool was_any_axis_active = axis_move_active_primary_ || axis_move_active_secondary_;
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -988,8 +1020,12 @@ public:
                 tracking_state_before_move_ = cached_status_.is_tracking;
             }
         }
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that jogs an axis after a failed GOTO must not be told the OLD
+        // goto failed.
+        last_slew_error_.clear();
     }
-    
+
     std::pair<double, double> get_axis_rate_range(int axis) const override {
         if (axis == 0 || axis == 1) {
             const auto& rates = axis_rate_steps_deg_per_sec();
@@ -1018,6 +1054,12 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // open-astro#575: surface a stored async-slew failure as an error
+        // instead of a silent false, until AbortSlew or a new slew initiator
+        // clears it (see last_slew_error_).
+        if (!last_slew_error_.empty()) {
+            throw AlpacaException(last_slew_error_);
+        }
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             return true;
         }
@@ -1089,8 +1131,6 @@ public:
             }
         }
         slew_in_progress_ = false;
-        restore_altitude_limit_locked("Slewing");
-        restore_meridian_treatment_locked("Slewing");
         return false;
     }
     
@@ -1103,9 +1143,9 @@ public:
     }
     
     void set_target_declination(double dec) override {
+        validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_dec(dec, "TargetDeclination");
 
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1122,9 +1162,9 @@ public:
     }
     
     void set_target_right_ascension(double ra) override {
+        validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra(ra, "TargetRightAscension");
 
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -1143,16 +1183,15 @@ public:
         // Alpaca TrackingRate uses DriveRates enum values (0-4).
         return static_cast<int>(cached_status_.tracking_rate);
     }
-    
-    void set_tracking_rate(int rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        
-        auto& protocol = iOptronProtocolWrapper::instance();
 
+    void set_tracking_rate(int rate) override {
         if (rate < 0 || rate > 4) {
             throw AlpacaException("Invalid tracking rate", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+
+        auto& protocol = iOptronProtocolWrapper::instance();
 
         protocol.set_tracking_rate(rate);
         if (rate == 4) {
@@ -1163,7 +1202,7 @@ public:
         last_status_update_ = std::chrono::steady_clock::now();
         tracking_rate_override_until_ = last_status_update_ + std::chrono::seconds(2);
     }
-    
+
     std::vector<int> get_tracking_rates() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -1225,8 +1264,12 @@ public:
         slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that calls FindHome after a failed GOTO must not be told the OLD
+        // goto failed while it's homing.
+        last_slew_error_.clear();
     }
-    
+
     void park() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
@@ -1255,6 +1298,10 @@ public:
         last_status_update_ = std::chrono::steady_clock::now();
         slew_override_until_ = last_status_update_ + std::chrono::seconds(5);
         position_cache_valid_ = false;
+        // open-astro#575: a fresh initiator is a clean start -- a client
+        // that calls Park after a failed GOTO must not be told the OLD goto
+        // failed while it's parking.
+        last_slew_error_.clear();
         // HAE29C firmware quirk (hardware-verified 2026-07-14): :MP1# park
         // slews complete physically but the mount keeps reporting
         // system-status 2 ("slewing") forever instead of 6 ("parked");
@@ -1274,14 +1321,28 @@ public:
     }
 
     void abort_slew() override {
+        // open-astro#768: fence the async slew dispatch first, so no :MS1#/:MS2#
+        // can reach the mount after the stop below. Runs without mutex_ held
+        // (the dispatch thread takes it), like every other reap site.
+        reap_slew_dispatch();
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        ensure_not_parked_locked("AbortSlew");
-        if (!cached_status_.is_slewing) {
-            restore_altitude_limit_locked("AbortSlew");
-            restore_meridian_treatment_locked("AbortSlew");
-            return;
+        // open-astro#728: a latched fault must not stop a client stopping the
+        // mount. Skip the latch check, the parked check (a status read) and the
+        // cached slewing flag, none of which can be trusted on a faulted link,
+        // and send the stop; a sent stop clears the latch. A parked mount is
+        // sent the stop too: InvalidWhileParked is not raised while latched.
+        const bool faulted = connected_ && device_faulted_;
+        if (!faulted) {
+            check_connected();
+            ensure_not_parked_locked("AbortSlew");
         }
+        // open-astro#575: AbortSlew is a valid clearing command for a stored
+        // slew failure -- the client acted on the error, so the next Slewing
+        // read must answer normally again. Clear unconditionally (a
+        // soft-failed goto never set is_slewing).
+        last_slew_error_.clear();
+        // open-astro#768: the stop is sent even when the cached status says the
+        // mount is not slewing; that cache can lag a GOTO the mount accepted.
         auto& protocol = iOptronProtocolWrapper::instance();
         try {
             protocol.stop_slewing();
@@ -1294,11 +1355,17 @@ public:
         slew_in_progress_ = false;
         status_cache_valid_ = false;
         slew_override_until_ = std::chrono::steady_clock::time_point{};
-        restore_altitude_limit_locked("AbortSlew");
-        restore_meridian_treatment_locked("AbortSlew");
     }
     
     void pulse_guide(int direction, int duration) override {
+        // Argument validation precedes the connection and park checks (ASCOM).
+        // 99999 ms is the protocol's 5-digit duration field.
+        if (direction < 0 || direction > 3) {
+            throw AlpacaException("PulseGuide direction must be 0-3", AlpacaError::InvalidValue);
+        }
+        if (duration < 0 || duration > 99999) {
+            throw AlpacaException("PulseGuide duration must be 0-99999 ms", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         ensure_not_parked_fast_locked("PulseGuide");
@@ -1463,10 +1530,16 @@ public:
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
                     clear_slew_override_locked();
+                    if (!slew_dispatch_cancel_.load()) {
+                        last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + e.what();
+                    }
                     ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
                 } catch (...) {
                     slew_in_progress_ = false;
                     clear_slew_override_locked();
+                    if (!slew_dispatch_cancel_.load()) {
+                        last_slew_error_ = "SlewToCoordinatesAsync failed with an unknown error";
+                    }
                     ALPACA_LOG_WARN("iOptron", "Async slew failed with unknown exception");
                 }
             });
@@ -1510,9 +1583,9 @@ public:
     }
     
     void sync_to_coordinates(double ra, double dec) override {
+        validate_ra_dec(ra, dec, "SyncToCoordinates");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
         ensure_not_parked_locked("SyncToCoordinates");
 
         target_ra_hours_ = ra;
@@ -1543,10 +1616,10 @@ public:
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
+        validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
             if (!site_info_valid_) {
                 ensure_site_info_cached_locked();
                 // ensure_site_info_cached_locked() sets site_info_valid_ on success;
@@ -1595,10 +1668,16 @@ public:
                 } catch (const std::exception& e) {
                     slew_in_progress_ = false;
                     clear_slew_override_locked();
+                    if (!slew_dispatch_cancel_.load()) {
+                        last_slew_error_ = std::string("SlewToAltAzAsync failed: ") + e.what();
+                    }
                     ALPACA_LOG_WARN("iOptron", std::string("Async AltAz slew failed: ") + e.what());
                 } catch (...) {
                     slew_in_progress_ = false;
                     clear_slew_override_locked();
+                    if (!slew_dispatch_cancel_.load()) {
+                        last_slew_error_ = "SlewToAltAzAsync failed with an unknown error";
+                    }
                     ALPACA_LOG_WARN("iOptron", "Async AltAz slew failed with unknown exception");
                 }
             });
@@ -1614,10 +1693,10 @@ public:
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra_hours = 0.0;
         double dec_degrees = 0.0;
+        validate_alt_az(altitude, azimuth, "SlewToAltAz");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            validate_alt_az(altitude, azimuth, "SlewToAltAz");
             ensure_site_info_cached_locked();
             if (!site_info_valid_) {
                 throw AlpacaException("Site information unavailable for Alt/Az slew",
@@ -1738,9 +1817,9 @@ private:
     }
 
     // A single transient timeout must not brick the whole session: only latch
-    // device_faulted_ (which makes every subsequent call throw) after several
-    // CONSECUTIVE failures. Any subsequent successful command clears the count
-    // via clear_device_fault_locked().
+    // device_faulted_ (which makes every call through check_connected() throw)
+    // after several CONSECUTIVE failures. A successful read resets the count
+    // via note_device_read_ok_locked().
     static constexpr int kDeviceFaultThreshold = 3;
 
     void record_device_fault_locked(const char* context, const std::string& detail) const {
@@ -1754,13 +1833,28 @@ private:
             ALPACA_LOG_WARN("iOptron", "Device fault (transient, " + std::to_string(device_fault_count_) + "/" +
                                            std::to_string(kDeviceFaultThreshold) + ") - " + last_device_error_);
         }
+        publish_link_fault_locked();
     }
 
     void clear_device_fault_locked() const {
         device_fault_count_ = 0;
         device_faulted_ = false;
         last_device_error_.clear();
+        publish_link_fault_locked();
     }
+
+    // Copies the latched fault text to the narrow-mutex copy get_link_fault() reads.
+    // Call under mutex_ after every change to device_faulted_ or last_device_error_.
+    void publish_link_fault_locked() const {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        link_fault_text_ = device_faulted_ ? last_device_error_ : std::string{};
+    }
+
+    // open-astro#728: a successful read ends the run of failures, so only
+    // consecutive failures reach the threshold. It does not clear a latch that
+    // has already tripped; only AbortSlew or a reconnect does (Park and Unpark
+    // also clear it on success, but check_connected() refuses them while it is set).
+    void note_device_read_ok_locked() const { device_fault_count_ = 0; }
 
     void prefetch_mount_state_locked() {
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1806,83 +1900,14 @@ private:
         }
     }
 
-    bool try_override_altitude_limit_locked() const {
-        auto& protocol = iOptronProtocolWrapper::instance();
-        try {
-            const int current_limit = protocol.get_altitude_limit_degrees();
-            altitude_limit_restore_degrees_ = current_limit;
-            constexpr int kAltitudeLimitOverrideDegrees = -89;
-            if (current_limit != kAltitudeLimitOverrideDegrees) {
-                protocol.set_altitude_limit_degrees(kAltitudeLimitOverrideDegrees);
-            }
-            altitude_limit_override_active_ = true;
-            ALPACA_LOG_INFO(
-                "iOptron",
-                "Temporarily lowering altitude limit to " +
-                    std::to_string(kAltitudeLimitOverrideDegrees) +
-                    " degrees for slew");
-            return true;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Unable to override altitude limit: ") + e.what());
-            altitude_limit_override_active_ = false;
-            return false;
-        }
-    }
-
-    void restore_altitude_limit_locked(const char* label) const {
-        if (!altitude_limit_override_active_) {
-            return;
-        }
-        try {
-            auto& protocol = iOptronProtocolWrapper::instance();
-            protocol.set_altitude_limit_degrees(altitude_limit_restore_degrees_);
-            altitude_limit_override_active_ = false;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string(label) + ": Failed to restore altitude limit: " +
-                                         e.what());
-        }
-    }
-
-    bool try_override_meridian_treatment_locked() const {
-        auto& protocol = iOptronProtocolWrapper::instance();
-        try {
-            const MeridianTreatment current = protocol.get_meridian_treatment();
-            meridian_restore_behavior_ = current.behavior;
-            meridian_restore_degrees_ = current.degrees_past;
-            constexpr int kMeridianOverrideDegrees = 30;
-            protocol.set_meridian_treatment(1, kMeridianOverrideDegrees);
-            meridian_override_active_ = true;
-            ALPACA_LOG_INFO(
-                "iOptron",
-                "Temporarily relaxing meridian treatment to flip, " +
-                    std::to_string(kMeridianOverrideDegrees) + " degrees past meridian");
-            return true;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string("Unable to override meridian treatment: ") + e.what());
-            meridian_override_active_ = false;
-            return false;
-        }
-    }
-
-    void restore_meridian_treatment_locked(const char* label) const {
-        if (!meridian_override_active_) {
-            return;
-        }
-        try {
-            auto& protocol = iOptronProtocolWrapper::instance();
-            protocol.set_meridian_treatment(meridian_restore_behavior_, meridian_restore_degrees_);
-            meridian_override_active_ = false;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("iOptron", std::string(label) + ": Failed to restore meridian treatment: " +
-                                         e.what());
-        }
-    }
-
     void prepare_slew_state_locked(double ascom_ra, double ascom_dec,
                                     double phys_ra, double phys_dec,
                                     const char* label) {
         check_connected();
         ensure_not_parked_locked(label);
+        // open-astro#575: a fresh initiator is a clean start -- a client that
+        // retries a rejected goto must not be told the OLD goto failed.
+        last_slew_error_.clear();
 
         target_ra_hours_ = ascom_ra;
         target_dec_degrees_ = ascom_dec;
@@ -1912,30 +1937,17 @@ private:
         if (!accepted) {
             accepted = protocol.slew_to_ra_dec_cw_up();
         }
-        bool altitude_override_applied = false;
-        bool meridian_override_applied = false;
-        if (!accepted && !altitude_limit_override_active_) {
-            altitude_override_applied = try_override_altitude_limit_locked();
-        }
-        if (!accepted && !meridian_override_active_) {
-            meridian_override_applied = try_override_meridian_treatment_locked();
-        }
-        if (!accepted && (altitude_override_applied || meridian_override_applied)) {
-            accepted = protocol.slew_to_ra_dec();
-            if (!accepted) {
-                accepted = protocol.slew_to_ra_dec_cw_up();
-            }
-            if (!accepted && altitude_override_applied) {
-                restore_altitude_limit_locked(label);
-            }
-            if (!accepted && meridian_override_applied) {
-                restore_meridian_treatment_locked(label);
-            }
-        }
         if (!accepted) {
             slew_in_progress_ = false;
             clear_slew_override_locked();
             if (allow_soft_fail) {
+                // open-astro#575: a reap by a newer initiator is not a failure -- that
+                // initiator already owns clearing/replacing last_slew_error_.
+                // AbortSlew reaps the dispatch (open-astro#768), so none can
+                // record a failure after the abort cleared the error.
+                if (!slew_dispatch_cancel_.load()) {
+                    last_slew_error_ = std::string(label) + " failed: mount rejected the target";
+                }
                 ALPACA_LOG_WARN("iOptron", "Slew rejected by mount - treating as no-op for async slew");
                 return;
             }
@@ -1965,7 +1977,12 @@ private:
         // tens of degrees).  Wait for position readings to stabilize — two
         // consecutive reads within tolerance of each other — AND target
         // reached.  Uses the slew deadline, not a fixed iteration cap.
-        if (target_ra_set_ && target_dec_set_) {
+        bool has_target = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            has_target = target_ra_set_ && target_dec_set_;
+        }
+        if (has_target) {
             static constexpr double kStableThresholdArcsec = 30.0;
             static constexpr int kRequiredStableReads = 3;
             double prev_ra_hours = std::numeric_limits<double>::quiet_NaN();
@@ -2012,8 +2029,6 @@ private:
             std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         slew_in_progress_ = false;
-        restore_altitude_limit_locked(label);
-        restore_meridian_treatment_locked(label);
     }
     
     void refresh_position_cache_locked(bool force = false) const {
@@ -2033,6 +2048,7 @@ private:
             cached_side_of_pier_ = pos.side_of_pier;
             position_cache_valid_ = true;
             last_position_update_ = now;
+            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("Position", e.what());
             throw AlpacaException(std::string("Failed to refresh mount position: ") + e.what(),
@@ -2056,6 +2072,7 @@ private:
             cached_az_degrees_ = altaz.azimuth_degrees;
             altaz_cache_valid_ = true;
             last_altaz_update_ = now;
+            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("AltAz", e.what());
             throw AlpacaException(std::string("Failed to refresh mount Alt/Az: ") + e.what(),
@@ -2077,6 +2094,7 @@ private:
             cached_status_ = protocol.get_status();
             status_cache_valid_ = true;
             last_status_update_ = now;
+            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("Status", e.what());
             throw AlpacaException(std::string("Failed to refresh mount status: ") + e.what(),
@@ -2154,6 +2172,7 @@ private:
             dst_observed_ = site.dst_observed;
             site_info_valid_ = true;
             last_site_info_fetch_ = now;
+            note_device_read_ok_locked();
         } catch (const std::exception& e) {
             if (site_info_valid_) {
                 ALPACA_LOG_WARN("iOptron", std::string("Failed to read site info; using cached values: ") + e.what());
@@ -2550,17 +2569,18 @@ private:
     // Must be called WITHOUT mutex_ held — the dispatch thread takes mutex_,
     // so joining under the lock would deadlock. The thread only dispatches a
     // single command (no long sleeps), so the join is quick.
+    // open-astro#768: join under slew_dispatch_mutex_ (the dispatch never
+    // takes it) and touch the cancel flag only there, so a second reaper waits
+    // for the first join instead of returning early and clearing the cancel
+    // the queued dispatch still has to see. Same shape as
+    // stop_clock_sync_thread_locked().
     void reap_slew_dispatch() {
-        slew_dispatch_cancel_.store(true);
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-            prev = std::move(slew_dispatch_thread_);
+        std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
+        if (slew_dispatch_thread_.joinable()) {
+            slew_dispatch_cancel_.store(true);
+            slew_dispatch_thread_.join();
+            slew_dispatch_cancel_.store(false);
         }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        slew_dispatch_cancel_.store(false);
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
@@ -2686,6 +2706,11 @@ private:
     
     int device_number_;
     ConnectionInfo connection_info_;
+    // Set by the auto-detect factories; empty for an explicit port or host.
+    // connection_resolved_ is true once a connect has run the resolver, so a
+    // later connect retries that endpoint before scanning again.
+    util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    bool connection_resolved_ = false;
     std::atomic<bool> connected_{false};
     mutable MountInfo mount_info_;
     mutable std::mutex mutex_;
@@ -2783,18 +2808,22 @@ private:
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
     mutable bool slew_in_progress_ = false;
+    // open-astro#575: an async slew that fails AFTER the initiator returned
+    // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
+    // leave Slewing read FALSE -- indistinguishable from a landed goto. Set
+    // (under mutex_) on a REAL failure (never on the dispatch thread's own
+    // cancellation), cleared by the next slew initiator and by AbortSlew.
+    // Consulted by get_slewing() before the cached status.
+    mutable std::string last_slew_error_;
     static constexpr int kMaxSlewRefines = 3;
     mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;
     mutable double slew_target_dec_degrees_ = 0.0;
-    mutable bool altitude_limit_override_active_ = false;
-    mutable int altitude_limit_restore_degrees_ = 0;
-    mutable bool meridian_override_active_ = false;
-    mutable int meridian_restore_behavior_ = 0;
-    mutable int meridian_restore_degrees_ = 0;
     mutable bool device_faulted_ = false;
     mutable int device_fault_count_ = 0;
     mutable std::string last_device_error_;
+    mutable std::mutex link_fault_mutex_;
+    mutable std::string link_fault_text_;
     mutable bool utc_query_supported_;
     mutable std::chrono::steady_clock::time_point fast_cache_until_{};
     mutable std::chrono::steady_clock::time_point tracking_override_until_{};
@@ -2806,7 +2835,8 @@ private:
     // bodies — see start_clock_sync_thread(). Never taken by the body.
     std::mutex clock_sync_mutex_;
     // Async slew dispatch thread (never detached) — see reap_slew_dispatch().
-    // slew_dispatch_mutex_ only guards the thread handle.
+    // slew_dispatch_mutex_ guards the thread handle and every write of the
+    // cancel flag; the dispatch body never takes it.
     std::mutex slew_dispatch_mutex_;
     std::thread slew_dispatch_thread_;
     std::atomic<bool> slew_dispatch_cancel_{false};
@@ -2838,14 +2868,19 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_with_site(
         sync_time_on_connect);
 }
 
-std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
-    int device_number,
-    int mount_index,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect) {
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_deferred(
+    int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    if (!connection_resolver) {
+        throw AlpacaException("iOptron telescope: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<iOptronTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
+                                                    site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                    std::move(connection_resolver));
+}
 
+ConnectionInfo resolve_ioptron_serial_auto(int mount_index) {
     auto ports = enumerate_ioptron_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("iOptron mount"));
@@ -2865,20 +2900,10 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(
     conn.type = ConnectionType::Serial;
     conn.port_path = port.port_path;
     conn.baud_rate = 115200;
-
-    return create_ioptron_telescope_with_site(
-        device_number, conn, site_latitude_deg, site_longitude_deg,
-        site_elevation_m, sync_time_on_connect);
+    return conn;
 }
 
-std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
-    int device_number,
-    int mount_index,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect) {
-
+ConnectionInfo resolve_ioptron_network_auto(int mount_index) {
     ALPACA_LOG_INFO("iOptron", "Starting network auto-discovery...");
     auto hosts = enumerate_ioptron_network_hosts();
     if (hosts.empty()) {
@@ -2903,10 +2928,30 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
     conn.type = ConnectionType::Network;
     conn.host = found.host;
     conn.tcp_port = found.tcp_port;
+    return conn;
+}
 
-    return create_ioptron_telescope_with_site(
-        device_number, conn, site_latitude_deg, site_longitude_deg,
-        site_elevation_m, sync_time_on_connect);
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(int device_number, int mount_index,
+                                                               std::optional<double> site_latitude_deg,
+                                                               std::optional<double> site_longitude_deg,
+                                                               std::optional<double> site_elevation_m,
+                                                               std::optional<bool> sync_time_on_connect) {
+    // The serial scan runs at connect time (#659), not here.
+    return create_ioptron_telescope_deferred(
+        device_number, [mount_index] { return resolve_ioptron_serial_auto(mount_index); }, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, sync_time_on_connect);
+}
+
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(int device_number, int mount_index,
+                                                                       std::optional<double> site_latitude_deg,
+                                                                       std::optional<double> site_longitude_deg,
+                                                                       std::optional<double> site_elevation_m,
+                                                                       std::optional<bool> sync_time_on_connect) {
+    // The subnet sweep runs at connect time (#659), not here: at server
+    // start-up the mount is usually still joining the access point.
+    return create_ioptron_telescope_deferred(
+        device_number, [mount_index] { return resolve_ioptron_network_auto(mount_index); }, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
 
 } // namespace alpacacore::vendor::ioptron

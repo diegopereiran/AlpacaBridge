@@ -14,12 +14,12 @@ AlpacaBridge turns a single-board computer into a control server for your entire
 
 Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-#### [4.0.0] - 2026-09-17 &middot; [Changelog](CHANGELOG.md)
+#### [4.2.0] - 2026-09-30 &middot; [Changelog](CHANGELOG.md)
 
 ## Why AlpacaBridge
 
 - **Proven, not promised.** Every driver is [validated with ASCOM ConformU](SUPPORTED-DRIVERS.md), on the actual hardware it supports.
-- **76 validated devices. Fifteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, Nikon DSLRs (via libgphoto2), OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
+- **81 validated devices. Fifteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, Canon and Nikon DSLRs, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
 - **Plug in and go.** Vendor SDKs and udev rules come bundled. USB and Wi-Fi devices are auto-detected. No port hunting.
 - **Manage it from a browser.** Configure every device from the built-in web UI, from any machine on your network.
 - **Set it and forget it.** Installs from the OpenAstro APT repository, runs as a systemd service, starts on boot, updates with `apt upgrade`.
@@ -59,6 +59,8 @@ Other Rockchip and Orange Pi arm64 boards running Debian 13 work with the standa
 
 Three commands from the [OpenAstro APT repository](https://apt.openastro.net), and it stays current with `apt upgrade`.
 
+AlpacaBridge is built for a single-purpose appliance: its udev rules let any local user open a supported device. Do not install it on a shared machine. See [the LAN surface threat model](docs/decisions/0007-lan-surface-threat-model.md).
+
 **1. Add the OpenAstro signing key**
 
 ```sh
@@ -81,7 +83,7 @@ sudo apt update
 sudo apt install alpacabridge
 ```
 
-The service starts automatically and runs as the `alpacabridge` system user. Then open **http://localhost:6800/** (or your server's hostname from any machine on the network) and set up your devices.
+The service starts automatically and runs as the `alpacabridge` system user. Then open **http://localhost:6800/** (or your server's IP address, hostname or `<hostname>.local` from any machine on the network) and set up your devices. A name your router's DNS adds, such as `astropi.lan` or `astropi.fritz.box`, works too: the Host-name check (`http.host_check_enabled`) is off by default, and with it on such a name gets HTTP 403 until you add it to `http.allowed_hosts`; see [docs/troubleshooting.md](docs/troubleshooting.md#the-web-ui-or-api-answers-http-403-host--is-not-allowed).
 
 <details>
 <summary>Updating and uninstalling</summary>
@@ -90,6 +92,8 @@ The service starts automatically and runs as the `alpacabridge` system user. The
 sudo apt update && sudo apt upgrade alpacabridge   # update
 sudo apt remove alpacabridge                       # uninstall
 ```
+
+Or from the web UI: **Server Info** > **Software Update** > **Check for Updates**, then **Install Update**. It runs the same apt upgrade and restarts the service; see [docs/software-update.md](docs/software-update.md).
 
 </details>
 

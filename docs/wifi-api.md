@@ -34,6 +34,7 @@ The one call a client needs for its WiFi UI state.
   "ConnectionUuid": "639bae67-...",
   "ApActive": true,
   "Ssid": "OpenAstro-65CD",
+  "SsidHex": "4f70656e417374726f2d36354344",
   "FrequencyMhz": 5180,
   "SignalPercent": 62,
   "Ip4Address": "172.24.1.1",
@@ -50,6 +51,9 @@ The one call a client needs for its WiFi UI state.
   are supported.
 - `Ssid`/`FrequencyMhz`/`SignalPercent` describe the current association
   (own AP when `ApActive`, joined network otherwise); absent when idle.
+- `SsidHex` is the lowercase hexadecimal encoding of the exact SSID bytes.
+  `Ssid` is display text and invalid UTF-8 bytes appear as U+FFFD; use
+  `SsidHex` for identity and round-tripping.
 - **5 GHz gating rule**: offer 5 GHz options when
   `Capabilities.Freq5GHz || ScanSees5GHz`. Some vendor drivers (ASIAIR Plus
   RK3568 `bcmdhd`) under-report capabilities while 5 GHz works.
@@ -63,7 +67,7 @@ Triggers a scan (best-effort; ~1.5 s) and returns visible networks, strongest
 first, deduplicated by SSID, hidden SSIDs omitted:
 
 ```json
-[ { "Ssid": "HomeNet", "FrequencyMhz": 5200, "SignalPercent": 71,
+[ { "Ssid": "HomeNet", "SsidHex": "486f6d654e6574", "FrequencyMhz": 5200, "SignalPercent": 71,
     "Security": "WPA2" } ]
 ```
 
@@ -76,7 +80,7 @@ most drivers — results may be stale in AP mode.
 Saved connections (client networks AND the hotspot profile):
 
 ```json
-[ { "Id": "HomeNet", "Uuid": "…", "Ssid": "HomeNet",
+[ { "Id": "HomeNet", "Uuid": "…", "Ssid": "HomeNet", "SsidHex": "486f6d654e6574",
     "Mode": "infrastructure", "Autoconnect": true, "Priority": 0,
     "Active": false } ]
 ```
@@ -84,16 +88,28 @@ Saved connections (client networks AND the hotspot profile):
 `Mode` is `infrastructure` (client) or `ap` (hotspot). Passphrases are never
 returned by any endpoint.
 
+`Id` is the NetworkManager connection name. A new profile uses the SSID text
+when it is valid UTF-8 and contains no NUL byte. Otherwise, its ID is
+`Wi-Fi <SsidHex>`. Updating an existing profile keeps its current `Id`.
+
 ### PUT /management/v1/wifi/profiles
 
 Create or update a client profile: `{ "Ssid": "HomeNet", "Passphrase":
 "secret123", "Autoconnect": true, "Priority": 0 }`.
 
+For arbitrary SSID bytes, send `SsidHex` instead of `Ssid`, for example
+`{ "SsidHex": "ff00fe", "Passphrase": "secret123" }`. It is an even-length
+hex string encoding 1–32 bytes. When both fields are supplied, `SsidHex` is
+authoritative. Legacy clients may continue to send `Ssid` text; that form cannot
+represent arbitrary invalid UTF-8 bytes.
+
 - `Passphrase` empty or omitted: open network for a NEW profile; "keep the
   existing secret" when the profile already has one. A secured profile can
   never be silently converted to open — delete and re-add instead.
-- Passphrase must be 8–63 chars when present; SSID 1–32 bytes.
+- Passphrase must be 8–63 chars when present; SSID is 1–32 bytes.
 - Updating matches by SSID (client profiles only).
+- A new profile uses a safe `Id` as described above. An update keeps the existing
+  profile `Id`.
 
 ### DELETE /management/v1/wifi/profiles/{uuid}
 
@@ -109,7 +125,7 @@ a device can't be stranded unreachable; hotspot config goes through `ap`.
 ### GET /management/v1/wifi/ap
 
 ```json
-{ "Configured": true, "Ssid": "OpenAstro-65CD", "Band": "a",
+{ "Configured": true, "Ssid": "OpenAstro-65CD", "SsidHex": "4f70656e417374726f2d36354344", "Band": "a",
   "Channel": 36, "Autoconnect": true, "Active": false,
   "Ip4Address": "172.24.1.1" }
 ```
@@ -129,6 +145,11 @@ DHCP on the fleet-wide subnet `172.24.1.0/24`; the portal is always at
 - `Band`: `"a"` = 5 GHz, `"bg"` = 2.4 GHz. `Channel: 0` lets
   NetworkManager pick. Empty `Passphrase` keeps the existing secret.
 - A brand-new hotspot profile requires a passphrase (8–63 chars).
+- `SsidHex` may be supplied instead of `Ssid` with the same encoding and
+  precedence rules as `PUT /profiles`. This lets clients preserve a configured
+  SSID while changing other AP settings.
+- The web UI preserves the configured `SsidHex` when the displayed SSID text is
+  unchanged. Change the text to set a new SSID.
 
 ### PUT /management/v1/wifi/radio
 
@@ -164,7 +185,10 @@ guard: `PUT`/`POST /api/v1/telescope/{n}/utcdate`, because on an NTP-less host
 a UTCDate write steps the system clock (see the Clock section above), and
 `PUT /api/v1/telescope/{n}/sitelatitude`, `sitelongitude` and `siteelevation`,
 because since #444 they also rewrite the device's persisted configuration, the
-effect `configuredevice` guards. Every other device setter is unguarded.
+effect `configuredevice` guards. The guard also runs for any device method on
+a verb it does not accept (a POST or DELETE, or a PUT to a GET-only property):
+a foreign `Origin` gets 403 before the 400 that verb check would return. Every
+other device setter, on the verb it accepts, is unguarded.
 
 Since issue #348 this is not specific to the WiFi endpoints: every
 state-changing management endpoint carries the same guard — `synctime`,
@@ -172,8 +196,10 @@ state-changing management endpoint carries the same guard — `synctime`,
 `description` `PUT`/`POST` (as with `configuredevice` and `removedevice`, the
 handler accepts both and the guard covers both), and both
 `DELETE /management/v1/logfiles` (all files) and
-`DELETE /management/v1/logfiles/<name>` (one file). The rejection message names
-the endpoint.
+`DELETE /management/v1/logfiles/<name>` (one file), and since 4.2.0 the
+software-update pair `POST /management/v1/update/check` and
+`POST /management/v1/update/install` ([software-update.md](software-update.md)).
+The rejection message names the endpoint.
 
 The guard compares the request's `Origin` against the request's own `Host`,
 which stops a page served from an attacker-controlled origin. It does not
@@ -206,14 +232,15 @@ has no NTP, so the client's clock becomes the time source:
 
 - `GET /management/v1/synctime` — `Value` = the server's current Unix epoch
   (seconds, UTC). Poll it to show a live server clock or detect drift
-  against the client's clock.
+  against the client's clock. Outside the sanity range 2000-01-01..2100-01-01
+  UTC it answers ErrorCode `INVALID_OPERATION` with no `Value` field.
 - `POST/PUT /management/v1/synctime` with `{"Epoch": 1786298276}` (or
   `{"Value": …}`) — sets the SBC's system clock. Rejected outside the
   sanity range 2000-01-01..2100-01-01 UTC. Send the client's epoch captured
   at request time; add half the observed round-trip if you want to be exact.
   Since 3.6.0 this also takes the cross-origin guard above: a browser-based
-  client posting from a different origin gets HTTP 403 before the body is
-  read. `GET` is unaffected, so a live-clock poll works from any origin.
+  client posting from a different origin gets HTTP 403 without the request being
+  acted on. `GET` is unaffected, so a live-clock poll works from any origin.
 
 Same Alpaca envelope, same trusted-LAN model as the WiFi endpoints.
 
@@ -242,13 +269,89 @@ counts as a client step: `ClockSource` reads `client` afterwards.
 `/sys/class/rtc/rtc*` device whose `hctosys` reads 1, whose `since_epoch` is
 after 2020-01-01 (a battery-less Raspberry Pi 5 RTC reads 2000-01-01 and does
 not count). It is a statement about where the clock came from, not about how
-accurate it is: nothing on an NTP-less host verifies or rewrites the RTC, so
-it may still be wrong or drifting, and the telescope connect line says so.
+accurate it is: nothing on an NTP-less host verifies the RTC, so it may still
+be wrong or drifting, and the telescope connect line says so.
+
+After the service steps the system clock (a client's `UTCDate` write or a Sync
+Time press) it writes the new system time into that same RTC
+(`ioctl(RTC_SET_TIME)`, UTC, like `hwclock --systohc`), so the correction
+survives a power cycle, and forgets the settled probe so the next periodic
+re-read lets a battery-less RTC that held 2000-01-01 report `rtc` instead of
+`none`. The write is rounded to the nearest second. A step that was skipped or
+failed writes nothing, and so does either path while `sync_system_clock_from_clients`
+is off, and a host with no RTC the kernel booted from is left alone.
+The package ships a udev rule (`/usr/lib/udev/rules.d/60-alpacabridge.rules`)
+that gives the `alpacabridge` group write access to `/dev/rtc*`; without it the
+write fails once with a WARN naming the errno and the clock stays corrected for
+that session only. From a source install, set the device group by hand.
 A working RTC reads `none` whenever the kernel was not the one that loaded it:
 a userspace `hwclock --hctosys` under a non-systemd init, or a kernel without
 `CONFIG_RTC_HCTOSYS`. `rtc` is a new value on a published field, so an older
 client that switches on `ClockSource` should treat any unknown value as
 "not NTP".
+
+### Host check (`HostCheckEnabled`, `AllowedHosts`)
+
+`GET /management/v1/description` also carries the two settings of the Host
+header check, a guard against DNS rebinding. Both are persisted under `http:` in
+the config file (`host_check_enabled`, `allowed_hosts`) and have no environment
+override.
+
+- `HostCheckEnabled` (boolean, default `false`): when `true`, every request
+  whose `Host` header is not allowed is refused with HTTP 403, an Alpaca error
+  body with `ErrorNumber` 1025 (`InvalidValue`) and the message `Host '<name>'
+  is not allowed; open the web UI by IP address and add it under Allowed host
+  names, or add it to http.allowed_hosts`. When `false`, any Host name is
+  served. A missing or empty `Host` header is always allowed.
+- `AllowedHosts` (string, default `""`): extra host names accepted while the
+  check is on, comma-separated, written as `a.lan, b.lan` (comma plus space) in
+  `GET` and in the config file. The `PUT` reader splits on commas and trims
+  each entry, so any spacing is accepted and empty entries are skipped. Entries
+  are lowercased and a trailing dot is removed. A leading dot allows the domain
+  and every name under it (`.lan` allows `lan` and `pi.lan`). Always allowed
+  without an entry: IP addresses, `localhost` and `*.localhost`, this machine's
+  host name and `<host name>.local`, `*.local`, `*.home.arpa` and `*.internal`.
+  The field only matters while `HostCheckEnabled` is `true`.
+
+`PUT`/`POST` accept either field alone or both, in the same body as the other
+description fields:
+
+| Field | Accepted names | Value |
+|---|---|---|
+| `HostCheckEnabled` | `HostCheckEnabled`, `hostCheckEnabled`, `host_check_enabled` | boolean, or the string `true`, `false`, `1` or `0` (case-insensitive) |
+| `AllowedHosts` | `AllowedHosts`, `allowedHosts`, `allowed_hosts` | one string, comma-separated; `""` clears the list |
+
+If a body holds several spellings of one field, the first in the order listed
+is used. Values are checked before anything is applied or saved. Errors:
+
+- A value of the wrong type (`AllowedHosts` not a string, `HostCheckEnabled` not
+  a boolean or string): HTTP 200, `ErrorNumber` 1025, `Invalid value for
+  <name>`. A string that is not one of the four accepted for
+  `HostCheckEnabled`: `ErrorNumber` 1025, `Invalid value for parameter:
+  <name>`.
+- More than 64 entries in `AllowedHosts`: HTTP 400, `ErrorNumber` 1025,
+  `AllowedHosts holds more than 64 entries`.
+- An entry that is not a host name: HTTP 400, `ErrorNumber` 1025,
+  `AllowedHosts entry '<entry>' is not a host name` (the entry is cut to 80
+  characters, non-printable characters shown as `?`). A host name is an
+  optional leading dot and dot-separated labels of `a-z`, `0-9`, `_` and `-`
+  (1 to 63 characters each, 253 in all), or a bracketed IPv6 literal. An
+  optional `:port` of 1 to 5 digits is accepted and dropped. A URL such as
+  `http://x.lan` is refused.
+- No self-lockout: a request that turns the check on, or edits the list while
+  it is on, is refused when its own `Host` header would not pass the resulting
+  settings: HTTP 400, `ErrorNumber` 1025, `Host '<name>' would be refused by
+  these settings; add it to the allowed host names or use the IP address`.
+  Nothing is changed. Use the server's IP address or add the name in the same
+  request.
+- A body with none of `Location`, `ProfileName`, `SyncSystemClockFromClients`,
+  `HostCheckEnabled` or `AllowedHosts`: `ErrorNumber` 1026 (`ValueNotSet`).
+- The config file cannot be written: `ErrorNumber` 1280 (`DriverException`),
+  `Failed to persist server settings: <reason>`; the running settings are not
+  changed.
+
+The `PUT` response is the new `description` payload. The change takes effect at
+once and is logged at INFO with the client address.
 
 ## Related: build info
 

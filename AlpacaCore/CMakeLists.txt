@@ -1,16 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 
-# Read version from workspace VERSION file
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" PROJECT_VERSION LIMIT_COUNT 1)
-string(STRIP "${PROJECT_VERSION}" PROJECT_VERSION)
+# Read version from workspace VERSION file: project() takes the numeric part
+# (ALPACABRIDGE_BASE_VERSION), the version defines below keep the full string
+# (ALPACABRIDGE_VERSION, 5.0.0~beta1 for a beta).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/AlpacaBridgeVersion.cmake")
+alpacabridge_read_version("${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
 
-project(AlpacaCore VERSION ${PROJECT_VERSION} LANGUAGES CXX)
+project(AlpacaCore VERSION ${ALPACABRIDGE_BASE_VERSION} LANGUAGES CXX)
 
 # Expose the workspace version (from the VERSION file) to all AlpacaCore targets,
 # including the per-vendor driver libraries added via add_subdirectory below, so
 # that DriverVersion reflects the AlpacaBridge release instead of a hardcoded value.
 # Directory-scoped so it reaches every target created after this point.
-add_compile_definitions(ALPACACORE_VERSION="${PROJECT_VERSION}")
+add_compile_definitions(ALPACACORE_VERSION="${ALPACABRIDGE_VERSION}")
 
 # C++20 required
 set(CMAKE_CXX_STANDARD 20)
@@ -35,7 +37,7 @@ option(ALPACACORE_ENABLE_TOUPTEK "Enable ToupTek vendor support" OFF)
 option(ALPACACORE_ENABLE_PLAYERONE "Enable Player One vendor support" OFF)
 option(ALPACACORE_ENABLE_WANDERERASTRO "Enable WandererAstro CoverCalibrator vendor support" OFF)
 option(ALPACACORE_ENABLE_ASTROASIS "Enable Astroasis Oasis Focuser vendor support" OFF)
-option(ALPACACORE_ENABLE_GPHOTO "Enable gphoto2 DSLR/mirrorless camera vendor support" OFF)
+option(ALPACACORE_ENABLE_GPHOTO "Enable libgphoto2 DSLR/mirrorless camera vendor support" OFF)
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)
@@ -77,6 +79,9 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/error_handling.cpp
     src/core/util/host_clock.cpp
     src/core/util/units.cpp
+    src/core/util/rotator_sync_offset_store.cpp
+    src/catalog/device_config.cpp
+    src/catalog/device_catalog.cpp
 )
 
 # Driver sources
@@ -114,118 +119,179 @@ target_include_directories(alpacacore PUBLIC
 # Create namespace alias for consistent target naming
 add_library(AlpacaCore::alpacacore ALIAS alpacacore)
 
+# Built-in descriptor composition (open-astro#710): which vendor descriptors this
+# build registers. Kept out of alpacacore so the core links no vendor library and
+# the dependency runs one way: alpacacore <- alpacacore_<vendor> <- alpacacore_builtins.
+# Every vendor schema half (src/vendors/<vendor>/<vendor>_schema.cpp) compiles here,
+# in every build; the vendor links and ALPACACORE_ENABLE_<VENDOR> definitions for
+# register_builtin_factories() are added per vendor below.
+add_library(alpacacore_builtins STATIC
+    src/catalog/builtin_catalog.cpp
+    src/vendors/astroasis/astroasis_schema.cpp
+    src/vendors/skywatcher/skywatcher_schema.cpp
+    src/vendors/weewx/weewx_schema.cpp
+    src/vendors/svbony/svbony_schema.cpp
+    src/vendors/gphoto/gphoto_schema.cpp
+    src/vendors/playerone/playerone_schema.cpp
+    src/vendors/bisque/bisque_schema.cpp
+    src/vendors/onstep/onstep_schema.cpp
+    src/vendors/celestron/celestron_schema.cpp
+    src/vendors/synscan/synscan_schema.cpp
+    src/vendors/qhy/qhy_schema.cpp
+    src/vendors/touptek/touptek_schema.cpp
+    src/vendors/gemini/gemini_schema.cpp
+    src/vendors/wandererastro/wandererastro_schema.cpp
+)
+target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
+add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
+
 # Vendor support (conditional)
 # Only add subdirectories for vendors that are actually implemented
 # Check if CMakeLists.txt exists and is not empty before adding
 if(ALPACACORE_ENABLE_ZWO)
     add_subdirectory(src/vendors/zwo)
     if(TARGET alpacacore_zwo)
-        target_link_libraries(alpacacore PRIVATE alpacacore_zwo)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_zwo)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_QHY)
     add_subdirectory(src/vendors/qhy)
     if(TARGET alpacacore_qhy)
-        target_link_libraries(alpacacore PRIVATE alpacacore_qhy)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_qhy)
+        # register_builtin_factories() guards its QHY factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_QHY)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_IOPTRON)
     add_subdirectory(src/vendors/ioptron)
     if(TARGET alpacacore_ioptron)
-        target_link_libraries(alpacacore PRIVATE alpacacore_ioptron)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_ioptron)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_SYNSCAN)
     add_subdirectory(src/vendors/synscan)
     if(TARGET alpacacore_synscan)
-        target_link_libraries(alpacacore PRIVATE alpacacore_synscan)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_synscan)
+        # register_builtin_factories() guards its SynScan factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_SYNSCAN)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_SKYWATCHER)
     add_subdirectory(src/vendors/skywatcher)
     if(TARGET alpacacore_skywatcher)
-        target_link_libraries(alpacacore PRIVATE alpacacore_skywatcher)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_skywatcher)
+        # Guards the Sky-Watcher factory registration in register_builtin_factories(),
+        # as for Astroasis below.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_SKYWATCHER)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_ONSTEP)
     add_subdirectory(src/vendors/onstep)
     if(TARGET alpacacore_onstep)
-        target_link_libraries(alpacacore PRIVATE alpacacore_onstep)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_onstep)
+        # register_builtin_factories() guards its OnStep factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_ONSTEP)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_WEEWX)
     add_subdirectory(src/vendors/weewx)
     if(TARGET alpacacore_weewx)
-        target_link_libraries(alpacacore PRIVATE alpacacore_weewx)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_weewx)
+        # register_builtin_factories() (src/catalog/builtin_catalog.cpp) guards its
+        # WeeWX factory registration behind this macro. Without it the
+        # registration compiles empty even though alpacacore_weewx links fine.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_WEEWX)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_GEMINI)
     add_subdirectory(src/vendors/gemini)
     if(TARGET alpacacore_gemini)
-        target_link_libraries(alpacacore PRIVATE alpacacore_gemini)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_gemini)
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_GEMINI)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_WANDERERASTRO)
     add_subdirectory(src/vendors/wandererastro)
     if(TARGET alpacacore_wandererastro)
-        target_link_libraries(alpacacore PRIVATE alpacacore_wandererastro)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_wandererastro)
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_WANDERERASTRO)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_SVBONY)
     add_subdirectory(src/vendors/svbony)
     if(TARGET alpacacore_svbony)
-        target_link_libraries(alpacacore PRIVATE alpacacore_svbony)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_svbony)
+        # register_builtin_factories() guards its SVBONY factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_SVBONY)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_GPHOTO)
     add_subdirectory(src/vendors/gphoto)
     if(TARGET alpacacore_gphoto)
-        target_link_libraries(alpacacore PRIVATE alpacacore_gphoto)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_gphoto)
+        # register_builtin_factories() guards its gphoto factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_GPHOTO)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_CELESTRON)
     add_subdirectory(src/vendors/celestron)
     if(TARGET alpacacore_celestron)
-        target_link_libraries(alpacacore PRIVATE alpacacore_celestron)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_celestron)
+        # register_builtin_factories() guards its Celestron factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_CELESTRON)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_BISQUE)
     add_subdirectory(src/vendors/bisque)
     if(TARGET alpacacore_bisque)
-        target_link_libraries(alpacacore PRIVATE alpacacore_bisque)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_bisque)
+        # register_builtin_factories() guards its Bisque factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_BISQUE)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_TOUPTEK)
     add_subdirectory(src/vendors/touptek)
     if(TARGET alpacacore_touptek)
-        target_link_libraries(alpacacore PRIVATE alpacacore_touptek)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_touptek)
+        # register_builtin_factories() guards its ToupTek factory behind this macro;
+        # the schema's gpioChip check and the StellaVita factory follow the second.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_TOUPTEK)
+        if(ALPACACORE_TOUPTEK_STELLAVITA)
+            target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_TOUPTEK_STELLAVITA)
+        endif()
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_PLAYERONE)
     add_subdirectory(src/vendors/playerone)
     if(TARGET alpacacore_playerone)
-        target_link_libraries(alpacacore PRIVATE alpacacore_playerone)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_playerone)
+        # register_builtin_factories() guards its Player One factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_PLAYERONE)
     endif()
 endif()
 
 if(ALPACACORE_ENABLE_ASTROASIS)
     add_subdirectory(src/vendors/astroasis)
     if(TARGET alpacacore_astroasis)
-        target_link_libraries(alpacacore PRIVATE alpacacore_astroasis)
+        target_link_libraries(alpacacore_builtins PRIVATE alpacacore_astroasis)
+        # register_builtin_factories() (src/catalog/builtin_catalog.cpp) guards its
+        # Astroasis factory registration behind this macro. Without it the
+        # registration compiles empty even though alpacacore_astroasis links fine.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_ASTROASIS)
     endif()
 endif()
 
@@ -261,6 +327,13 @@ add_subdirectory(examples)
 
 # Installation
 install(TARGETS alpacacore
+    EXPORT AlpacaCoreTargets
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+    RUNTIME DESTINATION bin
+)
+
+install(TARGETS alpacacore_builtins
     EXPORT AlpacaCoreTargets
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

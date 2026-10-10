@@ -33,7 +33,8 @@ public:
      * @brief Platform 7 DeviceState snapshot for Switch devices.
      *
      * Reports the per-switch operational properties (GetSwitchN, GetSwitchValueN,
-     * StateChangeCompleteN for every id below MaxSwitch) plus a TimeStamp by
+     * StateChangeCompleteN for every id below MaxSwitch) plus a TimeStamp (a
+     * disconnected driver returns the empty list, with no TimeStamp) by
      * calling this device's own public getters — the same ones the GET endpoints
      * use, which is what guarantees the DeviceState↔GET consistency ConformU
      * checks. A getter that throws (NotConnected, or an unwrapped vendor error)
@@ -45,6 +46,9 @@ public:
      * but the public getters is exactly what desyncs DeviceState from the GETs.
      */
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         int count = 0;
         try {

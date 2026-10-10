@@ -69,16 +69,16 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 - Assesses the working tree, reviews diffs, flags red flags (SDK bloat, secrets, build artifacts)
 - Hard-blocks committing failing ConformU reports
 - Updates SUPPORTED-DRIVERS.md and `docs/architecture.md` if driver or ConformU changes are present
-- Updates CHANGELOG.md under the UNRELEASED version, applying the SemVer policy (driver = minor, fix/docs = patch, breaking = major)
+- Adds the PR's changelog fragment (`changelog.d/<branch-slug>.md`, never `CHANGELOG.md`); the release derives the SemVer bump from it (new driver = minor, fix/docs = patch, breaking = major)
 - Writes verb-first commit messages with vendor/device specificity
 
 ### `/submit-pr` — pull request submission
 
 - Safety checks: refuses to PR from `main`, blocks on uncommitted changes and failing ConformU reports
 - Auto-detects direct contributor vs fork and handles both flows
-- Runs the pre-submission checklist (tests, ConformU, CHANGELOG, SUPPORTED-DRIVERS, AGENTS.md, license headers, SDK cleanup)
+- Runs the pre-submission checklist (tests, ConformU, changelog fragment, SUPPORTED-DRIVERS, AGENTS.md, license headers, SDK cleanup)
 - Reproduces CI locally via `scripts/ci_preflight.sh` before pushing, so PRs never open red
-- Builds the PR title and body with component-tagged changes and a test plan, then creates the PR via `gh`
+- Builds the PR title and a body that follows `.github/PULL_REQUEST_TEMPLATE.md` (thinking path, linked issues, what changed, verification, risks, model used, checklist), then creates the PR via `gh`; the `pr-template` job in `.github/workflows/pr-body.yml` (`scripts/check_pr_template.py`) fails a PR whose body drops a template section or leaves one unfilled
 - Watches for the automated review verdict and batches fixes into single pushes (every push restarts a full fresh review)
 
 ### AGENTS.md — the knowledge base
@@ -93,8 +93,11 @@ sudo apt install git build-essential cmake g++ \
     libhidapi-dev \
     libgphoto2-dev libraw-dev \
     nlohmann-json3-dev libcurl4-openssl-dev \
+    zlib1g-dev libsystemd-dev pkgconf \
     catch2
 ```
+
+This matches the `Build-Depends` field of `debian/control`, the authoritative list, plus `git` and `catch2` for the tests.
 
 Verify: `cmake --version` (3.20+), `g++ --version` (GCC 10+, C++20 required).
 
@@ -113,9 +116,8 @@ The server starts on port **6800**: `http://localhost:6800/`
 ### Manual build
 
 ```sh
-mkdir build && cd build
-cmake .. -DALPACACORE_ENABLE_ALL_VENDORS=ON
-cmake --build . --parallel
+cmake -S AlpacaHTTP -B AlpacaHTTP/build -DALPACACORE_ENABLE_ALL_VENDORS=ON
+cmake --build AlpacaHTTP/build --parallel
 ```
 
 ### Build options
@@ -139,13 +141,31 @@ cmake --build . --parallel
 | `ALPACACORE_ENABLE_BISQUE` | `OFF` | Bisque/Paramount (TheSkyX) telescope support |
 | `ALPACACORE_ENABLE_WANDERERASTRO` | `OFF` | WandererAstro CoverCalibrator |
 | `ALPACACORE_ENABLE_ASTROASIS` | `OFF` | Astroasis Oasis Focuser |
-| `ALPACACORE_ENABLE_GPHOTO` | `OFF` | gphoto2 DSLR/mirrorless cameras (Canon, Nikon, Sony) |
+| `ALPACACORE_ENABLE_GPHOTO` | `OFF` | libgphoto2 DSLR/mirrorless cameras (Canon, Nikon, Sony) |
 
 ## Running tests
 
 ```sh
 ./run_all_tests.sh
 ```
+
+The build runs at `nproc`, but `ctest` runs at twice that: most of the suite
+waits on fake hardware in real time rather than computing, so tying it to the
+core count leaves the machine idle. Override with `CTEST_PARALLEL` on a machine
+where that is too aggressive:
+
+```sh
+CTEST_PARALLEL=4 ./run_all_tests.sh
+```
+
+`run_all_tests.sh` also guards against a shrunken suite. `ctest --no-tests=error` fails only a
+run that finds zero tests, so a vendor target that silently stops configuring would still pass
+with most of its cases gone. After each build the script counts the tests with `ctest -N` and
+fails, naming the configuration, the count found and the floor, when AlpacaCore or AlpacaHTTP
+finds fewer than its floor. The floors sit at the top of `run_all_tests.sh`, keyed by
+`ALPACACORE_ENABLE_ALL_VENDORS` (`OFF` or `ON`), about 10% below the counts at the time they
+were set; any other value has no floor and fails. When tests are removed on purpose, lower the
+floor in the same PR; when the suite grows a lot, raise it so the guard stays tight.
 
 Or manually:
 
@@ -156,13 +176,16 @@ cd build && ctest
 Filter by tag: `./build/tests/alpacacore_tests [zwo][camera]`
 Exclude hardware tests: `./build/tests/alpacacore_tests ~[hardware]`
 
+Both assume the `build` directory `run_all_tests.sh` just made. A pre-flight leaves a different
+one there (see below), so after one, rebuild rather than filtering against what is left.
+
 Before pushing, reproduce the full CI gate set locally:
 
 ```sh
 ./scripts/ci_preflight.sh
 ```
 
-This runs clang-format, the Unicode/Trojan-Source scan, both build+test configurations (vendors OFF and ON), clang-tidy, cppcheck, and — when the relevant files changed — shellcheck, the web UI JavaScript gate (`node --check` for syntax plus `node --test` for the pure formatters in `AlpacaHTTP/web/format.js`, triggered by changes under `AlpacaHTTP/web/` or `AlpacaHTTP/tests/web/`), and zizmor. `/submit-pr` runs it automatically.
+This runs clang-format, the Unicode/Trojan-Source scan, both build+test configurations (vendors OFF and ON), clang-tidy, cppcheck, and — when the relevant files changed — shellcheck, the web UI JavaScript gate (`node --check` for syntax plus `node --test` for the pure formatters in `AlpacaHTTP/web/format.js`, triggered by changes under `AlpacaHTTP/web/` or `AlpacaHTTP/tests/web/`), and zizmor. It finishes with the ASan+UBSan pass, which is on by default since #588 and runs last of the default gates, after zizmor; `RUN_SANITIZERS=0` opts out, and the opt-in `RUN_TSAN=1` and `RUN_SCAN_BUILD=1` passes run after it when set. `/submit-pr` runs it automatically.
 
 ## Writing tests
 
@@ -337,17 +360,18 @@ The Debian package is built from the `debian/` directory. It installs:
 - Vendor libraries under `/usr/lib/alpacabridge`
 - Configuration under `/etc/alpacabridge`
 - Systemd unit `alpacabridge.service` running as the `alpacabridge` system user
+- The software-update helper: root-owned oneshot unit `alpacabridge-update.service`, its script `/usr/libexec/alpacabridge/software-update`, and the polkit rule `/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules` that lets the service user start that one unit (see [software-update.md](software-update.md)). `debian/rules` passes only `alpacabridge.service` to `dh_installsystemd` so the helper never gets enable/start/restart snippets.
 
 ## Releases
 
 The only install channel is the OpenAstro APT repository ([apt.openastro.net](https://apt.openastro.net)): install once, then `apt upgrade`. Every version published there is also marked in this repository so a shipped build has a name:
 
 - A git tag `vX.Y.Z` on the merge commit that carried the release (the `VERSION` file, the README badge, and the dated CHANGELOG heading all agree at that commit).
-- A GitHub Release for that tag, created automatically by `.github/workflows/release.yml`. Its notes are the plain-language `docs/releases/X.Y.Z.md` (falling back to the version's CHANGELOG section) and its only assets are the source archives GitHub attaches itself. No `.deb` is attached; use apt.
+- A GitHub Release for that tag, created automatically by `.github/workflows/release.yml`. Its notes are the plain-language `docs/releases/X.Y.Z.md` (falling back to the version's CHANGELOG section). A stable release's only assets are the source archives GitHub attaches itself; no `.deb` is attached, use apt. A beta pre-release (`vX.Y.Z-beta.N`) also carries the arm64 `.deb` and its `.sha256`, built by the same workflow in a Debian trixie container, so testers can install a named beta with `sudo apt install ./alpacabridge_X.Y.Z-beta.N_arm64.deb` ([beta channel](beta-channel.md)).
 
-To cut a release, run `/bump-release` (Claude Code skill, `.claude/commands/bump-release.md`). It does the whole flow: writes `VERSION`, updates the README badge and device count, dates the CHANGELOG heading, writes plain-language notes to `docs/releases/X.Y.Z.md`, opens and merges the release PR, tags the merge commit, and verifies the Release. By hand the same steps are:
+To cut a release or a beta, run `/bump-release` (Claude Code skill, `.claude/commands/bump-release.md`). It does the whole flow: writes `VERSION`, updates the README badge and device count, assembles the changelog fragments into a dated CHANGELOG section, writes plain-language notes to `docs/releases/X.Y.Z.md`, opens and merges the release PR, tags the merge commit, and verifies the Release. By hand the same steps are:
 
-1. On a `release/X.Y.Z` branch: write `VERSION`, update the README badge line, change `## [X.Y.Z] - UNRELEASED` to today's date, and write `docs/releases/X.Y.Z.md` for the people who will not read the CHANGELOG (what changed, what to do, no issue numbers or code names).
+1. On a `release/X.Y.Z` branch: write `VERSION`, update the README badge line, run `python3 scripts/changelog_fragments.py --release X.Y.Z --date <today>` (it writes the dated CHANGELOG section and deletes the `changelog.d/` fragments), and write `docs/releases/X.Y.Z.md` for the people who will not read the CHANGELOG (what changed, what to do, no issue numbers or code names).
 2. Merge the PR.
 3. Tag the merge commit and push the tag:
 
@@ -357,7 +381,9 @@ git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The Release body is `docs/releases/X.Y.Z.md` with a link to the CHANGELOG section appended; when no notes file exists the CHANGELOG section itself is used. The workflow refuses a tag whose version does not match `VERSION`, or whose CHANGELOG section is still `UNRELEASED`, so a tag can never publish notes for an uncut release. Preview the CHANGELOG notes locally with `scripts/changelog_section.py X.Y.Z`.
+The Release body is `docs/releases/X.Y.Z.md` with a link to the CHANGELOG section appended; when no notes file exists the CHANGELOG section itself is used. The workflow refuses a tag whose version does not match `VERSION`, or whose CHANGELOG section is missing or still `UNRELEASED`, so a tag can never publish notes for an uncut release. Preview the CHANGELOG notes locally with `scripts/changelog_section.py X.Y.Z`.
+
+Betas and hotfixes follow the stable-branch flow in [beta-channel.md](beta-channel.md): `/bump-release` cuts from `main` only to create `stable/X.Y` and its first beta; every later beta, the stable release and hotfixes are cut on `stable/X.Y`, and each is merged back into `main` with a merge commit. A beta tag `vX.Y.Z-beta.N` publishes a GitHub pre-release from `docs/releases/X.Y.Z-beta.N.md` and needs no dated CHANGELOG section.
 
 Testers who need an unreleased build still build from source or use `/deploy-remote-test`; commits between tags report the last released version.
 

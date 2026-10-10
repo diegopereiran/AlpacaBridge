@@ -7,6 +7,7 @@ applyTo: "AlpacaHTTP/**"
 Related decisions and failures — read when changing the behavior they explain:
 
 - [Server-thread ownership decision](../../docs/decisions/0002-server-thread-ownership.md)
+- [LAN surface threat model](../../docs/decisions/0007-lan-surface-threat-model.md): trust statement, per-surface bounds and the reviewer check for a new route or persisted config field
 - [Failed-bind thread failure](../../docs/failures/0005-server-failed-bind-thread.md)
 - [Release-build assertion failure](../../docs/failures/0004-ndebug-disabled-http-assertions.md)
 
@@ -17,7 +18,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
 - **URLs are case-sensitive and lowercase.** Device type and method path segments must be lower-case; that check stays.
 - **HTTP status codes:**
   - `200` — request was interpreted and reached the driver. Driver exceptions (NotImplemented, InvalidValue, NotConnected, etc.) ride in the JSON `ErrorNumber`/`ErrorMessage` fields with a `200`. `apply_error_status` exists to keep these at 200 — never downgrade a driver error to 4xx/5xx.
-  - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
+  - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, a known method on a verb it does not accept (after the cross-origin 403), a device number outside 0..4294967295, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
+  - `403` — a `Host` header that is not allowed, only when `http.host_check_enabled` is true (off by default; issue #392, checked in `Router::route()` before static files and routing: IP literals, `localhost`, this machine's hostname, `*.local`/`*.home.arpa`/`*.internal` and `http.allowed_hosts`; a missing `Host` passes), or a cross-origin state-changing request. Both carry the Alpaca envelope with `InvalidValue` and echo `ClientTransactionID`; a test that sends another `Host` gets the 403 only with the check enabled (`Router::set_host_check_enabled(true)`).
   - `500` — unexpected internal error only.
 - **The Alpaca `Value` is structured JSON, never a re-parsed string.** `AlpacaResponse::value` is `std::optional<nlohmann::json>` and `to_json` emits it verbatim. Handlers assign the real type directly — scalar, string, array, or object (e.g. `alpaca_response.value = actions;` for `SupportedActions`, **not** `actions.dump()`; `make_success_response(..., gains)` where `gains` is a `nlohmann::json` array). Do NOT serialize a structured payload to a string and rely on it being re-parsed downstream. The old `to_json` ran `json::parse()` on every string `Value` and substituted the result if it parsed — which (a) corrupted scalar string properties whose text is valid JSON (`"12345"` → number, `"true"` → bool, wrong ASCOM type on the wire) and (b) forced every array/object endpoint to round-trip through `.dump()`. That heuristic bit `SupportedActions`/`DeviceState` (every device) plus camera `Gains`/`Offsets`/`ReadoutModes`, telescope `AxisRates`, and filter `Names`/`FocusOffsets` — ConformU rejected the stringified arrays ("could not be converted to IList`<String>`"). The web UI mirror (`web/app.js parseResponseValue`) only parses a string that begins with `{`/`[`, never a bare scalar. The large camera image payload uses its own `build_image_*_payload` path and never goes through `Value`.
 - **The router's `Connected=false` wait must poll `get_connecting()`, never
@@ -49,8 +51,8 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   went stale for SynScan** -- answer `get_connected()` under the state mutex that their
   `set_connected(true)` holds for the entire handshake, so a
   `get_connected()` call from the `PUT connected` wait or from a `GET
-  connected` blocked for the whole connect and the wait's 8 s deadline never
-  fired (25 s on a silent handset: five 5 s query timeouts). The
+  connected` blocked for the whole connect and the wait's deadline (8 s then)
+  never fired (25 s on a silent handset: five 5 s query timeouts). The
   wrapper-backed switch drivers (iMate PowerBox, StellaVita, ASIAIR, ASIAIR
   Plus) used to block too, inside the wrapper's `is_open()`; since issue #382
   each wrapper publishes its open state as an atomic written only inside its
@@ -78,15 +80,18 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   correcting the others. State the rule, not the arithmetic. Regression tests:
   `AlpacaHTTP/tests/test_routing.cpp` (mutex-holding slow stub) and
   `AlpacaCore/tests/test_synscan_async_park.cpp`.
-  **Known trade-off:** while a task is in flight, `Connected` reports false
-  for every client, including one whose `PUT connected` reply already came
-  back at the 8 s deadline with the connect still proceeding — a Platform 6
-  client that treats that combination as a hard failure gives up on a
-  connect that may still succeed moments later. Accepted because the
-  alternative (reading `get_connected()` directly) is the phantom-link bug
-  this rule fixes; there is no per-driver signal yet for which
-  `get_connected()` implementations are safe to read mid-task (the lock-free
-  majority) versus which aren't (the telescopes above).
+  **`PUT connected` returns the outcome (issue #776).** It waits for the
+  connect task to end (bounded by `Router::connect_wait_limit()`, 60 s) and
+  replies success only when the device is connected; a failed connect is a
+  `DriverException` carrying the driver's reason (ASCOM `Connected`: "Do not
+  use a NotConnectedException here"), and a connect still running at the limit
+  is a `DriverException` and is withdrawn when no other client holds the
+  device. The old 8 s reply with the connect still proceeding is gone. After a
+  failed Platform 7 `Connect()`, `GET connecting` raises the stored failure
+  (`AlpacaDriver::get_connecting_error()`, kept by `AsyncConnectable`) as a
+  `DriverException` on every read until the client's next accepted Connect or
+  Disconnect; `LastConnectError` on the management API is separate and keeps
+  the reason across a Disconnect.
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
@@ -239,12 +244,15 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   connection ends — so an ACTIVE client (NINA/PHD2 polling every second)
   held its worker, and therefore `stop()`, until the 300s lifetime cap.
   systemd's default 90s `TimeoutStopSec` would SIGKILL the service first,
-  and the same applies to the management restart/shutdown endpoints, which
-  go through `stop()` on the main thread. Before keep-alive a worker only
-  ever held one request, so this was a genuine regression the caps did not
-  cover: they bound how long a connection may live, not whether it outlives
-  the server. Measured with a client sending every 2s: `stop()` blocked
-  26,006 ms and served 13 further requests before the check, 1 ms after.
+  and the same applies to the management restart/shutdown endpoints: the
+  router's detached thread always calls `stop()` for a restart, and for a
+  shutdown only when no shutdown callback is installed (otherwise the
+  embedder's own `stop()` is the call that blocks). Before keep-alive a
+  worker only ever held one request, so this was a genuine regression the
+  caps did not cover: they bound how long a connection may live, not
+  whether it outlives the server. Measured with a client sending every
+  2s: `stop()` blocked 26,006 ms and served 13 further requests before
+  the check, 1 ms after.
   With the reactor (below) no worker is ever parked, so `stop()` no longer
   waits out an idle gap at all: a request in flight is answered with
   `Connection: close`, a request already on the wire at the reactor's final
@@ -368,7 +376,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     destructor joins it. The threads this covers are the accept/server
     thread, the reactor, the worker pool and the RTC probe timer
     (`rtc_probe_thread_`, #314) -- the last spawns and joins alongside the
-    reactor and takes no lock `stop()` holds. So nothing can touch a
+    reactor and takes no lock `stop()` holds. Since #547 the same thread also
+    ticks the client-silence motion watchdog every second
+    (`Router::run_motion_watchdogs`); it rides this thread rather than the
+    reactor or a thread per device for the identical reason the RTC probe
+    does -- its mount I/O (`Slewing`/`AbortSlew`) must never block `poll()`.
+    So nothing can touch a
     `Server`'s members, the wake pipe included, after the destructor returns
     (review round 5). Destroying a `Server` from inside one of its own
     handlers is not supported.
@@ -401,6 +414,12 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     in `test_config.cpp`. At the bound the accept
     loop pauses and new clients wait in the listen backlog (64) rather than
     being refused; an idle connection expires within 15 s.
+  - `Config::motion_watchdog_seconds` (open-astro#547; 30 s default, matching
+    AlpacaCore's `kClientSilenceStopInterval` in `util/motion_policy.h`; 0
+    disables) is settable the same way, from the config file (`server:`
+    section) and the environment (`ALPACAHTTP_MOTION_WATCHDOG_SECONDS`),
+    routed through its clamping setter (negative -> 0); tested in
+    `test_config.cpp`.
   - Do not reintroduce a worker-side counter or reserve: the previous design
     counted busy workers as parked and pushed clients to close-per-request at
     exactly the busiest moments (review of #233).
@@ -414,13 +433,15 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
     the router's detached thread, so every connection is already closed and
     the count already zero before the reset ran, but the reset was wrong on
     principle and is gone.)
-  - Restart-path tests must not poll `is_running()` right after the restart
-    response: the router fires the callback 100 ms later on a detached
-    thread, so a true seen before `stop()` begins is the OLD generation, and
-    a client connecting then lands in a listener about to close and reads a
-    reset. Wait for a parked bystander to see EOF (proof `stop()` ran), then
-    for `is_running()`, then retry `connect()` (it goes true before the new
-    listener is bound). And lines "missing" from a test log after an
+  - Restart-path tests must not use `is_running()` as a readiness signal:
+    since #713 it stays true for the whole of a restart, so it never tells
+    the OLD generation from the new one, and a client connecting before
+    `stop()` lands in a listener about to close and reads a reset. Wait for
+    a parked bystander to see EOF (proof `stop()` ran), then for
+    `restart_in_progress_for_test()` to clear (`wait_for_restart_done()`:
+    `start_async()` has returned), then for `bound_port()` to be non-zero
+    (`wait_for_bound_port()`; the new listener is bound after
+    `start_async()` returns), and retry `connect()`. And lines "missing" from a test log after an
     `EXPECT` abort are usually buffered stdout lost at `abort()`, not a hang;
     confirm with a backtrace (`pidof test_server_socket`, never `pgrep -f`
     with a pattern that matches your own shell) before chasing one.

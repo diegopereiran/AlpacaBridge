@@ -135,7 +135,8 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - State machine", "[wandererastr
     REQUIRE(driver->get_connected() == false);
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
-    // and are omitted, leaving just the TimeStamp. The non-compliant "Connected"
+    // and are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list. The non-compliant "Connected"
     // entry must never appear.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
@@ -147,7 +148,7 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - State machine", "[wandererastr
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("WandererAstro CoverCalibrator Driver - HaltCover is implemented", "[wandererastro][covercalibrator][unit]") {
@@ -168,8 +169,23 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - HaltCover is implemented", "[w
 #include <thread>
 
 #include "fake_serial_streamer.h"
+#include "fake_task_clock.h"
 
 namespace {
+
+// Moves the fake clock by @p d, then waits (bounded, real time) for the
+// reader thread's next pass: its silence check is the one clock read a muted
+// or severed link makes per pass, taken under the lock the driver's getters
+// also take, so a getter called after this returns sees that pass's verdict.
+bool advance_one_pass(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds d) {
+    clock.advance(d);
+    return clock.wait_for_now_calls(clock.now_calls() + 1, std::chrono::milliseconds(2000));
+}
+
+// set_muted() can land just after the streamer committed one more frame to the
+// pty; give the reader time to take it at the current virtual time before the
+// clock moves, or it would restart the silence window.
+void drain_after_mute() { std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
 
 template <typename Pred>
 bool wait_until_cover(Pred pred, std::chrono::milliseconds limit) {
@@ -192,8 +208,10 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and 
           "[wandererastro][covercalibrator][unit][fake]") {
     using alpacacore::CalibratorState;
     using alpacacore::CoverState;
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
     alpacacore::test::FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(300));
-    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path());
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path(), 19200, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(driver->get_cover_state() == CoverState::Closed);
@@ -202,9 +220,16 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and 
     CHECK(driver->get_brightness() == 100);
 
     cover.set_muted(true);
-    CHECK(wait_until_cover([&] { return driver->get_cover_state() == CoverState::Unknown; },
-                           std::chrono::milliseconds(15000)));
+    drain_after_mute();
+    // The 10 s limit is inclusive: exactly 10 s of silence still serves the cache.
+    REQUIRE(advance_one_pass(clock, std::chrono::seconds(10)));
+    CHECK(driver->get_cover_state() == CoverState::Closed);
+    CHECK(driver->get_brightness() == 100);
+    // One millisecond more latches the fault.
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    CHECK(driver->get_cover_state() == CoverState::Unknown);
     CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().find("no status frame") != std::string::npos);  // surfaced to the management listing
     CHECK_FALSE(driver->get_cover_moving());
     // The panel is unreachable: its commanded state is no longer known to hold.
     CHECK(driver->get_calibrator_state() == CalibratorState::Unknown);
@@ -221,5 +246,6 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and 
                            std::chrono::milliseconds(3000)));
     CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
     CHECK(driver->get_brightness() == 100);
+    CHECK(driver->get_link_fault().empty());
     CHECK_NOTHROW(driver->set_connected(false));
 }

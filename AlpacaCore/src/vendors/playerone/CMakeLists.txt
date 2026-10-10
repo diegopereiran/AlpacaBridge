@@ -45,6 +45,7 @@ if(ALPACACORE_ENABLE_PLAYERONE)
         playerone_switch_driver.cpp
         playerone_pw_wrapper.cpp
         playerone_filterwheel_driver.cpp
+        playerone_catalog.cpp
     )
 
     add_library(alpacacore_playerone STATIC ${PLAYERONE_SOURCES})
@@ -54,6 +55,10 @@ if(ALPACACORE_ENABLE_PLAYERONE)
         ${PLAYERONE_SDK_INCLUDE}
         ${PLAYERONE_PW_SDK_INCLUDE}
     )
+
+    # Base drivers, logging and AsyncConnectable live in alpacacore; this vendor
+    # links down to it, never the reverse (open-astro#710).
+    target_link_libraries(alpacacore_playerone PRIVATE alpacacore)
 
     # Link the shared libraries; RPATH covers both install paths used by the
     # workspace (/usr/local/lib via install_alpaca_service.sh) and the Debian

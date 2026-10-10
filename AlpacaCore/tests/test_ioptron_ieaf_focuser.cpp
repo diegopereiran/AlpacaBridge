@@ -126,7 +126,8 @@ TEST_CASE("iOptron iEAF Focuser Driver - State machine", "[ioptron][focuser][uni
     REQUIRE(driver->get_connected() == false);
 
     // Platform 7 DeviceState while disconnected: operational getters throw and
-    // are omitted, leaving just the TimeStamp; no non-compliant "Connected".
+    // are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list; no non-compliant "Connected".
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
@@ -135,7 +136,7 @@ TEST_CASE("iOptron iEAF Focuser Driver - State machine", "[ioptron][focuser][uni
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("iOptron iEAF Focuser Driver - Unique IDs", "[ioptron][focuser][unit]") {
@@ -183,6 +184,25 @@ TEST_CASE("iOptron iEAF Focuser Driver - connects and moves over the fake", "[io
     CHECK(fake.count(":FM") == 1);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+}
+
+// Parameter validation precedes the connection check (ASCOM precedence).
+TEST_CASE("iOptron iEAF Focuser Driver - move range is InvalidValue even while disconnected",
+          "[ioptron][focuser][unit]") {
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
+    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(99999 + 1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(1000); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("iOptron iEAF Focuser Driver - move range over the fake", "[ioptron][focuser][unit]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    require_alpaca_error([&]() { driver->move(-1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->move(99999 + 1); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(fake.count(":FM") == 0);
+    driver->set_connected(false);
 }
 
 // Issue #528: a synchronous disconnect that lands while a synchronous connect

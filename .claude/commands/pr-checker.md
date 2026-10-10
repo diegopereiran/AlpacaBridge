@@ -11,6 +11,19 @@ half-finished PR back, and do not ask "shall I continue?" between rounds. The on
 are: every listed PR is merged (or closed), or a PR is blocked on something only the user can
 decide (see **Hard stops**).
 
+## Base branches other than `main`
+
+A PR may target `stable/X.Y` (a fix during a beta) or be a merge-down PR `stable/X.Y` -> `main`
+(`docs/beta-channel.md`; its head is `merge-down/X.Y-to-<main|X.Z>`, cut from the stable branch, so the
+update-branch and conflict steps below act on that branch and never on `stable/X.Y`). For a PR whose base is `stable/X.Y`, read `main` / `origin/main` in the
+steps below as that base (`gh pr view <N> --json baseRefName` says which), including the behind
+check and the format and conformu-report diffs. Those two kinds of PR (base `stable/X.Y`, and a
+merge-down into `main`) are merged with `gh pr merge <N> --merge` (merge commit); an ordinary PR
+into `main` keeps the method the steps below already use. A merge-down PR is **never squashed**:
+refuse `--squash` and `--rebase` on it, and when
+`update-branch` is needed use the merge-based one. Version-file conflicts in it follow the
+Merge down rule in `.claude/commands/bump-release.md`.
+
 ## Step 0 — Resolve the PR list
 
 ```bash
@@ -255,13 +268,15 @@ For **every** Defect, in this order:
      (`PREFLIGHT_BASE`), which is stale in a long session; `PREFLIGHT_BASE=origin/main` makes
      the two agree.
    - `scripts/*.py`: run the script itself against the real repo, plus its own probe.
-   - docs / skill / CHANGELOG (and every branch, since CI runs these on every PR regardless of
+   - docs / skill / changelog fragment (and every branch, since CI runs these on every PR regardless of
      what changed): `python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs_drift.py`,
      `python3 .github/scripts/check-unicode.py --self-test && python3 .github/scripts/check-unicode.py`,
      `python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py`
      (the self-test first, as `ci_preflight.sh` and CI both run it),
      `python3 scripts/check_connect_error_hook.py --self-test && python3 scripts/check_connect_error_hook.py`
-     (the self-test first, same as the stress-registration gate), and on a PR also
+     (the self-test first, same as the stress-registration gate),
+     `python3 scripts/check_layering.py --self-test && python3 scripts/check_layering.py`
+     (self-test first; vendor-include baseline for AlpacaHTTP and the catalog), and on a PR also
      `python3 scripts/check_conformu_reports.py --self-test && python3 scripts/check_conformu_reports.py origin/main`
      (CI passes `origin/$GITHUB_BASE_REF`;
      the pre-flight passes the merge base, which differs only when `origin/main` has moved
@@ -272,14 +287,33 @@ For **every** Defect, in this order:
      present, else the pinned copy at
      `${XDG_CACHE_HOME:-$HOME/.cache}/alpacabridge-preflight/zizmor-<ZIZMOR_VER>` (the
      pre-flight downloads it on first use).
-   - driver code: rebuild with the vendor compiled in, then run the tagged suite:
-     `cmake -S AlpacaCore -B AlpacaCore/build -DALPACACORE_ENABLE_ALL_VENDORS=ON && cmake --build AlpacaCore/build --target alpacacore_tests`
-     then `AlpacaCore/build/tests/alpacacore_tests "[vendor][device]"`. `run_all_tests.sh`
+   - driver code: rebuild with the vendor compiled in **into a build directory of its own**,
+     then run the tagged suite:
+     `cmake -S AlpacaCore -B AlpacaCore/build-vendors -DALPACACORE_ENABLE_ALL_VENDORS=ON && cmake --build AlpacaCore/build-vendors --target alpacacore_tests`
+     then `AlpacaCore/build-vendors/tests/alpacacore_tests "[vendor][device]"`. `run_all_tests.sh`
      defaults vendors ON, but `ci_preflight.sh` gate 3 runs it as
      `ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh`, and a build from that pass compiles
      no driver: the tag filter matches nothing and Catch2 exits non-zero for "no tests ran"
-     (probed: rc 2), a failure that says nothing about the driver.
+     (probed: rc 2), a failure that says nothing about the driver. The separate directory is what
+     makes the `-D` sufficient: CMake seeds `CMAKE_CXX_FLAGS` from `CXXFLAGS` on the FIRST
+     configure and then caches it, so reconfiguring a directory the sanitized pass built would
+     keep `-fsanitize=address,undefined` from that cache and handed you a sanitized binary no
+     matter what you passed on the command line.
+     After a default pre-flight, `AlpacaCore/build` holds the ASan+UBSan vendors-OFF binary
+     rather than gate 4's vendors-ON one -- since #588 the sanitized pass is the last of the
+     three `run_all_tests.sh` invocations (`ci_preflight.sh:477`, after zizmor) and
+     `run_all_tests.sh:20` `rm -rf`s the build directory on entry. `ci_preflight.sh` sets no
+     `-e`, so it reaches that pass whether or not an earlier gate failed. (Under
+     `RUN_SANITIZERS=0` the pass is skipped and `AlpacaCore/build` does still hold gate 4's
+     vendors-ON build -- which is exactly why this is not worth reasoning about case by case.)
+     Never infer what is in `AlpacaCore/build`: build your own.
    The full `ci_preflight.sh` is for branches that change runtime C++ across vendors.
+5b. **After a rename, grep the old name across the whole tree before pushing.** PR #695
+   round 2 renamed `MIN_README_RELATIVE_LINKS` to a dict and pushed with a comment in the
+   *other* script still naming the deleted constant; the bot's next round was that one
+   Defect. `git grep -n <old name>` must return nothing (or only history) before the push.
+   The same goes for a number restated in prose (a floor, a count, a line number): grep
+   the digits too, or write the prose without them.
 6. **One commit per Defect, one push per round** (this `⚠️ Issues found` path only). Commits
    stay atomic so a wrong one can be reverted alone; the push stays batched because every push
    costs a full review. A cleanup round after an approval is different: its notes are small and
@@ -307,6 +341,8 @@ else
     && python3 scripts/check_stress_registration.py --self-test && python3 scripts/check_stress_registration.py \
     && python3 scripts/check_connect_error_hook.py --self-test \
     && python3 scripts/check_connect_error_hook.py \
+    && python3 scripts/check_layering.py --self-test \
+    && python3 scripts/check_layering.py \
     && python3 scripts/check_conformu_reports.py --self-test \
     && python3 scripts/check_conformu_reports.py origin/main; }
 fi
@@ -410,8 +446,27 @@ beyond the PR as opened (PR #272 gained an unrelated cppcheck-scoping commit mid
 The loop ends only when every PR is merged or a **Hard stop** below applies. In particular:
 
 - **A gate failure in code this branch does not touch** is not a stop. Re-run the failed
-  test in isolation 5 times against the built binary (`AlpacaCore/build/tests/alpacacore_tests
-  "<test name>"`). If it passes in isolation and `git diff main...HEAD --name-only` shows no
+  test in isolation 5 times -- against a binary you built for the purpose, NOT whatever is
+  sitting in `AlpacaCore/build`:
+  `cmake -S AlpacaCore -B AlpacaCore/build-isolate -DALPACACORE_ENABLE_ALL_VENDORS=OFF && cmake --build AlpacaCore/build-isolate --target alpacacore_tests`,
+  then `AlpacaCore/build-isolate/tests/alpacacore_tests "<test name>"`.
+  **Match the vendor set to the test.** The probe needs exactly two properties -- not sanitized,
+  and the failing test compiled in -- and building every SDK in the tree to re-run one test for
+  five seconds is minutes of rebuild it does not need. `ALPACACORE_ENABLE_ALL_VENDORS` defaults
+  **ON** (`AlpacaCore/CMakeLists.txt:22`), so a bare `cmake -S AlpacaCore -B <dir>` builds all of
+  them: the `=OFF` above is doing real work and is not redundant. For a vendor-tagged test, add
+  `-DALPACACORE_ENABLE_<VENDOR>=ON` for that one vendor -- its tests are guarded by
+  `if(TARGET alpacacore_<vendor>)` in `AlpacaCore/tests/CMakeLists.txt`, so with vendors off and
+  no `-D` the case is absent and the filter matches nothing (rc 2, as below). If the gate-3 step
+  above already built `AlpacaCore/build-vendors` with the vendor you need, run the probe against
+  that binary instead of configuring a second tree. Nothing wipes either directory, so the
+  configure cost is paid once and later probes are incremental. Since #588 a default
+  pre-flight leaves `AlpacaCore/build` holding the ASan+UBSan, vendors-OFF binary from its last
+  pass (see the gate-3 note above), which breaks this probe two ways: a vendor test name matches nothing
+  and Catch2 exits rc 2, and -- the quiet one -- a sanitized binary has different timing, so a
+  concurrency flake can stop reproducing under it and get waved through as "passes in
+  isolation". A separate build directory also keeps the probe from destroying the artifacts of
+  the gate that failed. If it passes in isolation and `git diff main...HEAD --name-only` shows no
   file that could affect it, it is a flake: re-run the step 5 gate that failed once, push on
   green, and
   record the flake (test name, failure text, pass rate) in the wrap-up for the user. Two

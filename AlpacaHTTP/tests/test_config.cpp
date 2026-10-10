@@ -11,12 +11,16 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/motion_policy.h>
 #include <alpacahttp/config.h>
+#include <alpacahttp/software_update.h>
 #include <unistd.h>
 
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <vector>
 
 #include "test_assert.h"
 
@@ -143,6 +147,290 @@ int main() {
         alpacahttp::Config bad_value;
         EXPECT(bad_value.load(path));
         EXPECT(bad_value.sync_system_clock_from_clients() == true);
+        ::unlink(path.c_str());
+    }
+
+    // Software update (docs/software-update.md): update_packages_url under
+    // [server]. The default is the arm64 Trixie index; the file and the
+    // environment both override it, and an explicit empty value (which
+    // disables the check) is kept rather than replaced by the default.
+    {
+        alpacahttp::Config fresh;
+        EXPECT(fresh.update_packages_url() == std::string(alpacahttp::util::kDefaultPackagesUrl));
+        EXPECT(fresh.update_packages_url().find("apt.openastro.net") != std::string::npos);
+        fresh.set_update_packages_url("https://mirror.example/Packages");
+        EXPECT(fresh.update_packages_url() == "https://mirror.example/Packages");
+
+        char path_template[] = "/tmp/alpacahttp_test_update_url_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            // The value carries a colon of its own; the parser must split on
+            // the first one only.
+            out << "server:\n"
+                   "  update_packages_url: https://mirror.example/dists/trixie/main/binary-arm64/Packages  # note\n";
+        }
+        ::close(fd);
+
+        ::unsetenv("ALPACAHTTP_UPDATE_PACKAGES_URL");
+        alpacahttp::Config from_file;
+        EXPECT(from_file.load(path));
+        EXPECT(from_file.update_packages_url() == "https://mirror.example/dists/trixie/main/binary-arm64/Packages");
+
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  update_packages_url: \"\"\n";
+        }
+        alpacahttp::Config from_file_empty;
+        EXPECT(from_file_empty.load(path));
+        EXPECT(from_file_empty.update_packages_url().empty());
+
+        ::setenv("ALPACAHTTP_UPDATE_PACKAGES_URL", "https://env.example/Packages", 1);
+        alpacahttp::Config from_env;
+        EXPECT(from_env.load(path));
+        EXPECT(from_env.update_packages_url() == "https://env.example/Packages");
+        ::setenv("ALPACAHTTP_UPDATE_PACKAGES_URL", "", 1);
+        alpacahttp::Config from_env_empty;
+        EXPECT(from_env_empty.load(path));
+        EXPECT(from_env_empty.update_packages_url().empty());
+        ::unsetenv("ALPACAHTTP_UPDATE_PACKAGES_URL");
+
+        // The release-notes and release-page templates follow the same rules.
+        EXPECT(fresh.update_release_notes_url() == std::string(alpacahttp::util::kDefaultReleaseNotesUrl));
+        EXPECT(fresh.update_release_url() == std::string(alpacahttp::util::kDefaultReleaseUrl));
+        EXPECT(fresh.update_release_notes_url().find("{version}") != std::string::npos);
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  update_release_notes_url: https://notes.example/{version}.md\n"
+                   "  update_release_url: \"\"\n";
+        }
+        ::unsetenv("ALPACAHTTP_UPDATE_RELEASE_NOTES_URL");
+        ::unsetenv("ALPACAHTTP_UPDATE_RELEASE_URL");
+        alpacahttp::Config templates_from_file;
+        EXPECT(templates_from_file.load(path));
+        EXPECT(templates_from_file.update_release_notes_url() == "https://notes.example/{version}.md");
+        EXPECT(templates_from_file.update_release_url().empty());
+        ::setenv("ALPACAHTTP_UPDATE_RELEASE_NOTES_URL", "", 1);
+        ::setenv("ALPACAHTTP_UPDATE_RELEASE_URL", "https://rel.example/v{version}", 1);
+        alpacahttp::Config templates_from_env;
+        EXPECT(templates_from_env.load(path));
+        EXPECT(templates_from_env.update_release_notes_url().empty());
+        EXPECT(templates_from_env.update_release_url() == "https://rel.example/v{version}");
+        ::unsetenv("ALPACAHTTP_UPDATE_RELEASE_NOTES_URL");
+        ::unsetenv("ALPACAHTTP_UPDATE_RELEASE_URL");
+
+        ::unlink(path.c_str());
+    }
+
+    // open-astro#547: motion_watchdog_seconds under [server], next to
+    // sync_system_clock_from_clients. Default matches AlpacaCore's
+    // kClientSilenceStopInterval (util/motion_policy.h), which is the two
+    // constants' shared home with open-astro#521's relink window. 0 = the
+    // watchdog is disabled outright (no upper clamp: an operator with a very
+    // slow polling client may want longer than 30 s).
+    {
+        alpacahttp::Config fresh;
+        EXPECT(fresh.motion_watchdog_seconds() ==
+               static_cast<int>(alpacacore::util::kClientSilenceStopInterval.count()));
+
+        fresh.set_motion_watchdog_seconds(-3);
+        EXPECT(fresh.motion_watchdog_seconds() == 0);
+        fresh.set_motion_watchdog_seconds(0);
+        EXPECT(fresh.motion_watchdog_seconds() == 0);
+        fresh.set_motion_watchdog_seconds(45);
+        EXPECT(fresh.motion_watchdog_seconds() == 45);
+
+        char path_template[] = "/tmp/alpacahttp_test_watchdog_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  motion_watchdog_seconds: 5\n";
+        }
+        ::close(fd);
+
+        ::unsetenv("ALPACAHTTP_MOTION_WATCHDOG_SECONDS");
+        alpacahttp::Config from_file;
+        EXPECT(from_file.load(path));
+        EXPECT(from_file.motion_watchdog_seconds() == 5);
+
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  motion_watchdog_seconds: 0\n";
+        }
+        alpacahttp::Config from_file_disabled;
+        EXPECT(from_file_disabled.load(path));
+        EXPECT(from_file_disabled.motion_watchdog_seconds() == 0);
+
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  motion_watchdog_seconds: -7\n";
+        }
+        alpacahttp::Config from_file_negative;
+        EXPECT(from_file_negative.load(path));
+        EXPECT(from_file_negative.motion_watchdog_seconds() == 0);
+
+        ::setenv("ALPACAHTTP_MOTION_WATCHDOG_SECONDS", "12", 1);
+        alpacahttp::Config from_env;
+        EXPECT(from_env.load(path));
+        EXPECT(from_env.motion_watchdog_seconds() == 12);
+        ::unsetenv("ALPACAHTTP_MOTION_WATCHDOG_SECONDS");
+
+        {
+            std::ofstream out(path);
+            out << "server:\n"
+                   "  motion_watchdog_seconds: banana\n";
+        }
+        alpacahttp::Config from_file_garbage;
+        EXPECT(from_file_garbage.load(path));
+        EXPECT(from_file_garbage.motion_watchdog_seconds() ==
+               static_cast<int>(alpacacore::util::kClientSilenceStopInterval.count()));
+
+        ::unlink(path.c_str());
+    }
+
+    // open-astro#392: http.allowed_hosts, one comma-separated string. Entries
+    // are trimmed and empty ones dropped; the router normalizes them.
+    {
+        alpacahttp::Config fresh;
+        EXPECT(fresh.allowed_hosts().empty());
+
+        char path_template[] = "/tmp/alpacahttp_test_allowed_hosts_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            out << "http:\n"
+                   "  port: 6800\n"
+                   "  allowed_hosts: \".lan, astropi.home\"  # a comment\n"
+                   "server:\n"
+                   "  allowed_hosts: wrong.section\n";
+        }
+        ::close(fd);
+
+        alpacahttp::Config from_file;
+        EXPECT(from_file.load(path));
+        EXPECT((from_file.allowed_hosts() == std::vector<std::string>{".lan", "astropi.home"}));
+
+        {
+            std::ofstream out(path);
+            out << "http:\n"
+                   "  allowed_hosts: a, ,b,\n";
+        }
+        alpacahttp::Config from_file_empty_entries;
+        EXPECT(from_file_empty_entries.load(path));
+        EXPECT((from_file_empty_entries.allowed_hosts() == std::vector<std::string>{"a", "b"}));
+
+        // open-astro#787: the web UI owns the list, so the file is its only
+        // source; the old ALPACAHTTP_ALLOWED_HOSTS variable is ignored.
+        ::setenv("ALPACAHTTP_ALLOWED_HOSTS", " .fritz.box ,, pi.lan ", 1);
+        alpacahttp::Config env_ignored;
+        EXPECT(env_ignored.load(path));
+        EXPECT((env_ignored.allowed_hosts() == std::vector<std::string>{"a", "b"}));
+        ::unsetenv("ALPACAHTTP_ALLOWED_HOSTS");
+
+        ::unlink(path.c_str());
+    }
+
+    // http.host_check_enabled: off unless set.
+    {
+        alpacahttp::Config fresh;
+        EXPECT(!fresh.host_check_enabled());
+
+        char path_template[] = "/tmp/alpacahttp_test_host_check_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        ::close(fd);
+        const auto write_file = [&path](const char* value) {
+            std::ofstream out(path);
+            out << "http:\n  port: 6800\n";
+            if (*value != '\0') {
+                out << "  host_check_enabled: " << value << "  # a comment\n";
+            }
+        };
+
+        write_file("");
+        alpacahttp::Config absent;
+        EXPECT(absent.load(path));
+        EXPECT(!absent.host_check_enabled());
+
+        write_file("true");
+        alpacahttp::Config file_on;
+        EXPECT(file_on.load(path));
+        EXPECT(file_on.host_check_enabled());
+
+        // open-astro#787: the old ALPACAHTTP_HOST_CHECK variable is ignored;
+        // the file's value stands either way.
+        write_file("false");
+        ::setenv("ALPACAHTTP_HOST_CHECK", "true", 1);
+        alpacahttp::Config env_on_ignored;
+        EXPECT(env_on_ignored.load(path));
+        EXPECT(!env_on_ignored.host_check_enabled());
+
+        write_file("true");
+        ::setenv("ALPACAHTTP_HOST_CHECK", "false", 1);
+        alpacahttp::Config env_off_ignored;
+        EXPECT(env_off_ignored.load(path));
+        EXPECT(env_off_ignored.host_check_enabled());
+        ::unsetenv("ALPACAHTTP_HOST_CHECK");
+
+        ::unlink(path.c_str());
+    }
+
+    // open-astro#392: a '#' inside a double-quoted value is data; one outside
+    // starts a comment.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_hash_quoted_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string path = path_template;
+        {
+            std::ofstream out(path);
+            out << "http:\n"
+                   "  allowed_hosts: \"a#b, .lan\" # trailing comment\n";
+        }
+        alpacahttp::Config quoted;
+        EXPECT(quoted.load(path));
+        EXPECT((quoted.allowed_hosts() == std::vector<std::string>{"a#b", ".lan"}));
+        ::unlink(path.c_str());
+    }
+
+    // A double quote opens a quoted value only as its first non-space
+    // character; a later one in a plain value is a literal.
+    {
+        char path_template[] = "/tmp/alpacahttp_test_lone_quote_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string path = path_template;
+        const auto location_of = [&path](const std::string& line) {
+            {
+                std::ofstream out(path);
+                out << "server:\n" << line << "\n";
+            }
+            alpacahttp::Config cfg;
+            EXPECT(cfg.load(path));
+            return cfg.location();
+        };
+        EXPECT(location_of("  location: 8\" Dob  # note") == "8\" Dob");
+        EXPECT(location_of("  location: \"Obs #2\"  # c") == "Obs #2");
+        EXPECT(location_of("  location: \"a\\\"#b\"  # c") == "a\"#b");
+        EXPECT(location_of("  location: 'Obs'  # c") == "Obs");
+        EXPECT(location_of("  location: 'Obs #2'") == "Obs #2");
+        EXPECT(location_of("  location: 'Obs' # comment") == "Obs");
+        EXPECT(location_of("  location: Bob's #2") == "Bob's");
+        EXPECT(location_of("  location: Plain Site") == "Plain Site");
         ::unlink(path.c_str());
     }
 

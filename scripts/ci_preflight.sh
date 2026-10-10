@@ -8,7 +8,9 @@
 #
 #   ./scripts/ci_preflight.sh                 # base = main
 #   PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh   # fork contributors
-#   RUN_SANITIZERS=1 ./scripts/ci_preflight.sh # also run the ASan+UBSan job
+#     (a <remote>/<branch> base is fetched first; a failed fetch or a local-branch base warns)
+#     (a base that does not resolve, or shares no history with HEAD, is a hard failure)
+#   RUN_SANITIZERS=0 ./scripts/ci_preflight.sh # SKIP the ASan+UBSan job (on by default)
 #   RUN_TSAN=1 ./scripts/ci_preflight.sh       # also run the TSan concurrency stress job
 #   RUN_SCAN_BUILD=1 ./scripts/ci_preflight.sh # also run Clang Static Analyzer (advisory)
 #   PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh         # never apt-install
@@ -41,17 +43,22 @@ fi
 # --- ccache (issue #529) ---------------------------------------------------
 #
 # run_all_tests.sh does `rm -rf build` and a full clean rebuild, and this
-# script runs it twice (vendors OFF, then ON) plus a third clean build for the
-# TSan pass, so every pre-flight recompiles the whole tree 2-3 times from
-# scratch. Route those compiles through ccache when it is available: CMake reads
+# script runs it twice (vendors OFF, then ON) plus the ASan+UBSan pass, which
+# is on by default, plus a fourth clean build when RUN_TSAN=1, so every
+# pre-flight recompiles the whole tree 3-4 times from scratch. Route those
+# compiles through ccache when it is available: CMake reads
 # CMAKE_{C,CXX}_COMPILER_LAUNCHER at configure time, so exporting them here
 # covers run_all_tests.sh's configures and the clang-tidy compile DB without
 # editing each cmake line. Guarded on ccache being present so this is a no-op
-# where it is absent, leaving CI parity unchanged. The TSan build's
-# -fsanitize=thread objects have distinct cache keys and won't share with the
-# normal builds, but successive runs of each still hit; that build dir is
-# reused across runs and the launcher is only a cache-variable DEFAULT, so it
-# is also passed explicitly there (CCACHE_CMAKE_ARGS) or an older build-tsan/
+# where it is absent, leaving CI parity unchanged. A sanitized build's objects
+# have distinct cache keys and won't share with the normal builds -- CMake seeds
+# CMAKE_CXX_FLAGS from the environment's CXXFLAGS at configure time, so the
+# -fsanitize flags land on the compile line, and ccache hashes that line -- so
+# neither the ASan+UBSan pass nor the TSan one is made cheaper by the ordinary
+# builds, though successive runs of each still hit. The TSan build dir is the
+# one reused across runs (the ASan pass goes through run_all_tests.sh, which
+# wipes build/ every time), and there the launcher is only a cache-variable
+# DEFAULT, so it is also passed explicitly (CCACHE_CMAKE_ARGS) or an older build-tsan/
 # would never pick it up. Invariant: every OTHER build dir is deleted before
 # it is configured (run_all_tests.sh rm -rf's build/ and AlpacaHTTP/build/),
 # which is the only reason the env var alone is enough there; a future gate
@@ -175,8 +182,50 @@ ensure_zizmor() {
 
 # --- changed-file sets -----------------------------------------------------
 
-git fetch --no-tags origin "${BASE#origin/}" >/dev/null 2>&1 || true
-MERGE_BASE="$(git merge-base "${BASE}" HEAD 2>/dev/null || echo HEAD)"
+# Refresh the base from the remote it names (issue #708). BASE is <remote>/<branch>
+# when its prefix is a configured remote; a failed fetch is a warning, not fatal,
+# so an offline run still diffs against the cached ref. A plain local branch
+# (the default `main`) is never fetched. A base starting with '-' would reach git
+# as an option (`--output=FILE` makes git log overwrite FILE), and a branch part
+# holding ':' would be a refspec that writes a local ref, so both are refused.
+if [[ "${BASE}" == -* || "${BASE}" == */*:* ]]; then
+  echo "ERROR: PREFLIGHT_BASE='${BASE}' is not a branch name or <remote>/<branch>." >&2
+  exit 1
+fi
+base_remote="${BASE%%/*}"
+if [[ "${BASE}" == */* ]] && git remote | grep -Fxq -e "${base_remote}"; then
+  if ! fetch_err="$(git fetch --no-tags -- "${base_remote}" "${BASE#*/}" 2>&1 >/dev/null)"; then
+    if cached_date="$(git log -1 --format=%cI "${BASE}" 2>/dev/null)" && [[ -n "${cached_date}" ]]; then
+      echo "WARNING: could not refresh '${BASE}' (${fetch_err//$'\n'/ }); using cached ref from ${cached_date}" >&2
+    fi
+  fi
+else
+  local_note=""
+  if local_date="$(git log -1 --format=%cI "${BASE}" 2>/dev/null)" && [[ -n "${local_date}" ]]; then
+    local_note=" (cached ref from ${local_date})"
+  fi
+  echo "WARNING: '${BASE}' is a local branch, not refreshed${local_note}; run git fetch or set PREFLIGHT_BASE=<remote>/<branch>" >&2
+fi
+# Fail fast when the base cannot be resolved (issue #601): an empty diff would
+# make every change-scoped gate skip and the run end "Safe to push".
+if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+  {
+    echo "ERROR: cannot resolve the diff base '${BASE}' to a commit."
+    echo "Fetch the remote it names, or set PREFLIGHT_BASE to a ref that exists, e.g.:"
+    echo "  git remote add upstream https://github.com/open-astro/AlpacaBridge.git && git fetch upstream"
+    echo "  PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh"
+  } >&2
+  exit 1
+fi
+if ! MERGE_BASE="$(git merge-base "${BASE}" HEAD 2>/dev/null)"; then
+  {
+    echo "ERROR: no merge-base between the diff base '${BASE}' and HEAD."
+    echo "The history is probably shallow or the base is unrelated: run"
+    echo "  git fetch --unshallow"
+    echo "or set PREFLIGHT_BASE to a ref that shares history with HEAD."
+  } >&2
+  exit 1
+fi
 echo "Diff base: ${BASE} (merge-base ${MERGE_BASE})"
 
 mapfile -t CHANGED < <(git diff --name-only "${MERGE_BASE}" HEAD)
@@ -197,7 +246,7 @@ mapfile -t SRC_CPP_FILES < <(
 mapfile -t SH_FILES < <(
   {
     printf '%s\n' "${CHANGED[@]}" | grep -E '\.sh$' | grep -v '^AlpacaCore/external/'
-    for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm; do
+    for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm debian/alpacabridge-software-update; do
       printf '%s\n' "${CHANGED[@]}" | grep -qx "${f}" && echo "${f}"
     done
   } | sort -u
@@ -253,6 +302,51 @@ else
   record FAIL "stress-test registration"
 fi
 
+# --- gate 2b2: Falsified by: lines for new test cases -----------------------
+
+section "Falsified-by (PR body)"
+if python3 scripts/check_falsified_by.py --self-test; then
+  if [ -z "${PR_BODY_FILE:-}" ]; then
+    record SKIP "falsified-by (no PR body)"
+  elif [[ "$(git branch --show-current 2>/dev/null)" == merge-down/* ]] \
+       && python3 scripts/merge_down.py --exempt --head-ref "$(git branch --show-current 2>/dev/null)" \
+            --base-ref "${BASE}" --base-rev "${MERGE_BASE}" \
+            --stable-remote "$(case "${BASE}" in */*) echo "${BASE%%/*}" ;; *) echo origin ;; esac)"; then
+    # Same exemption, same script as the falsified-by CI job: a merge down
+    # (merge-down/X.Y-to-<target> against that target, nothing that is not
+    # already on stable/X.Y) carries test cases already gated on their fix PRs
+    # (docs/beta-channel.md). Set PREFLIGHT_BASE to the PR's base.
+    record SKIP "falsified-by (merge down)"
+  elif [ ! -f "${PR_BODY_FILE}" ]; then
+    echo "falsified-by: PR_BODY_FILE is set but ${PR_BODY_FILE} does not exist"
+    record FAIL "falsified-by"
+  elif FALSIFIED_BASE="${MERGE_BASE}" python3 scripts/check_falsified_by.py --body-file "${PR_BODY_FILE}"; then
+    record PASS "falsified-by"
+  else
+    record FAIL "falsified-by"
+  fi
+else
+  record FAIL "falsified-by"
+fi
+
+# --- gate 2b3: PR body follows the PR template ------------------------------
+
+section "PR template (PR body)"
+if python3 scripts/check_pr_template.py --self-test; then
+  if [ -z "${PR_BODY_FILE:-}" ]; then
+    record SKIP "pr-template (no PR body)"
+  elif [ ! -f "${PR_BODY_FILE}" ]; then
+    echo "pr-template: PR_BODY_FILE is set but ${PR_BODY_FILE} does not exist"
+    record FAIL "pr-template"
+  elif python3 scripts/check_pr_template.py --body-file "${PR_BODY_FILE}"; then
+    record PASS "pr-template"
+  else
+    record FAIL "pr-template"
+  fi
+else
+  record FAIL "pr-template"
+fi
+
 # --- gate 2c: ConformU report validation ------------------------------------
 
 section "ConformU report validation"
@@ -266,7 +360,12 @@ fi
 
 section "Docs drift check"
 if python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs_drift.py \
-   && python3 scripts/changelog_section.py --self-test; then
+   && python3 scripts/changelog_section.py --self-test \
+   && python3 scripts/changelog_fragments.py --self-test \
+   && python3 scripts/changelog_fragments.py --check \
+   && python3 scripts/changelog_to_deb.py --self-test \
+   && python3 scripts/release_tag.py --self-test \
+   && python3 scripts/merge_down.py --self-test; then
   record PASS "docs drift check"
 else
   record FAIL "docs drift check"
@@ -281,13 +380,52 @@ else
   record FAIL "connect-error hook"
 fi
 
+# --- gate 2f: layering gate ------------------------------------------------
+
+section "Layering gate"
+if python3 scripts/check_layering.py --self-test && python3 scripts/check_layering.py; then
+  record PASS "layering gate"
+else
+  record FAIL "layering gate"
+fi
+
+# --- gate 2g: cross-driver contract sweep registration ---------------------
+
+section "Contract sweep registration"
+if python3 scripts/check_contract_sweep.py --self-test && python3 scripts/check_contract_sweep.py; then
+  record PASS "contract sweep registration"
+else
+  record FAIL "contract sweep registration"
+fi
+
 # --- gate 3: build + unit tests, vendor-neutral ----------------------------
 
 section "Build + tests (vendors OFF)"
+# Catch2 probe (issue #593): without it AlpacaCore/tests/CMakeLists.txt returns
+# early and ctest can only say "No tests were found", so name the cause here.
+if ! compgen -G "/usr/lib/cmake/Catch2" >/dev/null \
+   && ! compgen -G "/usr/lib/*/cmake/Catch2" >/dev/null \
+   && ! compgen -G "/usr/local/lib/cmake/Catch2" >/dev/null \
+   && ! compgen -G "/usr/share/cmake/Catch2" >/dev/null; then
+  echo "Catch2 not found: install catch2 (apt) or the AlpacaCore tests will not configure"
+fi
 if ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh; then
   record PASS "build+test (vendors OFF)"
 else
   record FAIL "build+test (vendors OFF)"
+fi
+
+# --- gate 3b: the beta VERSION split ---------------------------------------
+#
+# Mirrors the build-test CI step: the VERSION helper both CMakeLists include
+# gives project() the base version and the version defines the full string
+# (docs/beta-channel.md). cmake -P only, no configure.
+
+section "Beta VERSION split"
+if scripts/check_beta_configure.sh; then
+  record PASS "beta VERSION split"
+else
+  record FAIL "beta VERSION split"
 fi
 
 # --- gate 4: build + unit tests, all vendors -------------------------------
@@ -316,6 +454,7 @@ elif ensure_tool clang-tidy clang-tidy; then
   cmake -S AlpacaHTTP -B AlpacaHTTP/build \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DALPACAHTTP_BUILD_TESTS=ON \
+    -DALPACACORE_BUILD_TESTS=ON \
     -DALPACACORE_ENABLE_ALL_VENDORS=ON >/dev/null
   cmake --build AlpacaHTTP/build --parallel "${PARALLEL}" >/dev/null
   tidy_diff="$(dpkg -L clang-tidy 2>/dev/null | grep -m1 -E 'clang-tidy-diff.*\.py' || true)"
@@ -462,9 +601,9 @@ else
   fi
 fi
 
-# --- optional: sanitizers --------------------------------------------------
+# --- sanitizers (ASan+UBSan, on by default; RUN_SANITIZERS=0 opts out) -----
 
-if [ "${RUN_SANITIZERS:-0}" = "1" ]; then
+if [ "${RUN_SANITIZERS:-1}" = "1" ]; then
   section "Sanitizers (ASan + UBSan, vendors OFF)"
   if CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
      LDFLAGS="-fsanitize=address,undefined" \
@@ -475,6 +614,8 @@ if [ "${RUN_SANITIZERS:-0}" = "1" ]; then
   else
     record FAIL "sanitizers"
   fi
+else
+  record SKIP "sanitizers (RUN_SANITIZERS=${RUN_SANITIZERS})"
 fi
 
 # --- optional: ThreadSanitizer concurrency stress ---------------------------

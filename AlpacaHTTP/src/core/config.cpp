@@ -11,10 +11,12 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacahttp/config.h>
-#include <fstream>
-#include <cstdlib>
+#include <alpacahttp/util/yaml_comment.h>
+
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <string_view>
 
@@ -43,14 +45,6 @@ std::string trim_copy(std::string_view input) {
         --end;
     }
     return std::string(input.substr(start, end - start));
-}
-
-std::string strip_inline_comment(const std::string& line) {
-    auto pos = line.find('#');
-    if (pos == std::string::npos) {
-        return line;
-    }
-    return line.substr(0, pos);
 }
 
 std::string unquote_string(const std::string& value) {
@@ -133,7 +127,24 @@ bool parse_size_value(const std::string& value, std::size_t& result) {
     }
 }
 
-} // namespace
+}  // namespace
+
+std::vector<std::string> split_host_list(std::string_view value) {
+    std::vector<std::string> hosts;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        auto end = value.find(',', start);
+        if (end == std::string_view::npos) {
+            end = value.size();
+        }
+        std::string entry = trim_copy(value.substr(start, end - start));
+        if (!entry.empty()) {
+            hosts.push_back(std::move(entry));
+        }
+        start = end + 1;
+    }
+    return hosts;
+}
 
 void Config::load_config_from_yaml(const std::string& config_path) {
     std::ifstream file(config_path);
@@ -144,7 +155,7 @@ void Config::load_config_from_yaml(const std::string& config_path) {
     std::string current_section;
     std::string line;
     while (std::getline(file, line)) {
-        std::string no_comment = strip_inline_comment(line);
+        std::string no_comment = alpacahttp::util::strip_yaml_comment(line);
         std::string trimmed = trim_copy(no_comment);
         if (trimmed.empty()) {
             continue;
@@ -186,6 +197,13 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 if (parse_size_value(value, parsed) &&
                     parsed <= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
                     set_keep_alive_lifetime_seconds(static_cast<int>(parsed));
+                }
+            } else if (key == "allowed_hosts") {
+                allowed_hosts_ = split_host_list(value);
+            } else if (key == "host_check_enabled") {
+                bool enabled = host_check_enabled_;
+                if (parse_bool_value(value, enabled)) {
+                    host_check_enabled_ = enabled;
                 }
             }
         } else if (current_section == "discovery") {
@@ -230,6 +248,24 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 if (parse_bool_value(value, enabled)) {
                     sync_system_clock_from_clients_ = enabled;
                 }
+            } else if (key == "motion_watchdog_seconds") {
+                // open-astro#547. Through the setter so the file and the
+                // environment clamp alike (negative -> 0, disabled). A
+                // signed std::stoi, not parse_size_value: 0 is a legitimate
+                // value here (unlike the unsigned http: keys above).
+                try {
+                    set_motion_watchdog_seconds(std::stoi(value));
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // Unparseable: keep the default.
+                }
+            } else if (key == "update_packages_url") {
+                // Software update check (docs/software-update.md). An
+                // explicit empty string disables the check.
+                update_packages_url_ = value;
+            } else if (key == "update_release_notes_url") {
+                update_release_notes_url_ = value;
+            } else if (key == "update_release_url") {
+                update_release_url_ = value;
             }
         }
     }
@@ -356,6 +392,31 @@ void Config::apply_environment_overrides() {
             parsed <= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             set_keep_alive_lifetime_seconds(static_cast<int>(parsed));
         }
+    }
+
+    const char* watchdog_env = std::getenv("ALPACAHTTP_MOTION_WATCHDOG_SECONDS");
+    if (watchdog_env) {
+        try {
+            set_motion_watchdog_seconds(std::stoi(watchdog_env));
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+            // Unparseable: keep whatever the file (or the default) set.
+        }
+    }
+
+    // open-astro#787: http.allowed_hosts and http.host_check_enabled have no
+    // environment override. The web UI edits them and writes the file, so
+    // the file is their only source; a variable would hide the UI's value.
+
+    const char* packages_url_env = std::getenv("ALPACAHTTP_UPDATE_PACKAGES_URL");
+    if (packages_url_env) {
+        // Empty disables the check, so an explicitly empty variable counts.
+        update_packages_url_ = packages_url_env;
+    }
+    if (const char* v = std::getenv("ALPACAHTTP_UPDATE_RELEASE_NOTES_URL")) {
+        update_release_notes_url_ = v;
+    }
+    if (const char* v = std::getenv("ALPACAHTTP_UPDATE_RELEASE_URL")) {
+        update_release_url_ = v;
     }
 
     const char* log_dir_env = std::getenv("ALPACAHTTP_LOG_DIRECTORY");

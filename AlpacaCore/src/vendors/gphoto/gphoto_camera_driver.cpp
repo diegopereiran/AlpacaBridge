@@ -175,7 +175,7 @@ void store_cached_sensor_geometry(const std::string& model, const CachedSensorGe
 // either. This table is sourced from each model's published sensor
 // width/resolution spec, not from anything the camera itself reports, so
 // PixelSizeX/Y stay 0.0 (ASCOM "unknown") for any model not listed here --
-// every fixed-lens compact/camcorder gphoto2 also supports, plus any
+// every fixed-lens compact/camcorder libgphoto2 also supports, plus any
 // interchangeable-lens body released after this table was last updated.
 // Canon's Rebel/Kiss/EOS-number triplets are the same physical sensor sold
 // under different regional names, so they appear as separate entries here
@@ -377,8 +377,12 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    GPhotoCameraDriver(int device_number, int camera_index)
-        : AsyncConnectable("GPhoto"), device_number_(device_number), camera_index_(camera_index) {
+    GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder)
+        : AsyncConnectable("GPhoto"),
+          device_number_(device_number),
+          camera_index_(camera_index),
+          sdk_(sdk),
+          decoder_(decoder) {
         preload_camera_info_locked();
     }
 
@@ -401,7 +405,7 @@ public:
     std::string get_name() const override {
         const_cast<GPhotoCameraDriver*>(this)->refresh_cached_camera_info_if_needed();
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.model : "gphoto2 Camera";
+        return camera_info_valid_ ? camera_info_.model : "DSLR / Mirrorless Camera";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
@@ -420,12 +424,12 @@ public:
         return "GPHOTO_" + std::to_string(device_number_);
     }
 
-    std::string get_description() const override { return "libgphoto2 DSLR/Mirrorless Camera Driver"; }
+    std::string get_description() const override { return "DSLR / Mirrorless Camera Driver"; }
     std::string get_driver_info() const override { return "AlpacaCore GPhoto Camera Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = GPhotoSDKWrapper::instance().get_gphoto_version();
+        auto version = sdk_.get_gphoto_version();
         if (version.empty()) return std::nullopt;
         return "libgphoto2 " + version;
     }
@@ -468,7 +472,7 @@ public:
             return;  // Idempotent (ASCOM)
         }
 
-        auto& sdk = GPhotoSDKWrapper::instance();
+        auto& sdk = sdk_;
 
         if (connected) {
             if (connecting_priming_) {
@@ -482,8 +486,9 @@ public:
             }
             auto cameras = sdk.enumerate_cameras();
             if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
-                throw AlpacaException("gphoto camera index not found (is it plugged in and powered on?)",
-                                      AlpacaError::NotConnected);
+                throw AlpacaException(
+                    "No DSLR / mirrorless camera found at this camera index (is it plugged in and powered on?)",
+                    AlpacaError::NotConnected);
             }
             const auto& info = cameras[static_cast<std::size_t>(camera_index_)];
             int opened_handle = sdk.open_camera(info.model, info.port);
@@ -494,7 +499,7 @@ public:
                 throw;
             } catch (const std::exception& e) {
                 sdk.close_camera(opened_handle);
-                throw AlpacaException(std::string("Failed to configure gphoto camera: ") + e.what(),
+                throw AlpacaException(std::string("Failed to configure DSLR / mirrorless camera: ") + e.what(),
                                       AlpacaError::DriverException);
             }
             handle_ = opened_handle;
@@ -621,7 +626,7 @@ public:
     // that depends on geometry throws InvalidOperation ("not yet known") only
     // in the rare case that both of those failed (e.g. priming capture error)
     // -- it then falls back to the caller's own first real exposure, same as
-    // other RAW-over-gphoto2 ASCOM drivers (e.g. ASCOM.DSLR). See .github/instructions/gphoto.instructions.md
+    // other RAW-decoding ASCOM DSLR drivers (e.g. ASCOM.DSLR). See .github/instructions/gphoto.instructions.md
     // for the history of this tradeoff.
 
     int get_bayer_offset_x() const override {
@@ -689,7 +694,10 @@ public:
         return *sensor_temperature_;
     }
 
-    bool get_cooler_on() const override { return false; }
+    bool get_cooler_on() const override {
+        ensure_connected();
+        return false;
+    }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
         if (cooler_on) {
@@ -697,7 +705,10 @@ public:
         }
     }
 
-    double get_cooler_power() const override { return 0.0; }
+    double get_cooler_power() const override {
+        ensure_connected();
+        return 0.0;
+    }
     double get_electrons_per_adu() const override { return 1.0; }  // unknown; ConformU rejects 0
 
     double get_exposure_max() const override {
@@ -767,7 +778,7 @@ public:
                 throw AlpacaException("Cannot change ISO during an exposure", AlpacaError::InvalidOperation);
             }
             const std::string& choice = iso_choices_[static_cast<std::size_t>(gain)];
-            GPhotoSDKWrapper::instance().set_choice_value(handle, "iso", choice);
+            sdk_.set_choice_value(handle, "iso", choice);
             current_iso_index_ = gain;
             return 0;
         });
@@ -810,7 +821,7 @@ public:
     std::string get_image_array_variant() const override { return "Int32"; }
 
     bool get_image_ready() const override {
-        if (!connected_.load()) return false;
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return last_exposure_valid_ && image_ready_ && image_cached_;
     }
@@ -897,7 +908,7 @@ public:
 
     std::string get_sensor_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.model : "gphoto2 Sensor";
+        return camera_info_valid_ ? camera_info_.model : "DSLR / Mirrorless Sensor";
     }
 
     SensorType get_sensor_type() const override {
@@ -906,9 +917,11 @@ public:
     }
 
     double get_set_ccd_temperature() const override {
+        ensure_connected();
         throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
     }
     void set_set_ccd_temperature(double) override {
+        ensure_connected();
         throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
     }
 
@@ -935,7 +948,7 @@ public:
 
     void pulse_guide(int, int) override {
         ensure_connected();
-        throw AlpacaException("Pulse guide not supported (no autoguider port on a plain gphoto2 camera)",
+        throw AlpacaException("Pulse guide not supported (no autoguider port on a DSLR / mirrorless camera)",
                               AlpacaError::NotImplemented);
     }
 
@@ -974,8 +987,16 @@ public:
                 }
             }
             active_handle = handle_;
-            use_bulb = has_bulb_ && duration > max_native_shutter_seconds_ + 1e-9;
+            // A body in B mode lists only "bulb" for its shutter speed, so there is no native
+            // speed to fall back on: every duration takes the bulb path.
+            use_bulb = has_bulb_ && ((native_shutter_choices_.empty() && to_lower(bulb_choice_) == "bulb") ||
+                                     duration > max_native_shutter_seconds_ + 1e-9);
             shutter_choice = use_bulb ? bulb_choice_ : nearest_shutter_choice_locked(duration);
+            // In B mode the body owns the shutter and refuses a shutterspeed write ("I/O in progress");
+            // the press/release pair alone drives the exposure.
+            if (native_shutter_choices_.empty() && !remote_press_choice_.empty()) {
+                shutter_choice.clear();
+            }
             shutter_widget_name = shutter_widget_name_;
 
             last_exposure_duration_ = duration;
@@ -985,10 +1006,17 @@ public:
             image_cached_ = false;
             abort_requested_.store(false);
             // Generous watchdog margin over the requested duration: USB
-            // transfer of a 20+MB RAW file plus libgphoto2/PTP overhead.
+            // transfer of a 20+MB RAW file plus libgphoto2/PTP overhead. A
+            // bulb capture also gets the whole window bulb_capture_with_abort
+            // may spend waiting for the frame after the shutter closes, so
+            // the watchdog never declares Idle while that wait is still
+            // legitimately running.
             auto duration_margin = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                        std::chrono::duration<double>(duration)) +
                                    std::chrono::seconds(60);
+            if (use_bulb) {
+                duration_margin += bulb_file_wait_for(duration);
+            }
             exposure_deadline_ = std::chrono::steady_clock::now() + duration_margin;
             exposure_deadline_valid_ = true;
             exposure_active_.store(true);
@@ -1024,6 +1052,8 @@ private:
     int device_number_;
     int camera_index_;
     int handle_{-1};
+    GPhotoSDK& sdk_;
+    RawDecoder& decoder_;
 
     mutable std::mutex mutex_;
     std::atomic<bool> connected_{false};
@@ -1042,7 +1072,11 @@ private:
     // Widget capability caches, populated at connect (configure_after_connect_locked).
     std::vector<std::string> iso_choices_;
     int current_iso_index_{0};
-    bool has_bulb_{false};
+    bool has_bulb_{false};  // long exposure available: a "bulb" toggle, or both eosremoterelease choices
+    // Canon bodies have no "bulb" widget; bulb is the shutter-speed "bulb" choice held open by writing
+    // eosremoterelease (issue #640). Both are picked by name at connect, never by index; empty without the pair.
+    std::string remote_press_choice_;
+    std::string remote_release_choice_;
     std::string bulb_choice_;  // shutter-speed choice string selecting bulb mode
     std::vector<std::pair<std::string, double>> native_shutter_choices_;  // sorted ascending by seconds
     std::string shutter_widget_name_{"shutterspeed2"};  // whichever of the fallback names was found at connect
@@ -1170,7 +1204,7 @@ private:
     void preload_camera_info_locked() {
         std::lock_guard<std::mutex> lock(mutex_);
         try {
-            auto cameras = GPhotoSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
@@ -1183,7 +1217,7 @@ private:
     void refresh_cached_camera_info_if_needed() {
         if (connected_.load()) return;
         try {
-            auto cameras = GPhotoSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             std::lock_guard<std::mutex> lock(mutex_);
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
@@ -1197,7 +1231,7 @@ private:
     // Reads widget capabilities from the freshly opened camera and caches
     // them for the rest of the session. Requires mutex_ held by the caller
     // (set_connected holds it for the whole connect sequence).
-    void configure_after_connect_locked(GPhotoSDKWrapper& sdk, int handle) {
+    void configure_after_connect_locked(GPhotoSDK& sdk, int handle) {
         iso_choices_.clear();
         current_iso_index_ = 0;
         if (sdk.has_widget(handle, "iso")) {
@@ -1224,21 +1258,35 @@ private:
                     // A "bulb"/fraction-sentinel entry in the shutter-speed
                     // choice list: remember it so run_exposure can prime the
                     // dial into bulb mode before driving the toggle below.
-                    bulb_choice_ = choice;
+                    // Prefer a literal "bulb" over other unparseable labels such as
+                    // "auto" (Canon shutter value 0), which does not hold the shutter.
+                    if (bulb_choice_.empty() || to_lower(choice) == "bulb") bulb_choice_ = choice;
                     continue;
                 }
                 native_shutter_choices_.emplace_back(choice, *seconds);
             }
             break;
         }
-        // Bulb mode is only implementable when the standalone "bulb" toggle
-        // widget is present -- that is the only mechanism this driver drives
-        // (see bulb_capture_with_abort). A shutter-speed "bulb" choice with
-        // no toggle widget (the classic Canon eosremoterelease press/release
-        // sequence) is not supported yet; ExposureMax stays capped at the
-        // longest native shutter speed for such a camera. TODO(gphoto/canon):
-        // add the press/release path if/when tested against real hardware.
+        // Two ways to hold the shutter open (see bulb_capture_with_abort): the
+        // standalone "bulb" toggle (Nikon), or on Canon bodies, which have no
+        // such widget, the eosremoterelease press/release pair together with
+        // the shutter-speed "bulb" choice. Without either, ExposureMax stays
+        // capped at the longest native shutter speed.
+        remote_press_choice_.clear();
+        remote_release_choice_.clear();
         has_bulb_ = sdk.has_widget(handle, "bulb");
+        if (!has_bulb_ && to_lower(bulb_choice_) == "bulb" && sdk.has_widget(handle, "eosremoterelease")) {
+            const auto remote_choices = sdk.get_choices(handle, "eosremoterelease");
+            const bool has_press =
+                std::find(remote_choices.begin(), remote_choices.end(), "Press Full") != remote_choices.end();
+            const bool has_release =
+                std::find(remote_choices.begin(), remote_choices.end(), "Release Full") != remote_choices.end();
+            if (has_press && has_release) {
+                remote_press_choice_ = "Press Full";
+                remote_release_choice_ = "Release Full";
+                has_bulb_ = true;
+            }
+        }
         if (!has_bulb_) {
             bulb_choice_.clear();
         }
@@ -1295,7 +1343,7 @@ private:
     // on any failure, geometry simply stays unknown until the caller's own
     // first real exposure, exactly like before this existed.
     void prime_sensor_geometry_and_cache(int handle, const std::string& model) {
-        auto& sdk = GPhotoSDKWrapper::instance();
+        auto& sdk = sdk_;
         std::string shutter_choice;
         std::string widget_name;
         {
@@ -1312,7 +1360,7 @@ private:
         }
 
         GPhotoCaptureResult capture = sdk.capture_and_download(handle);
-        DecodedFrame decoded = decode_raw_frame(capture.data);
+        DecodedFrame decoded = decoder_.decode(capture.data);
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1325,7 +1373,7 @@ private:
 
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
                       bool use_bulb, double duration) {
-        auto& sdk = GPhotoSDKWrapper::instance();
+        auto& sdk = sdk_;
         try {
             if (!shutter_choice.empty() && !shutter_widget_name.empty()) {
                 sdk.set_choice_value(handle, shutter_widget_name, shutter_choice);
@@ -1344,7 +1392,7 @@ private:
                 return;
             }
 
-            DecodedFrame decoded = decode_raw_frame(capture.data);
+            DecodedFrame decoded = decoder_.decode(capture.data);
 
             std::lock_guard<std::mutex> lock(mutex_);
             apply_decoded_frame_locked(decoded);
@@ -1356,93 +1404,102 @@ private:
         exposure_active_.store(false);
     }
 
-    // Bulb capture with early-abort support: sleeps in short slices so
-    // stop_exposure()/abort_exposure() can close the shutter well before the
-    // full requested duration elapses.
-    GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
-        auto& sdk = GPhotoSDKWrapper::instance();
-        sdk.set_toggle_value(handle, "bulb", true);
-        constexpr double kSliceSeconds = 0.1;
-        double remaining = duration_s;
-        while (remaining > 0.0) {
-            double slice = std::min(remaining, kSliceSeconds);
-            std::this_thread::sleep_for(std::chrono::duration<double>(slice));
-            remaining -= slice;
-            if (abort_requested_.load()) {
-                break;
-            }
-        }
-        sdk.set_toggle_value(handle, "bulb", false);
-        return sdk.wait_for_bulb_file_and_download(handle);
+    // How long to keep polling for the frame after a bulb shutter closes. A
+    // body with long-exposure noise reduction on holds the file for a second
+    // exposure-length (the dark frame) before posting it, so the window
+    // scales with the exposure rather than being a fixed few seconds; the
+    // constant margin covers the RAW write and the USB download on top.
+    static std::chrono::steady_clock::duration bulb_file_wait_for(double duration_s) {
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                   std::chrono::duration<double>(duration_s)) +
+               std::chrono::seconds(30);
     }
 
-    struct DecodedFrame {
-        std::vector<std::int32_t> pixels;
-        int width{};
-        int height{};
-        int bayer_offset_x{};
-        int bayer_offset_y{};
-        int max_adu{65535};
-        SensorType sensor_type{SensorType::RGGB};
-        std::optional<double> sensor_temperature;
-    };
+    // After an abort the frame is still polled for -- briefly -- so the
+    // aborted file is consumed and deleted rather than left queued for the
+    // next exposure to mistake for its own (a body posts it a second or two
+    // after the close). run_exposure() discards whatever arrives.
+    static constexpr auto kAbortedBulbFileWait = std::chrono::seconds(15);
 
-    DecodedFrame decode_raw_frame(const std::vector<std::uint8_t>& raw_bytes) {
-        LibRaw processor;
-        int rc = processor.open_buffer(raw_bytes.data(), raw_bytes.size());
-        if (rc != LIBRAW_SUCCESS) {
-            throw AlpacaException(std::string("libraw failed to open captured frame: ") + libraw_strerror(rc),
-                                  AlpacaError::DriverException);
-        }
-        rc = processor.unpack();
-        if (rc != LIBRAW_SUCCESS) {
-            throw AlpacaException(std::string("libraw failed to unpack captured frame: ") + libraw_strerror(rc),
-                                  AlpacaError::DriverException);
-        }
+    // Bulb capture with early-abort support. The hold loop pumps the camera's
+    // event queue in short slices instead of sleeping, so a Nikon body sees
+    // the host polling for the whole exposure the way the gphoto2 CLI's
+    // --wait-event does between bulb=1 and bulb=0 (issue #569), and so
+    // stop_exposure()/abort_exposure() can close the shutter well before the
+    // full requested duration elapses. After the close, the frame is polled
+    // for in slices up to bulb_file_wait_for(duration), checking the abort
+    // flag between slices.
+    GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
+        auto& sdk = sdk_;
+        using clock = std::chrono::steady_clock;
+        constexpr auto kHoldSlice = std::chrono::milliseconds(100);
+        constexpr auto kFilePollSlice = std::chrono::seconds(1);
 
-        const auto& sizes = processor.imgdata.sizes;
-        const ushort* raw_image = processor.imgdata.rawdata.raw_image;
-        if (raw_image == nullptr || sizes.width == 0 || sizes.height == 0) {
-            throw AlpacaException("libraw produced no Bayer data for this frame", AlpacaError::DriverException);
-        }
+        // Nikon: the "bulb" toggle. Canon: eosremoterelease Press Full / Release Full.
+        const bool use_remote_release = !remote_press_choice_.empty();
+        const auto shutter_open = [&] {
+            if (use_remote_release) {
+                sdk.set_choice_value(handle, "eosremoterelease", remote_press_choice_);
+            } else {
+                sdk.set_toggle_value(handle, "bulb", true);
+            }
+        };
+        const auto shutter_close = [&] {
+            if (use_remote_release) {
+                sdk.set_choice_value(handle, "eosremoterelease", remote_release_choice_);
+            } else {
+                sdk.set_toggle_value(handle, "bulb", false);
+            }
+        };
 
-        DecodedFrame frame;
-        frame.width = sizes.width;
-        frame.height = sizes.height;
-        frame.pixels.resize(static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height));
-        for (int row = 0; row < frame.height; ++row) {
-            const ushort* src_row =
-                raw_image + static_cast<std::size_t>(row + sizes.top_margin) * sizes.raw_width + sizes.left_margin;
-            std::int32_t* dst_row = frame.pixels.data() + static_cast<std::size_t>(row) * frame.width;
-            for (int col = 0; col < frame.width; ++col) {
-                dst_row[col] = static_cast<std::int32_t>(src_row[col]);
+        shutter_open();
+        const auto hold_deadline =
+            clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
+        // The hold calls into the SDK, so unlike the sleep it replaced it can
+        // throw. A throw that skipped the close would leave the shutter open,
+        // the exact wedge issue #569 is about, so bulb=0 is sent on every way
+        // out of the hold and the original failure is rethrown afterwards.
+        try {
+            while (!abort_requested_.load()) {
+                const auto now = clock::now();
+                if (now >= hold_deadline) break;
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(hold_deadline - now);
+                sdk.drain_events(handle, std::min(remaining, std::chrono::milliseconds(kHoldSlice)));
+            }
+        } catch (...) {
+            try {
+                shutter_close();
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN(kLogTag, "Bulb close after a failed hold also failed: " + std::string(e.what()));
+            }
+            throw;
+        }
+        shutter_close();
+
+        bool aborted = abort_requested_.load();
+        auto file_deadline =
+            clock::now() + (aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s));
+        while (true) {
+            const auto now = clock::now();
+            if (now >= file_deadline) break;
+            if (!aborted && abort_requested_.load()) {
+                aborted = true;
+                file_deadline = std::min(file_deadline, now + clock::duration(kAbortedBulbFileWait));
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(file_deadline - now);
+            auto frame =
+                sdk.poll_bulb_file_and_download(handle, std::min(remaining, std::chrono::milliseconds(kFilePollSlice)));
+            if (frame.has_value()) {
+                return std::move(*frame);
             }
         }
-
-        // Bayer phase of the top-left 2x2 tile: find which cell libraw
-        // reports as the red channel.
-        const char* cdesc = processor.imgdata.idata.cdesc;
-        frame.bayer_offset_x = 0;
-        frame.bayer_offset_y = 0;
-        for (int y = 0; y < 2; ++y) {
-            for (int x = 0; x < 2; ++x) {
-                int color_index = processor.COLOR(y, x);
-                if (color_index >= 0 && color_index < 4 && cdesc[color_index] == 'R') {
-                    frame.bayer_offset_x = x;
-                    frame.bayer_offset_y = y;
-                }
-            }
-        }
-        frame.sensor_type = SensorType::RGGB;  // Nikon/Canon/Sony DSLR sensors are all standard Bayer RGGB variants
-
-        frame.max_adu = processor.imgdata.color.maximum > 0 ? static_cast<int>(processor.imgdata.color.maximum) : 65535;
-
-        float sensor_temp = processor.imgdata.makernotes.common.SensorTemperature;
-        if (sensor_temp > -273.15f) {
-            frame.sensor_temperature = static_cast<double>(sensor_temp);
-        }
-
-        return frame;
+        throw AlpacaException(
+            "Bulb capture: no file-added event from camera within " +
+                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                   aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s))
+                                   .count()) +
+                " s of closing the shutter (is long-exposure noise reduction on?)",
+            AlpacaError::DriverException);
     }
 
     // Requires mutex_ held. Populates the geometry properties (CameraXSize/
@@ -1497,8 +1554,72 @@ private:
     }
 };
 
+DecodedFrame LibRawDecoder::decode(const std::vector<std::uint8_t>& raw_bytes) {
+    LibRaw processor;
+    int rc = processor.open_buffer(raw_bytes.data(), raw_bytes.size());
+    if (rc != LIBRAW_SUCCESS) {
+        throw AlpacaException(std::string("libraw failed to open captured frame: ") + libraw_strerror(rc),
+                              AlpacaError::DriverException);
+    }
+    rc = processor.unpack();
+    if (rc != LIBRAW_SUCCESS) {
+        throw AlpacaException(std::string("libraw failed to unpack captured frame: ") + libraw_strerror(rc),
+                              AlpacaError::DriverException);
+    }
+
+    const auto& sizes = processor.imgdata.sizes;
+    const ushort* raw_image = processor.imgdata.rawdata.raw_image;
+    if (raw_image == nullptr || sizes.width == 0 || sizes.height == 0) {
+        throw AlpacaException("libraw produced no Bayer data for this frame", AlpacaError::DriverException);
+    }
+
+    DecodedFrame frame;
+    frame.width = sizes.width;
+    frame.height = sizes.height;
+    frame.pixels.resize(static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height));
+    for (int row = 0; row < frame.height; ++row) {
+        const ushort* src_row =
+            raw_image + static_cast<std::size_t>(row + sizes.top_margin) * sizes.raw_width + sizes.left_margin;
+        std::int32_t* dst_row = frame.pixels.data() + static_cast<std::size_t>(row) * frame.width;
+        for (int col = 0; col < frame.width; ++col) {
+            dst_row[col] = static_cast<std::int32_t>(src_row[col]);
+        }
+    }
+
+    // Bayer phase of the top-left 2x2 tile: find which cell libraw
+    // reports as the red channel.
+    const char* cdesc = processor.imgdata.idata.cdesc;
+    frame.bayer_offset_x = 0;
+    frame.bayer_offset_y = 0;
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            int color_index = processor.COLOR(y, x);
+            if (color_index >= 0 && color_index < 4 && cdesc[color_index] == 'R') {
+                frame.bayer_offset_x = x;
+                frame.bayer_offset_y = y;
+            }
+        }
+    }
+    frame.sensor_type = SensorType::RGGB;  // Nikon/Canon/Sony DSLR sensors are all standard Bayer RGGB variants
+
+    frame.max_adu = processor.imgdata.color.maximum > 0 ? static_cast<int>(processor.imgdata.color.maximum) : 65535;
+
+    float sensor_temp = processor.imgdata.makernotes.common.SensorTemperature;
+    if (sensor_temp > -273.15f) {
+        frame.sensor_temperature = static_cast<double>(sensor_temp);
+    }
+
+    return frame;
+}
+
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index) {
-    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index);
+    static LibRawDecoder decoder;
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, GPhotoSDKWrapper::instance(), decoder);
+}
+
+std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, GPhotoSDK& sdk,
+                                                   RawDecoder& decoder) {
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, sdk, decoder);
 }
 
 }  // namespace alpacacore::vendor::gphoto

@@ -62,7 +62,30 @@ function localZoneLabel(date, timeZone) {
     }
 }
 
+// True when a synctime Value (whole seconds) can become a valid Date. Number.isFinite
+// alone passes 1e15, which is finite but far outside the +-8.64e15 ms Date range
+// (issue #511); such a Value is the same error case as a non-numeric one.
+function isValidClockSeconds(value) {
+    return Number.isFinite(value) && !Number.isNaN(new Date(value * 1000).getTime());
+}
+
+// The text the live server clock shows when GET /management/v1/synctime answers
+// with an Alpaca error, or '' when the reply is not one (issue #677). The #670
+// refusal of a host clock outside 2000..2100 UTC carries the fix in its
+// ErrorMessage, so the clock says it rather than keeping a stale time.
+function serverClockError(result) {
+    if (!result || typeof result.ErrorNumber !== 'number' || result.ErrorNumber === 0) {
+        return '';
+    }
+    const message = typeof result.ErrorMessage === 'string' ? result.ErrorMessage.trim() : '';
+    return message || 'Server clock error ' + result.ErrorNumber;
+}
+
 function formatServerClock(date, timeZone) {
+    if (Number.isNaN(date.getTime())) {
+        // No time to show; the UTC arm below would throw on toISOString().
+        return '--:--:--';
+    }
     if (timeZone) {
         // Prove the zone before using it: the viewer-zone tier is the right
         // fallback for a name this browser's Intl does not know, and it must
@@ -182,8 +205,264 @@ function buildBadgeLabel(info) {
     };
 }
 
+// Software update card (docs/software-update.md): the one-line summary of a
+// /management/v1/update/status payload. Pure so node can pin every shape,
+// including the one that matters most: a dev build NEWER than the repository
+// must read as up to date, not as an available "update" backwards.
+function updateStatusText(status) {
+    const source = status || {};
+    const installed = String(source.InstalledVersion || '');
+    const latest = source.LatestVersion ? String(source.LatestVersion) : '';
+    if (source.CheckEnabled === false) {
+        return 'Checking for updates is turned off in the server configuration.';
+    }
+    if (source.CheckError) {
+        return 'Check failed: ' + source.CheckError;
+    }
+    if (!latest) {
+        return 'Not checked yet.';
+    }
+    if (source.UpdateAvailable) {
+        return 'Version ' + latest + ' is available.';
+    }
+    if (installed && installed !== latest) {
+        return 'Up to date. This build (' + installed + ') is newer than the repository release ' + latest + '.';
+    }
+    return 'Up to date.';
+}
+
+// The installer half of the same payload. '' when there is nothing to say.
+function installerStateText(installer) {
+    const source = installer || {};
+    const detail = source.Detail ? String(source.Detail) : '';
+    switch (source.State) {
+        case 'running':
+            return 'Installing the update. The server restarts when it finishes.';
+        case 'succeeded':
+            return 'The last update finished successfully.';
+        case 'failed':
+            return 'The last update failed.' + (detail ? ' (' + detail + ')' : '');
+        case 'unavailable':
+            return 'Installing from this page is not available on this host' + (detail ? ': ' + detail : '.');
+        default:
+            return '';
+    }
+}
+
+// Release notes for the Software Update card (docs/software-update.md).
+//
+// docs/releases/X.Y.Z.md is written in a small Markdown subset: "#"/"##"
+// headings, "-" bullets, paragraphs, **bold**, `code`, [links](https://...)
+// and fenced code blocks. This renders exactly that subset and nothing else.
+// Everything is HTML-escaped BEFORE any tag is produced, tags come only
+// from the parsed structure, and a link is emitted only for an http(s)
+// target, so notes fetched from the network can never inject markup. The
+// leading "# AlpacaBridge X.Y.Z" title is dropped: the card names the
+// version itself.
+function escapeNotesHtml(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function renderNotesInline(escaped) {
+    // Operates on already-escaped text; the patterns contain no characters
+    // that escaping changes. Code spans are lifted out first so that bold
+    // and link syntax inside backticks stays literal, as Markdown means it.
+    const spans = [];
+    let out = escaped.replace(/`([^`]+)`/g, (match, code) => {
+        spans.push('<code>' + code + '</code>');
+        return '\u0000' + (spans.length - 1) + '\u0000';
+    });
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return out.replace(/\u0000(\d+)\u0000/g, (match, index) => spans[Number(index)]);
+}
+
+function renderReleaseNotes(markdown) {
+    // NUL is the code-span placeholder delimiter below and has no place in
+    // notes; strip it so notes carrying it cannot confuse the placeholders.
+    const lines = String(markdown || '').replace(/\u0000/g, '').replace(/\r\n?/g, '\n').split('\n');
+    const html = [];
+    let paragraph = [];
+    let inList = false;
+    let inFence = false;
+    let fence = [];
+    let titleSeen = false;
+
+    const flushParagraph = () => {
+        if (paragraph.length) {
+            html.push('<p>' + renderNotesInline(escapeNotesHtml(paragraph.join(' '))) + '</p>');
+            paragraph = [];
+        }
+    };
+    const closeList = () => {
+        if (inList) {
+            html.push('</ul>');
+            inList = false;
+        }
+    };
+
+    for (const raw of lines) {
+        const line = raw.replace(/\s+$/, '');
+        if (inFence) {
+            if (/^```/.test(line)) {
+                html.push('<pre><code>' + escapeNotesHtml(fence.join('\n')) + '</code></pre>');
+                fence = [];
+                inFence = false;
+            } else {
+                fence.push(line);
+            }
+            continue;
+        }
+        if (/^```/.test(line)) {
+            flushParagraph();
+            closeList();
+            inFence = true;
+            continue;
+        }
+        const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+        if (heading) {
+            flushParagraph();
+            closeList();
+            if (heading[1].length === 1 && !titleSeen) {
+                titleSeen = true;  // the "# AlpacaBridge X.Y.Z" title
+                continue;
+            }
+            const level = heading[1].length === 1 ? 4 : 5;
+            html.push('<h' + level + '>' + renderNotesInline(escapeNotesHtml(heading[2])) + '</h' + level + '>');
+            continue;
+        }
+        const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+        if (bullet) {
+            flushParagraph();
+            if (!inList) {
+                html.push('<ul>');
+                inList = true;
+            }
+            html.push('<li>' + renderNotesInline(escapeNotesHtml(bullet[1])) + '</li>');
+            continue;
+        }
+        if (line.trim() === '') {
+            flushParagraph();
+            closeList();
+            continue;
+        }
+        if (inList) {
+            // A wrapped bullet continues the previous item.
+            html[html.length - 1] = html[html.length - 1].replace(/<\/li>$/,
+                ' ' + renderNotesInline(escapeNotesHtml(line.trim())) + '</li>');
+            continue;
+        }
+        paragraph.push(line.trim());
+    }
+    if (inFence) {
+        while (fence.length && fence[fence.length - 1] === '') fence.pop();
+        html.push('<pre><code>' + escapeNotesHtml(fence.join('\n')) + '</code></pre>');
+    }
+    flushParagraph();
+    closeList();
+    return html.join('\n');
+}
+
+// open-astro#392: the Host check rows of the server settings area.
+// The names default.yaml says are always allowed (the text after "Always
+// allowed: ", no final dot); a test pins this to that file.
+const HOST_CHECK_ALWAYS_ALLOWED =
+    "IP addresses, localhost and *.localhost, this machine's hostname, *.local, *.home.arpa and *.internal";
+
+// What the two Host check rows render from the description Value. null when
+// the server does not report the setting (an older build), so no row shows a
+// toggle that reads as "off". Both rows are always editable (open-astro#787).
+function hostCheckSettings(desc) {
+    if (!desc || typeof desc.HostCheckEnabled !== 'boolean') {
+        return null;
+    }
+    return {
+        enabled: desc.HostCheckEnabled,
+        hosts: typeof desc.AllowedHosts === 'string' ? desc.AllowedHosts : '',
+    };
+}
+
+// The message to show for a settings PUT, or '' when it saved. The server
+// refuses a lockout with HTTP 400 and the reason in ErrorMessage, so the body
+// is read before the status decides anything.
+function settingsSaveError(status, data) {
+    const ok = status >= 200 && status < 300;
+    const isEnvelope = data !== null && typeof data === 'object' && typeof data.ErrorNumber === 'number';
+    if (ok && isEnvelope && data.ErrorNumber === 0) {
+        return '';
+    }
+    const message = isEnvelope && typeof data.ErrorMessage === 'string' ? data.ErrorMessage.trim() : '';
+    if (message) {
+        return message;
+    }
+    if (!ok) {
+        return `HTTP error! status: ${status}`;
+    }
+    return isEnvelope ? `Server error ${data.ErrorNumber}` : 'Unknown server error';
+}
+
+function wifiSsidKey(item) {
+    return item && typeof item.SsidHex === 'string' ? item.SsidHex.toLowerCase() : String((item && item.Ssid) || '');
+}
+
+function wifiSsidLabel(item, displayCount) {
+    const label = String((item && item.Ssid) || '');
+    const hex = item && typeof item.SsidHex === 'string' ? item.SsidHex : '';
+    return displayCount > 1 && hex ? `${label} (${hex})` : label;
+}
+
+// The server accepts each ASIAIR GPIO line on at most one port (router.cpp).
+// Returns a message naming the first repeated line, or null. `gpios` holds one
+// number per port row in order; NaN (a blank row) is skipped.
+function asiairDuplicateGpioError(gpios) {
+    const firstRow = new Map();
+    for (let i = 0; i < gpios.length; i += 1) {
+        const gpio = gpios[i];
+        if (Number.isNaN(gpio)) continue;
+        if (firstRow.has(gpio)) {
+            return `GPIO ${gpio} is selected for ports ${firstRow.get(gpio) + 1} and ${i + 1}. ` +
+                'Each GPIO line can be used on only one port.';
+        }
+        firstRow.set(gpio, i);
+    }
+    return null;
+}
+
+// The alignmentMode values the SynScan and Celestron drivers accept (#860);
+// anything else reads as 'auto', as the server's sanitize drops it.
+function normalizeAlignmentMode(value) {
+    return value === 'altaz' || value === 'equatorial' ? value : 'auto';
+}
+
+// Status dot for a configureddevices row: green = driver loaded and Connected,
+// yellow = loaded, not connected, red = LoadError, LastConnectError, a
+// LinkFault (connected or not), or Connected missing/non-boolean (unknown).
+// Green means a client is connected AND the device still replies, so any latched
+// LinkFault turns the device red. The red text joins every reason.
+function deviceStatus(device) {
+    const d = device || {};
+    const reasons = [];
+    if (d.LoadError === true) reasons.push('Driver failed to load');
+    if (d.LastConnectError) reasons.push(String(d.LastConnectError));
+    if (d.LinkFault) reasons.push('Link fault: ' + String(d.LinkFault));
+    if (reasons.length > 0) return { state: 'error', text: 'Error: ' + reasons.join('; ') };
+    if (d.Connected === true) return { state: 'connected', text: 'Connected' };
+    if (d.Connected === false) return { state: 'idle', text: 'Loaded, not connected' };
+    return { state: 'error', text: 'Error: status unknown' };
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { localZoneLabel, formatServerClock, buildBadgeLabel };
+    module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
+                       updateStatusText, installerStateText, renderReleaseNotes,
+                        HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
+                        wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
+                        normalizeAlignmentMode, deviceStatus };
 }

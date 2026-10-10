@@ -77,6 +77,27 @@ fi
   docs/AlpacaDeviceAPI_v1.yaml` command so it stays content-identical to upstream (LF-normalized),
   but note it as non-breaking.
 
+**Whenever you overwrite the vendored copy — major or cosmetic — update the skill's pin in the
+same commit.** The `ascom-alpaca-protocol` skill's endpoint catalog was generated from one
+snapshot of this schema, and
+`.claude/skills/ascom-alpaca-protocol/references/version-and-sources.md` pins that snapshot's
+LF-normalized SHA-256. `scripts/check_docs_drift.py` check 11 fails the build when the two
+disagree, so a refresh that leaves the pin alone turns the docs-drift gate red:
+
+```bash
+sha256sum docs/AlpacaDeviceAPI_v1.yaml
+```
+
+That digest is the pinned one only while the vendored copy is LF, which the `tr -d '\r'`
+refresh above guarantees -- check 11 hashes the file with CRLF normalized away. If the
+working copy ever holds CRLF, hash the normalized bytes instead
+(`tr -d '\r' < docs/AlpacaDeviceAPI_v1.yaml | sha256sum`), or the gate rejects a digest
+that looks correct.
+
+Put that digest in `version-and-sources.md`, move its verification date, and regenerate the
+skill's `references/device-api-catalog.md` from the new schema if the endpoint set changed.
+The pin exists so the catalog cannot keep describing a schema the repo no longer carries.
+
 ### Step 0b — Probe for a newer major spec version (v2+)
 
 The diff above only proves our v1 copy matches upstream's v1 file. ASCOM revises the spec
@@ -369,6 +390,8 @@ grep -oE "^  '/[^']+'" docs/AlpacaDeviceAPI_v1.yaml | grep -E "^  '/(\{device_ty
 
 For each endpoint, open the relevant section of `docs/AlpacaDeviceAPI_v1.yaml` and read the HTTP verb, parameters, value ranges, response schema, and the documented error behavior. Implement against exactly what the YAML says — parameter names, casing, ranges, and the NotImplemented/NotConnected/InvalidValue semantics are all part of the contract.
 
+For device behavior the YAML does not capture (capability gates, units, completion properties, error selection, ImageBytes, discovery), use the `ascom-alpaca-protocol` skill in `.claude/skills/ascom-alpaca-protocol/`, starting with its `references/alpacabridge-integration.md`.
+
 The device-type API surfaces are:
 
 - Camera: common methods + `Camera`-specific endpoints
@@ -385,20 +408,22 @@ The device-type API surfaces are:
 Key compliance rules:
 - **Every property and method** listed in the API for the device type must be implemented. If the hardware doesn't support a capability, the method must still exist and throw the appropriate ASCOM error (e.g., `PropertyNotImplemented`, `NotConnected`, `InvalidValue`).
 - **Return types and value ranges** must match the spec exactly. RA is in hours (0-24), Dec in degrees (-90 to +90), angles in degrees, exposure in seconds, etc.
-- **Error codes** must use the correct ASCOM error numbers: `0x400` NotImplemented, `0x407` NotConnected, `0x401` InvalidValue, `0x408` InvalidOperation, etc.
+- **Error codes** must use the correct ASCOM error numbers: NotImplemented `0x400`, InvalidValue `0x401`, NotConnected `0x407`, InvalidWhileParked `0x408`, InvalidOperation `0x40B`, etc. (see `AlpacaCore/include/alpacacore/alpaca_errors.h`).
 - **`CanXxx` properties** must accurately reflect hardware capabilities. If `CanPulseGuide` returns true, `PulseGuide` must work. If the hardware doesn't support it, `CanPulseGuide` must return false and `PulseGuide` must throw `MethodNotImplemented`.
-- **Interface version** must match the current ASCOM spec version for the device type (e.g., ICameraV3, ITelescopeV3, IFocuserV3).
+- **Interface version** must match the current ASCOM spec version for the device type — AlpacaBridge advertises Platform 7 versions: Camera 4, Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2 (see `AGENTS.md`).
 - **Common methods** (`Action`, `CommandBlind`, `CommandBool`, `CommandString`, `SupportedActions`) must be implemented on every device.
 - **DeviceState** must return a well-formed property bag with device-type-appropriate operational telemetry.
 
-When in doubt about a behavior, check the spec first, then check how existing drivers in this project handle it, then check INDI/INDIGO for reference.
+When in doubt about a public behavior, the official spec decides. Existing drivers in this project show local structure, and INDI/INDIGO can inform undocumented vendor wire protocols, but neither defines ASCOM behavior.
 
-### Use an existing driver as a template (cross-driver consistency)
+### Match existing driver structure (cross-driver consistency)
 
 Always study the existing drivers of the **same device type** before writing a new one, and
-match their structure, naming, and behavior so every driver of a given type behaves the same
-way. The ASCOM spec defines *what* the contract is; the existing drivers define *how this
-project* satisfies it. New drivers must not invent a divergent shape.
+match their structure, naming, shared infrastructure, and test patterns so every driver of a
+given type is built the same way. Derive public ASCOM behavior (capabilities, error codes,
+units, value ranges, and state transitions) from the official spec, not from another driver.
+If an existing driver disagrees with the spec, follow the spec and flag the driver. New
+drivers must not invent a divergent shape.
 
 Find the closest matching existing driver for the same device type:
 
@@ -473,7 +498,7 @@ The Web UI (Step 6) should include a connection type selector matching this patt
 Update `AlpacaCore/CMakeLists.txt`:
 1. Add `option(ALPACACORE_ENABLE_<VENDOR> ...)`.
 2. Update `ALPACACORE_ENABLE_ALL_VENDORS` logic (if it exists).
-3. Add conditional `add_subdirectory(src/vendors/<vendor>)` + link.
+3. Add conditional `add_subdirectory(src/vendors/<vendor>)` + `target_link_libraries(alpacacore_builtins PRIVATE alpacacore_<vendor>)` (never link a vendor into `alpacacore`; the vendor's own CMakeLists links `alpacacore` PRIVATE, #710). A vendor whose descriptor factory `register_builtin_factories()` registers (`AlpacaCore/src/catalog/builtin_catalog.cpp`) also needs `target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_<VENDOR>)` next to that link, or the registration compiles empty with no build error (see the Astroasis block in `AlpacaCore/CMakeLists.txt`).
 4. Add install rules for vendor target.
 
 Create `AlpacaCore/src/vendors/<vendor>/CMakeLists.txt` for the vendor target.
@@ -623,10 +648,17 @@ All 8 are mandatory. Read the existing tests to match the exact patterns used in
 4. **Unsupported actions** `"<Vendor> <Device> Driver - Unsupported actions"` `[<vendor>][<device>][unit]`
    - `CHECK(driver.get_supported_actions().empty());` (unless the driver defines custom actions)
    - `CHECK(driver.can_action("anything") == false);`
-   - `CHECK_THROWS_AS(driver.action("test", ""), alpacacore::AlpacaException);`
-   - `CHECK_THROWS_AS(driver.command_blind("test", false), alpacacore::AlpacaException);`
-   - `CHECK_THROWS_AS(driver.command_bool("test", false), alpacacore::AlpacaException);`
-   - `CHECK_THROWS_AS(driver.command_string("test", false), alpacacore::AlpacaException);`
+   - Assert the exact codes with the `require_alpaca_error` helper (case 6), not `CHECK_THROWS_AS(..., alpacacore::AlpacaException)`, which passes for any code: `action()` with an unlisted name is `ActionNotImplemented` (0x40C), and the three `command_*` methods are `MethodNotImplemented` (0x400) unless the driver implements command pass-through. A pass-through driver checks the connection first, so disconnected it throws `NotConnected` (0x407): assert that code for its three `command_*` calls instead of the `MethodNotImplemented` lines below.
+     ```cpp
+     require_alpaca_error([&]() { driver.action("test", ""); },
+                          alpacacore::AlpacaError::ActionNotImplemented);
+     require_alpaca_error([&]() { driver.command_blind("test", false); },
+                          alpacacore::AlpacaError::MethodNotImplemented);
+     require_alpaca_error([&]() { driver.command_bool("test", false); },
+                          alpacacore::AlpacaError::MethodNotImplemented);
+     require_alpaca_error([&]() { driver.command_string("test", false); },
+                          alpacacore::AlpacaError::MethodNotImplemented);
+     ```
 
 5. **Device-specific behavior** `[<vendor>][<device>][unit]`
    At least one test covering behavior unique to the device type. Examples:
@@ -657,7 +689,7 @@ These three test cases catch the bugs that cause ConformU failures. They run wit
      require_alpaca_error([&]() { driver->set_site_elevation(10000.1); },
                           alpacacore::AlpacaError::InvalidValue);
      ```
-   - Note: some drivers check connection before validating values (e.g., iOptron site properties throw NotConnected first). Only test value validation for operations that work disconnected — check existing tests for the same device type.
+   - Note: some drivers check connection before validating values (check the driver; iOptron now validates static ranges first). Only test value validation for operations that work disconnected — check existing tests for the same device type.
 
 7. **State machine contracts** `"<Vendor> <Device> Driver - State machine"` `[<vendor>][<device>][unit]`
    - Verify that device state follows ASCOM rules without needing hardware.
@@ -670,7 +702,7 @@ These three test cases catch the bugs that cause ConformU failures. They run wit
      - SVBONY: `CameraState` got stuck after SDK hangs
 
 8. **Unsupported method error codes** `"<Vendor> <Device> Driver - Unsupported methods"` `[<vendor>][<device>][unit]`
-   - Methods the device doesn't support must throw `AlpacaException` with the correct error code — usually `AlpacaError::InvalidOperation` or `MethodNotImplemented`, NOT a generic `DriverException`.
+   - Methods the device doesn't support must throw `AlpacaException` with `AlpacaError::MethodNotImplemented` (or `PropertyNotImplemented` for a property, both 0x400), NOT a generic `DriverException`. `InvalidOperation` (0x40B) is for a supported member called in a state where it can't currently run, not for a member the hardware lacks — see AGENTS.md's ASCOM exception vocabulary table. `Action()` called with a name not in `SupportedActions` throws `ActionNotImplemented` (0x40C) instead — a distinct code, not `MethodNotImplemented`.
    - ConformU distinguishes between "not implemented" and "driver error" — the wrong error code fails validation.
    - Examples:
      - Telescope without `CanSyncAltAz`: `SyncToAltAz` must throw with correct code
@@ -710,10 +742,19 @@ cat AlpacaCore/tests/CMakeLists.txt
 After writing the tests, build and run them immediately. Do not defer this:
 
 ```bash
-cd AlpacaCore && cmake -B build -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests "[<vendor>]"
+cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests "[<vendor>]"
 ```
 
 If any test fails, fix it before proceeding. The test tag filter `"[<vendor>]"` runs only the new vendor's tests for faster iteration.
+
+Build into `build-vendors`, not `build`. The `-D` alone is not enough after a pre-flight: since
+#588 the sanitized pass is the last thing to configure `AlpacaCore/build`, and CMake seeds
+`CMAKE_CXX_FLAGS` from `CXXFLAGS` on a directory's first configure and then caches it -- so
+reconfiguring `build` keeps `-fsanitize=address,undefined` no matter what you pass, and you
+iterate against a slow, LSan-enabled binary with the `ALPACACORE_TESTS_SANITIZED` cases skipped.
+(The `-D` is belt-and-braces on a fresh directory, where `ALPACACORE_ENABLE_ALL_VENDORS` defaults
+ON anyway -- `AlpacaCore/CMakeLists.txt:22`. It earns its keep on a `build-vendors` left from an
+earlier vendors-OFF configure, where the umbrella option is cached OFF.)
 
 ### Assertion count target
 
@@ -724,10 +765,12 @@ Aim for **at least 30 assertions** across the 8 test cases. The ASCOM contract t
 Build the complete test suite (not just the new vendor) to catch any regressions:
 
 ```bash
-cd AlpacaCore && cmake -B build -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests
+cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests
 ```
 
-All tests must pass — not just the new driver's tests.
+All tests must pass — not just the new driver's tests. `build-vendors` rather than `build` for the
+reason given in Step 7: this is the regression check, so it is the last place you want it run
+against a leftover sanitized binary that skips the `ALPACACORE_TESTS_SANITIZED` cases.
 
 Then run the registration gate locally, exactly as CI and the pre-flight do, so a missing or misplaced `[stress]` case is caught here rather than in review:
 
@@ -737,7 +780,7 @@ cd "$(git rev-parse --show-toplevel)" && python3 scripts/check_stress_registrati
 
 (The `cd` matters: the build block above leaves the shell in `AlpacaCore/`, and from there the script's `git ls-files` sees no driver and reports every ALLOWLIST entry as stale.)
 
-It must print `Stress-test registration OK` and the new (vendor, device type) pair must not be on the `ALLOWLIST` (Step 7b). Run the storm itself under ThreadSanitizer before opening the PR: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. A bare `./scripts/ci_preflight.sh` does NOT build a TSan binary (the TSan job is an opt-in, like `RUN_SANITIZERS=1`), so the `[stress]` cases would only have run in the ordinary test build.
+It must print `Stress-test registration OK` and the new (vendor, device type) pair must not be on the `ALLOWLIST` (Step 7b). Run the storm itself under ThreadSanitizer before opening the PR: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. A bare `./scripts/ci_preflight.sh` does NOT build a TSan binary (TSan is still an opt-in — unlike the ASan+UBSan pass, which runs by default since #588 and is skipped with `RUN_SANITIZERS=0`), so the `[stress]` cases would only have run in the ordinary test build.
 
 ## Step 9 — Vendor-specific notes
 
@@ -749,16 +792,16 @@ Read the entire file; vendor sections are no longer in `AGENTS.md`.
 
 Apply any vendor-specific quirks, workarounds, or conventions documented there.
 
-## Step 10 — ConformU validation (MANDATORY — both platforms)
+## Step 10 — ConformU validation (MANDATORY — Linux arm64)
 
 **SAFETY: never run the telescope ConformU suite with an OTA mounted.** The suite slews at
 maximum rate to targets halfway to the horizon, aborts mid-slew, and forces meridian flips;
 mid-slew arcs can dip to ~5 degrees altitude. Validate on a bare mount. See /conformu for the
 full hard rule.
 
-After the driver builds and unit tests pass, the user MUST run ConformU against the driver with real hardware on **both target platforms**. A driver is NOT complete until it has ConformU results for both architectures.
+After the driver builds and unit tests pass, the user MUST run ConformU against the driver with real hardware on **Linux arm64**, the only supported target. A driver is NOT complete until it has arm64 ConformU results.
 
-**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Current version: 4.3.0.
+**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Use 4.5.1+ on arm64; 4.5.0 has a known arm64 timing defect (see `AGENTS.md`).
 
 ### Required validation matrix
 

@@ -18,8 +18,12 @@
 // #129), HTTP/1.1 persistence and its bounds, the framing gate that decides
 // whether a connection may stay open, and the graceful close path.
 
+#include <alpacacore/device_registry.h>
+#include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/logging.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/server.h>
+#include <alpacahttp/util/logging_adapter.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -29,14 +33,22 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "http/thread_join.h"
+#include "route_table_stubs.h"
 #include "test_assert.h"
 
 namespace {
@@ -46,6 +58,42 @@ constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
 
 // Must match kMaxRequestsPerConnection in AlpacaHTTP/src/http/server.cpp (not exported).
 constexpr std::uint64_t kMaxRequestsPerConnection = 1000;
+
+// Aborts the process if not disarmed within `budget` -- turns a regression
+// that HANGS (a join that never returns) into a failed test with a clear
+// message instead of a test binary that never exits and just times out the
+// CI job. Construct at the top of a scope that must complete within budget;
+// destructor disarms it.
+class Watchdog {
+public:
+    explicit Watchdog(std::chrono::milliseconds budget, std::string label)
+        : label_(std::move(label)), thread_([this, budget] {
+              std::unique_lock<std::mutex> lock(mutex_);
+              if (!cv_.wait_for(lock, budget, [this] { return disarmed_; })) {
+                  std::fprintf(stderr, "WATCHDOG TIMEOUT: %s did not complete within budget\n", label_.c_str());
+                  std::abort();
+              }
+          }) {}
+
+    ~Watchdog() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            disarmed_ = true;
+        }
+        cv_.notify_all();
+        thread_.join();
+    }
+
+    Watchdog(const Watchdog&) = delete;
+    Watchdog& operator=(const Watchdog&) = delete;
+
+private:
+    std::string label_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool disarmed_ = false;
+    std::thread thread_;
+};
 
 // Send `data` to 127.0.0.1:port in two writes — the terminator-bearing tail
 // goes in the second write so we exercise the fixed path (the chunk that finds
@@ -102,8 +150,8 @@ std::string make_request_with_header_size(std::size_t header_bytes) {
 // --- keep-alive helpers ------------------------------------------------------
 
 // Read back the ephemeral port a just-started Server bound, retrying
-// briefly: is_running() can go true before the listener is actually created
-// (see the restart-case comment below for why), so bound_port() may answer 0
+// briefly: is_running() goes true before the listener is actually created,
+// so bound_port() may answer 0
 // for a few milliseconds after start_async() returns. Returns 0 if the port
 // never showed up within the budget.
 std::uint16_t wait_for_bound_port(alpacahttp::Server& server, int budget_ms) {
@@ -118,9 +166,25 @@ std::uint16_t wait_for_bound_port(alpacahttp::Server& server, int budget_ms) {
     return port;
 }
 
-int connect_local(std::uint16_t port) {
+// Wait for a management restart's detached thread to make its last write to
+// the server. A new listener answering proves start_async() ran, not that the
+// thread has finished: stop() racing its tail can read is_running() true, and
+// the Server can leave scope while that thread still writes its members.
+bool wait_for_restart_done(const alpacahttp::Server& server, int budget_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
+    while (server.restart_in_progress_for_test() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return !server.restart_in_progress_for_test();
+}
+
+int connect_local(std::uint16_t port, int receive_buffer = 0) {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     EXPECT(fd >= 0);
+    if (receive_buffer > 0) {
+        // Set before connect so the small receive window is negotiated in SYN.
+        EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)) == 0);
+    }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -175,6 +239,147 @@ std::string read_one_response(int fd, std::string& carry) {
     carry.erase(0, total);
     return response;
 }
+
+std::string read_response_headers(int fd) {
+    std::string response;
+    char buffer[1024];
+    while (response.find("\r\n\r\n") == std::string::npos) {
+        const ssize_t received = ::recv(fd, buffer, sizeof(buffer), 0);
+        if (received <= 0) {
+            return {};
+        }
+        response.append(buffer, static_cast<std::size_t>(received));
+    }
+    return response.substr(0, response.find("\r\n\r\n") + 4);
+}
+
+// open-astro#547: minimal telescope stub for the end-to-end watchdog-timer
+// wiring test below. Always connected and always "slewing" so a single
+// routed request is enough to arm the watchdog; abort_slew() counts its own
+// calls instead of touching any mount state.
+class WatchdogStubTelescope final : public alpacacore::TelescopeDriver {
+public:
+    explicit WatchdogStubTelescope(int number) : number_(number) {}
+
+    int get_device_number() const override { return number_; }
+    std::string get_name() const override { return "Watchdog Stub"; }
+    alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Telescope; }
+    std::string get_unique_id() const override { return "watchdog-stub-" + std::to_string(number_); }
+    std::string get_description() const override { return "fake telescope"; }
+    std::string get_driver_info() const override { return "fake driver"; }
+    std::string get_driver_version() const override { return "0.0.1"; }
+    int get_interface_version() const override { return 4; }
+    bool get_connected() const override { return true; }
+    void set_connected(bool) override {}
+    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::string action(std::string_view, std::string_view) override { return ""; }
+    bool can_action(std::string_view) const override { return false; }
+    std::string command_blind(std::string_view, bool) override { return ""; }
+    bool command_bool(std::string_view, bool) override { return false; }
+    std::string command_string(std::string_view, bool) override { return ""; }
+    std::chrono::system_clock::time_point get_utc_date() const override { return {}; }
+    void set_utc_date(std::chrono::system_clock::time_point) override {}
+    alpacacore::AlignmentMode get_alignment_mode() const override { return alpacacore::AlignmentMode::GermanPolar; }
+    double get_altitude() const override { return 0.0; }
+    double get_aperture_diameter() const override { return 0.0; }
+    void set_aperture_diameter(double) override {}
+    double get_aperture_area() const override { return 0.0; }
+    bool get_at_home() const override { return false; }
+    bool get_at_park() const override { return false; }
+    double get_azimuth() const override { return 0.0; }
+    bool get_can_find_home() const override { return false; }
+    bool get_can_park() const override { return false; }
+    bool get_can_pulse_guide() const override { return false; }
+    bool get_is_pulse_guiding() const override { return false; }
+    bool get_can_set_declination_rate() const override { return false; }
+    bool get_can_set_guide_rates() const override { return false; }
+    bool get_can_set_park() const override { return false; }
+    bool get_can_set_pier_side() const override { return false; }
+    bool get_can_set_right_ascension_rate() const override { return false; }
+    bool get_can_set_tracking() const override { return false; }
+    bool get_can_slew_alt_az() const override { return false; }
+    bool get_can_slew_alt_az_async() const override { return false; }
+    bool get_can_sync_alt_az() const override { return false; }
+    bool get_can_slew() const override { return false; }
+    bool get_can_slew_async() const override { return false; }
+    bool get_can_sync() const override { return false; }
+    bool get_can_unpark() const override { return false; }
+    double get_declination() const override { return 0.0; }
+    double get_declination_rate() const override { return 0.0; }
+    void set_declination_rate(double) override {}
+    bool get_tracking() const override { return true; }
+    void set_tracking(bool) override {}
+    double get_focal_length() const override { return 0.0; }
+    void set_focal_length(double) override {}
+    alpacacore::GuideRate get_guide_rate() const override { return alpacacore::GuideRate{}; }
+    void set_guide_rate(const alpacacore::GuideRate&) override {}
+    double get_right_ascension() const override { return 0.0; }
+    double get_right_ascension_rate() const override { return 0.0; }
+    void set_right_ascension_rate(double) override {}
+    int get_side_of_pier() const override { return 0; }
+    void set_side_of_pier(int) override {}
+    int get_destination_side_of_pier(double, double) const override { return 0; }
+    alpacacore::EquatorialSystem get_equatorial_system() const override {
+        return alpacacore::EquatorialSystem::Topocentric;
+    }
+    bool get_does_refraction() const override { return false; }
+    void set_does_refraction(bool) override {}
+    int get_slew_settle_time() const override { return 0; }
+    void set_slew_settle_time(int) override {}
+    double get_sidereal_time() const override { return 0.0; }
+    double get_site_elevation() const override { return 0.0; }
+    void set_site_elevation(double) override {}
+    double get_site_latitude() const override { return 0.0; }
+    void set_site_latitude(double) override {}
+    double get_site_longitude() const override { return 0.0; }
+    void set_site_longitude(double) override {}
+    // Always slewing: this stub's only job is to prove the timer thread
+    // reaches stop_motion_if_client_silent() and that it can stop a
+    // telescope, not to model a real motion state machine.
+    bool get_slewing() const override { return true; }
+    double get_target_declination() const override { return 0.0; }
+    void set_target_declination(double) override {}
+    double get_target_right_ascension() const override { return 0.0; }
+    void set_target_right_ascension(double) override {}
+    int get_tracking_rate() const override { return 0; }
+    void set_tracking_rate(int) override {}
+    std::vector<int> get_tracking_rates() const override { return {}; }
+    void find_home() override {}
+    void park() override {}
+    void pulse_guide(int, int) override {}
+    void set_park() override {}
+    // open-astro#547 review finding: a slow SlewToCoordinatesAsync initiator can
+    // block the HTTP worker for as long as the goto takes. slew_sleep_ms
+    // lets a test hold this call in flight past the watchdog interval, to
+    // prove the client's own request never gets aborted out from under it.
+    std::atomic<int> slew_sleep_ms{0};
+    // The router refuses the synchronous forms (#775), so the stub holds the
+    // async initiator in flight instead; the guard under test is the same.
+    void slew_to_coordinates(double, double) override {}
+    void slew_to_coordinates_async(double, double) override {
+        const int ms = slew_sleep_ms.load();
+        if (ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        }
+    }
+    void slew_to_target() override {}
+    void slew_to_target_async() override {}
+    void sync_to_coordinates(double, double) override {}
+    void sync_to_target() override {}
+    void unpark() override {}
+    bool get_can_move_axis(int) const override { return false; }
+    void move_axis(int, double) override {}
+    std::pair<double, double> get_axis_rate_range(int) const override { return {0.0, 0.0}; }
+    void abort_slew() override { ++aborts; }
+    void slew_to_alt_az(double, double) override {}
+    void slew_to_alt_az_async(double, double) override {}
+    void sync_to_alt_az(double, double) override {}
+
+    std::atomic<int> aborts{0};
+
+private:
+    int number_;
+};
 
 // True if the server has closed the connection (EOF within `ms`); false if it
 // is still open (the peek times out).
@@ -320,6 +525,100 @@ int main() {
         ::close(fd);
     }
 
+    {
+        // case: Large binary responses remain framed across vectored sends
+        constexpr int kCameraNumber = 9898;
+        constexpr int kImageWidth = 1024;
+        constexpr int kImageHeight = 1024;
+        const std::size_t pixel_count = static_cast<std::size_t>(kImageWidth) * kImageHeight;
+        std::vector<std::int32_t> pixels(pixel_count);
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            pixels[i] = static_cast<std::int32_t>(i);
+        }
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        camera->set_image_array({std::move(pixels), kImageWidth, kImageHeight, 2});
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(camera));
+
+        const std::string image_request = "GET /api/v1/camera/" + std::to_string(kCameraNumber) +
+                                          "/imagearray HTTP/1.1\r\nHost: localhost\r\n"
+                                          "Accept: application/imagebytes\r\n\r\n";
+        const std::size_t payload_size = 44 + pixel_count * sizeof(std::int32_t);
+        auto set_receive_timeout = [](int fd) {
+            timeval timeout{};
+            timeout.tv_sec = 30;
+            EXPECT(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+        };
+
+        // Read the full 4 MiB body, then issue another request on the same
+        // keep-alive connection. The payload contains embedded NUL bytes.
+        {
+            int fd = connect_local(port);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            std::string carry;
+            send_all(fd, image_request);
+            const std::string response = read_one_response(fd, carry);
+            const auto headers_end = response.find("\r\n\r\n");
+            EXPECT(headers_end != std::string::npos);
+            EXPECT(response.find("Content-Type: application/imagebytes\r\n") != std::string::npos);
+            EXPECT(response.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
+            EXPECT(response.size() == headers_end + 4 + payload_size);
+            const std::size_t pixels_start = headers_end + 4 + 44;
+            EXPECT(response[pixels_start] == '\0');
+            const std::size_t second_x_pixel = pixels_start + kImageHeight * sizeof(std::int32_t);
+            EXPECT(response[second_x_pixel] == '\1');
+            EXPECT(response[second_x_pixel + 1] == '\0');
+            EXPECT(response[second_x_pixel + 2] == '\0');
+            EXPECT(response[second_x_pixel + 3] == '\0');
+            EXPECT(response.find("Connection: keep-alive\r\n") != std::string::npos);
+
+            send_all(fd, kGet11);
+            const std::string next_response = read_one_response(fd, carry);
+            EXPECT(next_response.rfind("HTTP/1.1 200 ", 0) == 0);
+            EXPECT(next_response.find("Connection: keep-alive\r\n") != std::string::npos);
+            send_all(fd,
+                     "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\n"
+                     "Connection: close\r\n\r\n");
+            EXPECT(read_one_response(fd, carry).find("Connection: close\r\n") != std::string::npos);
+            EXPECT(peer_closed(fd, 2000));
+            ::close(fd);
+        }
+
+        // Closing after the headers while the server is blocked sending the
+        // larger-than-send-buffer body must release a single worker, with no
+        // sleep-based guess about when the send notices the peer reset.
+        {
+            alpacahttp::Config one_worker_config;
+            one_worker_config.set_http_port(0);
+            one_worker_config.set_discovery_enabled(false);
+            one_worker_config.set_thread_pool_size(1);
+            alpacahttp::Server one_worker_server(one_worker_config);
+            one_worker_server.start_async();
+            const auto one_worker_port = wait_for_bound_port(one_worker_server, 2000);
+            EXPECT(one_worker_port != 0);
+
+            int fd = connect_local(one_worker_port, 4096);
+            EXPECT(fd >= 0);
+            set_receive_timeout(fd);
+            send_all(fd, image_request);
+            const std::string headers = read_response_headers(fd);
+            EXPECT(headers.find("Content-Length: " + std::to_string(payload_size) + "\r\n") != std::string::npos);
+            ::close(fd);
+
+            int next_fd = connect_local(one_worker_port);
+            EXPECT(next_fd >= 0);
+            set_receive_timeout(next_fd);
+            std::string carry;
+            send_all(next_fd, kGet11);
+            EXPECT(read_one_response(next_fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(next_fd);
+            one_worker_server.stop();
+        }
+
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
     // A connection is force-closed after kMaxRequestsPerConnection requests,
     // even though every one of them individually asked to keep the
     // connection alive -- the worker-pinning mitigation added in response to
@@ -430,6 +729,24 @@ int main() {
         std::string r = read_one_response(fd, carry);
         EXPECT(r.rfind("HTTP/1.1 501 ", 0) == 0);
         EXPECT(peer_closed(fd, 2000));
+        ::close(fd);
+    }
+
+    // A Content-Length over the 64 KiB body cap (issue #741) is refused with
+    // 413 from the headers alone: the client sends no body, so a server that
+    // waited for one would never answer inside the receive timeout.
+    {
+        int fd = connect_local(port);
+        EXPECT(fd >= 0);
+        timeval tv{};
+        tv.tv_sec = 3;
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        std::string carry;
+        send_all(fd,
+                 "PUT /management/v1/configuredevice HTTP/1.1\r\nHost: localhost\r\n"
+                 "Content-Length: 65537\r\n\r\n");
+        std::string r = read_one_response(fd, carry);
+        EXPECT(r.rfind("HTTP/1.1 413 ", 0) == 0);
         ::close(fd);
     }
 
@@ -730,21 +1047,19 @@ int main() {
                 ::close(fd);
 
                 // The restart runs on a detached thread 100 ms after the
-                // response, so polling is_running() here would race it (a
-                // true seen before stop() begins is the OLD generation, and
-                // a client connecting then lands in a listener about to be
-                // closed and gets a reset). Wait for proof the restart
-                // happened instead: stop() closes the parked bystander.
+                // response, and is_running() stays true for the whole of it
+                // (#713), so it cannot tell the old generation from the new
+                // one: a client connecting too early lands in a listener
+                // about to be closed and gets a reset. Wait for proof the
+                // restart happened instead: stop() closes the parked
+                // bystander.
                 EXPECT(peer_closed(bystander, 5000));
                 ::close(bystander);
-                // Then for the new generation to be up. is_running() goes
-                // true before the new listener is bound, so retry connect.
-                bool back = false;
-                for (int i = 0; i < 50 && !back; ++i) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    back = restart_server.is_running();
-                }
-                EXPECT(back);
+                // Then for the new generation to be up: the restart thread
+                // clears its flag only after stop() dropped the old listener
+                // and start_async() returned, so bound_port() below cannot
+                // answer the old one.
+                EXPECT(wait_for_restart_done(restart_server, 5000));
                 // The new generation's listener is a fresh ephemeral port
                 // (config_.http_port() is still 0), not necessarily the one
                 // from before this restart -- re-read it before using
@@ -779,10 +1094,204 @@ int main() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
                 EXPECT(restart_probes.load() > probes_before);
+                // Let this restart's thread finish before the next round's
+                // request (a duplicate would be ignored) or stop().
+                EXPECT(wait_for_restart_done(restart_server, 5000));
             }
             restart_server.stop();
         } else {
             std::cout << "  (skipped restart case: could not bind an ephemeral port)\n";
+        }
+    }
+
+    // open-astro#713: is_running() stays true for the WHOLE of a restart.
+    // handle_restart_request() runs stop() then start_async() on the
+    // endpoint's detached thread, and stop() clears running_ FIRST and only
+    // then joins the reactor, the RTC probe, the workers and the server
+    // thread -- a window of many milliseconds in which is_running() read
+    // false. The example embedder's wait loop (`while (g_running &&
+    // server.is_running())`) polls that flag every 100 ms, so a restart
+    // could end the process with exit status 0, which Restart=on-failure
+    // does not bring back: the web UI Restart button stopped AlpacaBridge
+    // for good. A watcher sampling the flag in a tight loop across one
+    // restart must never read false. It turns false only when the server is
+    // stopped outside a restart, or when the restart's start_async() failed
+    // to bring the server back.
+    {
+        alpacahttp::Config keep_config;
+        keep_config.set_http_port(0);
+        keep_config.set_discovery_enabled(false);
+        keep_config.set_server_name("TestServerRestartKeepsRunning");
+        alpacahttp::Server keep_server(keep_config);
+        keep_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (const std::uint16_t keep_port = keep_server.is_running() ? wait_for_bound_port(keep_server, 2000) : 0;
+            keep_port != 0) {
+            struct timeval tv {};
+            tv.tv_sec = 5;
+
+            // A bystander parked on the reactor: stop() closing it is the
+            // proof that the restart actually ran (as in the restart case
+            // above), so the watcher's clean record cannot be vacuous.
+            int bystander = connect_local(keep_port);
+            EXPECT(bystander >= 0);
+            std::string bystander_carry;
+            send_all(bystander, kGet11);
+            EXPECT(read_one_response(bystander, bystander_carry).find("Connection: keep-alive\r\n") !=
+                   std::string::npos);
+
+            // Tight loop, no sleep: the join window is tens of milliseconds
+            // wide and a sleeping sampler could straddle it.
+            std::atomic<bool> watch{true};
+            std::atomic<bool> saw_false{false};
+            std::atomic<long> samples{0};
+            std::thread watcher([&keep_server, &watch, &saw_false, &samples]() {
+                while (watch.load()) {
+                    if (!keep_server.is_running()) {
+                        saw_false = true;
+                    }
+                    samples.fetch_add(1);
+                }
+            });
+
+            int fd = connect_local(keep_port);
+            EXPECT(fd >= 0);
+            ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string carry;
+            send_all(fd, "PUT /management/restart HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+            EXPECT(read_one_response(fd, carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(fd);
+
+            // The restart happened: stop() closed the parked bystander.
+            EXPECT(peer_closed(bystander, 5000));
+            ::close(bystander);
+
+            // Then wait until the server answers a new connection again.
+            // is_running() cannot be the readiness signal here (it must read
+            // true throughout), and the old listener may still be bound for
+            // a moment after the bystander closes, so re-read the port and
+            // retry the whole connect + request until a 200 comes back.
+            struct timeval short_tv {};
+            short_tv.tv_sec = 1;
+            bool answered = false;
+            const auto back_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (!answered && std::chrono::steady_clock::now() < back_deadline) {
+                const std::uint16_t new_port = keep_server.bound_port();
+                int after = new_port != 0 ? connect_local(new_port) : -1;
+                if (after >= 0) {
+                    ::setsockopt(after, SOL_SOCKET, SO_RCVTIMEO, &short_tv, sizeof(short_tv));
+                    // Raw send: a connect that landed in the old listener is
+                    // reset, which is a retry here, not a failed check.
+                    if (::send(after, kGet11.data(), kGet11.size(), MSG_NOSIGNAL) ==
+                        static_cast<ssize_t>(kGet11.size())) {
+                        std::string after_carry;
+                        answered = read_one_response(after, after_carry).rfind("HTTP/1.1 200 ", 0) == 0;
+                    }
+                    ::close(after);
+                }
+                if (!answered) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            }
+            EXPECT(answered);
+
+            watch = false;
+            watcher.join();
+            EXPECT(samples.load() > 0);
+            EXPECT(!saw_false.load());
+
+            EXPECT(wait_for_restart_done(keep_server, 5000));
+            keep_server.stop();
+            EXPECT(!keep_server.is_running());
+        } else {
+            std::cout << "  (skipped restart-keeps-running case: could not bind an ephemeral port)\n";
+        }
+    }
+
+    // open-astro#713: with a shutdown callback installed, the shutdown
+    // endpoint's handler runs the callback and nothing else. The embedder's
+    // own stop() -- the example server's main loop calls it once the callback
+    // has cleared its flag -- is the one stop, and it returns only after
+    // every server thread is joined. Before this the handler called stop()
+    // as well, straight after the callback returned: the embedder saw
+    // is_running() drop before it had asked for anything, and two stop()
+    // calls raced on one Server (the concurrent-stop case below is what
+    // keeps that race from aborting). With no callback installed the handler
+    // keeps calling stop() itself; that path is not under test here.
+    {
+        std::mutex shutdown_cb_mutex;
+        std::condition_variable shutdown_cb_cv;
+        bool shutdown_cb_called = false;
+        alpacahttp::Config cb_config;
+        cb_config.set_http_port(0);
+        cb_config.set_discovery_enabled(false);
+        cb_config.set_server_name("TestServerShutdownCallbackOnly");
+        alpacahttp::Server cb_server(cb_config);
+        cb_server.set_shutdown_callback([&shutdown_cb_mutex, &shutdown_cb_cv, &shutdown_cb_called]() {
+            {
+                std::lock_guard<std::mutex> lock(shutdown_cb_mutex);
+                shutdown_cb_called = true;
+            }
+            shutdown_cb_cv.notify_all();
+        });
+        cb_server.start_async();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        if (const std::uint16_t cb_port = cb_server.is_running() ? wait_for_bound_port(cb_server, 2000) : 0;
+            cb_port != 0) {
+            struct timeval tv {};
+            tv.tv_sec = 5;
+
+            // A bystander parked on the reactor: a stop() the handler must
+            // not run would close it.
+            int bystander = connect_local(cb_port);
+            EXPECT(bystander >= 0);
+            std::string bystander_carry;
+            send_all(bystander, kGet11);
+            EXPECT(read_one_response(bystander, bystander_carry).find("Connection: keep-alive\r\n") !=
+                   std::string::npos);
+
+            int fd = connect_local(cb_port);
+            EXPECT(fd >= 0);
+            ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string carry;
+            send_all(fd, "PUT /management/shutdown HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+            const std::string r = read_one_response(fd, carry);
+            EXPECT(r.rfind("HTTP/1.1 200 ", 0) == 0);
+            EXPECT(r.find("Shutdown initiated") != std::string::npos);
+            ::close(fd);
+
+            // The callback runs on the endpoint's detached thread 100 ms
+            // after the response.
+            {
+                std::unique_lock<std::mutex> lock(shutdown_cb_mutex);
+                shutdown_cb_cv.wait_for(lock, std::chrono::seconds(5),
+                                        [&shutdown_cb_called] { return shutdown_cb_called; });
+                EXPECT(shutdown_cb_called);
+            }
+
+            // After the callback the server is still up: the bystander is
+            // still open half a second later, is_running() still reads true,
+            // and a fresh request is served.
+            EXPECT(!peer_closed(bystander, 500));
+            EXPECT(cb_server.is_running());
+            int after = connect_local(cb_port);
+            EXPECT(after >= 0);
+            ::setsockopt(after, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string after_carry;
+            send_all(after, kGet11);
+            EXPECT(read_one_response(after, after_carry).rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(after);
+
+            // The embedder's stop() is the one stop; when it returns, every
+            // server thread is joined and the parked connection is gone.
+            cb_server.stop();
+            EXPECT(!cb_server.is_running());
+            EXPECT(peer_closed(bystander, 5000));
+            ::close(bystander);
+        } else {
+            std::cout << "  (skipped shutdown-callback-only case: could not bind an ephemeral port)\n";
         }
     }
 
@@ -914,6 +1423,105 @@ int main() {
         const int after_stop = probes.load();
         std::this_thread::sleep_for(std::chrono::milliseconds(1200));
         EXPECT(probes.load() == after_stop);
+    }
+
+    // --- Client-silence motion watchdog timer wiring (open-astro#547) ------
+    // Mirrors the RTC probe case above end to end: a real Server, the same
+    // rtc_probe_thread_ (retasked by #547 to also tick the watchdog every
+    // second), and an assertion that a telescope left "slewing" with no
+    // further client activity gets stopped on its own -- no request ever
+    // asks it to.
+    {
+        alpacahttp::Config watchdog_config;
+        watchdog_config.set_http_port(0);
+        watchdog_config.set_discovery_enabled(false);
+        watchdog_config.set_server_name("TestServerMotionWatchdog");
+        watchdog_config.set_motion_watchdog_seconds(1);
+
+        auto stub = std::make_shared<WatchdogStubTelescope>(9547);
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(stub));
+
+        alpacahttp::Server watchdog_server(watchdog_config);
+        watchdog_server.start_async();
+        const std::uint16_t port = watchdog_server.is_running() ? wait_for_bound_port(watchdog_server, 2000) : 0;
+        EXPECT(port != 0);
+        if (port != 0) {
+            // One real routed request arms the watchdog (note_client_activity
+            // at the router's device-dispatch choke point) -- after this, NO
+            // further request is sent, so the only way `aborts` can rise is
+            // the timer thread finding the device on its own.
+            int fd = connect_local(port);
+            EXPECT(fd >= 0);
+            std::string carry;
+            send_all(fd, "GET /api/v1/telescope/9547/connected HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            const std::string resp = read_one_response(fd, carry);
+            EXPECT(resp.rfind("HTTP/1.1 200 ", 0) == 0);
+            ::close(fd);
+
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (stub->aborts.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            EXPECT(stub->aborts.load() > 0);
+        }
+        watchdog_server.stop();
+        EXPECT(!watchdog_server.is_running());
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Telescope, 9547);
+    }
+
+    // --- Watchdog must not trip on the client's OWN in-flight synchronous
+    // request (open-astro#547 review finding) -------------------------------
+    // A slow SlewToCoordinatesAsync initiator blocks the HTTP worker for the length
+    // of the goto. note_client_activity() only stamps once, at intake, so
+    // without begin_client_request()/end_client_request() bracketing the
+    // dispatch, the timer thread finds the interval elapsed while the
+    // client is still on the wire waiting on its own response -- and aborts
+    // the very slew that client just issued.
+    {
+        alpacahttp::Config watchdog_config;
+        watchdog_config.set_http_port(0);
+        watchdog_config.set_discovery_enabled(false);
+        watchdog_config.set_server_name("TestServerMotionWatchdogInFlight");
+        watchdog_config.set_motion_watchdog_seconds(1);
+
+        auto stub = std::make_shared<WatchdogStubTelescope>(9548);
+        stub->slew_sleep_ms.store(3000);  // 3 s in-flight, 3x the 1 s interval
+        EXPECT(alpacacore::management::DeviceRegistry::instance().register_device(stub));
+
+        alpacahttp::Server watchdog_server(watchdog_config);
+        watchdog_server.start_async();
+        const std::uint16_t port = watchdog_server.is_running() ? wait_for_bound_port(watchdog_server, 2000) : 0;
+        EXPECT(port != 0);
+        if (port != 0) {
+            std::thread client([&] {
+                int fd = connect_local(port);
+                if (fd < 0) {
+                    return;
+                }
+                std::string carry;
+                send_all(fd,
+                         "PUT /api/v1/telescope/9548/slewtocoordinatesasync?RightAscension=5&Declination=10"
+                         " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+                const std::string resp = read_one_response(fd, carry);
+                EXPECT(resp.rfind("HTTP/1.1 200 ", 0) == 0);
+                ::close(fd);
+            });
+
+            // The request is now blocking inside slew_to_coordinates_async() for
+            // 3 s. Give the 1 s-interval timer thread two full ticks to find
+            // it "silent" if the in-flight guard is missing.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+            EXPECT(stub->aborts.load() == 0);
+
+            // No abort check after the join: once the request ends, the stub
+            // still reports Slewing (it is a stub) and its timestamp is up to
+            // one interval old, so a tick landing right here legitimately
+            // aborts. The in-flight window above is what this case pins.
+            client.join();
+        }
+        watchdog_server.stop();
+        EXPECT(!watchdog_server.is_running());
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Telescope, 9548);
     }
 
     // stop() must not wait out an ACTIVE keep-alive client. Before the
@@ -1091,12 +1699,15 @@ int main() {
     }
 
     {
-        // Two threads calling stop() on the SAME running Server, which is the
-        // shipped shutdown path, not a contrived one: PUT
-        // /management/v1/shutdown spawns a detached thread that runs the
-        // shutdown callback, and the example server's callback clears the flag
-        // its own main loop polls -- so that loop calls stop() too, while the
-        // detached thread is inside stop(). Both reach join_server_thread().
+        // Two threads calling stop() on the SAME running Server, which a
+        // shipped server can reach, not a contrived one: PUT
+        // /management/v1/restart spawns a detached thread whose
+        // handle_restart_request() stops and restarts the server, and an
+        // embedder that also calls stop() from its own thread (its main loop
+        // after SIGTERM, or the shutdown endpoint with no callback installed)
+        // can land while that thread is inside stop(). The shutdown endpoint
+        // no longer stops when a callback is installed (#713), but these
+        // pairs still race. Both reach join_server_thread().
         //
         // Concurrent join() on one std::thread is UB; in practice the second
         // pthread_join throws std::system_error, which nothing catches, so the
@@ -1337,6 +1948,153 @@ int main() {
 
             restarting.stop();
             EXPECT(!restarting.is_running());
+        }
+    }
+
+    {
+        // (#562) With http_port 0, the descriptor-loss recovery must come back
+        // on the port it had, not a new ephemeral one: clients and discovery
+        // already hold that port. Close the listener behind the server; its
+        // next select() fails EBADF and run_server() rebinds.
+        alpacahttp::Config config;
+        config.set_http_port(0);
+        config.set_discovery_enabled(false);
+        config.set_server_name("TestServerRebind");
+
+        alpacahttp::Server server(config);
+        server.start_async();
+        const std::uint16_t before = server.is_running() ? wait_for_bound_port(server, 2000) : 0;
+        if (before == 0) {
+            std::cerr << "WARNING: rebind case SKIPPED -- could not bind an ephemeral port\n";
+        } else {
+            const int listener = server.listener_fd_for_test();
+            EXPECT(listener >= 0);
+            ::close(listener);
+
+            // bound_port() reads 0 while the closed number is not a listening
+            // socket; the rebind (which may reuse the same number) lands within
+            // one 500 ms select() timeout.
+            const std::uint16_t after = wait_for_bound_port(server, 10000);
+            if (after != before) {
+                std::cerr << "rebind moved the listener: " << before << " -> " << after << "\n";
+            }
+            EXPECT(after == before);
+
+            int fd = connect_local(after);
+            EXPECT(fd >= 0);
+            std::string carry;
+            send_all(fd, "GET /management/apiversions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            EXPECT(read_one_response(fd, carry).rfind("HTTP/1.1 200", 0) == 0);
+            ::close(fd);
+        }
+        server.stop();
+    }
+
+    {
+        // (issue #561, case a2) join_or_abandon()'s fallback is unreachable
+        // from a real Server through ordinary testing -- nothing can make
+        // join_server_thread()'s join() throw. ScopedJoinHooksForTest makes
+        // the ONE production call site named "join_server_thread" throw,
+        // while every other call site (worker/reactor/rtc-probe joins) still
+        // really joins, so this proves the fallback fires end-to-end and
+        // stop() still returns rather than propagating or hanging.
+        std::mutex captured_mutex;
+        std::vector<std::string> captured;
+        std::mutex stopped_mutex;
+        std::condition_variable stopped_cv;
+        bool stopped_seen = false;
+        // Default Config{} logs at WARNING, which would filter out the INFO
+        // "Server stopped" line below before it ever reaches the sink (see
+        // logging.cpp's level gate) -- need INFO to observe it.
+        alpacahttp::Config logging_config;
+        logging_config.set_log_level(alpacahttp::LogLevel::INFO);
+        alpacahttp::util::init_logging(logging_config);
+        alpacahttp::util::set_external_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (message == "Server stopped") {
+                    // run_server()'s very last statement before it returns. Once
+                    // this fires, the (possibly detached, see below) thread
+                    // running it is done touching the Server object and it is
+                    // safe to let `server` go out of scope.
+                    std::lock_guard<std::mutex> lock(stopped_mutex);
+                    stopped_seen = true;
+                    stopped_cv.notify_all();
+                }
+                if (level != alpacacore::logging::LogLevel::Error) {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(message);
+            });
+
+        alpacahttp::Config config;
+        config.set_http_port(0);
+        config.set_discovery_enabled(false);
+        config.set_server_name("TestServerJoinFallback");
+
+        // `server` is declared OUTSIDE the hooks/watchdog scope below so that
+        // its destructor runs strictly AFTER ScopedJoinHooksForTest's, per
+        // thread_join.h's documented contract ("must be destroyed before any
+        // Server instance that may still be joining threads is torn down").
+        // With hooks still installed during ~Server(), the SKIPPED branch's
+        // own teardown (join_server_thread() reaping the early-returned
+        // thread) would run under the injected throw too, masking a bind
+        // failure as a spurious fallback-error match.
+        alpacahttp::Server server(config);
+        bool ran = false;
+        {
+            Watchdog watchdog(std::chrono::seconds(10), "case a2 (join_server_thread fallback)");
+
+            alpacahttp::detail::ScopedJoinHooksForTest hooks(
+                [](std::thread& t, const char* context) {
+                    if (std::strcmp(context, "join_server_thread") == 0) {
+                        throw std::system_error(EDEADLK, std::generic_category());
+                    }
+                    t.join();
+                },
+                [](std::thread& t, const char*) { t.detach(); });
+
+            server.start_async();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (!server.is_running()) {
+                std::cerr << "WARNING: join-fallback case SKIPPED -- could not bind an ephemeral port\n";
+            } else {
+                ran = true;
+                server.stop();  // Must return despite the injected join() throw.
+                server.wait();  // Must also return -- both funnel through join_server_thread().
+                EXPECT(!server.is_running());
+                server.stop();  // Second stop() is a no-op; must not re-throw or hang.
+
+                // The injected join() throw makes join_or_abandon() detach
+                // the still-running server thread instead of joining it --
+                // case a2's whole point. stop()/wait() return as soon as
+                // that detach happens, but the now-detached OS thread is
+                // still inside run_server(), which keeps touching `this`
+                // (server_fd_, then the "Server stopped" log) right up to
+                // its last statement. Without waiting for that thread to
+                // actually finish, `server`'s destructor below can run
+                // concurrently with those last touches -- a real
+                // use-after-free window, not a theoretical one.
+                std::unique_lock<std::mutex> lock(stopped_mutex);
+                stopped_cv.wait(lock, [&stopped_seen] { return stopped_seen; });
+            }
+            // hooks (and its process-wide override) ARE destroyed here, at
+            // the end of this scope -- strictly before `server` goes out of
+            // scope below.
+        }
+
+        alpacahttp::util::set_external_log_sink(nullptr);
+        if (ran) {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            bool saw_fallback_error = false;
+            for (const auto& line : captured) {
+                if (line.find("join_server_thread") != std::string::npos &&
+                    line.find("pthread_join failed") != std::string::npos) {
+                    saw_fallback_error = true;
+                    break;
+                }
+            }
+            EXPECT(saw_fallback_error);
         }
     }
 

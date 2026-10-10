@@ -187,6 +187,17 @@ Privileged operations use two mechanisms, both scoped tightly:
   systemd applies them at exec; `CapabilityBoundingSet` is limited to the
   same two.
 
+The Software Update card (4.2.0, `src/util/software_update.cpp`,
+[software-update.md](software-update.md)) adds a third mechanism for the one
+thing neither of the above can do, run `apt` as root: the daemon asks systemd
+over the same sd-bus connection to start the root-owned oneshot unit
+`alpacabridge-update.service`, whose `ExecStart` is fixed to the packaged
+helper script, and a second polkit rule
+(`50-alpacabridge-update.rules`) lets the service user start exactly that unit
+and nothing else. The version check needs no privilege at all: it fetches the
+repository's `Packages` index with libcurl in-process. Routes live under
+`/management/v1/update/`.
+
 Every state-changing management request carries a CSRF guard (browser
 `Origin` header must match `Host`, else 403); the surface is otherwise
 unauthenticated per the trusted-LAN model, and the guard is what keeps that
@@ -198,7 +209,8 @@ reached the WiFi endpoints first (PR #198), then `synctime` and the
 issue #348 the rest:
 `restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
 `description` `PUT`/`POST` and both forms of `DELETE /management/v1/logfiles` (the
-collection and a single named file). Note that
+collection and a single named file), and since 4.2.0 `update/check` and
+`update/install`. Note that
 it compares the request's `Origin` against the request's own `Host`, so it
 stops a drive-by from an attacker-controlled origin but not DNS rebinding
 (issue #392). `GET /management/v1/buildinfo` (3.6.0) is a read-only companion
@@ -256,12 +268,29 @@ AlpacaBridge/
 +- debian/                            # Debian packaging
 +- docs/                              # Documentation
 +- AGENTS.md                          # AI driver development guide
++- CONTEXT.md                         # Domain glossary
 +- SUPPORTED-DRIVERS.md               # ConformU-validated driver matrix
 +- CHANGELOG.md                       # Release notes
 +- build_and_run.sh                   # Build and start server
 +- run_all_tests.sh                   # Run all test suites
 +- install_alpaca_service.sh          # Install as systemd service
 ```
+
+## Modules
+
+The HTTP → contract → vendor driver → SDK boundary above is being deepened into
+six named modules, one PR-sized slice at a time ([design review #584](https://github.com/open-astro/AlpacaBridge/issues/584)).
+Use these names in issues, PRs and records. Domain terms are defined in
+[CONTEXT.md](../CONTEXT.md).
+
+| Module | What it owns | State |
+|--------|--------------|-------|
+| Device Catalog | One descriptor per (vendor, device) declaring its config fields, roles and construction; AlpacaHTTP bridges JSON once and serves the schema | Planned; [decision 0004](decisions/0004-device-catalog.md) |
+| HTTP route bundles | The router's per-device-type routes, one bundle per Alpaca device type; the common `dispatch_device_method` stays in the router | Planned |
+| Task clock | Every driver wait and deadline, through one injectable clock with a fake for tests | Utility landed (#697); no driver on it yet; [decision 0005](decisions/0005-task-clock.md) |
+| Async operation slot | One cancellable, generation-tagged background body per slot, telling cancelled from superseded; piloted on the SkyWatcher telescope | Utility landed (#717); no driver on it yet; [decision 0006](decisions/0006-async-operation-ownership.md) (proposed) |
+| State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Planned; decision record written as proposed with the pilot |
+| SDK seams | An abstract SDK interface per vendor library with real, fake and locked adapters, so driver paths test without hardware | In place for QHY, ToupTek and gphoto (rules in [AGENTS.md](../AGENTS.md#hardware-free-driver-tests-via-the-sdk-seam-touptek-qhy-and-gphoto--extend-to-other-vendors)) |
 
 ## Threading model
 

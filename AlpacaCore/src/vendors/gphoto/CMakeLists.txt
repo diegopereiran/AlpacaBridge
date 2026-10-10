@@ -4,7 +4,7 @@
 # installed via apt, same as libusb/libudev are for the other camera vendors).
 
 if(ALPACACORE_ENABLE_GPHOTO)
-    message(STATUS "Building gphoto2 DSLR/mirrorless camera driver support")
+    message(STATUS "Building libgphoto2 DSLR/mirrorless camera driver support")
 
     # Linux arm64 only (Raspberry Pi 4/5, Rockchip SBCs, OrangePi, iOptron iMate)
     if(NOT UNIX)
@@ -21,6 +21,7 @@ if(ALPACACORE_ENABLE_GPHOTO)
     set(GPHOTO_SOURCES
         gphoto_sdk_wrapper.cpp
         gphoto_camera_driver.cpp
+        gphoto_catalog.cpp
     )
 
     add_library(alpacacore_gphoto STATIC ${GPHOTO_SOURCES})
@@ -28,6 +29,10 @@ if(ALPACACORE_ENABLE_GPHOTO)
     target_include_directories(alpacacore_gphoto PRIVATE
         ${CMAKE_SOURCE_DIR}/include
     )
+
+    # Base drivers, logging and AsyncConnectable live in alpacacore; this vendor
+    # links down to it, never the reverse (open-astro#710).
+    target_link_libraries(alpacacore_gphoto PRIVATE alpacacore)
 
     target_link_libraries(alpacacore_gphoto PRIVATE PkgConfig::LIBGPHOTO2 PkgConfig::LIBRAW)
 

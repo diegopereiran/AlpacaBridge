@@ -15,8 +15,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -68,13 +71,6 @@ TEST_CASE("ZWO Mount Telescope Driver - Defaults", "[zwo][telescope][unit]") {
     REQUIRE(driver->get_can_set_park());
     REQUIRE(driver->get_can_pulse_guide());
     REQUIRE(driver->get_can_set_guide_rates());
-    REQUIRE(driver->get_can_move_axis(0));
-    REQUIRE(driver->get_can_move_axis(1));
-    REQUIRE_FALSE(driver->get_can_move_axis(2));
-
-    // Out-of-range axis raises InvalidValue even while disconnected (#516).
-    require_alpaca_error([&]() { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { (void)driver->get_can_move_axis(3); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("ZWO Mount Telescope Driver - Target Validation", "[zwo][telescope][unit]") {
@@ -334,6 +330,208 @@ TEST_CASE("ZWO Telescope Driver - a far-off client UTCDate is logged once per co
     driver->set_utc_date(far);
     CHECK(warns.load() == 2);
     driver->set_connected(false);
+}
+
+// open-astro#714: pulse_guide() took pulse_mutex_ and then mutex_ to publish
+// the queue end together with the RA/Dec offsets, while the already-connected
+// Connected=true path took mutex_ and then pulse_mutex_ to clear the queue.
+// PHD2 pulsing while a second client sends Connect deadlocked the driver, and
+// every later call that takes mutex_ (IsPulseGuiding, RightAscension, the
+// poll thread) hung with it. The storm below races the two paths from worker
+// threads, then proves the driver still answers a mutex_-taking call from a
+// probe thread within 1 s (a flag polled from the main thread; never
+// std::async, whose future blocks in its destructor and bounds nothing) and
+// that the redundant Connected=true still drops the queued pulses (Rule 3).
+TEST_CASE(
+    "ZWO Telescope Driver - pulse guiding racing a redundant Connected=true neither deadlocks nor "
+    "survives the reconnect",
+    "[zwo][telescope][unit][pulseguide]") {
+    // :Ggr must answer a non-zero guide rate or pulse_guide() returns before
+    // it touches pulse_mutex_ and the inversion is never exercised (the same
+    // gap hid it from the [stress] case). :GAT "1#" passes the tracking gate,
+    // :SMTI "1#" acks the time sync the reconnect path sends (hash-terminated
+    // so the wrapper's idle-break wait does not add 100 ms to every refresh),
+    // and "0#" is a validly terminated reply for everything else.
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk.find(":SMTI") != std::string::npos) {
+            return "1#";
+        }
+        if (chunk.find(":GAT") != std::string::npos) {
+            return "1#";
+        }
+        if (chunk.find(":Ggr") != std::string::npos) {
+            return "0.50#";
+        }
+        return "0#";
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 250;
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    // The race: PHD2-style pulses from two threads against Connected=true
+    // refreshes from two more, for 3 s. The pulse loops are deliberately
+    // unthrottled: the inversion needs a pulse caller that has taken
+    // pulse_mutex_ and is parked on mutex_ at the instant a refresh wins
+    // mutex_ and then blocks on pulse_mutex_, and a caller that sleeps
+    // between pulses parks on one of the earlier, harmless mutex_ takes in
+    // pulse_guide() instead. Each refresh (~370 ms over the fake) is one
+    // roll of that dice; 3 s of them made the unfixed driver deadlock on
+    // every one of 36 measured runs, where 1.5 s still let 1 in 10 through.
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 2; ++i) {
+        workers.emplace_back([&] {
+            while (!stop.load()) {
+                try {
+                    driver->pulse_guide(0, 500);
+                } catch (const std::exception&) {
+                }
+            }
+        });
+        workers.emplace_back([&] {
+            while (!stop.load()) {
+                try {
+                    driver->set_connected(true);
+                } catch (const std::exception&) {
+                }
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    stop.store(true);
+
+    // Bounded liveness probe: a second thread makes one mutex_-taking call
+    // (IsPulseGuiding) and one lock-free call (Connected) and raises a flag;
+    // the main thread polls the flag for at most 1 s. A deadlocked driver
+    // never raises it, and the REQUIRE below reports that instead of the
+    // process hanging on the join.
+    std::atomic<bool> answered{false};
+    std::atomic<bool> probe_connected{false};
+    std::thread probe([&] {
+        static_cast<void>(driver->get_is_pulse_guiding());
+        probe_connected.store(driver->get_connected());
+        answered.store(true);
+    });
+    const auto probe_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!answered.load() && std::chrono::steady_clock::now() < probe_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    INFO("driver stopped answering mutex_-taking calls while pulse guiding raced Connected=true");
+    REQUIRE(answered.load());
+    probe.join();
+    CHECK(probe_connected.load());
+    for (auto& worker : workers) {
+        worker.join();
+    }
+
+    // Rule 3: a pulse queued before a redundant Connected=true does not
+    // survive it. Queue one more, refresh, and IsPulseGuiding must drop
+    // within one pulse duration plus the 500 ms hold (a task the pulse
+    // thread had already dequeued still runs its remaining 500 ms; a
+    // QUEUED one is dropped, so nothing follows it).
+    driver->pulse_guide(0, 500);
+    CHECK(driver->get_is_pulse_guiding());
+    driver->set_connected(true);
+    const auto clear_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    bool cleared = false;
+    while (std::chrono::steady_clock::now() < clear_deadline) {
+        if (!driver->get_is_pulse_guiding()) {
+            cleared = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(cleared);
+    CHECK(driver->get_connected());
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+}
+
+TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axis moving",
+          "[zwo][telescope][unit][moveaxis]") {
+    // Thread-safe counters: the fake answers on its own thread.
+    struct Counts {
+        std::atomic<int> stop_all{0};
+        std::atomic<int> stop_ew{0};
+        std::atomic<int> stop_ns{0};
+        std::atomic<int> tracking_on{0};
+        std::atomic<bool> tracking{true};
+    };
+    for (const int stopped_axis : {0, 1}) {
+        auto counts = std::make_shared<Counts>();
+        alpacacore::test::FakeMountServer server([counts](const std::string& chunk) -> std::string {
+            const auto count = [&chunk](const std::string& command) {
+                int n = 0;
+                for (auto p = chunk.find(command); p != std::string::npos;
+                     p = chunk.find(command, p + command.size())) {
+                    ++n;
+                }
+                return n;
+            };
+            counts->stop_all += count(":Q#");
+            counts->stop_ew += count(":Qe#") + count(":Qw#");
+            counts->stop_ns += count(":Qn#") + count(":Qs#");
+            counts->tracking_on += count(":Te");
+            // Like the mount: a jog drops tracking, ":Te" brings it back.
+            if (chunk.find(":Me") != std::string::npos || chunk.find(":Mw") != std::string::npos ||
+                chunk.find(":Mn") != std::string::npos || chunk.find(":Ms") != std::string::npos) {
+                counts->tracking = false;
+            }
+            if (chunk.find(":Te") != std::string::npos) {
+                counts->tracking = true;
+            }
+            if (chunk.find(":SMTI") != std::string::npos) {
+                return "1";
+            }
+            if (chunk.find(":GAT") != std::string::npos) {
+                return counts->tracking.load() ? "1#" : "0#";
+            }
+            // :GU carries the "n" (not tracking) flag the cache refresh reads.
+            if (chunk.find(":GU") != std::string::npos) {
+                return counts->tracking.load() ? "0#" : "n#";
+            }
+            return "0#";
+        });
+        REQUIRE(server.ok());
+        alpacacore::vendor::zwo::ConnectionInfo conn;
+        conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+        conn.host = "127.0.0.1";
+        conn.tcp_port = server.port();
+        conn.response_timeout_ms = 250;
+        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+        driver->move_axis(0, 1.0);
+        driver->move_axis(1, 1.0);
+        REQUIRE(driver->get_slewing());
+        // Outlast the driver's 2 s fast-tracking cache so the restore asks the
+        // mount (tracking now off) instead of returning early.
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+
+        const int tracking_on_before_stop = counts->tracking_on.load();
+        driver->move_axis(stopped_axis, 0.0);
+        // Let the fake see the blind command before counting.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        CHECK(counts->stop_all.load() == 0);
+        CHECK((stopped_axis == 0 ? counts->stop_ew : counts->stop_ns).load() > 0);
+        CHECK((stopped_axis == 0 ? counts->stop_ns : counts->stop_ew).load() == 0);
+        CHECK(driver->get_slewing());
+        // The other axis still jogs: the saved tracking state is handed to it,
+        // not restored yet.
+        CHECK(counts->tracking_on.load() == tracking_on_before_stop);
+
+        driver->move_axis(1 - stopped_axis, 0.0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        CHECK(counts->tracking_on.load() > tracking_on_before_stop);
+        // The other axis is idle now, so the generic stop is sent.
+        CHECK(counts->stop_all.load() > 0);
+        CHECK(alpacacore::test::settle_connected(*driver, false));
+    }
 }
 
 #endif  // _WIN32

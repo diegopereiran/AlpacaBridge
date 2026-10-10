@@ -13,9 +13,12 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/logging.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -33,6 +36,9 @@ struct Fake {
     bool set_ok = true;
     bool rtc = false;  // the kernel loaded the clock from a plausible RTC at boot
     std::vector<system_clock::time_point> sets;
+    HostClock::RtcWrite rtc_result = HostClock::RtcWrite::Written;
+    int rtc_writes = 0;
+    int rtc_probes = 0;
 
     HostClock clock() {
         return HostClock([this] { return synchronized; },
@@ -43,7 +49,18 @@ struct Fake {
                              }
                              return set_ok;
                          },
-                         [this] { return rtc; });
+                         [this] {
+                             ++rtc_probes;
+                             return rtc;
+                         },
+                         [this](std::string& device, std::string& err) {
+                             ++rtc_writes;
+                             device = "/dev/rtc0";
+                             if (rtc_result == HostClock::RtcWrite::Failed) {
+                                 err = "EACCES";
+                             }
+                             return rtc_result;
+                         });
     }
 };
 
@@ -246,7 +263,7 @@ TEST_CASE("HostClock - the RTC probe is primed at construction and never re-run 
     CHECK(probes == 1);
 
     // Only an explicit refresh re-probes. That is what the server's RTC probe
-    // thread calls, and what #307 will call after this process writes the RTC.
+    // thread calls after the stepping paths invalidate_rtc_probe() on an RTC write.
     c.refresh_rtc();
     CHECK(probes == 2);
 }
@@ -369,8 +386,10 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
     // Under TSan/ASan this case is the one that would report it. Without a
     // sanitizer it still pins that the swap neither crashes nor deadlocks,
     // and that a blocking probe cannot park a concurrent set_hooks().
+    constexpr int kReaders = 4;
     std::atomic<bool> stop{false};
     std::atomic<int> reads{0};
+    std::atomic<int> started{0};
     // A hang here (set_hooks() starved on the mutex, a reader wedged) would
     // otherwise run to the CI job timeout; the deadline turns it into a red
     // CHECK instead.
@@ -380,15 +399,25 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
                                   [](std::chrono::system_clock::time_point, std::string&) { return true; });
 
     std::vector<std::thread> readers;
-    for (int i = 0; i < 4; ++i) {
+    readers.reserve(kReaders);
+    for (int i = 0; i < kReaders; ++i) {
         readers.emplace_back([&] {
-            while (!stop.load() && !expired()) {
+            started.fetch_add(1);
+            // do/while, not while: a reader first scheduled after the writer
+            // loop below has already stored stop would read nothing at all,
+            // and the reads > 0 guard that used to end this case (#596
+            // replaced it) would then report the scheduler rather than the
+            // behaviour it existed to pin. That was
+            // not hypothetical -- at -j 8 on a 4-core box under ASan+UBSan it
+            // was a 3-in-10 red (PR #594, which took ctest from nproc to twice
+            // nproc and so supplied the oversubscription that exposed it).
+            do {
                 // The three reads the router actually makes on a request path.
                 static_cast<void>(c.source());
                 static_cast<void>(c.enabled());
                 static_cast<void>(c.has_rtc());
                 reads.fetch_add(1);
-            }
+            } while (!stop.load() && !expired());
         });
     }
     // A stand-in for the server's RTC probe thread, which is not a request path.
@@ -398,12 +427,33 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
         }
     });
 
-    for (int i = 0; i < 200 && !expired(); ++i) {
+    // Let every reader reach its loop before the swaps start, so they race
+    // live readers rather than possibly all landing before the first one is
+    // scheduled. This is what makes the case test overlap; the progress check
+    // below keeps swapping until readers get past a swap, so it does not
+    // depend on the scheduler either.
+    while (started.load() < kReaders && !expired()) {
+        std::this_thread::yield();
+    }
+
+    // open-astro#596: the guard is progress DURING the storm, sampled here.
+    // The old CHECK(reads > 0) could not fail: the do/while above makes every
+    // reader count at least once whether or not a swap ever let it through.
+    // Each reader may also be part-way through a read at this sample and
+    // count it afterwards without ever getting past a swap, so progress means
+    // more than kReaders reads beyond it. Swapping continues past the 200
+    // until readers show that, bounded by the deadline, so a set_hooks() that
+    // starves readers until the deadline turns this red instead of passing
+    // on reads that were already in flight.
+    const int before_swaps = reads.load();
+    const auto progressed = [&] { return reads.load() > before_swaps + kReaders; };
+    for (int i = 0; (i < 200 || !progressed()) && !expired(); ++i) {
         const bool synced = (i % 2) == 0;
         c.set_hooks([synced] { return synced; },
                     [](std::chrono::system_clock::time_point, std::string&) { return true; },
                     [synced] { return !synced; });
     }
+    const int after_swaps = reads.load();
 
     stop.store(true);
     for (auto& t : readers) {
@@ -411,7 +461,7 @@ TEST_CASE("HostClock - readers in flight survive a concurrent set_hooks", "[util
     }
     prober.join();
     CHECK_FALSE(expired());
-    CHECK(reads.load() > 0);
+    CHECK(after_swaps > before_swaps + kReaders);
 }
 
 // ── The client-clock disagreement warning for mounts with their own clock (#409) ──
@@ -516,4 +566,117 @@ TEST_CASE("ClientUtcWarning - a null probe restores the kernel one", "[util][hos
     CHECK(ClientUtcWarning::host_synchronized());
     ClientUtcWarning::set_host_synchronized_probe(nullptr);
     CHECK(ClientUtcWarning::host_synchronized() == HostClock::kernel_is_synchronized());
+}
+
+TEST_CASE("HostClock - a client step writes the system time to the RTC (#296)", "[util][hostclock][unit]") {
+    Fake f;
+    auto c = f.clock();
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
+    CHECK(f.rtc_writes == 1);
+}
+
+TEST_CASE("HostClock - Sync Time (mark_stepped) writes the RTC (#296)", "[util][hostclock][unit]") {
+    Fake f;
+    auto c = f.clock();
+    c.mark_stepped();
+    CHECK(f.rtc_writes == 1);
+}
+
+TEST_CASE("HostClock - no RTC write unless the step happened (#296)", "[util][hostclock][unit]") {
+    Fake f;
+    auto c = f.clock();
+    f.synchronized = true;
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::SkippedSynchronized);
+    f.synchronized = false;
+    CHECK(c.step_from_client(system_clock::time_point(seconds(HostClock::kMinEpoch - 1)), kNow).outcome ==
+          Outcome::SkippedOutOfRange);
+    CHECK(c.step_from_client(kNow + milliseconds(200), kNow).outcome == Outcome::SkippedSmall);
+    f.set_ok = false;
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Failed);
+    f.set_ok = true;
+    c.set_enabled(false);
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::SkippedDisabled);
+    CHECK(f.rtc_writes == 0);
+}
+
+TEST_CASE("HostClock - a failed RTC write leaves the step result alone and warns once (#296)",
+          "[util][hostclock][unit]") {
+    using alpacacore::logging::LogLevel;
+    const auto old_sink = alpacacore::logging::get_log_sink();
+    int warns = 0;
+    int infos = 0;
+    alpacacore::logging::set_log_sink([&](LogLevel level, std::string_view component, std::string_view) {
+        if (component == "HostClock") {
+            warns += level == LogLevel::Warn ? 1 : 0;
+            infos += level == LogLevel::Info ? 1 : 0;
+        }
+    });
+    Fake f;
+    f.rtc_result = HostClock::RtcWrite::Failed;
+    auto c = f.clock();
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
+    CHECK(c.step_from_client(kNow + seconds(240), kNow).outcome == Outcome::Stepped);
+    CHECK(f.rtc_writes == 2);  // attempted each time; only the WARN is latched
+    CHECK(warns == 1);
+    CHECK(infos == 0);
+    CHECK_FALSE(c.step_ever_failed());
+    f.rtc_result = HostClock::RtcWrite::Written;
+    c.mark_stepped();
+    CHECK(infos == 1);
+    alpacacore::logging::set_log_sink(old_sink);
+}
+
+TEST_CASE("HostClock - no boot RTC means no probe invalidation (#296)", "[util][hostclock][unit]") {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / ("hostclock_nortc_" + std::to_string(::getpid()));
+    fs::create_directories(root / "rtc0");
+    const auto put = [&](const char* file, const char* text) { std::ofstream(root / "rtc0" / file) << text; };
+    put("hctosys", "1");
+    put("since_epoch", "946684800");  // battery-less RTC: 2000-01-01
+    HostClock::set_sysfs_root_for_test(root.string());
+    HostClock::invalidate_rtc_probe();
+    CHECK_FALSE(HostClock::host_booted_from_rtc());  // settles "implausible"
+    put("since_epoch", "1900000000");
+
+    Fake f;
+    f.rtc_result = HostClock::RtcWrite::NoDevice;
+    auto c = f.clock();
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
+    CHECK(f.rtc_writes == 1);                        // attempted, but NoDevice: nothing written
+    CHECK_FALSE(HostClock::host_booted_from_rtc());  // probe still settled
+
+    HostClock::set_sysfs_root_for_test("");
+    HostClock::invalidate_rtc_probe();
+    fs::remove_all(root);
+}
+
+TEST_CASE("HostClock - Sync Time with the opt-out off does not write the RTC (#296)", "[util][hostclock][unit]") {
+    Fake f;
+    auto c = f.clock();
+    c.set_enabled(false);
+    c.mark_stepped();
+    CHECK(f.rtc_writes == 0);
+}
+
+TEST_CASE("HostClock - a successful RTC write invalidates the settled probe (#296)", "[util][hostclock][unit]") {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / ("hostclock_rtc_" + std::to_string(::getpid()));
+    fs::create_directories(root / "rtc0");
+    const auto put = [&](const char* file, const char* text) { std::ofstream(root / "rtc0" / file) << text; };
+    put("hctosys", "1");
+    put("since_epoch", "946684800");  // battery-less RTC: 2000-01-01
+    HostClock::set_sysfs_root_for_test(root.string());
+    HostClock::invalidate_rtc_probe();
+    CHECK_FALSE(HostClock::host_booted_from_rtc());  // settles "implausible"
+    put("since_epoch", "1900000000");
+    CHECK_FALSE(HostClock::host_booted_from_rtc());  // still settled
+
+    Fake f;
+    auto c = f.clock();
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
+    CHECK(HostClock::host_booted_from_rtc());  // invalidated, re-read
+
+    HostClock::set_sysfs_root_for_test("");
+    HostClock::invalidate_rtc_probe();
+    fs::remove_all(root);
 }

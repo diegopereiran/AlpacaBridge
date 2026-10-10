@@ -107,7 +107,7 @@ The value of the toggled pin will flip between `inactive` and `active`.
 
 ### Advanced configuration
 
-The defaults match the Pi 4 ASIair Pro wiring. For non-default deployments (different SBC, different pin map, PWM channels), override per-port in the device config:
+The defaults match the Pi 4 ASIair Pro wiring. The device config can rename ports, set PWM and reorder the four port lines, but it cannot point the driver at other lines or another chip: since #765 the server refuses (HTTP 400, config not saved) any `gpio` other than 12, 13, 26, 18 and any `gpioChip` other than `/dev/gpiochip0`. The full schema:
 
 ```json
 {
@@ -128,15 +128,15 @@ The defaults match the Pi 4 ASIair Pro wiring. For non-default deployments (diff
 
 | Field | Type | Notes |
 |----|----|----|
-| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip0`. |
+| `gpioChip` | string | Path to the gpiochip character device. Must be `/dev/gpiochip0` (the default); any other value is refused. |
 | `pwmFrequencyHz` | integer | Soft-PWM frequency for any port with `pwm: true`. Range 1–100000. Default 1000. |
 | `ports[].name` | string | Human-readable channel name shown to ASCOM clients (NINA, etc.). |
-| `ports[].gpio` | integer | BCM GPIO line number. |
+| `ports[].gpio` | integer | BCM GPIO line number: one of 12, 13, 26, 18; any other value is refused. |
 | `ports[].pwm` | boolean | `true` for analog 0–100% (dew heater, flat panel). `false` for boolean on/off. |
 
 ### Disconnect behavior — important for unattended observatories
 
-When the ASCOM client (or the AlpacaBridge Web UI) disconnects the device, the driver releases its hold on the four GPIO lines but **does not drive them LOW first**. The lines stay in whatever state they were last in.
+When the ASCOM client (or the AlpacaBridge Web UI) disconnects the device, the driver releases its hold on the four GPIO lines but **does not drive a boolean port LOW first**; boolean lines stay in whatever state they were last in. A PWM port stops its worker and is first driven to the steady level of its duty (on for any duty above 0, off at 0%), so it is never left mid-cycle.
 
 Combined with the `gpio=18,12,13,26=op,dh,pu` boot directive in `/boot/firmware/config.txt`, which configures the lines as outputs with default-high and pull-up enabled, this means **released lines stay HIGH**. The 12V outputs remain powered after disconnect — your camera, mount, and dew heaters keep getting voltage.
 
@@ -355,7 +355,7 @@ The driver's userspace soft-PWM accepts any value in 1–100,000 Hz, but the pra
 
 ### Disconnect behavior
 
-Identical to the ASIair Pro driver: `close()` releases our fd without driving the lines LOW first, so released ports stay in their last-driven state. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
+Same policy as the ASIair Pro driver: `close()` stops each PWM worker and sets that port to the steady level of its duty (`PWM_GPIO_SET_LEVEL`: on for any duty above 0, off at 0%), and boolean ports keep their commanded level; then it releases our fd. The kernel module retains per-port mode + level across opens, so a disconnect from the ASCOM client does **not** power-cycle anything. Set each port OFF in your client before disconnecting if you want a cold release.
 
 ### What about the USB power ports and the button?
 
@@ -483,7 +483,7 @@ The defaults match the StellaVita wiring. The configurable fields are the GPIO c
 
 | Field | Type | Notes |
 |----|----|----|
-| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip0` (the CM4's main BCM2711 bank). |
+| `gpioChip` | string | Path to the gpiochip character device. Must be `/dev/gpiochip0` (the default, the CM4's main BCM2711 bank); any other value is refused. |
 | `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `100` (tested best on StellaVita — dims flat panels smoothly without 50 Hz flicker). |
 | `ports` | array | Positional overlay on `[Port 1, Port 2, Port 3, Port 4]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The GPIO line mapping (18/10/17/4) is fixed. |
 
@@ -591,7 +591,7 @@ The fixed DC3/DC1/DC2 layout is not remappable; the configurable fields are the 
 
 | Field | Type | Notes |
 |----|----|----|
-| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip1`. |
+| `gpioChip` | string | Path to the gpiochip character device. Defaults to `/dev/gpiochip1`; the only other accepted value is `/dev/gpiochip0` (the stock BSP kernel). |
 | `pwmFrequencyHz` | int | Soft-PWM frequency (1–100000) for any PWM port. Default `50` (dims flat panels; raise for dew-heater-only setups if you prefer). |
 | `ports` | array | Positional overlay on `[DC3, DC1, DC2]`; each entry's optional `pwm` (bool) / `name` (string) is applied to that port. The DC3 entry's `pwm` is ignored (no GPIO). |
 

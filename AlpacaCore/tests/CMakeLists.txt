@@ -22,21 +22,32 @@ endif()
 # Test sources
 set(TEST_SOURCES
     test_alpaca_defs.cpp
+    test_contract_sweep.cpp
     test_async_connectable.cpp
+    test_device_catalog.cpp
+    test_catalog_builtins.cpp
     test_device_registry.cpp
+    test_device_state.cpp
     test_error_handling.cpp
     test_fake_pty_write.cpp
     test_host_clock.cpp
+    test_motion_limits.cpp
     test_poll_settle.cpp
+    test_rotator_sync_offset_store.cpp
+    test_task_clock.cpp
+    test_async_operation.cpp
+    test_connection_resolver.cpp
     test_serial_by_id_scan.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
+    test_telescope_driver_watchdog.cpp
     test_units.cpp
     test_version_format.cpp
 )
 
 if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_camera.cpp)
+    list(APPEND TEST_SOURCES test_zwo_camera_identity.cpp)
     list(APPEND TEST_SOURCES test_zwo_focuser.cpp)
     list(APPEND TEST_SOURCES test_zwo_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)
@@ -45,6 +56,8 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_asiair_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_plus_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_telescope.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_zwo_async_slew_failure.cpp)
 endif()
 
 if(TARGET alpacacore_qhy)
@@ -58,10 +71,14 @@ if(TARGET alpacacore_qhy)
     # connect path, so it carries its own [stress] registration.
     list(APPEND TEST_SOURCES test_qhy_focuser.cpp)
     list(APPEND TEST_SOURCES test_qhy_focuser_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_qhy_focuser_deferred_connect.cpp)
     # Standalone QHYCFW3 over its own CP2102 USB port: bare-ASCII serial
     # protocol, no SDK; the pty fake gives it a real connect path too.
     list(APPEND TEST_SOURCES test_qhy_cfw3_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_qhy_cfw3_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_qhy_cfw3_filterwheel_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)
@@ -70,19 +87,43 @@ if(TARGET alpacacore_synscan)
     # destruction; run under the sanitizers-tsan CI job (issue #101).
     list(APPEND TEST_SOURCES test_synscan_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_synscan_async_park.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_synscan_async_slew_failure.cpp)
+    # Refused operation-slot starts leave the mount stopped and the state consistent.
+    list(APPEND TEST_SOURCES test_synscan_slot.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_synscan_telescope_deferred_connect.cpp)
+    # Precise e/z replies decode the upper 24 bits of each field (issue #785).
+    list(APPEND TEST_SOURCES test_synscan_precise_position.cpp)
+    list(APPEND TEST_SOURCES test_synscan_goto_landing.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
         test_skywatcher_async.cpp test_skywatcher_serial.cpp
-        test_skywatcher_pointing.cpp)
+        test_skywatcher_pointing.cpp
+        test_skywatcher_link_loss.cpp)
+    # Altitude floor / meridian limit: goto target check over the fake mount
+    # (open-astro#436).
+    list(APPEND TEST_SOURCES test_skywatcher_motion_limits.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_skywatcher_async_slew_failure.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_skywatcher_telescope_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope.cpp test_ioptron_ieaf_focuser.cpp
         test_ioptron_filterwheel.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
+    # AbortSlew fences the async dispatch thread (issue #768).
+    list(APPEND TEST_SOURCES test_ioptron_abort_slew.cpp)
+    # Auto-detect resolves at connect time (issue #659): mount and iEAF.
+    list(APPEND TEST_SOURCES test_ioptron_telescope_deferred_connect.cpp
+        test_ioptron_ieaf_focuser_deferred_connect.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
@@ -96,6 +137,8 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_telescope.cpp)
     # Same telescope [stress] coverage as SynScan/iOptron (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_onstep_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_onstep_telescope_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over an unreachable URL, #271.
@@ -106,6 +149,8 @@ if(TARGET alpacacore_gemini)
          test_gemini_pdh_switch.cpp)
     # switch/covercalibrator over the pty fakes + fail-fast focuser [stress], #271
     list(APPEND TEST_SOURCES test_gemini_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_gemini_focuser_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
@@ -115,6 +160,8 @@ if(TARGET alpacacore_wandererastro)
 endif()
 if(TARGET alpacacore_astroasis)
     list(APPEND TEST_SOURCES test_astroasis_focuser.cpp test_astroasis_concurrency_stress.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_astroasis_focuser_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_svbony)
     list(APPEND TEST_SOURCES test_svbony_camera.cpp)
@@ -124,6 +171,9 @@ if(TARGET alpacacore_svbony)
 endif()
 if(TARGET alpacacore_gphoto)
     list(APPEND TEST_SOURCES test_gphoto_camera.cpp)
+    # Fault-injectable GPhotoSDK/RawDecoder seam (issue #489): connect,
+    # widget-fallback, ISO, and bulb-capture paths without hardware.
+    list(APPEND TEST_SOURCES test_gphoto_fake_sdk.cpp)
     # Camera lifecycle storm (issue #241); run under the sanitizers-tsan CI job.
     list(APPEND TEST_SOURCES test_gphoto_concurrency_stress.cpp)
 endif()
@@ -132,6 +182,10 @@ if(TARGET alpacacore_celestron)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_celestron_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_celestron_async_park.cpp)
+    # Auto-detect resolves at connect time (issue #659).
+    list(APPEND TEST_SOURCES test_celestron_telescope_deferred_connect.cpp)
+    # Async slew failure surfaces through Slewing (issue #575).
+    list(APPEND TEST_SOURCES test_celestron_async_slew_failure.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
@@ -165,54 +219,81 @@ endif()
 
 # Create test executable
 add_executable(alpacacore_tests ${TEST_SOURCES})
-target_link_libraries(alpacacore_tests PRIVATE alpacacore ${CATCH2_MAIN_TARGET})
+target_link_libraries(alpacacore_tests PRIVATE alpacacore alpacacore_builtins ${CATCH2_MAIN_TARGET})
 if(TARGET alpacacore_zwo)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_zwo)
+    # The registry in contract_sweep.h is guarded by this macro; the vendor
+    # targets do not export it, so define it here or the sweep compiles empty.
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ZWO)
 endif()
 if(TARGET alpacacore_qhy)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_qhy)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_QHY)
 endif()
 if(TARGET alpacacore_synscan)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_synscan)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_SYNSCAN)
 endif()
 if(TARGET alpacacore_skywatcher)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_skywatcher)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_SKYWATCHER)
 endif()
 if(TARGET alpacacore_ioptron)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_ioptron)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_IOPTRON)
 endif()
 if(TARGET alpacacore_onstep)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_onstep)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ONSTEP)
 endif()
 if(TARGET alpacacore_weewx)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_weewx)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_WEEWX)
 endif()
 if(TARGET alpacacore_gemini)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_gemini)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_GEMINI)
 endif()
 if(TARGET alpacacore_wandererastro)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_wandererastro)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_WANDERERASTRO)
 endif()
 if(TARGET alpacacore_svbony)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_svbony)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_SVBONY)
 endif()
 if(TARGET alpacacore_gphoto)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_gphoto)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_GPHOTO)
 endif()
 if(TARGET alpacacore_celestron)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_celestron)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_CELESTRON)
 endif()
 if(TARGET alpacacore_bisque)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_bisque)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_BISQUE)
 endif()
 if(TARGET alpacacore_touptek)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_touptek)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_TOUPTEK)
 endif()
 if(TARGET alpacacore_playerone)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_playerone)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_PLAYERONE)
 endif()
 if(TARGET alpacacore_astroasis)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_astroasis)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ASTROASIS)
+endif()
+
+# Driver-level build flags the registry also keys on (same names the router
+# uses; AlpacaHTTP/CMakeLists.txt defines them for the router the same way).
+if(TARGET alpacacore_ioptron AND ALPACACORE_IOPTRON_POWERBOX)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_IOPTRON_POWERBOX)
+endif()
+if(TARGET alpacacore_touptek AND ALPACACORE_TOUPTEK_STELLAVITA)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_TOUPTEK_STELLAVITA)
 endif()
 
 # Both QHY and ZWO SDKs define isLeapYear() at file scope.

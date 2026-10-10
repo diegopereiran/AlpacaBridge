@@ -13,13 +13,22 @@
 #pragma once
 
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/motion_policy.h>
+#include <alpacahttp/software_update.h>
 
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace alpacahttp {
+
+// open-astro#392: http.allowed_hosts and the AllowedHosts web setting are
+// one comma-separated string. Entries are
+// trimmed and empty ones dropped; the router normalizes the rest.
+std::vector<std::string> split_host_list(std::string_view value);
 
 enum class LogLevel {
     DEBUG,
@@ -55,6 +64,32 @@ public:
     // hardware RTC. Settable for the same reason the keep-alive cap is:
     // a test cannot wait out the default (kRtcProbeRateLimit + 1 s).
     int rtc_probe_interval_seconds() const { return rtc_probe_interval_seconds_; }
+    // open-astro#547: how long a telescope may go without any client request
+    // reaching it while it is slewing before the client-silence motion
+    // watchdog stops it. 0 disables the watchdog. Default matches
+    // AlpacaCore's kClientSilenceStopInterval (util/motion_policy.h), the
+    // shared home for this and open-astro#521's relink window.
+    int motion_watchdog_seconds() const { return motion_watchdog_seconds_; }
+    // Software update (docs/software-update.md): the APT Packages index the
+    // web UI's "Check for Updates" reads. Only the CHECK uses it; the install
+    // always goes through the host's own apt sources. Empty disables the
+    // check (the card then says so).
+    const std::string& update_packages_url() const { return update_packages_url_; }
+    // Templates with "{version}" for the newer version's plain-language notes
+    // (Markdown, shown in the card) and its release page (linked). Empty
+    // disables each.
+    const std::string& update_release_notes_url() const { return update_release_notes_url_; }
+    const std::string& update_release_url() const { return update_release_url_; }
+    // open-astro#392: extra names the router accepts as a request's Host, on
+    // top of the built-in ones (IP literals, localhost, the machine's own
+    // name, *.local, *.home.arpa, *.internal). An entry with a leading dot is
+    // a suffix (".lan" = "lan" and every "*.lan"). Trimmed, empty entries
+    // dropped; the router normalizes case, port and trailing dot. Read from
+    // the file at start-up; the web UI rewrites it live through the router
+    // and the file (PUT /management/v1/description).
+    const std::vector<std::string>& allowed_hosts() const { return allowed_hosts_; }
+    // http.host_check_enabled: apply the Host allowlist. Off unless set.
+    bool host_check_enabled() const { return host_check_enabled_; }
     const std::string& log_directory() const { return log_directory_; }
     bool file_logging_enabled() const { return file_logging_enabled_; }
     int log_retention_days() const { return log_retention_days_; }
@@ -95,6 +130,16 @@ public:
         if (seconds < 1) seconds = 1;
         rtc_probe_interval_seconds_ = seconds;
     }
+    // open-astro#547: 0 = disabled, clamped up from any negative value; no
+    // upper clamp (unlike the RTC probe seam, an operator may legitimately
+    // want longer than the default for a slow-polling client).
+    void set_motion_watchdog_seconds(int seconds) {
+        if (seconds < 0) seconds = 0;
+        motion_watchdog_seconds_ = seconds;
+    }
+    void set_update_packages_url(const std::string& url) { update_packages_url_ = url; }
+    void set_update_release_notes_url(const std::string& url) { update_release_notes_url_ = url; }
+    void set_update_release_url(const std::string& url) { update_release_url_ = url; }
     void set_log_directory(const std::string& dir) { log_directory_ = dir; }
     void set_file_logging_enabled(bool enabled) { file_logging_enabled_ = enabled; }
     void set_log_retention_days(int days) { log_retention_days_ = days; }
@@ -130,6 +175,13 @@ private:
     static constexpr int kDefaultRtcProbeIntervalSeconds =
         static_cast<int>(alpacacore::util::HostClock::kRtcProbeRateLimit.count()) + 1;
     int rtc_probe_interval_seconds_ = kDefaultRtcProbeIntervalSeconds;
+    // open-astro#547.
+    int motion_watchdog_seconds_ = static_cast<int>(alpacacore::util::kClientSilenceStopInterval.count());
+    std::string update_packages_url_ = util::kDefaultPackagesUrl;
+    std::string update_release_notes_url_ = util::kDefaultReleaseNotesUrl;
+    std::string update_release_url_ = util::kDefaultReleaseUrl;
+    std::vector<std::string> allowed_hosts_;
+    bool host_check_enabled_ = false;
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever

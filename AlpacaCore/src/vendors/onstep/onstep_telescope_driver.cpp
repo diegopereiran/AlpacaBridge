@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
+#include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
@@ -24,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <functional>
 #include <mutex>
 #include <numbers>
 #include <optional>
@@ -104,10 +106,10 @@ void alt_az_to_ra_dec(double alt_deg, double az_deg, double lat_deg, double lst_
 }
 
 void validate_ra_dec(double ra, double dec, const char* context) {
-    if (ra < 0.0 || ra >= 24.0) {
+    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
         throw AlpacaException(std::string(context) + ": RA out of range", AlpacaError::InvalidValue);
     }
-    if (dec < -90.0 || dec > 90.0) {
+    if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
         throw AlpacaException(std::string(context) + ": Dec out of range", AlpacaError::InvalidValue);
     }
 }
@@ -121,10 +123,12 @@ public:
 
     OnStepTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                           std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-                          std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect)
+                          std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
+                          util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
         : AsyncConnectable("OnStep"),
           device_number_(device_number),
           connection_info_(connection_info),
+          connection_resolver_(std::move(connection_resolver)),
           connected_(false),
           site_elevation_m_(site_elevation_m.value_or(0.0)),
           pending_site_latitude_(site_latitude_deg),
@@ -208,9 +212,19 @@ public:
 
         auto& protocol = OnStepProtocolWrapper::instance();
         if (connected) {
-            if (!protocol.connect(connection_info_)) {
-                throw AlpacaException("Failed to connect to OnStep mount");
-            }
+            // An auto-detected mount resolves its port here, not in the factory (#659).
+            util::connect_resolved(
+                connection_info_, connection_resolved_, connection_resolver_,
+                [&protocol](const ConnectionInfo& info) {
+                    if (!protocol.connect(info)) {
+                        // Refused TCP connect or vanished serial node: stale, re-scan.
+                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint("Failed to connect to OnStep mount");
+                        }
+                        throw AlpacaException("Failed to connect to OnStep mount");
+                    }
+                },
+                "OnStep");
             connected_ = true;
             status_cache_valid_ = false;
             equatorial_cache_valid_ = false;
@@ -349,7 +363,7 @@ public:
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
         (void)action_parameters;
-        throw AlpacaException("Action not supported: " + std::string(action_name));
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
     bool can_action(std::string_view action_name) const override {
@@ -605,7 +619,7 @@ public:
     double get_site_elevation() const override { return site_elevation_m_; }
 
     void set_site_elevation(double elevation) override {
-        if (elevation < -300.0 || elevation > 10000.0) {
+        if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters", AlpacaError::InvalidValue);
         }
         // Client-side only: the LX200/OnStep protocol has no elevation command.
@@ -620,7 +634,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (latitude < -90.0 || latitude > 90.0) {
+        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
             throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -644,7 +658,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (longitude < -180.0 || longitude > 180.0) {
+        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
             throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -664,6 +678,7 @@ public:
     }
 
     double get_target_declination() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!target_dec_set_) {
             throw AlpacaException("Target declination has not been set", AlpacaError::ValueNotSet);
         }
@@ -671,14 +686,16 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (dec < -90.0 || dec > 90.0) {
+        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
             throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
     }
 
     double get_target_right_ascension() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!target_ra_set_) {
             throw AlpacaException("Target right ascension has not been set", AlpacaError::ValueNotSet);
         }
@@ -686,9 +703,10 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (ra < 0.0 || ra >= 24.0) {
+        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
             throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
     }
@@ -821,17 +839,29 @@ public:
     }
 
     void slew_to_target() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        slew_to_coordinates(target_ra_hours_, target_dec_degrees_);
+        slew_to_coordinates(ra, dec);
     }
 
     void slew_to_target_async() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        slew_to_coordinates_async(target_ra_hours_, target_dec_degrees_);
+        slew_to_coordinates_async(ra, dec);
     }
 
     void sync_to_coordinates(double ra, double dec) override {
@@ -857,10 +887,16 @@ public:
     }
 
     void sync_to_target() override {
-        if (!target_ra_set_ || !target_dec_set_) {
-            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+        double ra, dec;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!target_ra_set_ || !target_dec_set_) {
+                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
+            }
+            ra = target_ra_hours_;
+            dec = target_dec_degrees_;
         }
-        sync_to_coordinates(target_ra_hours_, target_dec_degrees_);
+        sync_to_coordinates(ra, dec);
     }
 
     void unpark() override {
@@ -904,13 +940,28 @@ public:
         if (!moving) {
             // Defensive dual-stop, matching the project's convention for
             // fixed-direction (rather than signed-rate) motion protocols.
-            try {
-                protocol.move_axis_stop(positive_dir);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
-            }
-            try {
-                protocol.move_axis_stop(negative_dir);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            // Both stops are always tried. The driver cannot tell which
+            // direction the mount needed stopped, so any failed stop may be
+            // the one that mattered: report it and keep the axis moving
+            // (#742).
+            std::string stop_error;
+            const auto try_stop = [&](int dir) {
+                try {
+                    protocol.move_axis_stop(dir);
+                } catch (const std::exception& ex) {
+                    if (stop_error.empty()) {
+                        stop_error = ex.what();
+                    }
+                } catch (...) {
+                    if (stop_error.empty()) {
+                        stop_error = "unknown exception";
+                    }
+                }
+            };
+            try_stop(positive_dir);
+            try_stop(negative_dir);
+            if (!stop_error.empty()) {
+                throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
             }
         } else {
             protocol.move_axis_start(rate > 0.0 ? positive_dir : negative_dir, std::abs(rate));
@@ -949,12 +1000,28 @@ public:
         check_connected();
         check_not_parked_locked("AbortSlew");
         auto& protocol = OnStepProtocolWrapper::instance();
-        protocol.abort_slew();
-        for (int dir = 0; dir < 4; ++dir) {
+        // Try every stop on its own, so one lost command cannot skip the others (#781).
+        std::string stop_error;
+        const auto try_stop = [&stop_error](const std::function<void()>& stop) {
             try {
-                protocol.move_axis_stop(dir);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                stop();
+            } catch (const std::exception& ex) {
+                if (stop_error.empty()) {
+                    stop_error = ex.what();
+                }
+            } catch (...) {
+                if (stop_error.empty()) {
+                    stop_error = "unknown exception";
+                }
             }
+        };
+        try_stop([&protocol]() { protocol.abort_slew(); });
+        for (int dir = 0; dir < 4; ++dir) {
+            try_stop([&protocol, dir]() { protocol.move_axis_stop(dir); });
+        }
+        if (!stop_error.empty()) {
+            // The mount may still be moving: leave Slewing as it was.
+            throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
         }
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -1006,10 +1073,10 @@ private:
     }
 
     void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out) const {
-        if (altitude < -90.0 || altitude > 90.0) {
+        if (!std::isfinite(altitude) || altitude < -90.0 || altitude > 90.0) {
             throw AlpacaException("Altitude out of range", AlpacaError::InvalidValue);
         }
-        if (azimuth < 0.0 || azimuth > 360.0) {
+        if (!std::isfinite(azimuth) || azimuth < 0.0 || azimuth > 360.0) {
             throw AlpacaException("Azimuth out of range", AlpacaError::InvalidValue);
         }
         ensure_site_info_cached_locked();
@@ -1239,6 +1306,11 @@ private:
 
     int device_number_;
     ConnectionInfo connection_info_;
+    // Set by the auto-detect factory; empty for an explicit port or host.
+    // connection_resolved_ is true once a connect has run the resolver, so a
+    // later connect retries that endpoint before scanning again (#659).
+    util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    bool connection_resolved_ = false;
     mutable std::mutex mutex_;
     bool connected_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
@@ -1321,11 +1393,19 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(int device_nu
                                                    site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number, int mount_index,
-                                                              std::optional<double> site_latitude_deg,
-                                                              std::optional<double> site_longitude_deg,
-                                                              std::optional<double> site_elevation_m,
-                                                              std::optional<bool> sync_time_on_connect) {
+std::unique_ptr<TelescopeDriver> create_onstep_telescope_deferred(
+    int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    if (!connection_resolver) {
+        throw AlpacaException("OnStep telescope: a connection resolver is required", AlpacaError::InvalidValue);
+    }
+    return std::make_unique<OnStepTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
+                                                   site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                   std::move(connection_resolver));
+}
+
+ConnectionInfo resolve_onstep_serial_auto(int mount_index) {
     auto ports = enumerate_onstep_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("OnStep mount"));
@@ -1341,9 +1421,18 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
     ConnectionInfo conn;
     conn.type = ConnectionType::Serial;
     conn.port_path = port.port_path;
+    return conn;
+}
 
-    return create_onstep_telescope_with_site(device_number, conn, site_latitude_deg, site_longitude_deg,
-                                             site_elevation_m, sync_time_on_connect);
+std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number, int mount_index,
+                                                              std::optional<double> site_latitude_deg,
+                                                              std::optional<double> site_longitude_deg,
+                                                              std::optional<double> site_elevation_m,
+                                                              std::optional<bool> sync_time_on_connect) {
+    // The serial scan runs at connect time (#659), not here.
+    return create_onstep_telescope_deferred(
+        device_number, [mount_index] { return resolve_onstep_serial_auto(mount_index); }, site_latitude_deg,
+        site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
 
 }  // namespace alpacacore::vendor::onstep

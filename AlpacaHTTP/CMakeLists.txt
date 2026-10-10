@@ -1,10 +1,12 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 
-# Read version from workspace VERSION file
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" PROJECT_VERSION LIMIT_COUNT 1)
-string(STRIP "${PROJECT_VERSION}" PROJECT_VERSION)
+# Read version from workspace VERSION file: project() takes the numeric part
+# (ALPACABRIDGE_BASE_VERSION), the version defines below keep the full string
+# (ALPACABRIDGE_VERSION, 5.0.0~beta1 for a beta).
+include("${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/cmake/AlpacaBridgeVersion.cmake")
+alpacabridge_read_version("${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
 
-project(AlpacaHTTP VERSION ${PROJECT_VERSION} LANGUAGES CXX)
+project(AlpacaHTTP VERSION ${ALPACABRIDGE_BASE_VERSION} LANGUAGES CXX)
 
 # Git branch/commit for the running build, shown in the web UI so a dev build
 # checked out on a feature branch doesn't read as an official release
@@ -249,13 +251,16 @@ set(ALPACAHTTP_SOURCES
     src/core/response.cpp
     src/core/config.cpp
     src/core/json_utils.cpp
+    src/core/catalog_json.cpp
     src/http/router.cpp
     src/http/server.cpp
+    src/http/thread_join.cpp
     src/util/threading.cpp
     src/util/logging_adapter.cpp
     src/util/error_mapping.cpp
     src/util/host_timezone.cpp
     src/util/wifi_manager.cpp
+    src/util/software_update.cpp
 )
 
 if(ALPACAHTTP_ENABLE_DISCOVERY)
@@ -286,22 +291,37 @@ endif()
 
 # Create library
 add_library(alpacahttp STATIC ${ALPACAHTTP_SOURCES})
-target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${PROJECT_VERSION}\")
+target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_VERSION=\"${ALPACABRIDGE_VERSION}\")
+# The join test hook (ScopedJoinHooksForTest) is process-wide mutable state and
+# sits on every production stop()/wait() join path, so it is compiled only into
+# test builds. debian/rules configures with ALPACAHTTP_BUILD_TESTS=OFF, so no
+# shipped package contains it. PUBLIC because the tests include the header.
+if(ALPACAHTTP_BUILD_TESTS)
+    target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_ENABLE_TEST_HOOKS)
+endif()
 target_compile_definitions(alpacahttp PUBLIC ALPACAHTTP_GIT_BRANCH="${ALPACAHTTP_GIT_BRANCH}" ALPACAHTTP_GIT_COMMIT="${ALPACAHTTP_GIT_COMMIT}" ALPACAHTTP_GIT_DIRTY=${ALPACAHTTP_GIT_DIRTY} ALPACAHTTP_GIT_IS_RELEASE=${ALPACAHTTP_GIT_IS_RELEASE} ALPACAHTTP_GIT_REMOTE_URL=\"${ALPACAHTTP_GIT_REMOTE_URL}\")
 
 # zlib: gzip framing for the combined log download endpoint
 find_package(ZLIB REQUIRED)
 
-# libsystemd: sd-bus client for the NetworkManager-backed wifi endpoints
+# libsystemd: sd-bus client for the NetworkManager-backed wifi endpoints and
+# for starting the software-update helper unit (docs/software-update.md)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+
+# libcurl: the software-update check fetches the APT Packages index
+# (already a build dependency through the WeeWX driver; debian/control and
+# every CI job install libcurl4-openssl-dev)
+find_package(CURL REQUIRED)
 
 target_link_libraries(alpacahttp
     PUBLIC
         nlohmann_json::nlohmann_json
         AlpacaCore::alpacacore
+        AlpacaCore::alpacacore_builtins
         ZLIB::ZLIB
         PkgConfig::SYSTEMD
+        CURL::libcurl
 )
 
 # Both QHY and ZWO SDKs define isLeapYear() at file scope — silence the
@@ -343,6 +363,24 @@ if(ALPACAHTTP_BUILD_TESTS)
     set(TEST_ROUTING_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_routing_cwd)
     file(MAKE_DIRECTORY ${TEST_ROUTING_DIR})
     add_test(NAME test_routing COMMAND test_routing WORKING_DIRECTORY ${TEST_ROUTING_DIR})
+    # open-astro#664: the devicecatalog endpoint case reads the committed
+    # fixture tests/fixtures/devicecatalog.json, located from the source tree
+    # the same way test_route_table finds its type-name fixture.
+    target_compile_definitions(test_routing PRIVATE
+        ALPACAHTTP_ROUTER_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+    # #646: route-table snapshot, dispatch reach and rejection fixture. Own
+    # working directory for the same reason as test_routing (relative
+    # config/registered_devices.json), and its own process because the
+    # DeviceRegistry is process-wide and this test claims device number 4646
+    # for one stub per device type.
+    add_executable(test_route_table tests/test_route_table.cpp)
+    target_link_libraries(test_route_table alpacahttp)
+    target_compile_definitions(test_route_table PRIVATE
+        ALPACAHTTP_ROUTER_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set(TEST_ROUTE_TABLE_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_route_table_cwd)
+    file(MAKE_DIRECTORY ${TEST_ROUTE_TABLE_DIR})
+    add_test(NAME test_route_table COMMAND test_route_table WORKING_DIRECTORY ${TEST_ROUTE_TABLE_DIR})
 
     # Threaded storm over the router's persisted_devices_ store (audit 3.0.1
     # follow-up): configure/remove/configureddevices from concurrent threads,
@@ -357,9 +395,39 @@ if(ALPACAHTTP_BUILD_TESTS)
     
     # Socket-level tests for the Server request-read path (read_request), which
     # test_routing.cpp bypasses. Covers the header-size (431) boundary (#129).
+    # Both this target and test_thread_join need src/ on the include path
+    # because http/thread_join.h is an internal seam, not public API under
+    # include/.
     add_executable(test_server_socket tests/test_server_socket.cpp)
     target_link_libraries(test_server_socket alpacahttp)
+    target_include_directories(test_server_socket PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test_server_socket COMMAND test_server_socket)
+
+    # Unit tests for the join_or_abandon() fallback seam (issue #561).
+    add_executable(test_thread_join tests/test_thread_join.cpp)
+    target_link_libraries(test_thread_join alpacahttp)
+    target_include_directories(test_thread_join PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME test_thread_join COMMAND test_thread_join)
+
+    # open-astro#664: the JSON bridge of the device catalog (src/core/catalog_json.h,
+    # an internal seam like thread_join.h, hence src/ on the include path).
+    add_executable(test_catalog_json tests/test_catalog_json.cpp)
+    target_link_libraries(test_catalog_json alpacahttp)
+    target_include_directories(test_catalog_json PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME test_catalog_json COMMAND test_catalog_json)
+
+    # open-astro#765: device config cannot choose the GPIO chip, line or device node. The test
+    # replaces libgpiod with recording stubs, so it needs a libgpiod board driver (ZWO ASIAIR,
+    # iMate PowerBox or StellaVita) and its own working directory (relative
+    # config/registered_devices.json).
+    if(TARGET alpacacore_zwo OR ALPACACORE_IOPTRON_POWERBOX OR ALPACACORE_TOUPTEK_STELLAVITA)
+        add_executable(test_gpio_config_pin tests/test_gpio_config_pin.cpp)
+        target_link_libraries(test_gpio_config_pin alpacahttp)
+        target_include_directories(test_gpio_config_pin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+        set(TEST_GPIO_CONFIG_PIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_gpio_config_pin_cwd)
+        file(MAKE_DIRECTORY ${TEST_GPIO_CONFIG_PIN_DIR})
+        add_test(NAME test_gpio_config_pin COMMAND test_gpio_config_pin WORKING_DIRECTORY ${TEST_GPIO_CONFIG_PIN_DIR})
+    endif()
 
     add_executable(test_json tests/test_json.cpp)
     target_link_libraries(test_json alpacahttp)
@@ -375,7 +443,34 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_config alpacahttp)
     add_test(NAME test_config COMMAND test_config)
 
+    add_executable(test_log_text tests/test_log_text.cpp)
+    target_link_libraries(test_log_text alpacahttp)
+    add_test(NAME test_log_text COMMAND test_log_text)
+
+    add_executable(test_yaml_comment tests/test_yaml_comment.cpp)
+    target_link_libraries(test_yaml_comment alpacahttp)
+    add_test(NAME test_yaml_comment COMMAND test_yaml_comment)
+
     add_executable(test_wifi_manager tests/test_wifi_manager.cpp)
     target_link_libraries(test_wifi_manager alpacahttp)
     add_test(NAME test_wifi_manager COMMAND test_wifi_manager)
+
+    add_executable(test_wifi_ssid tests/test_wifi_ssid.cpp)
+    target_link_libraries(test_wifi_ssid alpacahttp)
+    add_test(NAME test_wifi_ssid COMMAND test_wifi_ssid)
+
+    # Issue #764: the JSON sink must not throw on non-UTF-8 bytes (Wi-Fi SSIDs).
+    add_executable(test_response_utf8 tests/test_response_utf8.cpp)
+    target_link_libraries(test_response_utf8 alpacahttp)
+    add_test(NAME test_response_utf8 COMMAND test_response_utf8)
+
+    # Software update: dpkg version ordering, Packages index parsing and the
+    # manager's policy over a scripted backend (docs/software-update.md).
+    add_executable(test_software_update tests/test_software_update.cpp)
+    target_link_libraries(test_software_update alpacahttp)
+    # It reads debian/alpacabridge-software-update and the two unit files to
+    # pin the transcript path on both sides of the root helper.
+    target_compile_definitions(test_software_update PRIVATE
+        ALPACAHTTP_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_test(NAME test_software_update COMMAND test_software_update)
 endif()

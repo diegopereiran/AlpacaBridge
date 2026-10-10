@@ -14,6 +14,7 @@ on:
   push:
     branches:
       - main
+      - "stable/**"
   pull_request:
   schedule:
     # Weekly catch-all so advisories published after a quiet period still surface.
@@ -39,15 +40,15 @@ jobs:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           languages: c-cpp
           build-mode: none
-          # Excludes cpp/cleartext-transmission (serial-port false positive);
-          # see the config file for rationale.
+          # Excludes cpp/cleartext-transmission (serial-port false positive) and
+          # AlpacaCore/external/** (vendored SDKs); see the config file for rationale.
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           category: "/language:c-cpp"

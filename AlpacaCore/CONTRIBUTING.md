@@ -27,7 +27,7 @@ All contributions must be licensed under the GNU Affero General Public License v
 
 ## Testing
 
-All non-trivial code must have unit tests. Use Catch2 or doctest for testing.
+All non-trivial code must have unit tests. Use Catch2 (v2 or v3) for testing.
 
 ## Conformance Logs
 
@@ -40,5 +40,5 @@ Also include AlpacaHTTP server logs captured during the ConformU run (DEBUG or T
 ## Documentation
 
 - Add Doxygen comments for public APIs
-- Update CHANGELOG.md for user-facing changes
+- Add a `changelog.d/<branch-slug>.md` fragment for user-facing changes (format: `changelog.d/README.md`); do not edit `CHANGELOG.md`
 - Update README.md if adding new features or build options

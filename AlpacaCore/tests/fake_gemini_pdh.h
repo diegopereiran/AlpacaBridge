@@ -86,6 +86,11 @@ public:
     // --- Fake hardware state (readable/settable by tests) ---
 
     void set_firmware(int version) { firmware_.store(version); }
+    /// One shot, then spent: the reply to the next ">H#" identity handshake (the only command that spends it; the
+    /// driver's connect sends it first) is held for @p delay. A connect waiting on that reply stays open that long;
+    /// used by the contract sweep to make Connecting observable.
+    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+
     void set_input_voltage(double v) {
         std::lock_guard<std::mutex> lock(mutex_);
         input_voltage_ = v;
@@ -99,8 +104,9 @@ public:
     void set_muted(bool muted) { muted_.store(muted); }
 
     /// Tear the pty down underneath the driver: the master side closes, so
-    /// the driver's reads and writes on the slave fail with EIO from here on
-    /// (what a USB re-enumeration / unplug looks like, issue #237). Not
+    /// the driver's writes on the slave fail with EIO and its reads return 0
+    /// at once from here on (what a USB re-enumeration / unplug looks like,
+    /// issue #237; the early 0 is issue #772). Not
     /// reversible; the fake only records commands received before the cut,
     /// and slave_path() is empty afterwards (copy it first if the test still
     /// needs it).
@@ -196,6 +202,8 @@ private:
             commands_.push_back(cmd);
         }
         if (cmd == ">H#") {
+            if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
             send("*HGeminiPowerBoxPlusAdv3#");
             return;
         }
@@ -226,6 +234,7 @@ private:
     PtyPair pty_;
     std::thread reader_;
     std::atomic<bool> stop_{false};
+    std::atomic<int> hold_ms_{0};
     std::atomic<int> firmware_{308};
     std::atomic<int> stream_ms_{0};
     std::atomic<bool> muted_{false};

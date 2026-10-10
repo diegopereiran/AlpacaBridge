@@ -22,10 +22,10 @@ Protocol documentation: `AlpacaCore/external/SynScan/SkyWatcher_Motor_Controller
 
 Connection types: Serial (the mount's own USB port or an EQDIR-class adapter, 8N1; the scan probes
 9600 then 115200 per port, because an EQ board's built-in PL2303 port answers only at 115200,
-so a silent Prolific/FTDI/CH340-class port costs at least about 3.3 s per scan: 1.5 s at 9600, the
-300 ms SynScan echo guard, 1.5 s at 115200, and up to roughly 4.4 s because the read loops only
-check their deadline between `VTIME` reads; multiplied by every such adapter on the rig; #403
-records the measurement) and Network (built-in Wi-Fi module,
+so a silent Prolific/FTDI/CH340-class port costs about 3.3 s per scan: 1.5 s at 9600, the
+300 ms SynScan echo guard, 1.5 s at 115200, each read bounded by `poll(POLLIN)` against its
+deadline so a port that ignores `VTIME` cannot stretch it; multiplied by every such adapter on the
+rig; #403 records the measurement) and Network (built-in Wi-Fi module,
 **UDP** port 11880 — one command per datagram, one reply per datagram; AP-mode address
 192.168.4.1). The wrapper retransmits up to 3 times on UDP timeout and drains stale
 datagrams before each send so replies cannot get off-by-one.
@@ -57,21 +57,26 @@ datagrams before each send so replies cannot get off-by-one.
   `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
   config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
   attaching to whatever mount answers. Use them rather than an inline `return false`; the
-  `portPath`, `host` and `connectionType` checks in every telescope branch do.
+  `portPath`, `host` and `connectionType` checks in every telescope branch do. Since #744 the
+  Sky-Watcher direct driver has no router branch: its device-catalog descriptor
+  (`AlpacaCore/src/vendors/skywatcher/skywatcher_schema.cpp`) applies the same source rule in
+  `Schema::normalize`, and the factory (`skywatcher_catalog.cpp`) logs the missing-site WARN.
   Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
   the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
   config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the
   ASCOM setters have always refused exactly that at runtime — a validation a client cannot bypass
   but a config can is not a validation. The reads and the check live in one shared
-  `read_site_coordinates()` used by all seven vendor branches that take a site, and on the
+  `read_site_coordinates()` used by the six router branches that take a site (for Sky-Watcher
+  the catalog's per-field min/max applies the same range since #744), and on the
   persisted path the offending coordinate is **cleared** so the driver's unset handling covers it. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math: the #432 sky frame (both the `a1` term and dec), the RA
   tracking direction (#250, restored by #432) and the Dec rate / pulse-guide sign (#253).
   **Not #261**, despite what this line said before #432 and what the `#274` CHANGELOG entry
-  still says as history: the pier-side branch and label are picked from the sky hour angle
-  and are hemisphere-independent, which is one of #432's findings. The driver comment on the
-  connect-time guard says the same. Time comes from two functions: `utc_now_locked()`
+  still says as history: the pier-side label is picked from the sky hour angle and is
+  hemisphere-independent, which is one of #432's findings; the mechanical branch is
+  `k * side` and mirrors with the hemisphere only on a board with a measured sense (#458).
+  The driver comment on the connect-time guard says the same. Time comes from two functions: `utc_now_locked()`
   feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
   client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
   the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
@@ -99,7 +104,7 @@ datagrams before each send so replies cannot get off-by-one.
   the same way calls it too.
 - Pointing convention (#432): home = counterweight down, tube parallel to the polar axis
   pointing at the visible pole, counts offset `0x800000`, axis angles `a1`/`a2` in degrees
-  from home in the increasing-count direction. **`HA = s * (a1/15) + (branch * 6 h)`
+  from home in the increasing-count direction. **`HA = s * (a1/15) + k * (branch * 6 h)`
   and `dec = s * (90 - |a2|)`, with `s = +1` north and `-1` south**, where `branch` is the
   sign of `a2` away from the pole and, inside a two-count deadband of `a2 = 0` where the
   encoder cannot say, the branch the last goto or sync commanded
@@ -107,23 +112,44 @@ datagrams before each send so replies cannot get off-by-one.
   counterweight-down home: the dec axis lies in the meridian plane there, so a dec-only
   rotation sweeps the HA = ±6 h circle and the meridian needs the bar horizontal
   (`a1 = ±90`); every reachable target keeps `|a1| <= 90`, which is the
-  counterweight-never-above-horizontal rule falling out of the geometry. Its SIGN follows
-  which side of the dec axis the tube is on and does NOT flip with hemisphere; the `a1`
-  term does, because the mount faces the other pole. **That asymmetry is measured, not
-  derived, and #458 is open on it**: geometry says the 6 h term must flip too, and the
-  two mounts it was fitted to (EQM-35 Pro south, Wave 150i north) cannot separate a
-  hemisphere effect from a per-board dec-axis count sense. Pier side is hemisphere-independent
-  (`branch > 0` -> pierEast, the same reader), since the goto picks the branch from the sky
-  hour angle.
+  counterweight-never-above-horizontal rule falling out of the geometry. Its sign
+  `k = s * eps` (`home_term_sign_locked()`) flips with the hemisphere like the `a1` term,
+  because a mount facing the other pole is the same mount turned half a turn about the
+  vertical, and with the board's dec-axis count sense `eps`, which is wiring, not
+  latitude (#458). `eps` is **measured, per mount code** (`measured_dec_axis_sense()`):
+  -1 for the EQM-35 Pro (0x32; south 2026-09-12 and a +37.2 latitude on the same rig
+  2026-09-19), +1 for the Wave 150i (0x45; the #432 report, north), +1 for the
+  EQ-AL55i Pro (0x09; a reporter's mount at about +40, 2026-09-20, #579). Every other
+  board keeps `k = +1`, the shipped model, which is 12 h out wherever that board's
+  `s * eps` is -1; adding a board takes one reading on it, not a derivation. Two boards
+  read +1 and one reads -1, so `eps` is per board and not a family constant, and the
+  classic Synta boards (EQ6, HEQ5, AZ-EQ6, EQ5 Pro) are all still unmeasured (#579).
+  The Wave 150i and the EQ-AL55i Pro south of the equator follow from geometry and have
+  not been measured; a board measured only in the north constrains nothing there, because
+  `s * eps = +1` (`k = +1`, so eps +1 in the north and -1 in the south) is also the unmeasured default. A per-device
+  `decAxisSense` setting (`auto` default, `normal` = eps +1, `reversed` = eps -1;
+  open-astro#582) overrides the table on connect and when `:e` fails; it sets eps,
+  never k, and the connect log names the source (measured table / user override /
+  unmeasured default / identify failed). The web UI shows the same source in the
+  device name (`eps: measured`, `eps: override normal|reversed`,
+  `eps: unmeasured default`, `eps: identify failed`), kept after a disconnect like the
+  model, and the Sky-Watcher form has a Dec axis sense select. Pier side is
+  `k * branch > 0` -> pierEast, the same reader, since the goto picks the side from the
+  sky hour angle; the Dec rate and guide signs read `branch` alone, because dec does not
+  involve `eps`.
   Tracking, `RightAscensionRate` and East/West pulses go through `ra_axis_sign_locked()`
   (counts up north, down south); `MoveAxis`, goto deltas and AutoHome are mechanical and
-  never apply it. This matches `indi-eqmod`'s `EncodersToRADec()` exactly in the north;
-  in the south the two differ by 12 h and a pier label, and the hardware backs this one.
+  never apply it. With `eps = +1` this is `indi-eqmod`'s `EncodersToRADec()` in both
+  hemispheres (asserted in `test_skywatcher_pointing.cpp`); with `k = +1` it matches
+  indi-eqmod in the north only and differs by 12 h in the south, and on the EQM-35 Pro
+  the hardware backs this model, not indi-eqmod's default.
   **Do not judge this model by the driver's own reported RA/Dec, ConformU included: the
   driver reports what it commands.** It was established by driving an EQM-35 Pro to known
   axis positions and reading the tube's real direction off the mount (2026-09-12); those
   rows are in the driver comment and asserted in `test_skywatcher_pointing.cpp`. Extend
   that file with a new hardware row for any change here.
+- **Motion limits (#436) are off by default and soft.** `minAltitudeDeg` and `meridianLimitMinutes` live in the catalog descriptor (`skywatcher_fields.h`); `util::MotionLimits` (`util/motion_limits.h`) is the pure decision. Only `SlewToCoordinatesAsync` (and so `SlewToTargetAsync`; the router refuses the synchronous forms with `MethodNotImplemented`) check the altitude floor, throwing `InvalidValue`; Park, FindHome, MoveAxis, Sync and PulseGuide are exempt from that check. The live guard (`run_limit_guard()`, its own `util::AsyncOperation` slot) watches MoveAxis and tracking while a limit is set and stops them on an inside-to-outside crossing through `set_tracking(false)` and `move_axis(axis, 0.0)` with `mutex_` released; it is edge-triggered, skips gotos, Park and FindHome, and `cancel_async_tasks()` joins it first. ConformU runs with both limits off.
+- The driver's blocking `slew_to_coordinates()` is not reachable over HTTP (the router refuses the synchronous slews with `MethodNotImplemented`). Called directly, one superseded by another generation-changing motion can throw `InvalidOperation` while the hardware GOTO continues to its target; the error reports that the synchronous wait lost ownership and does not prove the mount stopped.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
 - **Pulse guiding**: RA pulses while tracking are done by changing the RA step period
@@ -134,17 +160,48 @@ datagrams before each send so replies cannot get off-by-one.
   2026-09-06): the board stores the preset (`:i` reads it back) but the motor keeps its old
   rate. Every live in-place `:I` is therefore followed by a `:J` re-latch (INDI does the
   same), and the driver sample-verifies the rate over ~450 ms (`verify_live_rate_or_rekick`)
-  and resends `:I`+`:J` if the axis did not change speed. Pulses ≥ 1.5 s verify inside the
-  pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone);
+  and resends `:I`+`:J` if the axis did not change speed. **Except on the EQ-AL55i Pro
+  (0x09, `live_rate_change_needs_relatch()`, open-astro#666):** there a bare `:I` applied
+  16 of 16 times, and the `:J` is not free: each one re-anchors the board's trajectory on
+  the encoder, stepping the tracking RA axis by the servo's following error (~2 counts,
+  sign set by the mount's balance), which put ConformU's 5 s E/W pulses outside tolerance.
+  That board skips the re-latch at every live-rate site (pulse dispatch and restore, the
+  rate setters, the dispatch-failure recovery); the verify and its `:I`+`:J` resend stay,
+  so 0x09 still sends a `:J` (and takes its ~2-count step) whenever the verify finds a
+  stalled `:I` -- up to twice on a long pulse (dispatch and post-stop).
+  Add a board to that exception only on the same evidence: bare `:I` applied on hardware
+  AND a measured `:J` position step. The measurements are from MC firmware 3.48; the
+  3.46 readings in `FakeMountProfile::eq_al55i()` are from the same mount before its
+  firmware update (see the EQ-AL55i Pro firmware release notes below). Pulses ≥ 1.5 s verify inside the
+  pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone,
+  or on 0x09 on the bare `:I`);
   the `RightAscensionRate`/`TrackingRate` setters cannot wait 450 ms inside a property call,
-  so they spawn a one-shot background task (`rate_verify_thread_`, open-astro #248). That
-  task never takes `mutex_`, which is what lets every RA-taking path reap it WITH `mutex_`
-  held (setters, Tracking off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew,
-  disconnect) — a lock-free reap would leave a window for a setter to spawn one between an
-  initiator's reap and its lock, and the resend would land mid-pulse or on a stopped axis.
+  so they start a one-shot body on the `rate_verify_` slot (open-astro #248). Every RA-taking
+  path ends it WITH `mutex_` held through `cancel_rate_verify_locked()` (setters, Tracking
+  off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew; disconnect cancels and joins
+  the slot): `cancel()` never joins, so the body takes `mutex_` for its resend and sends
+  it only while the epoch it was started with (`rate_verify_epoch_`, bumped under `mutex_`
+  by every start and cancel) still matches. A cancel landing between the body's last wait
+  and its resend therefore cannot put `:I`+`:J` into an axis a pulse or a stop now owns.
+  The pulse body's own post-dispatch and post-restore checks resend the same way, gated on
+  its slot context.
+- **EQ-AL55i Pro motor-board firmware release notes** (Sky-Watcher's own changelog, copied
+  verbatim; append each new version here). Both versions on record ran on the same mount.
+  3.48 lists no motor-control change, so motor behaviour measured on either version is
+  taken to hold for both:
+  - **3.48**: "Support upgrading the Wi-Fi module's firmware." (the only change listed)
+  - **3.46**: the first version on record (`:e` -> `=032E09`, `FakeMountProfile::eq_al55i()`).
 - `:f` status nibbles: char0 bit0 speed-mode/bit1 CCW/bit2 fast; char1 bit0 running/bit1
   blocked; char2 bit0 init-done/bit1 level switch. Slewing = running AND NOT speed-mode
   on either axis (a tracking axis is not slewing).
+- **The `:i` step-period readback is a diagnostic only** (`set_step_period()`): it WARNs
+  on a mismatch with what `:I` wrote and never resends or throws. It turns itself off for
+  the connection when a board rejects `:i` with `!0`, and **per board when `:i` answers but
+  means nothing** (`step_period_readback_usable()`, open-astro#686): the EQ-AL55i Pro (0x09,
+  MC 3.48) answers `=FFFFFF` on both axes whatever was written, including while `:j` shows
+  the axis at the written rate, which logged a false mismatch on every checked write. Add a
+  board only on the same evidence: `:i` disagreeing with `:I` while the axis runs at the
+  written rate.
 - Connect sequence: `:e` version, `:a`/`:b`/`:g` per axis, then `:F` init (with `:E` home
   stamp) ONLY when the status reports not-initialized — never re-stamp an aligned session.
 - **Wave USB port is STM32 CDC-ACM** (`0483:5740`, `/dev/ttyACM*`, by-id name
@@ -222,14 +279,56 @@ datagrams before each send so replies cannot get off-by-one.
   constant ~79 arcsec sync-return error). Diagnosed by logging every motion
   frame (:G/:I/:J/:K) at WARN and killing ConformU at the first issue -- the
   trace showed three refinement gotos interleaved with the pulse.
+  Landing detection follows the same rule since open-astro#715: `wait_for_slew_complete()`
+  asks the board on every poll (`get_hardware_slewing_locked(false)`) instead of waiting out
+  an 8 s window, so a short goto lands when the board stops. The one window left is
+  `SlewToCoordinatesAsync`'s, covering only the gap before its task sets `goto_in_progress_`;
+  every exit of that body clears it, the early return of a cancelled body included (a
+  superseded body leaves it to the operation that replaced it).
 - **Reap the pulse task at every motion boundary** (slews, park, home,
-  moveaxis, sync, abort): ConformU's dual-axis pulse test leaves a live pulse
+  sync, abort): ConformU's dual-axis pulse test leaves a live pulse
   timer that otherwise fires its stop/step-period restore into the middle of
   the next goto. A CANCELLED pulse task must not touch the hardware -- the
-  canceller stops or re-commands the axes itself.
-- **AbortSlew must cancel the async slew task** (set `slew_task_cancel_`,
-  join later via reap) or the landing refinement re-slews after the abort;
-  every slew entry point reaps first, which also resets the flag.
+  canceller stops or re-commands the axes itself, so a path that commands one
+  axis reaps only that axis's pulse (PulseGuide #620, MoveAxis #630; a no-op
+  `MoveAxis(axis, 0)` reaps none) and sync stops both axes before `:E`.
+  Gate before reaping: a refused slew, MoveAxis or sync cancels nothing.
+- **AbortSlew must cancel the async slew body** (`slew_.cancel()`; the slot joins
+  it when the next body starts or on disconnect) or the landing refinement
+  re-slews after the abort. A cancelled body (AbortSlew, Unpark, disconnect)
+  stops the axes if it may have dispatched; a superseded one never touches them.
+- **Slew, goto, Park and FindHome bodies run in one `util::AsyncOperation` slot
+  (`slew_`); each axis's `MoveAxis(axis, 0)` stop-completion body has its own
+  (`stop_ops_[axis]`) with its own `OperationGeneration`** (decision 0006). Rules:
+  - A start does not wait for the body it replaces, so every initiator CLAIMS the
+    slot under `mutex_` first (`claim_slew_slot_locked()`: bump the slot generation
+    and `motion_generation_`, clear `parking_`/`homing_`), then sets its flags, then
+    calls `start_slew_body()` WITHOUT `mutex_`. A replaced body is Superseded: it
+    checks `owns_slew_state_locked(ctx)` under `mutex_` before touching a flag or
+    the axes. `MoveAxis` bumps `stop_generation_[axis]` under `mutex_` the same way.
+  - The four goto initiators (`SlewToCoordinates[Async]`, `SlewToTarget[Async]`)
+    share one start path, `start_goto()`, which is also where the #436 altitude
+    check runs; Park and FindHome claim the slot themselves and are exempt.
+  - A stop on one axis must not supersede the other axis's stop body, hence one
+    generation per axis (the same-axis refinement near the stop body's tail stays
+    on `motion_generation_`). Test: `SkyWatcher slot - a stop on one axis does not
+    supersede the other axis's stop body`.
+  - Waits inside a body go through `BodyScope`'s thread-local context
+    (`body_sleep()`, `body_stopped()`), so the helpers shared with the synchronous
+    `SlewToCoordinates` (which has no body) behave the same on both.
+  - `last_slew_error_` stays a driver member, not the slot's `last_failure()`:
+    AbortSlew, MoveAxis and a reconnect must clear it without starting a body. A
+    Park or FindHome failure is only logged (open-astro#631).
+  - No body calls `start()` or `cancel_all_and_join()` on its own slot (a park
+    tail that "restarts tracking" through a slot call would join itself or wait out
+    `kStaleReapTimeout`); use `cancel()` or `ctx.stop_reason()`. `start()` and
+    `cancel_all_and_join()` run without `mutex_`; `cancel()` may run with it.
+  - `start()` raises `AlpacaException` when the stale bound does not clear
+    (`InvalidOperation`) or the OS refuses a thread (`DriverException`); both change
+    nothing in the slot, and the initiator rolls its published flags back. When the claim had replaced a
+    body in flight, that body skips its stop, so the refusal also stops both axes
+    and publishes the AbortSlew state (`tracking_` and the tracking restore
+    cleared); a refusal that replaced nothing cancels nothing.
 - Debug technique: a watchdog loop that `pkill`s ConformU at the FIRST logged
   issue preserves the exact journal window and stops the mount from grinding
   through a failed run.
@@ -252,6 +351,24 @@ datagrams before each send so replies cannot get off-by-one.
   drain-before-send, a settle drain after any timeout, and per-command expected reply
   length validation; (4) run ConformU on the SBC itself (localhost), not across the LAN —
   VM-to-SBC jitter alone produces FAST-target (0.1 s) violations.
+- **The serial fd is kept NON-blocking and every read AND write is `poll()`-bounded**
+  (`skywatcher_protocol_wrapper.cpp`): some USB CDC-ACM virtual COM ports (the STM32 VCP
+  class these boards expose) do not honour `VMIN`/`VTIME`, so a blocking `read()` on a board
+  that has gone quiet parks forever in `n_tty_read` and wedges the whole driver (every worker
+  blocks behind the one holding `io_mutex_`). So `connect_serial()` calls `util::set_nonblocking()`
+  (NOT `clear_nonblocking`), `settle_serial`/`exchange_serial` gate each read on
+  `poll(POLLIN)` within the command budget, and frame sends use a `poll(POLLOUT)`-bounded
+  write (`write_all_bounded`) rather than `util::write_all` — which only retries `EAGAIN`
+  after a partial write and would fail a frame fast once the fd is non-blocking. This is the
+  deliberate exception to the shared "always `clear_nonblocking`" serial rule in `AGENTS.md`;
+  do not revert it. Regression tests (`test_skywatcher_serial.cpp`): a muted board times out
+  within the command budget (catches a revert of the read `poll()`), and a write seam that
+  reports `EAGAIN` is waited out (catches a revert of the bounded write). The auto-detect
+  probe follows the same rule: `probe_skywatcher_port` and the SynScan echo guard it runs at
+  115200 (`util::exchange_synscan_echo_on_fd`) keep a non-blocking fd and gate each read on
+  `poll(POLLIN)`; the `[skywatcher][serial][probe]` cases whose fake board forces
+  `VMIN=1`/`VTIME=0` (`set_reads_ignore_vtime`) fail when either goes back to the old
+  VTIME-only read loop.
 - **Disconnect all stray Alpaca clients before a ConformU run**: the per-client Connected
   registry keeps the device physically connected for other ClientIDs, so leftover test
   sessions carry state (targets, tracking) into ConformU's "first time use" checks.
@@ -286,8 +403,8 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   AutoHome on the 0x04 bit, never on `":q"` failing: an EQM-35 takes the count-frame
   `FindHome` fallback, and running the sensor hunt on a mount with no index sensors
   would drive the axes looking for an edge that never arrives.
-- Both presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
-  `eqm35_pro()`, so loopback tests run against real captured geometry.
+- The three presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
+  `eqm35_pro()` / `eq_al55i()`, so loopback tests run against real captured geometry.
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain): auto-detect found
   it unaided -- `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0 (MC firmware 3.39, 115200
@@ -310,6 +427,20 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   or an EQDIR cable where available; PC Direct Mode is a working no-extra-hardware fallback
   for classic mounts that have neither (the #230 audience). Docs line for
   `SUPPORTED-DRIVERS.md` lands with the post-ConformU direct-driver docs PR.
+- **EQM-35 Pro over an EQDIR cable (FTDI FT232R), 2026-09-21** (Raspberry Pi 3 Model B, Debian 13
+  arm64, no handset in the chain): the cable enumerates as `usb-FTDI_FT232R_USB_UART_<serial>-if00-port0`
+  (`/dev/ttyUSB0`) and, unlike the mount's built-in Prolific port, answers at **9600 baud**. Auto-detect
+  found it unaided in 27 ms -- `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0 (MC firmware 3.39, 9600
+  baud)` -- with the same identity as over the built-in port (`EQM-35 Pro (mount code 50), firmware
+  3.39`). With an explicit `connectionType: serial`, `baudRate: 9600`: `FindHome`, a 30 s slew to
+  RA 17.249 h / Dec +60 deg, and `FindHome` back returned both axes to the exact home count
+  (`:j1`/`:j2` = `=000080` before and after), and one session of 7146 motor-controller transactions
+  logged no serial timeout, checksum or EIO error. The TRACE log spaces back-to-back commands about
+  16 ms apart at 9600 baud, against about 2 ms over the built-in port at 115200. Two limits on
+  what this proves: the EQM-35 has no HOME_INDEXER bit (feature word 0x7000), so that `FindHome`
+  exercised the count-frame goto fallback, not home-sensor AutoHome; and open-loop `MoveAxis`
+  timing was not measured over EQDIR, so the PC Direct Mode latency caveat above is neither
+  confirmed nor ruled out for this path.
 
 #### Goto landing, tracking restart and the dev-VM clock (EQM-35 Pro) — 2026-09-12
 
@@ -396,8 +527,8 @@ below was one of them.
   clearing while the last counts still arrive -- and it needed its own seam (`land_short_by()`:
   report the landing stopped N counts short, then creep the remainder in). Goto counts could not
   be the signal either (`refine_goto_landing()` burns all three iterations on this fake whether or
-  not a landing coasts), nor wall-clock timing (the 3 s `slew_force_until_` window and the
-  tracking restore both sit between the landing and `Slewing` clearing). What works: coast for
+  not a landing coasts), nor wall-clock timing (the tracking restore sits between the landing
+  and `Slewing` clearing, as the 3 s `slew_force_until_` window also did before #715). What works: coast for
   longer than `kLandingSettleTimeout` and assert the check's own give-up WARN, a string nothing
   else emits. **Rule:** before claiming a change is covered, delete it and run the suite; if it
   stays green, the seam models the wrong failure.
@@ -464,13 +595,16 @@ against its checklist, 2026-09-06:
   scope for this issue. The claim/release in `connect_serial()` is covered by a pty-backed
   test in `test_skywatcher_serial.cpp`; the post-`open()` re-check in `probe_skywatcher_port`
   narrows the TOCTOU window but cannot close it (in-process best-effort set, not a file lock).
-- [ ] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
+- [x] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
   Audit (2026-09-09, no hardware): unlike the RA/Dec direction bugs above, the branch that
   drives `SideOfPier`/`DestinationSideOfPier` is chosen purely from the sign of hour angle
   in `ra_dec_to_axis_degrees_locked()`. Since #432 that function consults
   `hemisphere_south_locked()` twice -- `sky_sign` multiplies both `dec_mech` (the a2
   magnitude) and the `a1` term -- but still never for which branch is picked or which
-  side it is labelled, which is the half this audit rests on.
+  side it is labelled, which is the half this audit rests on. (Superseded in part by
+  #458: the branch is now `k * side`, and `k = s * eps` does consult the hemisphere on a
+  board with a measured sense; the side label is still the sign of HA alone, so the
+  flip contract below is unchanged.)
   So the reported side already satisfies the ASCOM flip-with-HA contract (the same one the
   OnStep driver had to learn the hard way, see below) in both hemispheres by construction, and
   a loopback or ConformU check can only confirm that self-consistency — it cannot tell whether
@@ -478,11 +612,18 @@ against its checklist, 2026-09-06:
   internal contradiction to expose (whichever side the code calls pierEast, it consistently
   slews to and reports that side). Loopback regressions asserting the flip contract on the
   EQM-35 Pro and Wave profiles are in `test_skywatcher_async.cpp` ("Pier side across the
-  meridian"). The physical-side question stays open until the plate-solved goto-across-the-
-  meridian check on the rig (see the hemisphere fixes and pending bench test elsewhere in this
-  section).
-- [ ] `SyncToCoordinates` single-point offset sync model — not exercised this session
-  (no plate solve performed).
+  meridian"). **Plate-solved on the rig 2026-09-24** (EQM-35 Pro at -37, TRACE log): gotos
+  across the meridian and back, with the board's `:j` counts at every exposure. Every landing's
+  dec branch was on the side of the meridian the solved hour angle puts it: `a2 < 0` for the
+  east-side (HA < 0) targets IC 5148 and a Capricornus field, `a2 >= 0` for every west one, with
+  `SideOfPier` reading 1 after the flip. A flip and flip back returned M7 to within 82 arcsec.
+  Pinned as sky truth in `test_skywatcher_pointing.cpp` ("measured axes agree with the
+  plate-solved sky across a flip, south").
+- [x] `SyncToCoordinates` single-point offset sync model — exercised 2026-09-24 with plate
+  solves: each sync was a pair of `:E` register writes with no motion, and later gotos on the
+  sync's side of the meridian landed 0.2-0.7 deg from the sky. Across the meridian the error
+  was 1.4-2.3 deg in Dec, which a single-point offset cannot remove: the mount's own dec zero
+  and cone errors change sign with the pier side (see the absolute-pointing bullet below).
 - [ ] Park/unpark weights-down convention — not specifically re-verified on a classic
   board this session (uses the same `kHomeCounts` convention as the Wave; untested here).
 - [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
@@ -514,9 +655,9 @@ then drifts at 1.0x sidereal — the signature of a stationary mount — instead
 This is the dangerous shape: a sequencer that waits for `Slewing` to clear before
 exposing hangs forever, and one that does not wait images on an untracked mount.
 
-**Mechanism.** `move_axis()` uses a SINGLE shared `stop_task_thread_` for both axes.
-When a new stop supersedes a pending one, the old task is cancelled
-(`stop_task_cancel_.store(true)`) and returns early from `task_wait_for()` — before
+**Mechanism.** (As the code stood then.) `move_axis()` used a SINGLE shared stop thread
+for both axes. When a new stop superseded a pending one, the old task was cancelled
+and returned early from its wait — before
 reaching `manual_axis_slewing_[axis] = false` and the restore-tracking tail. Its axis's
 flag is stranded set, and `get_hardware_slewing_locked()` returns true forever because
 it ORs both `manual_axis_slewing_` entries.
@@ -530,9 +671,9 @@ reproduced it reliably.
 flag and restores tracking, because a stop on an axis whose flag is set spawns a fresh
 task that runs to completion.
 
-**Fix (done).** `stop_task_thread_` and `stop_task_cancel_` are now per-axis arrays;
-`reap_stop_task(axis)` and the spawn/retry-join block only ever race with a prior task
-for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
+**Fix (done).** The stop task became per-axis, and is now one `util::AsyncOperation`
+slot per axis (`stop_ops_[axis]`, each with its own generation), so a start only ever
+replaces a prior body for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
 dispatched, Dec stop dispatched while RA's stop task is still mid-ramp) and asserts
 `Slewing` clears promptly. The generation guard
 (`motion_generation_ == stop_task_generation`) is unchanged and still gates the
@@ -558,13 +699,13 @@ command on EITHER axis (see its declaration: "bumped by every motion command"). 
 stop dispatched while RA's stop task is polling bumps the shared counter for a reason
 that has nothing to do with RA, so the RA task's tail reads a mismatch and silently
 skips restoring RA's tracking — even though nothing actually superseded the RA stop
-itself (which is correctly detected via the now-per-axis `stop_task_cancel_[0]`, a
-separate and correctly-scoped check).
+itself (which is correctly detected by the axis's own stop slot, a separate and
+correctly-scoped check).
 
 The codebase already has the right idiom for this elsewhere: the duty-cycle worker
 (`apply_ra_drive_locked`'s burst path, guarding sub-floor rate duty-cycling) computes a
 `same_axis_owner` flag from `goto_in_progress_ || parking_ || homing_ || slewing_cached_
-|| manual_axis_slewing_[i] || (pulse_guiding_active_ && pulse_axis_ == channel)` before
+|| manual_axis_slewing_[i] || pulse_axis_active_[channel - 1]` before
 trusting a generation mismatch as a real supersession, specifically BECAUSE "the global
 generation cannot tell a same-axis supersession from an unrelated other-axis command"
 (exact wording from that code's own comment). The MoveAxis stop-task tail does not apply
@@ -572,15 +713,21 @@ this idiom and should.
 
 **Fix (done).** Applied option (a): the stop-task restore tail now computes a
 channel-scoped `same_axis_owner` (`goto_in_progress_ || parking_ || homing_ ||
-slewing_cached_ || manual_axis_slewing_[axis] || (pulse_guiding_active_ &&
-pulse_axis_ == channel)`), the exact idiom the duty-cycle worker already uses, and only
+slewing_cached_ || manual_axis_slewing_[axis] ||
+pulse_axis_active_[channel - 1]`), the exact idiom the duty-cycle worker already uses, and only
 treats a `motion_generation_` mismatch as a real supersession when `same_axis_owner`
-is true. Verified the historical regression this guards against (PR #216 round-5:
-`SetTracking(false)` racing the restore) is still covered independently: that path sets
-`tracking_ = false` under the SAME `mutex_` this task also holds, so there is no
-interleaving where the restore reads `tracking_ == true` while a completed
-`SetTracking(false)` meant otherwise -- the `tracking_ &&`/`dec_rate_arcsec_per_sec_ !=
-0.0 &&` guards already ahead of the generation check cover that case on their own.
+is true. The historical regression this guards against (PR #216 round-5:
+`SetTracking(false)` racing the restore) is covered only for a COMPLETED
+`SetTracking(false)`: that path publishes `tracking_ = false` under the SAME `mutex_`
+this task also holds, so the `tracking_ &&`/`dec_rate_arcsec_per_sec_ != 0.0 &&` guards
+ahead of the generation check see it. They do NOT cover one still IN FLIGHT.
+`set_tracking_locked(false)` bumps `motion_generation_` first, then releases `mutex_`
+inside `stop_axis_and_wait_locked()`'s poll loop, and assigns `tracking_` only after that
+wait returns -- so a restore tail waking inside that window reads `tracking_ == true`,
+restores the drive, and the caller throws `Tracking change superseded by a concurrent
+motion command` with the mount left tracking. That is issue #535, still open; its
+regression case is quarantined `[!mayfail]` in `test_skywatcher_async.cpp` (see #586 /
+#587), so nothing gates this path until #535 lands.
 Extended the regression test from the first bug to assert the RA axis actually resumes
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.
@@ -595,7 +742,7 @@ driver. Not hemisphere-specific in shape, only in trigger.
 hemisphere's direction indefinitely -- stars trail at 2x, the #250 signature, with
 nothing scheduled to correct it. Under an autoguider this is the common case, not the
 corner: roughly half of a session's corrections are declination, and PHD2 holds
-`pulse_guiding_active_` true for most of every guide cycle.
+`pulse_axis_active_[i]` true for most of every guide cycle.
 
 **Mechanism.** A setter that must re-command an axis skips when the axis is busy, on the
 grounds that the busy operation's own restore path re-derives the value. That contract
@@ -608,13 +755,13 @@ in-flight operation skipped RA, each expecting the other to do it.
 
 **Fix (done).** `axis_busy_locked(channel)` is now the primitive -- the same
 `goto_in_progress_ || parking_ || homing_ || slewing_cached_ || manual_axis_slewing_[i]
-|| (pulse_guiding_active_ && pulse_axis_ == channel)` idiom the duty-cycle worker and the
+|| pulse_axis_active_[channel - 1]` idiom the duty-cycle worker and the
 MoveAxis stop tail already use -- and `axes_busy_locked()` is defined as the OR of the
 two, so every existing caller is unchanged. `set_site_latitude()` decides each half
 separately: re-apply the RA drive unless RA is busy, re-apply the Dec offset unless Dec
 is busy, and skip entirely only when both are. A sub-floor RA rate is pre-armed into
 `ra_duty_rate_deg_s_` when RA is busy, the way `set_right_ascension_rate()`'s busy branch
-already does, because the duty worker resumes from that stored rate and no restore path
+already does, because the duty body resumes from that stored rate and no restore path
 re-derives it. Two loopback regressions (`test_skywatcher_async.cpp`) drive the
 declination-pulse and declination-`MoveAxis` variants and were confirmed to fail on the
 pre-fix setter with the RA axis still counting the old way.
@@ -669,8 +816,8 @@ and each time the assertion itself was the review finding.
     transform (the rate goes straight to `start_speed_motion_locked`), so this is
     also the hardware reference for which way a raw Dec-axis rate moves reported
     Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
-    rests on. Reported coordinates come from the driver's own pointing model; an
-    independent sky check (plate solve) is still on the list below. Do NOT "fix"
+    rests on. Reported coordinates come from the driver's own pointing model; the
+    independent sky check (plate solve, 2026-09-24) is below. Do NOT "fix"
     MoveAxis to follow sky Dec: the ASCOM spec says the sign of the Rate parameter
     "is purposely left undefined" and the motion is about the MECHANICAL axis, so
     the no-transform behaviour is correct in both hemispheres (checked against
@@ -712,10 +859,22 @@ and each time the assertion itself was the review finding.
     reversed),
     and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
     to home, tracking off.
-  - STILL UNVALIDATED on EQ-class hardware: absolute pointing (needs a plate solve and
-    sync), `SideOfPier` and meridian-flip behaviour in the southern hemisphere, the
+  - **Absolute pointing and the southern meridian flip: plate-solved 2026-09-24.** Same
+    EQM-35 Pro at -37, 5 s frames solved by ASTAP and precessed to date, the service at TRACE
+    so every `:S` goto target, `:j` read and `:E` sync is in the log. The driver sent exactly
+    its formula's axes on the 12 gotos that have a solve (a2 to 0.000 deg, a1 within the
+    seconds between computing and logging the frame), and the board landed on the commanded
+    count (spot-checked in the log on two gotos). Against the sky, the plain model is up to 0.43 h and 4.6 deg off; a
+    seven-term fit to 15 solved exposures over two power-ons leaves 8 arcmin rms with polar
+    1.3 deg, cone 0.8 deg, a hand-homed dec zero 0.8 and 3.3 deg off and an RA zero per
+    power-on. Those are this rig's errors; the model has no terms for them, so the practical
+    fix is a sync on each side of the meridian. A 23-minute tracking run drifted Dec
+    -11.2 and RA +9.9 arcsec/min against -8.8 and +12.1 predicted by the fitted polar error;
+    they agree within about 2.5 arcsec/min, so no separate tracking-rate error is needed. Four same-Dec gotos turning only the RA axis
+    lay on one circle to 8 arcsec. The rows are pinned in `test_skywatcher_pointing.cpp`.
+  - STILL UNVALIDATED on EQ-class hardware: the
     `":g"` high-speed ratio under fast slews, and the Dec-axis direction of
-    `DeclinationRate` / `PulseGuide` North-South below the equator (fixed in code from
+    `DeclinationRate` / `PulseGuide` North-South below the equator on the a2 < 0 branch (fixed in code from
     the pointing model -- see the KNOWN BUG below -- but not yet measured on the mount;
     a short autoguiding session is the cheapest check).
   - **PENDING BENCH TEST (not yet run): `a2 < 0` Dec-direction sign coverage.** Closes the
@@ -741,9 +900,8 @@ and each time the assertion itself was the review finding.
        (unchanged) -- the mirror image of the `a2 > 0` row already confirmed.
     This closes ONLY the sign-rule coverage gap. It does NOT validate `SideOfPier`
     reporting or automatic pier-flip behaviour during a real GOTO across the meridian --
-    that is the separate, still-open bullet directly above, and realistically waits on
-    the plate-solve work since confirming a flip landed correctly needs an independent
-    sky check.
+    that was the separate plate-solved check above (2026-09-24), which needed an
+    independent sky check to confirm a flip landed correctly.
 
 #### KNOWN BUG (FIXED): DeclinationRate and PulseGuide North/South run backwards south of the equator
 
@@ -806,3 +964,4 @@ probes link health first. The late-loss branch needs a deterministic probe seam 
 outstanding fake-board task; assert that the old task never sends commands to the new link.
 Zero-byte reads are not themselves proof of removal; back off within the response deadline
 so a hung-up-but-present tty cannot busy-spin, while retaining the quiet-board timeout policy.
+- **The session open claims the tty with `TIOCEXCL` and re-applies the termios settings after every silent timeout** (#912): an outside open (a GPS probe at 9600) reprograms the shared line, and without the re-apply the latched link fault never cleared. `disconnect_locked()` issues `TIOCNXCL` explicitly, because the flag survives our close while any other fd holds the tty open. The echo-guard/probe opens are short-lived and do not claim.

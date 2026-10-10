@@ -16,6 +16,9 @@
 #   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
 #                  connect/disconnect/operate concurrency suite (issue #101),
 #                  plus [stress-guard] (the harness's own self-tests, issue #322)
+#   coverage       informational gcovr line coverage, all vendors ON, per
+#                  component + combined in the job summary, HTML/JSON artifact
+#                  (no threshold, not a required check; bound 30 min)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   unicode        scan sources for Trojan-Source / invisible Unicode
@@ -35,6 +38,7 @@ on:
   push:
     branches:
       - main
+      - "stable/**"
   workflow_dispatch:
 
 # A newer push to the same ref makes in-flight runs obsolete — cancel them so
@@ -43,9 +47,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Single source of truth for the vendored libgpiod build dependency — both the
-# build-vendors and clang-tidy jobs consume these, so a version bump can't
-# skew them (tarball + README in AlpacaCore/external/libgpiod/).
+# Single source of truth for the vendored libgpiod build dependency — the
+# build-vendors, sanitizers-tsan, coverage and clang-tidy jobs consume these,
+# so a version bump can't skew them (tarball + README in AlpacaCore/external/libgpiod/).
 env:
   LIBGPIOD_VER: "2.2.4"
   LIBGPIOD_SHA256: "13207176b0eb9b3e0f02552d5f49f5a6a449343ce47416158bb484d9d3019592"
@@ -65,12 +69,16 @@ jobs:
           persist-credentials: false
 
       - name: Install build dependencies
+        # catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
+        # returns early, ctest finds no tests and exits 0, and this job
+        # green-lights while running none of the core suite (issue #586).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             g++ \
+            catch2 \
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
@@ -90,6 +98,13 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
         run: ./run_all_tests.sh
 
+      - name: Check the beta VERSION split
+        # Pins the ~betaN split both CMakeLists share
+        # (AlpacaCore/cmake/AlpacaBridgeVersion.cmake, docs/beta-channel.md)
+        # whatever the checkout's VERSION is: cmake -P over sample values, no
+        # configure, no compile.
+        run: scripts/check_beta_configure.sh
+
   build-vendors:
     name: Build + test (all vendors, arm64)
     runs-on: ubuntu-24.04-arm
@@ -105,12 +120,16 @@ jobs:
         # ships libgpiod 1.6, but the ZWO switch/GPIO drivers need >= 2.0. We
         # build v2 from source in the next step instead (matches the Debian
         # Trixie production target).
+        # catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
+        # returns early, ctest finds no tests and exits 0, and this job
+        # green-lights while running none of the core suite (issue #586).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             g++ \
+            catch2 \
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
@@ -189,12 +208,16 @@ jobs:
           persist-credentials: false
 
       - name: Install build dependencies
+        # catch2 is required: without it AlpacaCore/tests/CMakeLists.txt
+        # returns early, ctest finds no tests and exits 0, and this job
+        # green-lights while running none of the core suite (issue #586).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             g++ \
+            catch2 \
             pkg-config \
             libusb-1.0-0-dev \
             libudev-dev \
@@ -349,6 +372,140 @@ jobs:
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-guard-run.log
 
+  coverage:
+    # Informational only: no --fail-under threshold and not a required check.
+    # A separate job so instrumentation adds no time to build-test or
+    # build-vendors; it runs in parallel with them.
+    name: Line coverage (gcovr, all vendors, arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Same set as build-vendors (libgpiod-dev omitted, built from source
+        # below; catch2 required, issue #586), plus gcovr for the report.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            g++ \
+            catch2 \
+            pkg-config \
+            libusb-1.0-0-dev \
+            libudev-dev \
+            libsystemd-dev \
+            libhidapi-dev \
+            libgphoto2-dev \
+            libraw-dev \
+            nlohmann-json3-dev \
+            zlib1g-dev \
+            libcurl4-openssl-dev \
+            gcovr
+
+      - name: Build libgpiod v2 from source
+        # Copied from build-vendors; see the comments there.
+        run: |
+          set -euo pipefail
+          cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
+          echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
+            | sha256sum -c -
+          mkdir -p /tmp/libgpiod
+          tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
+          cd /tmp/libgpiod
+          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+
+      - name: Stage vendor SDK shared libraries
+        # Copied from build-vendors; keep the two lists in step.
+        run: |
+          set -euo pipefail
+          core="AlpacaCore/external"
+          libs=(
+            "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
+            "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
+            "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
+            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
+          )
+          for lib in "${libs[@]}"; do
+            if compgen -G "${lib}*" > /dev/null; then
+              echo "Staging $(basename "$lib")*"
+              sudo cp -a "${lib}"* /usr/local/lib/
+            else
+              echo "WARNING: ${lib}* not found — skipping"
+            fi
+          done
+          sudo ldconfig
+
+      - name: Build + run tests with coverage (all vendors)
+        # Same seeding as the sanitizers job: CMake takes CXXFLAGS / LDFLAGS
+        # on a fresh configure and run_all_tests.sh wipes build/ first.
+        # -fprofile-update=atomic because the [stress] cases are
+        # multi-threaded and plain counter updates would race.
+        env:
+          ALPACACORE_ENABLE_ALL_VENDORS: "ON"
+          CXXFLAGS: "--coverage -O0 -g -fprofile-update=atomic"
+          LDFLAGS: "--coverage"
+        run: ./run_all_tests.sh
+
+      - name: Generate coverage report
+        # One gcovr call per component plus a combined total, each over BOTH
+        # build dirs: AlpacaHTTP/build compiles AlpacaCore's sources again as
+        # a subdirectory, and gcovr merges the two per source file.
+        run: |
+          set -euo pipefail
+          mkdir -p coverage/html
+          excludes=(
+            --exclude '.*/tests/'
+            --exclude '.*/external/'
+            --exclude '.*/examples/'
+            --exclude '.*/build[^/]*/'
+          )
+          report() {
+            local name="$1"
+            shift
+            gcovr --root . -j "$(nproc)" "$@" "${excludes[@]}" \
+              --gcov-ignore-parse-errors=all \
+              --txt "coverage/${name}.txt" \
+              --json-summary-pretty --json-summary "coverage/${name}.json" \
+              AlpacaCore/build AlpacaHTTP/build
+          }
+          report alpacacore --filter 'AlpacaCore/(src|include)/'
+          report alpacahttp --filter 'AlpacaHTTP/(src|include)/'
+          report combined \
+            --filter 'AlpacaCore/(src|include)/' \
+            --filter 'AlpacaHTTP/(src|include)/' \
+            --html-details coverage/html/index.html
+          cat coverage/combined.txt
+          python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          rows = [("AlpacaCore", "alpacacore"), ("AlpacaHTTP", "alpacahttp"),
+                  ("Combined", "combined")]
+          print("## Line coverage (all vendors, arm64)\n")
+          print("| Component | Lines covered | Lines total | Line % |")
+          print("|---|---:|---:|---:|")
+          for label, name in rows:
+              with open(f"coverage/{name}.json") as f:
+                  s = json.load(f)
+              print(f"| {label} | {s['line_covered']} | {s['line_total']} "
+                    f"| {s['line_percent']:.1f} |")
+          PY
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: error
+
   format:
     name: clang-format (changed lines)
     if: github.event_name == 'pull_request'
@@ -461,6 +618,7 @@ jobs:
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DALPACAHTTP_BUILD_TESTS=ON \
+            -DALPACACORE_BUILD_TESTS=ON \
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
 
@@ -551,6 +709,32 @@ jobs:
         # instead of blocking the release.
         run: python3 scripts/changelog_section.py --self-test
 
+      - name: Validate changelog fragments
+        # A PR adds changelog.d/<branch-slug>.md instead of editing
+        # CHANGELOG.md; a malformed fragment would break the release step.
+        run: python3 scripts/changelog_fragments.py --self-test && python3 scripts/changelog_fragments.py --check
+
+      - name: Self-test the debian/changelog generator
+        # build_deb.sh feeds the fragments into the .deb changelog through
+        # this script; nothing else exercises that path.
+        run: python3 scripts/changelog_to_deb.py --self-test
+
+      - name: Self-test the release tag mapping
+        # release.yml runs this too, but only on a tag push or a dry run; here
+        # a broken tag/VERSION mapping (scripts/release_tag_cases.txt) fails
+        # the PR that caused it instead of the first beta tag.
+        run: python3 scripts/release_tag.py --self-test
+
+      - name: Self-test the merge-down exemption
+        # pr-body.yml runs it on every PR as well; here a change to it is
+        # tested by the PR that makes it, whatever that PR's head is named.
+        run: python3 scripts/merge_down.py --self-test
+
+      - name: Self-test the stable-PR issue closer
+        # close-linked-issues.yml runs the script only on a merged stable PR;
+        # here a change to its keyword parser fails the PR that makes it.
+        run: python3 scripts/close_linked_issues.py --self-test
+
   connect-error-hook:
     name: Connect-error hook
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
@@ -569,6 +753,24 @@ jobs:
         run: |
           python3 scripts/check_connect_error_hook.py --self-test
           python3 scripts/check_connect_error_hook.py
+
+  layering:
+    name: Layering gate
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-test the layering gate's fixtures
+        run: python3 scripts/check_layering.py --self-test
+
+      - name: AlpacaHTTP and catalog schema files include no new vendor headers
+        # ADR 0004 (device-catalog) promises the layering gate enforces it;
+        # issue #651. Counts alpacacore/vendor includes against a baseline.
+        run: python3 scripts/check_layering.py
 
   stress-registration:
     name: Stress-test registration
@@ -594,6 +796,27 @@ jobs:
         # by the sanitizers-tsan job; this was previously enforced only by
         # code review. See scripts/check_stress_registration.py.
         run: python3 scripts/check_stress_registration.py
+
+  contract-sweep:
+    name: Contract sweep registration
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-test the gate's parsers and rules
+        # Literal fixtures, one per rule (ADR 0003), independent of repo state.
+        run: python3 scripts/check_contract_sweep.py --self-test
+
+      - name: Check every router-constructed driver is in the contract sweep
+        # Issue #571: AlpacaCore/tests/contract_sweep.h must hold an entry for
+        # every (vendor, deviceType) pair Router::register_device_from_config()
+        # constructs, or ALLOWLIST it with a reason. Also checks the guard
+        # macros reach alpacacore_tests, so the registry cannot compile empty.
+        run: python3 scripts/check_contract_sweep.py
 
   conformu-reports:
     name: ConformU report validation
@@ -654,7 +877,7 @@ jobs:
             esac
             scripts+=("$f")
           done < <(git ls-files '*.sh')
-          for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm; do
+          for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm debian/alpacabridge-software-update; do
             [ -f "$f" ] && scripts+=("$f")
           done
           echo "Linting: ${scripts[*]}"

@@ -8,6 +8,7 @@ if(ALPACACORE_ENABLE_CELESTRON)
     set(CELESTRON_SOURCES
         celestron_protocol_wrapper.cpp
         celestron_telescope_driver.cpp
+        celestron_catalog.cpp
     )
 
     add_library(alpacacore_celestron STATIC ${CELESTRON_SOURCES})
@@ -15,6 +16,10 @@ if(ALPACACORE_ENABLE_CELESTRON)
     target_include_directories(alpacacore_celestron PRIVATE
         ${CMAKE_SOURCE_DIR}/include
     )
+
+    # Base drivers, logging and AsyncConnectable live in alpacacore; this vendor
+    # links down to it, never the reverse (open-astro#710).
+    target_link_libraries(alpacacore_celestron PRIVATE alpacacore)
 
     message(STATUS "Celestron driver: Serial and TCP connection support enabled")
 endif()

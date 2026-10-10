@@ -12,10 +12,14 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -117,18 +121,51 @@ public:
     // One wrapper owns one transport. Drivers own distinct instances; the legacy
     // singleton remains available for standalone protocol callers.
     using SerialRead = std::function<std::ptrdiff_t(int, char*, std::size_t)>;
-    // An optional read seam exercises quiet/hung-up tty behavior without hardware.
-    explicit SkyWatcherProtocolWrapper(SerialRead serial_read = {});
+    using SerialWrite = std::function<std::ptrdiff_t(int, const char*, std::size_t)>;
+    // Optional read/write seams exercise quiet/hung-up tty behavior -- and a
+    // stalled TX buffer (write EAGAIN) -- without hardware.
+    explicit SkyWatcherProtocolWrapper(SerialRead serial_read = {}, SerialWrite serial_write = {});
     virtual ~SkyWatcherProtocolWrapper();
     static SkyWatcherProtocolWrapper& instance();
 
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    // Decision 0009: the clock the staleness bound and the link-lost stamp run
+    // on. Real by default; the driver passes its own TaskClock.
+    void set_task_clock(util::TaskClock& clock);
     // open-astro#445: is_connected() without I/O and without waiting on an
     // exchange, that also notices a serial device which has gone away (and
     // closes the dead link when it can). Safe to call from a Connected poll.
     virtual bool link_alive();
+
+    // open-astro#505: a board that stops answering while its node is still
+    // there — mount powered off with the adapter plugged in, EQDIR pulled at
+    // the mount end, controller hung. link_alive() cannot see that (the fd is
+    // healthy and the node resolves), so consecutive failed exchanges latch a
+    // fault instead. Non-empty fault means the caller must refuse to serve its
+    // CACHE (DriverException "communications compromised"), never that it
+    // should stop talking: on a polled link the reads are the only traffic
+    // that can clear the latch. Connected stays true while the fault is younger
+    // than util::kLinkStalenessBound (30 s); past it the link is LOST
+    // (decision 0009): link_alive() reads false, the transport is closed and
+    // the last fault text stays here until the next connect or disconnect.
+    // Cheap and lock-free enough for a read path (own leaf mutex, no I/O).
+    virtual std::string link_fault();
+    virtual bool link_faulted();
+    // Bumped each time a good reply clears a latched fault. A driver keeps the
+    // value it last saw and re-validates the board when it changes, because a
+    // board that came back from a power cycle answers perfectly well while
+    // reporting init_done false with its position registers reset.
+    virtual std::uint64_t link_recovery_epoch();
+
+    // open-astro#521: when the link was last LOST, cleared as it is read. A
+    // relink needs the LENGTH of the outage: a Sky-Watcher axis keeps running
+    // with no further commands, so motion that survived a brief cable glitch
+    // is still wanted, while motion that survived a long one has had nobody in
+    // control of it. A client's own disconnect does not stamp this, so a fresh
+    // connect sees nullopt and takes the safe branch.
+    virtual std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
 
     // Low-level framed exchange: sends ":<cmd><axis><data>\r", returns the
     // payload of a "=" response (without the leading "=" or trailing CR).
@@ -153,6 +190,10 @@ public:
     // ":I". with_readback=false skips the diagnostic ":i" comparison (one extra
     // serial round-trip) for callers on a timing-critical path.
     void set_step_period(int axis, uint32_t t1_preset, bool with_readback = true);
+    // Turn the ":i" readback diagnostic off until the next connect(), for a
+    // board whose ":i" reply does not reflect the stored preset
+    // (open-astro#686). connect() turns it back on.
+    void disable_step_period_readback();
     void start_motion(int axis);                         // ":J"
     void stop_motion(int axis);                          // ":K"
     void instant_stop(int axis);                         // ":L"

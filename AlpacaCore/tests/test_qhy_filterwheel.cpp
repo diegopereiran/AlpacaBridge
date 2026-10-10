@@ -15,6 +15,7 @@
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
 #include <string>
 #include <vector>
@@ -121,7 +122,8 @@ TEST_CASE("QHY Filter Wheel Driver - State machine contracts", "[qhy][filterwhee
     REQUIRE(driver->get_connecting() == false);
 
     // Platform 7 DeviceState: Position throws while disconnected and is
-    // omitted, leaving just the TimeStamp; the non-compliant "Connected"
+    // omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list; the non-compliant "Connected"
     // entry must not appear.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
@@ -131,7 +133,7 @@ TEST_CASE("QHY Filter Wheel Driver - State machine contracts", "[qhy][filterwhee
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("QHY Filter Wheel Driver - Unsupported methods", "[qhy][filterwheel][unit]") {
@@ -205,6 +207,29 @@ TEST_CASE("QHY Filter Wheel Driver - An invalid slot count is refused", "[qhy][f
     auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
 
     require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
+    CHECK(fake.physical_closes == 1);
+    CHECK(fake.ref_count("fake-qhy-0") == 0);
+}
+
+TEST_CASE("QHY Filter Wheel Driver - A slot count the SDK cannot read is refused", "[qhy][filterwheel][unit]") {
+    // Issue #510: get_param() answers the QHYCCD_ERROR sentinel (about 4.29e9)
+    // when the read fails, and static_cast<int> of a double outside int's
+    // range is undefined behaviour. x86_64 happens to produce INT_MIN, which
+    // the <= 0 check refused by luck; arm64 saturates to INT_MAX, a
+    // two-billion-slot wheel. The sentinel must be refused the same way as 0.
+    auto fake = make_fake();
+    fake.params.erase(alpacacore::vendor::qhy::control::CFWSLOTSNUM);
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+
+    try {
+        driver->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()) == "QHY CFW reported an invalid slot count");
+    }
+    CHECK_FALSE(driver->get_connected());
     CHECK(fake.physical_closes == 1);
     CHECK(fake.ref_count("fake-qhy-0") == 0);
 }
@@ -326,4 +351,51 @@ TEST_CASE("QHY Filter Wheel Driver - Connecting by index resolves the id and con
 
     driver->set_connected(false);
     CHECK(fake.physical_closes == 1);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp set_position() not resetting
+// pending_target_ when move_cfw throws.
+TEST_CASE("QHY Filter Wheel Driver - A failed move leaves Position on live reads", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    const int before = driver->get_position();
+
+    fake.throw_from.insert("move_cfw");
+    CHECK_THROWS_AS(driver->set_position(3), alpacacore::AlpacaException);
+    fake.throw_from.clear();
+
+    for (int i = 0; i < 5; ++i) {
+        CHECK(driver->get_position() == before);
+    }
+    driver->set_connected(false);
+}
+
+// Falsified by: qhy_filterwheel_driver.cpp get_position() dropping the rest
+// detection (or kSettleTime never elapsing), so a stopped wheel reads -1 forever.
+TEST_CASE("QHY Filter Wheel Driver - A wheel settling on a non-target slot reports that slot",
+          "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto now = std::chrono::steady_clock::now();
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, [&now] { return now; });
+    driver->set_connected(true);
+
+    driver->set_position(3);
+    // Transit readings change every poll, so they stay -1 however long the move runs.
+    fake.cfw_position_script = {4, 5, 6, 0, 1, 2};
+    for (int i = 0; i < 6; ++i) {
+        now += std::chrono::seconds(1);
+        CHECK(driver->get_position() == -1);
+    }
+    // Rest at slot 2: still -1 until the settle time has passed.
+    CHECK(driver->get_position() == -1);
+    now += std::chrono::seconds(1);
+    CHECK(driver->get_position() == -1);
+    now += std::chrono::seconds(2);
+    CHECK(driver->get_position() == 2);
+    // The pending state ended: later reads are served from the settled slot.
+    CHECK(driver->get_position() == 2);
+    driver->set_connected(false);
 }

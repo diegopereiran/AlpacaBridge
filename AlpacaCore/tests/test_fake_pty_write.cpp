@@ -33,6 +33,28 @@
 
 #ifndef _WIN32
 
+// Set when this translation unit is built under a sanitizer, by either gcc's
+// predefined macro or __has_feature. Used by the EMFILE case below, which
+// cannot run under a sanitizer that needs a descriptor of its own.
+//
+// UBSan is the one that actually kills that case (its vptr check on Catch2's
+// expression decomposer -- see the case's own note), and it is the one with
+// no predefined macro: gcc has __SANITIZE_ADDRESS__/__SANITIZE_THREAD__ but
+// no __SANITIZE_UNDEFINED__. It is detectable all the same --
+// __has_feature(undefined_behavior_sanitizer) answers 1 under gcc 14's
+// -fsanitize=undefined (measured on Debian 13, gcc 14.2) -- so the
+// __has_feature branch covers it. The predefined-macro branch above stays
+// first for gcc < 14, which has no __has_feature at all; a UBSan-only build
+// on such a compiler is still undetectable, but every build this repo runs
+// pairs address with undefined and so trips the first branch anyway.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define ALPACACORE_TESTS_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+#define ALPACACORE_TESTS_SANITIZED 1
+#endif
+#endif
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -202,6 +224,25 @@ TEST_CASE("PtyPair - a keep-alive open that fails throws, with the master closed
     // syscalls wide and the limit is restored on every exit path; if it ever
     // flakes under the ASan/TSan jobs, gate this case out there rather than
     // loosening the check.
+    //
+    // Taking that instruction (issue #586, which made the `sanitizers` job
+    // actually run this suite): under -fsanitize=address,undefined this case
+    // fails DETERMINISTICALLY, not flakily. UBSan's vptr check on Catch2's
+    // expression decomposer has to reach the runtime the first time a
+    // REQUIRE is decomposed inside the EMFILE window, and cannot, so the
+    // case dies on `member access within address ... does not point to an
+    // object of type 'BinaryExpr'` with no stack trace -- the symbolizer
+    // needs a descriptor too. That is the sanitizer being unable to observe
+    // the case, not the case finding a defect. It still runs for real in
+    // build-test and build-vendors, which is where its coverage lives.
+#if defined(ALPACACORE_TESTS_SANITIZED)
+    WARN("built with sanitizers; the EMFILE setup-failure check is skipped (see the note above)");
+    // Keep the case from ending with zero assertions: WARN is not one, so a
+    // runner started with -w NoAssertions would fail a case we skipped on
+    // purpose.
+    SUCCEED("skipped under sanitizers");
+    return;
+#endif
     const FdTable start = fd_table();
     if (start.count < 0) {
         WARN("/proc/self/fd is not available on this host; the setup-failure check is skipped");
@@ -357,6 +398,11 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
     std::string received;
     received.resize(reply.size());
     std::size_t got = 0;
+    // Declared here, not inside the `if (ready <= 0)` block below, so the
+    // message survives the `break` that follows it (issue #560: a bare
+    // INFO(...) there is an unnamed Catch2 ScopedMessage, destroyed at the
+    // closing brace of that `if` before the CHECK below ever sees it).
+    std::string poll_err;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (got < reply.size()) {
         const auto now = std::chrono::steady_clock::now();
@@ -374,13 +420,17 @@ TEST_CASE("fake pty write - a drained pty still receives the whole reply", "[fak
             continue;  // interrupted (profiler/debugger/SIGCHLD) -- re-poll against the same deadline
         }
         if (ready <= 0) {
-            INFO(std::strerror(errno));  // names a real poll() failure; stale on a plain timeout
+            // Only a negative return is a poll() failure; ready == 0 is a plain
+            // timeout, which leaves errno untouched, so reading it there would
+            // report whatever stale value happened to be sitting in it.
+            if (ready < 0) poll_err = std::strerror(errno);
             break;
         }
         const ssize_t n = read(slave, received.data() + got, reply.size() - got);
         if (n <= 0) break;
         got += static_cast<std::size_t>(n);
     }
+    CAPTURE(poll_err);
     CHECK(got == reply.size());
     CHECK(received == reply);
 }
@@ -426,6 +476,36 @@ TEST_CASE("fake pty write - a fake whose pty is never drained still destructs", 
         destroyer.detach();
     }
     CHECK(finished);
+}
+
+// The first-frame hold promises "no frame is sent until that long after the worker started". The worker starts in the
+// constructor and streams at once, so the hold has to be a constructor argument: a setter called after the
+// constructor returns races the first frames (it let 24 bytes through at 50 ms). Nothing may reach the slave.
+TEST_CASE("fake serial streamer - the first-frame hold holds every frame", "[fakes][pty][unit]") {
+    using namespace std::chrono_literals;
+
+    alpacacore::test::FakeSerialStreamer streamer("FRAME\n", 10ms, 300ms);
+    std::this_thread::sleep_for(50ms);
+
+    const int fd = ::open(streamer.slave_path().c_str(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
+    REQUIRE(fd >= 0);
+    termios tio{};
+    REQUIRE(::tcgetattr(fd, &tio) == 0);
+    ::cfmakeraw(&tio);
+    REQUIRE(::tcsetattr(fd, TCSANOW, &tio) == 0);
+
+    std::size_t received = 0;
+    const auto deadline = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < deadline) {
+        pollfd pfd{fd, POLLIN, 0};
+        if (::poll(&pfd, 1, 10) > 0) {
+            char buf[64];
+            const ssize_t n = ::read(fd, buf, sizeof(buf));
+            if (n > 0) received += static_cast<std::size_t>(n);
+        }
+    }
+    ::close(fd);
+    CHECK(received == 0);
 }
 
 #endif  // _WIN32

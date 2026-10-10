@@ -251,6 +251,11 @@ function resetDeviceForm() {
     // setEditMode(false)); call it explicitly too so this helper is
     // self-contained and doesn't silently rely on that listener existing.
     setEditMode(false);
+    // Hidden inputs keep script-set values through form.reset().
+    for (const id of ['zwo-camera-serial', 'zwo-camera-name', 'zwo-camera-unique-id',
+        'zwo-camera-loaded-index', 'zwo-camera-loaded-id']) {
+        setFormValue(id, '');
+    }
     // Re-run the vendor option/sub-section toggles against the reset values so
     // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
     updateVendorOptions();
@@ -540,10 +545,11 @@ async function loadDevices() {
             const settingsHtml = renderDeviceSettings(config);
             const deviceName = device.DeviceName || device.Name || 'Unknown Device';
             const hasLoadError = device.LoadError === true;
+            const status = deviceStatus(device);
             return `
             <div class="device-card collapsed${hasLoadError ? ' device-error' : ''}">
                 <div class="device-card-header">
-                    <h3>${hasLoadError ? '&#x26a0; ' : ''}${escapeHtml(deviceName)}</h3>
+                    <h3><span class="status-dot status-${status.state}" role="img" data-device-type="${escapeHtml(device.DeviceType)}" data-device-number="${escapeHtml(String(device.DeviceNumber))}" title="${escapeHtml(status.text)}" aria-label="${escapeHtml(status.text)}"></span>${hasLoadError ? '&#x26a0; ' : ''}${escapeHtml(deviceName)}</h3>
                     <button class="device-toggle" type="button" aria-expanded="false" data-device-index="${index}">
                         <span class="device-toggle-icon" aria-hidden="true"></span>
                         <span class="device-toggle-label">Details</span>
@@ -706,6 +712,42 @@ function setEditMode(isEditing) {
     }
 }
 
+// The serial, model name and UniqueID the server learned for a ZWO camera
+// (#914). An edit removes the entry and adds it again, so the form resends
+// them; only while the index and id are the ones the form loaded. A changed
+// index or id points the entry at another body, which then learns its own.
+function zwoCameraIdentityFields(formData) {
+    const loadedIndex = String(document.getElementById('zwo-camera-loaded-index')?.value ?? '');
+    const loadedId = String(document.getElementById('zwo-camera-loaded-id')?.value ?? '');
+    const indexValue = String(formData.get('cameraIndex') ?? '');
+    const idValue = String(formData.get('cameraId') ?? '');
+    const fields = {};
+    // Only an edit of that entry resends them; an add never inherits the
+    // hidden values of a camera edited earlier.
+    const form = document.getElementById('device-form');
+    if (!form || form.dataset.editing !== 'true') {
+        return fields;
+    }
+    if (loadedIndex === '' && loadedId === '') {
+        return fields;
+    }
+    if (indexValue !== loadedIndex || idValue !== loadedId) {
+        return fields;
+    }
+    const pairs = [
+        ['serialNumber', 'zwoCameraSerial'],
+        ['cameraName', 'zwoCameraName'],
+        ['uniqueId', 'zwoCameraUniqueId'],
+    ];
+    for (const [key, name] of pairs) {
+        const value = formData.get(name);
+        if (typeof value === 'string' && value !== '') {
+            fields[key] = value;
+        }
+    }
+    return fields;
+}
+
 function setFormValue(elementId, value) {
     const element = document.getElementById(elementId);
     if (!element) {
@@ -830,6 +872,7 @@ function startEditDevice(device) {
         }
     } else if (vendor === 'synscan') {
         setFormValue('synscan-version', config.synscanVersion || 'auto');
+        setFormValue('synscan-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
         const synscanConnectionType = config.connectionType || 'auto';
         setFormValue('synscan-connection-type', synscanConnectionType);
         if (synscanConnectionType === 'serial') {
@@ -861,6 +904,11 @@ function startEditDevice(device) {
         setFormValue('skywatcher-site-latitude', config.siteLatitude);
         setFormValue('skywatcher-site-longitude', config.siteLongitude);
         setFormValue('skywatcher-site-elevation', config.siteElevation);
+        // open-astro#436: absent or null = limit off = blank field.
+        setFormValue('skywatcher-min-altitude', config.minAltitudeDeg ?? '');
+        setFormValue('skywatcher-meridian-limit', config.meridianLimitMinutes ?? '');
+        // open-astro#582: absent = auto.
+        setFormValue('skywatcher-dec-axis-sense', config.decAxisSense || 'auto');
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             skywatcherLearnSite.checked = config.learnSiteFromClient !== false;
@@ -885,6 +933,7 @@ function startEditDevice(device) {
             onstepConnectionTypeEl.dispatchEvent(new Event('change'));
         }
     } else if (vendor === 'celestron') {
+        setFormValue('celestron-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
         const celestronConnectionType = config.connectionType || 'auto';
         setFormValue('celestron-connection-type', celestronConnectionType);
         if (celestronConnectionType === 'serial') {
@@ -1194,6 +1243,14 @@ function startEditDevice(device) {
     }
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
+    // #914: remember the identity the server learned for a ZWO camera, and the
+    // index/id the form loaded it with, so the submit can resend it unchanged.
+    const keepZwoIdentity = vendor === 'zwo' && deviceType === 'camera';
+    setFormValue('zwo-camera-serial', keepZwoIdentity ? config.serialNumber : '');
+    setFormValue('zwo-camera-name', keepZwoIdentity ? config.cameraName : '');
+    setFormValue('zwo-camera-unique-id', keepZwoIdentity ? config.uniqueId : '');
+    setFormValue('zwo-camera-loaded-index', keepZwoIdentity ? config.cameraIndex : '');
+    setFormValue('zwo-camera-loaded-id', keepZwoIdentity ? config.cameraId : '');
     setFormValue('filterwheel-index', config.filterwheelIndex);
     setFormValue('filterwheel-id', config.filterwheelId);
     const filterNamesField = document.getElementById('filterwheel-names');
@@ -1215,11 +1272,11 @@ function startEditDevice(device) {
     // Populate the ASIAIR Pro Switch per-port table from the saved config.
     // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
     // default flow), the HTML's pre-filled defaults remain in place.
+    // gpioChip is not loaded: the read-only field holds the one chip the
+    // server accepts, so a saved config naming another chip is corrected on
+    // save instead of being refused with a field the user cannot edit.
     if (vendor === 'zwo' &&
         (config.switchType === 'asiair' || config.switchType === 'asiair-plus-picm4')) {
-        if (config.gpioChip !== undefined && config.gpioChip !== null) {
-            setFormValue('asiair-gpio-chip', config.gpioChip);
-        }
         if (config.pwmFrequencyHz !== undefined && config.pwmFrequencyHz !== null) {
             setFormValue('asiair-pwm-frequency', config.pwmFrequencyHz);
         }
@@ -1230,8 +1287,14 @@ function startEditDevice(device) {
                 if (port.name !== undefined && port.name !== null) {
                     setFormValue('asiair-port-name-' + i, port.name);
                 }
-                if (port.gpio !== undefined && port.gpio !== null) {
-                    setFormValue('asiair-port-gpio-' + i, port.gpio);
+                // A saved line the select does not offer would blank it, and
+                // the submit skips a blank port; keep the row's default.
+                const gpioSelect = document.getElementById('asiair-port-gpio-' + i);
+                if (gpioSelect && port.gpio !== undefined && port.gpio !== null) {
+                    gpioSelect.value = String(port.gpio);
+                    if (gpioSelect.selectedIndex === -1) {
+                        gpioSelect.value = gpioSelect.querySelector('option[selected]').value;
+                    }
                 }
                 const pwmCheckbox = document.getElementById('asiair-port-pwm-' + i);
                 if (pwmCheckbox) {
@@ -1242,12 +1305,9 @@ function startEditDevice(device) {
     }
     // Populate the ASIAIR Plus (RK3568) per-port table from the saved config.
     // The kernel module fixes the per-port hardware mapping, so only the
-    // device path, PWM frequency, channel names and per-port PWM flags are
-    // configurable here.
+    // channel names and per-port PWM flags are configurable here. devicePath
+    // is not loaded, for the same reason as gpioChip above.
     if (vendor === 'zwo' && config.switchType === 'asiair-plus-rk3568') {
-        if (config.devicePath !== undefined && config.devicePath !== null) {
-            setFormValue('asiair-plus-device-path', config.devicePath);
-        }
         // pwmFrequencyHz was previously surfaced here as a user-editable
         // field. It's now auto-managed by the wrapper (defaults to 50 Hz,
         // matching what ZWO's stock zwoair_imager daemon actually uses -
@@ -1290,6 +1350,50 @@ function startEditDevice(device) {
 
     // Switch to the Configure tab without resetting the form we just populated.
     showTab('configure', { preserveForm: true });
+}
+
+// Light poll of the Devices listing: updates only the status dots in place, so
+// expanded cards and scroll position survive. Runs only while the Devices tab
+// is shown and the page is visible.
+const DEVICE_STATUS_POLL_MS = 5000;
+let deviceStatusPollTimer = null;
+let deviceStatusPollInFlight = false;
+
+async function pollDeviceStatus() {
+    const tab = document.getElementById('devices-tab');
+    if (document.hidden || !tab || !tab.classList.contains('active')) {
+        return;
+    }
+    // A listing can stall behind a driver mutex during a connect; never queue a second request.
+    if (deviceStatusPollInFlight) return;
+    deviceStatusPollInFlight = true;
+    try {
+        const response = await fetch(API_BASE + '/management/v1/configureddevices?ts=' + Date.now(), { cache: 'no-store' });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return;
+        for (const device of data.Value) {
+            const status = deviceStatus(device);
+            document.querySelectorAll('.status-dot').forEach(dot => {
+                if (dot.dataset.deviceType === String(device.DeviceType) &&
+                    dot.dataset.deviceNumber === String(device.DeviceNumber)) {
+                    dot.className = 'status-dot status-' + status.state;
+                    dot.title = status.text;
+                    dot.setAttribute('aria-label', status.text);
+                }
+            });
+        }
+    } catch (e) {
+        // Next tick retries; the dots keep their last state.
+    } finally {
+        deviceStatusPollInFlight = false;
+    }
+}
+
+function startDeviceStatusPoll() {
+    if (deviceStatusPollTimer === null) {
+        deviceStatusPollTimer = setInterval(pollDeviceStatus, DEVICE_STATUS_POLL_MS);
+    }
 }
 
 // Refresh devices
@@ -1375,6 +1479,7 @@ async function loadServerInfo() {
         const clockSource = resolveDescriptionValue(desc, ['ClockSource']) || '';
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
         const clockText = clockStateText(desc);
+        const hostCheck = hostCheckSettings(desc);
         // open-astro#354: adopt the host zone for the header clock. A missing
         // field (older server) or '' keeps the browser-zone rendering.
         serverTimeZone = String(resolveDescriptionValue(desc, ['TimeZone']) || '');
@@ -1403,6 +1508,22 @@ async function loadServerInfo() {
                         Sync time from client on connect
                     </label>
                 </div>` : ''}
+                ${hostCheck ? `
+                <div class="server-info-row">
+                    <span class="info-label">Host names</span>
+                    <label class="info-value" title="Refuse requests whose Host header is not an allowed name, so a web page cannot reach this server through a rebound DNS name. Off: any Host name is served.">
+                        <input id="server-host-check-toggle" type="checkbox" ${hostCheck.enabled ? 'checked' : ''}>
+                        Restrict Host names (DNS-rebinding protection)
+                    </label>
+                </div>
+                <div class="server-info-row">
+                    <span class="info-label">Allowed host names</span>
+                    <div class="server-location">
+                        <input id="server-allowed-hosts-input" type="text" placeholder="e.g. .lan, astropi.home">
+                    </div>
+                    <span class="info-note">Comma-separated; a leading dot allows a domain and every name under it. Always allowed: ${escapeHtml(HOST_CHECK_ALWAYS_ALLOWED)}.</span>
+                    <button id="server-allowed-hosts-save" class="btn btn-secondary btn-small" type="button">Save</button>
+                </div>` : ''}
                 <div class="server-info-row">
                     <span class="info-label">Profile Name</span>
                     <div class="server-location">
@@ -1423,6 +1544,21 @@ async function loadServerInfo() {
         const syncClockToggle = document.getElementById('server-sync-clock-toggle');
         if (syncClockToggle) {
             syncClockToggle.addEventListener('change', () => updateSyncClockFromClients(syncClockToggle.checked));
+        }
+
+        if (hostCheck) {
+            const hostCheckToggle = document.getElementById('server-host-check-toggle');
+            hostCheckToggle.addEventListener('change', () => saveHostCheckSettings({HostCheckEnabled: hostCheckToggle.checked}));
+            const allowedHostsInput = document.getElementById('server-allowed-hosts-input');
+            allowedHostsInput.value = hostCheck.hosts;
+            const saveAllowedHosts = () => saveHostCheckSettings({AllowedHosts: allowedHostsInput.value});
+            allowedHostsInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    saveAllowedHosts();
+                }
+            });
+            document.getElementById('server-allowed-hosts-save').addEventListener('click', saveAllowedHosts);
         }
 
         const locationInput = document.getElementById('server-location-input');
@@ -1688,6 +1824,41 @@ async function updateSyncClockFromClients(enabled) {
     }
 }
 
+// open-astro#392: save the Host check toggle or list. The server refuses a
+// change that would lock this browser out (HTTP 400 with the reason), so the
+// body is read before the status; the rows reload either way, to show what the
+// server holds.
+async function saveHostCheckSettings(values) {
+    setServerInfoStatus('Saving Host name settings...');
+    let error = '';
+    try {
+        const response = await fetch(API_BASE + '/management/v1/description', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(values)
+        });
+        let data = null;
+        try {
+            data = await response.json();
+        } catch (e) {
+            data = null;
+        }
+        error = settingsSaveError(response.status, data);
+    } catch (e) {
+        error = e.message;
+    }
+    await loadServerInfo();
+    // A refused list stays in the field so it can be corrected, as the profile name does.
+    const typedHosts = document.getElementById('server-allowed-hosts-input');
+    if (error && typedHosts && typeof values.AllowedHosts === 'string') {
+        typedHosts.value = values.AllowedHosts;
+    }
+    setServerInfoStatus(error ? 'Host name settings not saved: ' + error : 'Host name settings saved.', !!error);
+    if (error) {
+        document.getElementById('server-info-status')?.scrollIntoView({block: 'nearest'});
+    }
+}
+
 async function updateServerProfileName() {
     const profileInput = document.getElementById('server-profile-input');
     const profileSaveButton = document.getElementById('server-profile-save');
@@ -1760,6 +1931,227 @@ function refreshServerInfo() {
     loadLogSettings();
     loadLogFiles();
     wifiRefresh();
+    updateRefresh();
+}
+
+// ---------------------------------------------------------------------------
+// Software update card (docs/software-update.md)
+// ---------------------------------------------------------------------------
+
+const UPDATE_BASE = API_BASE + '/management/v1/update';
+let updatePollTimer = null;
+// The version that was running when Install was pressed: the poll reloads the
+// page once a DIFFERENT version answers, which is how it knows the restart
+// that the upgrade performs has completed.
+let updateInstallFromVersion = null;
+let updateRestartSeen = false;
+
+function updateEl(id) {
+    return document.getElementById(id);
+}
+
+async function updateApi(sub, method) {
+    const response = await fetch(UPDATE_BASE + '/' + sub, { method: method || 'GET' });
+    const result = await response.json();
+    if (result.ErrorNumber !== 0) throw new Error(result.ErrorMessage || 'unknown error');
+    return result.Value;
+}
+
+function updateMessage(text, isError) {
+    const el = updateEl('update-message');
+    if (!el) return;
+    el.textContent = text || '';
+    el.classList.toggle('error', !!isError);
+}
+
+function updateRender(status) {
+    const installed = updateEl('update-installed');
+    const line = updateEl('update-status-line');
+    const summary = updateEl('update-summary');
+    const installBtn = updateEl('update-install');
+    const installerLine = updateEl('update-installer-line');
+    const log = updateEl('update-log');
+    if (!installed || !line || !installBtn || !installerLine || !log) return;
+
+    const installer = status.Installer || {};
+    const checkBtn = updateEl('update-check');
+    if (checkBtn) checkBtn.disabled = status.CheckEnabled === false;
+    installed.textContent = status.InstalledVersion || '?';
+    line.textContent = updateStatusText(status);
+    line.classList.toggle('update-available', !!status.UpdateAvailable);
+    if (summary) {
+        summary.textContent = status.UpdateAvailable ? 'Update available'
+            : installer.State === 'running' ? 'Installing...' : '';
+    }
+    // The button shows only when there is something to install AND this host
+    // can install it; a source build gets the apt instructions instead.
+    const canInstall = !!status.UpdateAvailable && installer.State !== 'running' && installer.State !== 'unavailable';
+    installBtn.hidden = !canInstall;
+    installBtn.disabled = !canInstall;
+
+    // The newer version's plain-language notes, so the operator decides
+    // with the changes in front of them. Rendered from a fixed Markdown
+    // subset with everything escaped first (format.js renderReleaseNotes).
+    const notes = updateEl('update-notes');
+    const notesBody = updateEl('update-notes-body');
+    const notesTitle = updateEl('update-notes-title');
+    const notesMissing = updateEl('update-notes-missing');
+    const releaseLink = updateEl('update-release-link');
+    if (notes && notesBody && notesTitle && notesMissing && releaseLink) {
+        if (status.UpdateAvailable) {
+            notesTitle.textContent = "What's new in " + status.LatestVersion;
+            const rendered = renderReleaseNotes(status.ReleaseNotes || '');
+            notesBody.innerHTML = rendered;
+            notesBody.hidden = !rendered;
+            notesMissing.hidden = !!rendered;
+            notesMissing.textContent = rendered ? ''
+                : 'The release notes could not be fetched' + (status.ReleaseUrl ? '; read them on the release page.' : '.');
+            if (status.ReleaseUrl) {
+                releaseLink.href = status.ReleaseUrl;
+                releaseLink.hidden = false;
+            } else {
+                releaseLink.hidden = true;
+            }
+            notes.classList.remove('hidden');
+        } else {
+            notesBody.innerHTML = '';
+            notes.classList.add('hidden');
+        }
+    }
+
+    installerLine.textContent = installerStateText(installer);
+    installerLine.classList.toggle('error', installer.State === 'failed');
+    if (installer.Log) {
+        log.textContent = installer.Log;
+        log.classList.remove('hidden');
+        log.scrollTop = log.scrollHeight;
+    } else {
+        log.textContent = '';
+        log.classList.add('hidden');
+    }
+}
+
+async function updateRefresh() {
+    if (!updateEl('update-installed')) return;
+    try {
+        const status = await updateApi('status', 'GET');
+        updateRender(status);
+        if ((status.Installer || {}).State === 'running') {
+            // A page opened (or reloaded) mid-install joins the run: remember
+            // the version now answering so the poll can still detect the
+            // switch to the new one.
+            if (!updateInstallFromVersion) updateInstallFromVersion = status.InstalledVersion || null;
+            updateStartPolling();
+        }
+    } catch (error) {
+        updateMessage('Could not read the update status: ' + error.message, true);
+    }
+}
+
+async function updateCheckClicked() {
+    const btn = updateEl('update-check');
+    if (!btn) return;
+    btn.dataset.originalLabel = btn.textContent;
+    btn.textContent = 'Checking...';
+    btn.disabled = true;
+    updateMessage('');
+    try {
+        const status = await updateApi('check', 'POST');
+        updateRender(status);
+    } catch (error) {
+        updateMessage(error.message, true);
+        // The status still carries the failure and whatever was known before.
+        try { updateRender(await updateApi('status', 'GET')); } catch (e) { /* message already shown */ }
+    } finally {
+        btn.textContent = btn.dataset.originalLabel || 'Check for Updates';
+        btn.disabled = false;
+    }
+}
+
+async function updateInstallClicked() {
+    let status;
+    try {
+        status = await updateApi('status', 'GET');
+    } catch (error) {
+        updateMessage('Could not read the update status: ' + error.message, true);
+        return;
+    }
+    if (!status.UpdateAvailable) {
+        updateRender(status);
+        updateMessage('No update is available. Check for updates first.', true);
+        return;
+    }
+    const latest = status.LatestVersion;
+    const installed = status.InstalledVersion;
+    if (!confirm('Install AlpacaBridge ' + latest + ' (currently ' + installed + ')?\n\n' +
+                 'The server restarts when the upgrade finishes and every connected client is ' +
+                 'disconnected for a few seconds. Do not start this during an exposure or a slew.')) {
+        return;
+    }
+    const btn = updateEl('update-install');
+    if (btn) btn.disabled = true;
+    updateMessage('');
+    try {
+        updateInstallFromVersion = installed;
+        updateRestartSeen = false;
+        const started = await updateApi('install', 'POST');
+        updateRender(started);
+        updateStartPolling();
+    } catch (error) {
+        updateInstallFromVersion = null;
+        updateMessage(error.message, true);
+        if (btn) btn.disabled = false;
+    }
+}
+
+function updateStartPolling() {
+    if (updatePollTimer) return;
+    updatePollTimer = setInterval(updatePollTick, 2000);
+}
+
+function updateStopPolling() {
+    if (!updatePollTimer) return;
+    clearInterval(updatePollTimer);
+    updatePollTimer = null;
+}
+
+async function updatePollTick() {
+    let status;
+    try {
+        status = await updateApi('status', 'GET');
+    } catch (error) {
+        // The upgrade restarts the service part-way through: a failed poll
+        // here is the expected shape, not an error to show.
+        updateRestartSeen = true;
+        updateMessage('The server is restarting to finish the update. Waiting for it to come back...');
+        return;
+    }
+    if (updateInstallFromVersion && status.InstalledVersion && status.InstalledVersion !== updateInstallFromVersion) {
+        updateStopPolling();
+        updateRender(status);
+        updateMessage('Updated to ' + status.InstalledVersion + '. Reloading...');
+        setTimeout(() => { window.location.reload(); }, 1500);
+        return;
+    }
+    updateRender(status);
+    const state = (status.Installer || {}).State;
+    if (state === 'running') {
+        if (updateRestartSeen) updateMessage('The server is back. Finishing the update...');
+        return;
+    }
+    // Not running any more and the version did not change: the run ended
+    // without installing anything, or the new package restarted us back on
+    // the same number (a dev build). Stop and leave the transcript up.
+    updateStopPolling();
+    updateInstallFromVersion = null;
+    if (state === 'succeeded') {
+        updateMessage(updateRestartSeen
+            ? 'The update finished. Reload the page to see the new version.'
+            : 'The update finished without changing the installed version.');
+        if (updateRestartSeen) setTimeout(() => { window.location.reload(); }, 1500);
+    } else if (state === 'failed') {
+        updateMessage('The update did not complete. The transcript above has the details.', true);
+    }
 }
 
 // Sync the SBC's system clock from the browser's clock. The browser machine
@@ -1790,7 +2182,7 @@ async function syncTime() {
             result = null;
         }
 
-        if (result && result.ErrorNumber === 0) {
+        if (result && result.ErrorNumber === 0 && isValidClockSeconds(result.Value)) {
             // Account for round-trip latency so the confirmation shows the
             // server's adjusted time, not the browser's send time.
             const roundTripMs = Date.now() - t0;
@@ -1799,7 +2191,7 @@ async function syncTime() {
             alert('Time synced! Server time is now ' + serverTime.toLocaleString() + ' (UTC offset ' + (serverTime.getTimezoneOffset() / -60) + 'h).');
             refreshClockRow();  // the source is now "client" (open-astro#292); that row only, after the dialog
         } else {
-            alert('Error syncing time: ' + (result ? result.ErrorMessage : 'unknown error'));
+            alert('Error syncing time: ' + (result ? (result.ErrorMessage || 'invalid time value') : 'unknown error'));
         }
     } catch (e) {
         alert('Error syncing time: ' + e.message);
@@ -1815,13 +2207,17 @@ let serverClockOffsetMs = null;
 // TimeZone field ('' until the first successful load, or when the host
 // cannot name one); formatServerClock() falls back to the browser's zone.
 let serverTimeZone = '';
+// open-astro#677: the synctime ErrorMessage while the server refuses to report
+// its time (serverClockError() in web/format.js), '' otherwise.
+let serverClockErrorText = '';
 
 async function refreshServerClockOffset() {
     try {
         const t0 = Date.now();
         const response = await fetch(API_BASE + '/management/v1/synctime');
         const result = await response.json();
-        if (result && result.ErrorNumber === 0 && Number.isFinite(result.Value)) {
+        serverClockErrorText = serverClockError(result);
+        if (result && result.ErrorNumber === 0 && isValidClockSeconds(result.Value)) {
             // Value is whole seconds; assume the server read its clock halfway
             // through the round trip.
             //
@@ -1834,12 +2230,10 @@ async function refreshServerClockOffset() {
             // the previous offset in place instead is what the fetch-failure
             // comment below already promises for every other bad answer.
             //
-            // Number.isFinite alone is the whole check: it is false for every
-            // non-number, so a `typeof` test in front of it would be redundant.
-            // It does NOT cover a finite but out-of-range Value (e.g. 1e15
-            // seconds), which is still an Invalid Date downstream; that input
-            // was broken before this change too and clamping it to the server's
-            // own 2000-2100 window belongs with that endpoint, not here.
+            // isValidClockSeconds() starts with Number.isFinite, which is false for
+            // every non-number, so a `typeof` test in front of it would be
+            // redundant. It also rejects a finite but out-of-range
+            // Value (e.g. 1e15 seconds), which would be an Invalid Date (#511).
             const midpoint = t0 + (Date.now() - t0) / 2;
             serverClockOffsetMs = (result.Value * 1000) - midpoint;
         }
@@ -1860,6 +2254,27 @@ function updateServerClock() {
     if (!el) {
         return;
     }
+    if (el.dataset.defaultTitle === undefined) {
+        el.dataset.defaultTitle = el.title;
+    }
+    if (serverClockErrorText) {
+        // open-astro#677: the reply carried no time, so show none, in the red
+        // "needs sync" style, with the server's reason on hover; the #670
+        // refusal names Sync Time as the fix. The header has no room for the
+        // whole message.
+        el.textContent = 'clock error';
+        el.title = serverClockErrorText;
+        el.classList.add('drift');
+        // A title tooltip never shows on a touch screen and a span takes no
+        // keyboard focus, so the clock becomes a control that shows the
+        // message (showServerClockError()) until the error clears.
+        el.tabIndex = 0;
+        el.setAttribute('role', 'button');
+        return;
+    }
+    el.title = el.dataset.defaultTitle;
+    el.removeAttribute('tabindex');
+    el.removeAttribute('role');
     if (serverClockOffsetMs === null) {
         el.textContent = '--:--:--';
         el.classList.remove('drift');
@@ -1870,6 +2285,20 @@ function updateServerClock() {
     // The GET returns whole seconds, so up to ±1 s of the offset is
     // quantization, not drift; only flag beyond 2 s.
     el.classList.toggle('drift', Math.abs(serverClockOffsetMs) > 2000);
+}
+
+// open-astro#677: a tap, click, Enter or Space on the header clock while it
+// reads "clock error" shows the server's message, which the title tooltip
+// alone keeps from touch and keyboard users.
+function showServerClockError(event) {
+    if (!serverClockErrorText) {
+        return;
+    }
+    if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') {
+        return;
+    }
+    event.preventDefault();
+    alert(serverClockErrorText + '\n\nTo set it from this device, use Sync Time at the bottom of the page.');
 }
 
 // Shutdown server
@@ -3486,6 +3915,7 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'synscan') {
         deviceData.connectionType = formData.get('synscanConnectionType') || 'auto';
         deviceData.synscanVersion = formData.get('synscanVersion') || 'auto';
+        deviceData.alignmentMode = normalizeAlignmentMode(formData.get('synscanAlignmentMode'));
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('synscanPortPath');
             deviceData.baudRate = parseInt(formData.get('synscanBaudRate')) || 9600;
@@ -3538,6 +3968,10 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (skywatcherSiteElevation !== null) {
             deviceData.siteElevation = skywatcherSiteElevation;
         }
+        // open-astro#436: blank = off, sent as null so an edit can clear a limit.
+        deviceData.minAltitudeDeg = readOptionalNumber(formData, 'skywatcherMinAltitudeDeg');
+        deviceData.meridianLimitMinutes = readOptionalNumber(formData, 'skywatcherMeridianLimitMinutes');
+        deviceData.decAxisSense = formData.get('skywatcherDecAxisSense') || 'auto';  // open-astro#582
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444
@@ -3555,6 +3989,7 @@ document.getElementById('device-form').addEventListener('submit', async function
         }
     } else if (deviceData.vendor === 'celestron') {
         deviceData.connectionType = formData.get('celestronConnectionType') || 'auto';
+        deviceData.alignmentMode = normalizeAlignmentMode(formData.get('celestronAlignmentMode'));
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('celestronPortPath');
             deviceData.baudRate = parseInt(formData.get('celestronBaudRate')) || 9600;
@@ -3630,6 +4065,12 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (!Number.isNaN(pwmFreq)) {
                     deviceData.pwmFrequencyHz = pwmFreq;
                 }
+                const duplicateGpio = asiairDuplicateGpioError(
+                    [0, 1, 2, 3].map((i) => Number.parseInt(formData.get('asiairPortGpio' + i), 10)));
+                if (duplicateGpio) {
+                    alert(duplicateGpio);
+                    return;
+                }
                 const ports = [];
                 for (let i = 0; i < 4; i += 1) {
                     const name = formData.get('asiairPortName' + i);
@@ -3679,6 +4120,9 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (!Number.isNaN(cameraId)) {
                     deviceData.cameraId = cameraId;
                 }
+            }
+            if (normalizedType === 'camera') {
+                Object.assign(deviceData, zwoCameraIdentityFields(formData));
             }
         }
         if (normalizedType === 'filterwheel') {
@@ -4129,6 +4573,7 @@ function renderDeviceSettings(config) {
         ['host', 'Host'],
         ['tcpPort', 'TCP Port'],
         ['synscanVersion', 'SynScan V3/V4 Version'],
+        ['alignmentMode', 'Alignment Mode'],
         ['cameraIndex', 'Camera Index'],
         ['cameraId', 'Camera ID'],
         ['filterwheelIndex', 'Filter Wheel Index'],
@@ -4241,7 +4686,13 @@ function escapeHtml(text) {
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     loadDevices();
+    startDeviceStatusPoll();
     loadServerInfo();
+    const serverClock = document.getElementById('server-clock');
+    if (serverClock) {
+        serverClock.addEventListener('click', showServerClockError);
+        serverClock.addEventListener('keydown', showServerClockError);
+    }
     refreshServerClockOffset();
     setInterval(updateServerClock, 1000);
     setInterval(refreshServerClockOffset, 60000);
@@ -4473,41 +4924,54 @@ async function wifiRenderNetworks(rescan) {
         return;
     }
     const profiles = wifiState.profiles || [];
-    const savedBySsid = {};
+    const savedBySsid = new Map();
     for (const p of profiles) {
-        if (p.Mode !== 'ap') savedBySsid[p.Ssid] = p;
+        if (p.Mode !== 'ap') savedBySsid.set(wifiSsidKey(p), p);
     }
-    const activeSsid = wifiClientConnected(status) ? status.Ssid : null;
+    const activeSsid = wifiClientConnected(status) ? wifiSsidKey(status) : null;
 
     list.innerHTML = '';
     const inRange = new Set();
+    const displayKeys = new Map();
+    for (const item of networks.concat(profiles)) {
+        const keys = displayKeys.get(item.Ssid) || new Set();
+        keys.add(wifiSsidKey(item));
+        displayKeys.set(item.Ssid, keys);
+    }
     for (const n of networks) {
-        if (n.Ssid === (wifiState.ap && wifiState.ap.Ssid)) continue;  // own hotspot
-        inRange.add(n.Ssid);
-        const saved = savedBySsid[n.Ssid];
-        const isActive = n.Ssid === activeSsid;
+        const key = wifiSsidKey(n);
+        if (key === wifiSsidKey(wifiState.ap)) continue;  // own hotspot
+        inRange.add(key);
+        const saved = savedBySsid.get(key);
+        const isActive = key === activeSsid;
+        const label = wifiSsidLabel(n, displayKeys.get(n.Ssid).size);
         const row = document.createElement('div');
         row.className = 'wifi-net-row' + (isActive ? ' active' : '');
         row.innerHTML =
             '<span class="wifi-net-check">' + (isActive ? '✓' : '') + '</span>' +
-            '<span class="wifi-net-name">' + escapeHtml(n.Ssid) + (saved && !isActive ? ' <small>saved</small>' : '') + '</span>' +
+            '<span class="wifi-net-name">' + escapeHtml(label) + (saved && !isActive ? ' <small>saved</small>' : '') + '</span>' +
             '<span class="wifi-net-meta">' + (n.Security !== 'Open' ? '🔒 ' : '') +
             (n.FrequencyMhz > 5000 ? '5' : '2.4') + ' GHz <span class="wifi-signal">' + wifiSignalIcon(n.SignalPercent) + '</span></span>';
         if (!isActive) {
-            row.addEventListener('click', () => saved ? wifiConnectSaved(saved) : wifiJoinNew(n));
+            row.addEventListener('click', () => saved ?
+                wifiConnectSaved(saved, displayKeys.get(saved.Ssid).size) :
+                wifiJoinNew(n, displayKeys.get(n.Ssid).size));
         }
         if (saved) {
             const forget = document.createElement('button');
             forget.className = 'btn btn-secondary btn-small';
             forget.textContent = 'Forget';
-            forget.addEventListener('click', (e) => { e.stopPropagation(); wifiForget(saved); });
+            forget.addEventListener('click', (e) => {
+                e.stopPropagation();
+                wifiForget(saved, displayKeys.get(saved.Ssid).size);
+            });
             row.appendChild(forget);
         }
         list.appendChild(row);
     }
 
     // Saved networks that are not in range right now: manageable (forget).
-    const outOfRange = profiles.filter((p) => p.Mode !== 'ap' && !inRange.has(p.Ssid));
+    const outOfRange = profiles.filter((p) => p.Mode !== 'ap' && !inRange.has(wifiSsidKey(p)));
     if (outOfRange.length) {
         const title = document.createElement('p');
         title.className = 'wifi-substatus';
@@ -4516,11 +4980,15 @@ async function wifiRenderNetworks(rescan) {
         for (const p of outOfRange) {
             const row = document.createElement('div');
             row.className = 'wifi-net-row dim';
-            row.innerHTML = '<span class="wifi-net-check"></span><span class="wifi-net-name">' + escapeHtml(p.Ssid) + '</span>';
+            row.innerHTML = '<span class="wifi-net-check"></span><span class="wifi-net-name">' +
+                escapeHtml(wifiSsidLabel(p, displayKeys.get(p.Ssid).size)) + '</span>';
             const forget = document.createElement('button');
             forget.className = 'btn btn-secondary btn-small';
             forget.textContent = 'Forget';
-            forget.addEventListener('click', (e) => { e.stopPropagation(); wifiForget(p); });
+            forget.addEventListener('click', (e) => {
+                e.stopPropagation();
+                wifiForget(p, displayKeys.get(p.Ssid).size);
+            });
             row.appendChild(forget);
             list.appendChild(row);
         }
@@ -4532,39 +5000,45 @@ async function wifiRenderNetworks(rescan) {
 
 function wifiScanClicked() { wifiRenderNetworks(true); }
 
-async function wifiJoinNew(network) {
+async function wifiJoinNew(network, displayCount) {
+    const label = wifiSsidLabel(network, displayCount);
     let passphrase = '';
     if (network.Security !== 'Open') {
-        passphrase = prompt('Password for "' + network.Ssid + '":');
+        passphrase = prompt('Password for "' + label + '":');
         if (passphrase === null) return;
     }
-    if (!wifiConfirmSwitch('join "' + network.Ssid + '"')) return;
+    if (!wifiConfirmSwitch('join "' + label + '"')) return;
     try {
-        await wifiApi('/profiles', 'PUT', { Ssid: network.Ssid, Passphrase: passphrase, Autoconnect: true, Priority: 0 });
+        await wifiApi('/profiles', 'PUT', Object.assign(
+            network.SsidHex ? { SsidHex: network.SsidHex } : { Ssid: network.Ssid },
+            { Passphrase: passphrase, Autoconnect: true, Priority: 0 }));
         const profiles = await wifiApi('/profiles');
-        const match = profiles.find((p) => p.Ssid === network.Ssid && p.Mode !== 'ap');
+        const match = profiles.find((p) => wifiSsidKey(p) === wifiSsidKey(network) && p.Mode !== 'ap');
         if (match) await wifiApi('/connect', 'PUT', { Uuid: match.Uuid });
-        wifiMessage('Joining ' + network.Ssid + '...');
+        wifiMessage('Joining ' + label + '...');
         setTimeout(wifiRefresh, 8000);
     } catch (e) {
         wifiMessage('Could not join: ' + e.message, true);
     }
 }
 
-async function wifiConnectSaved(profile) {
-    if (!wifiConfirmSwitch('switch to "' + profile.Ssid + '"')) return;
+async function wifiConnectSaved(profile, displayCount) {
+    const label = wifiSsidLabel(profile, displayCount);
+    if (!wifiConfirmSwitch('switch to "' + label + '"')) return;
     try {
         await wifiApi('/connect', 'PUT', { Uuid: profile.Uuid });
-        wifiMessage('Connecting to ' + profile.Ssid + '...');
+        wifiMessage('Connecting to ' + label + '...');
         setTimeout(wifiRefresh, 8000);
     } catch (e) {
         wifiMessage('Could not connect: ' + e.message, true);
     }
 }
 
-async function wifiForget(profile) {
-    const connectedNow = wifiClientConnected(wifiState.status || {}) && (wifiState.status || {}).Ssid === profile.Ssid;
-    if (!confirm('Forget "' + profile.Ssid + '"?' + (connectedNow ? '\n\nThe device is connected to this network right now and will disconnect from it.' : ''))) return;
+async function wifiForget(profile, displayCount) {
+    const label = wifiSsidLabel(profile, displayCount);
+    const connectedNow = wifiClientConnected(wifiState.status || {}) &&
+        wifiSsidKey(wifiState.status || {}) === wifiSsidKey(profile);
+    if (!confirm('Forget "' + label + '"?' + (connectedNow ? '\n\nThe device is connected to this network right now and will disconnect from it.' : ''))) return;
     try {
         await wifiApi('/profiles/' + encodeURIComponent(profile.Uuid), 'DELETE');
         wifiState.profiles = await wifiApi('/profiles');
@@ -4636,7 +5110,12 @@ async function wifiApplyAp(enabled, fromToggle) {
     }
     wifiState.busy = true;
     try {
-        await wifiApi('/ap', 'PUT', { Ssid: ssid, Passphrase: passphrase, Band: wifiSelectedBand(), Channel: 0, Enabled: enabled });
+        const apBody = { Ssid: ssid, Passphrase: passphrase, Band: wifiSelectedBand(), Channel: 0, Enabled: enabled };
+        // Keep the exact configured bytes when the user leaves the displayed SSID text unchanged.
+        if (wifiState.ap && wifiState.ap.Configured && ssid === wifiState.ap.Ssid && wifiState.ap.SsidHex) {
+            apBody.SsidHex = wifiState.ap.SsidHex;
+        }
+        await wifiApi('/ap', 'PUT', apBody);
         const passInput = wifiEl('wifi-ap-pass');
         if (passInput) passInput.value = '';
         wifiMessage(fromToggle ? (enabled ? 'Hotspot starting...' : 'Hotspot turned off.') : 'Saved.');

@@ -51,34 +51,35 @@ TEST_CASE("ZWO Camera Driver - Device metadata", "[zwo][camera][unit]") {
     CHECK(driver->get_driver_info() == "AlpacaCore ZWO Camera Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);  // ICameraV4 (Platform 7)
-    CHECK(driver->get_unique_id() == "ZWO_3");
+    // Not derived from the device number or the enumeration index (#914).
+    CHECK(driver->get_unique_id().rfind("ZWO_UID_", 0) == 0);
+    CHECK(driver->get_unique_id() == driver->get_unique_id());
 }
 
-TEST_CASE("ZWO Camera Driver - DeviceState is ICameraV4 compliant", "[zwo][camera][unit]") {
+TEST_CASE("ZWO Camera Driver - UniqueID follows the config entry, not the device number", "[zwo][camera][unit]") {
+    alpacacore::vendor::zwo::ZwoCameraBinding serial_less;
+    serial_less.identity.camera_name = "ZWO ASI120MM Mini";
+    serial_less.unique_id = "ZWO_UID_00112233445566ff";
+    alpacacore::vendor::zwo::ZwoCameraBinding with_serial;
+    with_serial.identity.serial = "0c190e111d020900";
+    with_serial.unique_id = "ZWO_UID_ignored";
+
+    // Same stored value on two starts and under two device numbers.
+    CHECK(alpacacore::vendor::zwo::create_zwo_camera_bound(0, serial_less)->get_unique_id() ==
+          "ZWO_UID_00112233445566ff");
+    CHECK(alpacacore::vendor::zwo::create_zwo_camera_bound(1, serial_less)->get_unique_id() ==
+          "ZWO_UID_00112233445566ff");
+    CHECK(alpacacore::vendor::zwo::create_zwo_camera_bound(1, with_serial)->get_unique_id() ==
+          "ZWO_SN_0c190e111d020900");
+}
+
+TEST_CASE("ZWO Camera Driver - DeviceState is empty when disconnected", "[zwo][camera][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
 
-    auto state = driver->get_device_state();
-    auto has = [&state](const std::string& name) {
-        for (const auto& entry : state) {
-            if (entry.name == name) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    // Every Platform 7 DeviceState response carries a TimeStamp.
-    CHECK(has("TimeStamp"));
-    // The pre-Platform-7 implementation emitted these non-standard names; an
-    // ICameraV4 DeviceState must not contain them.
-    CHECK_FALSE(has("Connected"));
-    CHECK_FALSE(has("CoolerOn"));
-    // Every returned name must be a valid ICameraV4 operational property.
-    const std::set<std::string> valid = {"CameraState", "CCDTemperature", "CoolerPower",      "HeatSinkTemperature",
-                                         "ImageReady",  "IsPulseGuiding", "PercentCompleted", "TimeStamp"};
-    for (const auto& entry : state) {
-        CHECK(valid.count(entry.name) == 1);
-    }
+    // A disconnected driver's DeviceState is the empty list -- no TimeStamp
+    // (ASCOM read-all FAQ), and none of the getters that answer a default
+    // (CameraState, PercentCompleted) leak into it.
+    CHECK(driver->get_device_state().empty());
 }
 
 TEST_CASE("ZWO Camera Driver - Not connected throws", "[zwo][camera][unit]") {
@@ -146,4 +147,37 @@ TEST_CASE("ZWO Camera Driver - State Machine Contracts", "[zwo][camera][unit]") 
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
+}
+
+namespace {
+
+std::string connect_error(alpacacore::CameraDriver& driver) {
+    try {
+        driver.set_connected(true);
+    } catch (const alpacacore::AlpacaException& ex) {
+        return ex.what();
+    }
+    return "";
+}
+
+}  // namespace
+
+// Issue #738: a camera registered by cameraId lost that id the first time a
+// client read its name while it was disconnected, so every later connect
+// failed with "Camera ID not specified". A name query must not change what a
+// connect does. The id is 256, the SDK's ASICAMERA_ID_MAX, which no attached
+// camera can have, so the connect fails with or without cameras on the bus;
+// the point is that both drivers fail the same way, on the configured id.
+TEST_CASE("ZWO Camera Driver - A name query keeps the configured camera id", "[zwo][camera][unit]") {
+    constexpr int kNoSuchCameraId = 256;
+    auto untouched = alpacacore::vendor::zwo::create_zwo_camera(0, kNoSuchCameraId);
+    const std::string expected = connect_error(*untouched);
+    REQUIRE_FALSE(expected.empty());
+
+    auto queried = alpacacore::vendor::zwo::create_zwo_camera(0, kNoSuchCameraId);
+    (void)queried->get_name();
+    const std::string actual = connect_error(*queried);
+
+    CHECK(actual != "Camera ID not specified");
+    CHECK(actual == expected);
 }

@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=30">
+    <link rel="stylesheet" href="/web/style.css?v=32">
 </head>
 <body>
     <div class="container">
@@ -77,7 +77,7 @@
                         <option value="astroasis">Astroasis</option>
                         <option value="celestron">Celestron NexStar</option>
                         <option value="gemini">Gemini</option>
-                        <option value="gphoto">DSLR / Mirrorless (gphoto2)</option>
+                        <option value="gphoto">DSLR / Mirrorless</option>
                         <option value="ioptron">iOptron</option>
                         <option value="playerone">Player One</option>
                         <option value="onstep">OnStep</option>
@@ -341,6 +341,16 @@
                     </div>
 
                     <div class="form-group">
+                        <label for="synscan-alignment-mode">Alignment Mode:</label>
+                        <select id="synscan-alignment-mode" name="synscanAlignmentMode">
+                            <option value="auto">Auto (from the handset)</option>
+                            <option value="altaz">Alt-Az</option>
+                            <option value="equatorial">Equatorial</option>
+                        </select>
+                        <small>For an AZ-EQ5 or AZ-EQ6, which reports only its model: pick how the mount is set up. Other mounts ignore this.</small>
+                    </div>
+
+                    <div class="form-group">
                         <label for="synscan-connection-type">Connection Type:</label>
                         <select id="synscan-connection-type" name="synscanConnectionType" required>
                             <option value="auto">Auto-Detect</option>
@@ -480,6 +490,25 @@
                         </label>
                         <small>Keep a site latitude, longitude or elevation written by a client (an app with GPS, a planetarium program) as this device's saved site, so it survives a restart. Untick to protect a surveyed position.</small>
                     </div>
+                    <div class="form-group">
+                        <label for="skywatcher-min-altitude">Minimum altitude limit (deg):</label>
+                        <input type="number" id="skywatcher-min-altitude" name="skywatcherMinAltitudeDeg" min="-90" max="90" step="any" placeholder="off">
+                        <small>Optional. Clear the field to switch the limit off. A goto to a target below this altitude is refused, and MoveAxis or tracking that carries the tube below it is stopped. Motion that starts below the limit is not stopped, so you can move back up; Park and FindHome are not limited. It is a soft limit: set it at least 3 degrees above the real clearance of your tube and tripod.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="skywatcher-meridian-limit">Meridian limit (minutes past the meridian):</label>
+                        <input type="number" id="skywatcher-meridian-limit" name="skywatcherMeridianLimitMinutes" min="0" max="360" step="any" placeholder="off">
+                        <small>Optional. Clear the field to switch the limit off. MoveAxis or tracking that carries the counterweight past this limit is stopped. Motion that starts past it is not stopped, and gotos are not refused at this limit.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="skywatcher-dec-axis-sense">Dec axis sense:</label>
+                        <select id="skywatcher-dec-axis-sense" name="skywatcherDecAxisSense">
+                            <option value="auto" selected>Auto (measured for known mounts)</option>
+                            <option value="normal">Normal</option>
+                            <option value="reversed">Reversed</option>
+                        </select>
+                        <small>Leave on Auto unless the mount points 12 hours out in hour angle. Only mounts that have not been measured need this; see the troubleshooting guide for the reading that tells you which to pick.</small>
+                    </div>
                 </div>
 
                 <!-- OnStep Telescope Configuration -->
@@ -529,6 +558,16 @@
                 <!-- Celestron NexStar Telescope Configuration -->
                 <div id="celestron-config" class="vendor-config" style="display: none;">
                     <h3>Celestron NexStar Telescope Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="celestron-alignment-mode">Alignment Mode:</label>
+                        <select id="celestron-alignment-mode" name="celestronAlignmentMode">
+                            <option value="auto">Auto (from the handset)</option>
+                            <option value="altaz">Alt-Az</option>
+                            <option value="equatorial">Equatorial</option>
+                        </select>
+                        <small>For a fork mount on a wedge, pick Equatorial. German equatorial mounts ignore this.</small>
+                    </div>
 
                     <div class="form-group">
                         <label for="celestron-connection-type">Connection Type:</label>
@@ -708,7 +747,7 @@
                     <div id="zwo-asiair-fields" style="display: none;">
                         <div class="form-group">
                             <label for="asiair-gpio-chip">GPIO Chip Device:</label>
-                            <input type="text" id="asiair-gpio-chip" name="asiairGpioChip" value="/dev/gpiochip0">
+                            <input type="text" id="asiair-gpio-chip" name="asiairGpioChip" value="/dev/gpiochip0" readonly>
                             <small>Path to the libgpiod character device. Default <code>/dev/gpiochip0</code> matches the Pi 4 ASIAIR Pro.</small>
                         </div>
                         <div class="form-group">
@@ -729,22 +768,22 @@
                             <tbody>
                                 <tr>
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-0" name="asiairPortName0" value="Port 1" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-0" name="asiairPortGpio0" value="12" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-0" name="asiairPortGpio0" style="width: 60px;"><option value="12" selected>12</option><option value="13">13</option><option value="26">26</option><option value="18">18</option></select></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-0" name="asiairPortPwm0"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-1" name="asiairPortName1" value="Port 2" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-1" name="asiairPortGpio1" value="13" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-1" name="asiairPortGpio1" style="width: 60px;"><option value="12">12</option><option value="13" selected>13</option><option value="26">26</option><option value="18">18</option></select></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-1" name="asiairPortPwm1"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-2" name="asiairPortName2" value="Port 3" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-2" name="asiairPortGpio2" value="26" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-2" name="asiairPortGpio2" style="width: 60px;"><option value="12">12</option><option value="13">13</option><option value="26" selected>26</option><option value="18">18</option></select></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-2" name="asiairPortPwm2"></td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 4px;"><input type="text" id="asiair-port-name-3" name="asiairPortName3" value="Port 4" style="width: 100%;"></td>
-                                    <td style="padding: 4px;"><input type="number" id="asiair-port-gpio-3" name="asiairPortGpio3" value="18" min="0" max="63" style="width: 60px;"></td>
+                                    <td style="padding: 4px;"><select id="asiair-port-gpio-3" name="asiairPortGpio3" style="width: 60px;"><option value="12">12</option><option value="13">13</option><option value="26">26</option><option value="18" selected>18</option></select></td>
                                     <td style="padding: 4px;"><input type="checkbox" id="asiair-port-pwm-3" name="asiairPortPwm3"></td>
                                 </tr>
                             </tbody>
@@ -754,7 +793,7 @@
                     <div id="zwo-asiair-plus-fields" style="display: none;">
                         <div class="form-group">
                             <label for="asiair-plus-device-path">Power Control Device:</label>
-                            <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" value="/dev/pwm-gpio-misc">
+                            <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" value="/dev/pwm-gpio-misc" readonly>
                             <small>Path to the ZWO <code>pwm_gpio.ko</code> kernel module's character device. Default <code>/dev/pwm-gpio-misc</code> is correct for stock ASIAIR Plus (RK3568) hardware.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
@@ -798,6 +837,13 @@
                             <input type="number" id="camera-id" name="cameraId" min="0">
                             <small>If set, overrides the camera index.</small>
                         </div>
+                        <!-- Identity the server learned (#914). Carried through an edit,
+                             which removes and re-adds the entry; see zwoCameraIdentityFields(). -->
+                        <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial">
+                        <input type="hidden" id="zwo-camera-name" name="zwoCameraName">
+                        <input type="hidden" id="zwo-camera-unique-id" name="zwoCameraUniqueId">
+                        <input type="hidden" id="zwo-camera-loaded-index">
+                        <input type="hidden" id="zwo-camera-loaded-id">
                     </div>
 
                     <div id="zwo-filterwheel-fields" style="display: none;">
@@ -1093,14 +1139,14 @@
 
                 </div>
 
-                <!-- gphoto2 DSLR/Mirrorless Camera Configuration -->
+                <!-- libgphoto2 DSLR/Mirrorless Camera Configuration -->
                 <div id="gphoto-config" class="vendor-config" style="display: none;">
-                    <h3>DSLR / Mirrorless (gphoto2) Configuration</h3>
+                    <h3>DSLR / Mirrorless Configuration</h3>
 
                     <div class="form-group">
                         <label for="gphoto-camera-index">Camera Index:</label>
                         <input type="number" id="gphoto-camera-index" name="gphotoCameraIndex" value="0" min="0">
-                        <small>0-based index from the libgphoto2 USB autodetect list. Connect the camera over
+                        <small>0-based index from the USB autodetect list. Connect the camera over
                         USB and power it on before saving.</small>
                     </div>
 
@@ -1705,6 +1751,40 @@
                     <p id="server-info-status" class="server-status"></p>
                 </div>
             </div>
+            <div id="update-section" class="section-card collapsed">
+                <div class="section-card-header">
+                    <h3>Software Update</h3>
+                    <span id="update-summary" class="server-clock" title="Update state"></span>
+                    <button class="section-toggle" type="button" aria-expanded="false">
+                        <span class="section-toggle-icon" aria-hidden="true"></span>
+                        <span class="section-toggle-label">Details</span>
+                    </button>
+                </div>
+                <div class="section-card-body">
+                    <div class="update-row">
+                        <div class="wifi-row-label">
+                            <span>Installed version <strong id="update-installed">...</strong></span>
+                            <small id="update-status-line">Not checked yet.</small>
+                        </div>
+                        <div class="update-actions">
+                            <button id="update-check" class="btn btn-secondary" type="button" onclick="updateCheckClicked()">Check for Updates</button>
+                            <button id="update-install" class="btn btn-primary" type="button" onclick="updateInstallClicked()" hidden>Install Update</button>
+                        </div>
+                    </div>
+                    <p class="wifi-hint">Checks the OpenAstro repository for a newer release. Installing runs the same upgrade as <code>apt</code> and restarts the server for a few seconds, so do it between exposures.<button class="info-btn" type="button" aria-label="About software updates" data-info-title="Software Update" data-info-text="Check for Updates reads the newest AlpacaBridge version from apt.openastro.net and compares it with the running one. Install Update asks the system to upgrade the alpacabridge package through apt, exactly as 'sudo apt install --only-upgrade alpacabridge' would, so the download is signature-checked. The server restarts at the end and every connected client is disconnected for a few seconds. Nothing updates on its own.">i</button></p>
+                    <div id="update-notes" class="update-notes hidden">
+                        <div class="update-notes-header">
+                            <h4 id="update-notes-title">What's new</h4>
+                            <a id="update-release-link" href="#" target="_blank" rel="noopener" hidden>Full release notes</a>
+                        </div>
+                        <div id="update-notes-body" class="update-notes-body"></div>
+                        <p id="update-notes-missing" class="wifi-substatus" hidden></p>
+                    </div>
+                    <p id="update-installer-line" class="wifi-substatus"></p>
+                    <pre id="update-log" class="log-file-viewer-body update-log hidden"></pre>
+                    <p id="update-message" class="wifi-substatus"></p>
+                </div>
+            </div>
             <div id="wifi-section" class="section-card collapsed">
                 <div class="section-card-header">
                     <h3>WiFi</h3>
@@ -1822,7 +1902,7 @@
         </div>
     </div>
 
-    <script src="/web/format.js?v=3"></script>
-    <script src="/web/app.js?v=36"></script>
+    <script src="/web/format.js?v=12"></script>
+    <script src="/web/app.js?v=43"></script>
 </body>
 </html>

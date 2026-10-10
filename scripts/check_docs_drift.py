@@ -11,6 +11,11 @@ Self-test (no repo state): python3 scripts/check_docs_drift.py --self-test
   -- drives check 8's pairing and job-scoping helpers over literal fixtures,
   one per mutation the check exists to catch, so an extractor that stops
   matching fails here instead of degrading the gate to its floor (#455).
+Counts (check 15's numbers): python3 scripts/check_docs_drift.py --counts
+  -- prints the validated-device count, the brand count and its spelled-out
+  word, the brand list and a paste-ready README headline, all computed by
+  the same functions check 15 gates with, so the /bump-release recount step
+  has one command and no second copy of the row filter (#689).
 
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
@@ -39,8 +44,10 @@ Checks:
      production's cancel skips the per-handle mutex so it can interrupt a
      download blocked on the same handle) -- and the forward sweep in
      test_qhy_fake_sdk.cpp drives all of them.
-  7. Every relative path referenced in AGENTS.md, scoped instructions,
-     docs/agents/ agent-skills config, and docs/failures/ and docs/decisions/
+  7. Every relative path referenced in AGENTS.md, CONTEXT.md, README.md (issue
+     #693: the most-read file in the repo was in no scan), scoped instructions,
+     docs/agents/ agent-skills config, .claude/skills/ Claude skills, and
+     docs/failures/ and docs/decisions/
      inline code spans (`` `AlpacaCore/...` ``, `` `scripts/...` ``,
      `` `docs/...` ``, etc.) that looks like a real repo path actually exists.
      First-party code-comment references to a failure or decision record must
@@ -73,19 +80,93 @@ Checks:
      are skipped exactly as in check 7; a stale entry inside a tree block
      stays unchecked, and that is an accepted limit of this check, not an
      oversight. Each file carries its own floor.
+ 11. The SHA-256 of the LF-normalized docs/AlpacaDeviceAPI_v1.yaml matches
+     the one pinned in the ascom-alpaca-protocol skill's
+     references/version-and-sources.md. The skill's endpoint catalog was
+     built from that snapshot; /driver-build Step 0 refreshes the schema
+     from ascom-standards.org, and without this pin the catalog would keep
+     describing the old one.
+ 12. Every model in SUPPORTED-DRIVERS.md's GPhoto table is named in the STATUS
+     paragraph of .github/instructions/gphoto.instructions.md, the only file a
+     scoped agent reads for that vendor, which restated the validated set by
+     hand and fell behind when the Canon EOS 4000D row was added (PR #626).
+     By name, one-directional, and only for rows whose Connection cell starts
+     with USB and whose status cell is a check mark.
+ 13. The fake-connectable roster in AlpacaCore/tests/contract_sweep.h agrees
+     with the fake_*.h files on disk in both directions (issue #571): a fake
+     that is neither in the roster nor in HELPER_FAKES fails, and a roster row
+     whose fake no longer exists fails. The roster is the list the tier-2
+     (connected-over-a-fake) contract cases will iterate; those cases are a
+     follow-up PR to #571, so today this check pins the list, not any case. HELPER_FAKES names the
+     fakes that are not a driver's connect path, each with a reason, and a
+     helper that has since been given a roster row is itself a finding.
+ 14. Every std::regex in AlpacaHTTP/src/http/router.cpp is a static object
+     (issue #657, from #646). Router::route once built a std::regex per
+     request, which made a device-path request about 14x a management request
+     (30x under ASan). This replaces a wall-clock ratio test, which was coarse
+     in Release and flaky under load. A construction with no `static` in its
+     statement, or an unnamed temporary, is a finding, and so is finding no
+     construction at all (the extractor is stale or the regexes moved).
+ 15. The README headline ("N validated devices. <Word> brands. One server."
+     plus the brand list) agrees with SUPPORTED-DRIVERS.md (issue #684). N is
+     recomputed with the row filter this script owns, count_validated_device_rows
+     (table rows that are not a separator, a header or a `| Source` row,
+     counted when they carry a check mark; /bump-release Step 2.4 reads it
+     through --counts instead of restating it, issue #689); the spelled-out
+     brand word must equal the number
+     of items in the README list; and every `### ` vendor heading in
+     SUPPORTED-DRIVERS.md must map, through the explicit table
+     SUPPORTED_HEADING_TO_README_BRAND, onto an item in that list, with
+     README_BRANDS_WITHOUT_HEADING declaring the items that have no heading
+     (the Unihedron SQM-LE is a sensor the WeeWX driver reads through the
+     feed's sqm fields; it has no row or heading of its own). Only check 4 gated
+     the README, and it compares the version badge alone, so the headline
+     was three releases stale at 4.0.0 and moved by hand again at 4.1.0.
+     Parse failures name the real cause (issue #690): a declared brand item
+     that contains a comma is consumed whole before the list is split, and a
+     multi-word brand count ("Twenty One") reaches the number-word message
+     instead of failing the headline regex as "headline not found".
+ 16. The hand-maintained `## Updated YYYY-MM-DD` line in SUPPORTED-DRIVERS.md
+     is a real date no older than the README badge's release date (issue
+     #692). It read 2026-09-24 on the 2026-09-27 release. Every release
+     re-verifies the file (Step 2.4 recounts from it), so /bump-release sets
+     the line to the release date and this gate holds it there; between
+     releases it may run ahead (/conformu and /commit bump it) but never
+     behind, and never more than MAX_UPDATED_DAYS_AHEAD past the badge, which
+     catches a typo'd year without consulting the clock. Pure, so it runs in
+     pre-flight; no git state is consulted.
+ 17. Every AlpacaError value AGENTS.md and .claude/commands/driver-build.md
+     write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
+     (issue #682): the name must be a constant in `namespace AlpacaError` and
+     the hex value must be the one the header defines. Four written forms are
+     read: `Name` (0xNNN), Name `0xNNN`, `A` (or `B` ..., both 0xNNN), and an
+     exception-table row `| `Name` | ... (0xNNN ... |`, whose values belong to
+     the row's name. CamelCase names only, so a protocol constant such as
+     MC_AUX_GUIDE 0x26 is not read as a pin; a floor catches an extractor that
+     stops matching.
+ 18. The first bullet under AGENTS.md's "Continuous Integration and Pre-flight"
+     heading (`- CI (...`) names exactly the job ids under `jobs:` in
+     .github/workflows/ci.yml, in both directions and by id, not by count
+     (issue #702): it listed 11 of 18 jobs and called `format` `clang-format`.
+     The roster is every backticked token in the bullet outside parentheses,
+     so each id's description goes in parentheses after it.
 """
 
 import glob
+import hashlib
 import re
 import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import changelog_fragments  # noqa: E402  (VERSION_RE, the one spelling of X.Y.Z[~betaN])
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def read(path):
-    return (ROOT / path).read_text(encoding="utf-8", errors="replace")
+def read(path, root=ROOT):
+    return (root / path).read_text(encoding="utf-8", errors="replace")
 
 
 # --- check 1: CMake options vs docs/development.md --------------------------
@@ -246,23 +327,35 @@ def check_cppcheck_suppress_sync():
 
 # --- check 4: VERSION vs README badge ---------------------------------------
 
-def check_version_matches_readme():
-    failures = []
-    version = read("VERSION").strip()
-    readme = read("README.md")
+# A beta VERSION spells its Debian pre-release suffix `~betaN` (5.0.0~beta1);
+# the README badge carries the same spelling. The form is owned by
+# scripts/changelog_fragments.py (VERSION_RE; release_tag.py's TAG_RE is its
+# tag-side twin) and only borrowed here, so there is one Python spelling.
+VERSION_FORM_RE = changelog_fragments.VERSION_RE
+# A plain string with no capturing group, embedded below; both badge regexes
+# read their fields by name, so a group added to it cannot shift them.
+VERSION_PATTERN = changelog_fragments.VERSION_PATTERN
+README_BADGE_RE = re.compile(
+    r"^####\s*\[(?P<version>" + VERSION_PATTERN + r")\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", re.MULTILINE)
 
-    m = re.search(r"^####\s*\[([0-9.]+)\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", readme, re.MULTILINE)
+
+def _version_badge_findings(version, readme):
+    """Check 4 over the VERSION text and README text. Pure, so --self-test can drive it."""
+    if not VERSION_FORM_RE.match(version.strip()):
+        return ["VERSION (%s) is not X.Y.Z or X.Y.Z~betaN (betas count from 1)" % version.strip()]
+    m = README_BADGE_RE.search(readme)
     if not m:
-        failures.append("could not find the version badge line in README.md")
-        return failures
-
-    badge_version = m.group(1)
-    if badge_version != version:
-        failures.append(
+        return ["could not find the version badge line in README.md"]
+    if m.group("version") != version.strip():
+        return [
             "VERSION (%s) does not match the README badge version (%s)"
-            % (version, badge_version)
-        )
-    return failures
+            % (version.strip(), m.group("version"))
+        ]
+    return []
+
+
+def check_version_matches_readme():
+    return _version_badge_findings(read("VERSION"), read("README.md"))
 
 
 # --- check 5: the blocking-get_connected() list vs the code -----------------
@@ -386,7 +479,11 @@ def _strip_comments(text):
     """Comments blanked (newlines kept). These headers carry long doc comments
     whose prose contains parentheses and identifiers, and both patterns above
     scan across whitespace -- without this a sentence in a comment is matched
-    as a method signature. No raw string literals exist in either header."""
+    as a method signature. Written for the two QHY headers, which hold no raw
+    string literals. Check 14 also runs it over router.cpp, which does (R"(...)"
+    regexes) and holds "://" (origin.find), so LINE_COMMENT_RE blanks the rest of
+    that line; that is harmless only while no std::regex sits on such a line or
+    after a stray /* -- re-check both if the gate ever misses one."""
     text = BLOCK_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     return LINE_COMMENT_RE.sub("", text)
 
@@ -745,18 +842,20 @@ CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # AGENTS.md is legitimately trimmed below this, lower the floor.
 MIN_AGENTS_MD_PATH_REFS = 40
 # Tripwire for a docs/agents/ rename, not a target file count.
-MIN_AGENTS_DIR_FILES = 3
+MIN_AGENTS_DIR_FILES = 1
+# Tripwire for a .claude/skills/ rename, not a target file count.
+MIN_SKILL_FILES = 1
 # Trailing punctuation/anchors that can ride along inside a backtick span.
 TRIM_SUFFIX_RE = re.compile(r"[),.;:]+$")
 
 
-def _run_git(args, check=True):
+def _run_git(args, check=True, root=ROOT):
     return subprocess.run(
-        ["git"] + args, cwd=ROOT, capture_output=True, text=True, check=check
+        ["git"] + args, cwd=root, capture_output=True, text=True, check=check
     )
 
 
-def _is_gitignored(path):
+def _is_gitignored(path, root=ROOT):
     """True if git would ignore this path (e.g. a generated file/dir).
 
     Used instead of a plain filesystem exists() check: a generated file like
@@ -765,49 +864,59 @@ def _is_gitignored(path):
     from every clean checkout, including CI's. A path git ignores is
     expected to be absent and isn't a documentation error.
     """
-    return _run_git(["check-ignore", "-q", path], check=False).returncode == 0
+    return _run_git(["check-ignore", "-q", path], check=False, root=root).returncode == 0
 
 
-_TRACKED_PATHS_CACHE = None
+# Keyed by root so a fixture repository never sees the real tree's listing (or
+# another fixture's); the real run uses one root, so it is still computed once.
+_TRACKED_PATHS_CACHE = {}
 
 
-def _tracked_paths():
+def _tracked_paths(root=ROOT):
     """(tracked files, tracked directories with a trailing slash), computed once
-    per invocation: six documents share it and the listing walks the vendored
-    SDK trees."""
-    global _TRACKED_PATHS_CACHE
-    if _TRACKED_PATHS_CACHE is not None:
-        return _TRACKED_PATHS_CACHE
+    per root: six documents share it and the listing walks the vendored SDK
+    trees. `root` is a parameter so the self-test can drive this over a
+    fixture repository; the real run passes nothing."""
+    key = str(root)
+    if key in _TRACKED_PATHS_CACHE:
+        return _TRACKED_PATHS_CACHE[key]
     # core.quotePath=false: a tracked path with non-ASCII bytes must not
     # come back quoted, or it would never match a span.
-    tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"]).stdout.splitlines())
+    tracked = set(_run_git(["-c", "core.quotePath=false", "ls-files"], root=root).stdout.splitlines())
     # A migration creates instruction files before they are staged. Include
     # those files so references to them can be checked in the working tree.
-    for pattern in (".github/instructions/*.instructions.md", "docs/failures/*.md", "docs/decisions/*.md"):
-        tracked.update(str(p.relative_to(ROOT)) for p in ROOT.glob(pattern))
+    # Every directory check_agents_md_paths_exist scans must appear here, or a
+    # doc written but not yet `git add`ed is reported as drift (issue #556a);
+    # the skills tree is nested, so its pattern is recursive to match the
+    # rglob that scans it.
+    for pattern in (".github/instructions/*.instructions.md", "docs/failures/*.md", "docs/decisions/*.md",
+                    "docs/agents/*.md", ".claude/skills/**/*.md"):
+        tracked.update(p.relative_to(root).as_posix() for p in root.glob(pattern))
     tracked_dirs = set()
     for f in tracked:
         parts = f.split("/")
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]) + "/")
-    _TRACKED_PATHS_CACHE = (tracked, tracked_dirs)
-    return _TRACKED_PATHS_CACHE
+    _TRACKED_PATHS_CACHE[key] = (tracked, tracked_dirs)
+    return _TRACKED_PATHS_CACHE[key]
 
 
-def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefixes=()):
+def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefixes=(), root=ROOT):
     """Every backticked path span in `doc` names a tracked file or directory.
 
     `component` (e.g. "AlpacaCore/") is where a span starting with one of
     `relative_prefixes` ("src/", "external/", ...) is resolved: the Cursor
     rule files write paths relative to the component they live under, not
     to the repo root. Repo-root spans (PATH_PREFIXES) are accepted in every
-    document. Returns (failures, checked).
+    document. Returns (failures, checked). `root` is a parameter so the
+    self-test can drive this over a fixture repository; the real run passes
+    nothing.
     """
     failures = []
-    if not (ROOT / doc).is_file():
+    if not (root / doc).is_file():
         return (["%s is listed for path checking but does not exist -- it was renamed or deleted; "
                  "update the list" % doc], 0)
-    text = FENCED_BLOCK_RE.sub("", read(doc))
+    text = FENCED_BLOCK_RE.sub("", read(doc, root))
     text = DOUBLE_BACKTICK_SPAN_RE.sub("", text)
     # With fences gone every backtick must pair up; one stray backtick would
     # invert every span after it, and the count floor below only catches a
@@ -816,7 +925,7 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
         return ["%s has an unbalanced backtick outside fenced blocks; "
                 "the path-reference check cannot pair code spans reliably" % doc], 0
     seen = set()
-    tracked, tracked_dirs = _tracked_paths()
+    tracked, tracked_dirs = _tracked_paths(root)
 
     checked = 0
     for m in CODE_SPAN_RE.finditer(text):
@@ -858,7 +967,7 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
         # Not a tracked file or the directory of one: a generated/ignored
         # path (debian/changelog, a `.../build/` output dir) is expected to
         # be absent from a clean checkout, so it isn't a documentation error.
-        if _is_gitignored(path):
+        if _is_gitignored(path, root):
             continue
         failures.append("%s references a path that does not exist: %s" % (doc, path))
     if checked < floor:
@@ -869,45 +978,75 @@ def _check_doc_path_refs(doc, floor, floor_name, component=None, relative_prefix
     return failures, checked
 
 
-def check_agents_md_paths_exist():
-    failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS")
-    instruction_dir = ROOT / ".github/instructions"
+def check_agents_md_paths_exist(root=ROOT):
+    """`root` is a parameter so the self-test can drive this over a fixture
+    repository; the real run passes nothing.
+
+    The `ls-files` pathspecs are `:(glob)dir/*.md`: a bare `dir/*.md` lets git's
+    `*` cross `/`, so a tracked `docs/agents/sub/y.md` was listed by git but
+    never found by the one-level `Path.glob` below and reported as "missing".
+    `.claude/skills/` is recursive on both sides and stays a directory spec.
+    """
+    failures, _ = _check_doc_path_refs("AGENTS.md", MIN_AGENTS_MD_PATH_REFS, "MIN_AGENTS_MD_PATH_REFS", root=root)
+    context_failures, _ = _check_doc_path_refs("CONTEXT.md", 0, "CONTEXT.md floor", root=root)
+    failures.extend(context_failures)
+    # README.md carries no path spans today, so the floor is 0 like CONTEXT.md;
+    # the file itself must exist. Its relative links are the instruction-
+    # structure check's job (ROOT_DOCUMENT_LINK_FLOORS['README.md'] in
+    # scripts/check_instruction_structure.py), issue #693.
+    readme_failures, _ = _check_doc_path_refs("README.md", 0, "README.md floor", root=root)
+    failures.extend(readme_failures)
+    instruction_dir = root / ".github/instructions"
     files = sorted(instruction_dir.glob("*.instructions.md"))
-    tracked = _run_git(["-c", "core.quotePath=false", "ls-files", ".github/instructions/*.instructions.md"]).stdout.splitlines()
-    for missing in sorted(set(tracked) - {str(p.relative_to(ROOT)) for p in files}):
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob).github/instructions/*.instructions.md"], root=root).stdout.splitlines()
+    for missing in sorted(set(tracked) - {p.relative_to(root).as_posix() for p in files}):
         failures.append("%s is a tracked instruction file but is missing" % missing)
     for path in files:
-        doc = str(path.relative_to(ROOT))
-        doc_failures, _ = _check_doc_path_refs(doc, 0, "instruction file floor")
+        doc = path.relative_to(root).as_posix()
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "instruction file floor", root=root)
         failures.extend(doc_failures)
-    agents_dir = ROOT / "docs/agents"
+    agents_dir = root / "docs/agents"
     agents_files = sorted(agents_dir.glob("*.md"))
-    tracked_agents = _run_git(["-c", "core.quotePath=false", "ls-files", "docs/agents/*.md"]).stdout.splitlines()
+    tracked_agents = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob)docs/agents/*.md"], root=root).stdout.splitlines()
     # A directory rename would make both the glob and ls-files go empty and
     # this whole block would silently pass nothing -- the vacuity class
-    # decision record 0003 calls out. Floor is today's file count (3); it is
+    # decision record 0003 calls out. Floor is today's file count (1); it is
     # a tripwire, not a target.
     if len(tracked_agents) < MIN_AGENTS_DIR_FILES:
         failures.append(
             "only %d tracked file(s) found under docs/agents/*.md (floor %d): "
             "the directory may have been renamed, or check_agents_md_paths_exist "
             "should be updated" % (len(tracked_agents), MIN_AGENTS_DIR_FILES))
-    for missing in sorted(set(tracked_agents) - {str(p.relative_to(ROOT)) for p in agents_files}):
+    for missing in sorted(set(tracked_agents) - {p.relative_to(root).as_posix() for p in agents_files}):
         failures.append("%s is a tracked agent-skills doc but is missing" % missing)
     for path in agents_files:
-        doc = str(path.relative_to(ROOT))
-        doc_failures, _ = _check_doc_path_refs(doc, 0, "agent-skills doc floor")
+        doc = path.relative_to(root).as_posix()
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "agent-skills doc floor", root=root)
+        failures.extend(doc_failures)
+    skill_files = sorted((root / ".claude/skills").rglob("*.md"))
+    tracked_skills = _run_git(["-c", "core.quotePath=false", "ls-files", ".claude/skills/"], root=root).stdout.splitlines()
+    tracked_skills = [p for p in tracked_skills if p.endswith(".md")]
+    if len(tracked_skills) < MIN_SKILL_FILES:
+        failures.append(
+            "only %d tracked file(s) found under .claude/skills/ (floor %d): "
+            "the directory may have been renamed, or check_agents_md_paths_exist "
+            "should be updated" % (len(tracked_skills), MIN_SKILL_FILES))
+    for missing in sorted(set(tracked_skills) - {p.relative_to(root).as_posix() for p in skill_files}):
+        failures.append("%s is a tracked skill doc but is missing" % missing)
+    for path in skill_files:
+        doc = path.relative_to(root).as_posix()
+        doc_failures, _ = _check_doc_path_refs(doc, 0, "skill doc floor", root=root)
         failures.extend(doc_failures)
     for directory in ("docs/failures", "docs/decisions"):
-        paths = sorted((ROOT / directory).glob("*.md"))
-        tracked_memory = _run_git(["-c", "core.quotePath=false", "ls-files", directory + "/*.md"]).stdout.splitlines()
-        for missing in sorted(set(tracked_memory) - {str(p.relative_to(ROOT)) for p in paths}):
+        paths = sorted((root / directory).glob("*.md"))
+        tracked_memory = _run_git(["-c", "core.quotePath=false", "ls-files", ":(glob)" + directory + "/*.md"], root=root).stdout.splitlines()
+        for missing in sorted(set(tracked_memory) - {p.relative_to(root).as_posix() for p in paths}):
             failures.append("%s is a tracked memory record but is missing" % missing)
         for path in paths:
-            doc = str(path.relative_to(ROOT))
-            doc_failures, _ = _check_doc_path_refs(doc, 0, "memory record floor")
+            doc = path.relative_to(root).as_posix()
+            doc_failures, _ = _check_doc_path_refs(doc, 0, "memory record floor", root=root)
             failures.extend(doc_failures)
-    failures.extend(check_memory_comment_paths_exist())
+    failures.extend(check_memory_comment_paths_exist(root))
     return failures
 
 
@@ -984,20 +1123,23 @@ RULE_FILE_PATH_CHECKS = (
 )
 
 
-def check_rule_file_paths_exist():
+def check_rule_file_paths_exist(root=ROOT):
+    """`root` is a parameter so the self-test can drive this over a fixture
+    repository; the real run passes nothing."""
     failures = []
     # The tuple is hand-written; every tracked rule file must be in it, or a
     # fifth .mdc added later is silently unchecked -- the drift class this
     # check exists for (review note on PR #474).
     listed = {doc for doc, _, _ in RULE_FILE_PATH_CHECKS}
     tracked_rule_files = [f for f in _run_git(["-c", "core.quotePath=false", "ls-files",
-                                               "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"]).stdout.splitlines() if f]
+                                               "*/.cursor/rules/*.mdc", ".cursor/rules/*.mdc"],
+                                              root=root).stdout.splitlines() if f]
     for f in sorted(set(tracked_rule_files) - listed):
         failures.append("%s is a tracked Cursor rule file but is not in RULE_FILE_PATH_CHECKS -- add it "
                         "with its component and a floor" % f)
     for doc, component, floor in RULE_FILE_PATH_CHECKS:
         doc_failures, _ = _check_doc_path_refs(
-            doc, floor, "its RULE_FILE_PATH_CHECKS floor", component, RULE_FILE_RELATIVE_PREFIXES)
+            doc, floor, "its RULE_FILE_PATH_CHECKS floor", component, RULE_FILE_RELATIVE_PREFIXES, root=root)
         failures.extend(doc_failures)
     return failures
 
@@ -1271,6 +1413,677 @@ def check_license_headers():
 from check_instruction_structure import check as check_instruction_structure
 
 
+SKILL_SPEC_PATH = "docs/AlpacaDeviceAPI_v1.yaml"
+SKILL_SOURCES_PATH = ".claude/skills/ascom-alpaca-protocol/references/version-and-sources.md"
+SKILL_SPEC_PIN_RE = re.compile(r"SHA-256:\s*`([0-9a-f]{64})`")
+
+
+def check_skill_spec_hash(root=ROOT):
+    """Check 11. `root` is a parameter so the self-test can drive it."""
+    spec = root / SKILL_SPEC_PATH
+    sources = root / SKILL_SOURCES_PATH
+    for path in (spec, sources):
+        if not path.is_file():
+            return ["%s does not exist -- it was renamed or deleted; update check_skill_spec_hash"
+                    % path.relative_to(root)]
+    pins = SKILL_SPEC_PIN_RE.findall(sources.read_text(encoding="utf-8"))
+    if len(pins) != 1:
+        return ["%s %s (found %d `SHA-256:` pins, expected 1)"
+                % (SKILL_SOURCES_PATH,
+                   "has no pinned Device API SHA-256" if not pins
+                   else "pins more than one Device API SHA-256, so which one is "
+                        "authoritative is ambiguous",
+                   len(pins))]
+    actual = hashlib.sha256(spec.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    if actual != pins[0]:
+        return ["%s (LF-normalized SHA-256 %s) does not match the snapshot pinned in %s (%s): "
+                "regenerate the skill's references/device-api-catalog.md from the new schema, "
+                "then update the pin and the verification date"
+                % (SKILL_SPEC_PATH, actual, SKILL_SOURCES_PATH, pins[0])]
+    return []
+
+
+# --- check 12: the GPhoto STATUS paragraph names every validated body -------
+#
+# SUPPORTED-DRIVERS.md's GPhoto table is where a body becomes ConformU-validated;
+# .github/instructions/gphoto.instructions.md is the only file a scoped agent
+# reads for that vendor, and its STATUS paragraph restated the set by hand
+# ("three real Nikon bodies"). Adding the Canon EOS 4000D row left it saying no
+# Canon body was validated (PR #626 review). Gated by NAME, like check 5: a
+# model in the table that the paragraph does not mention is drift.
+
+GPHOTO_TABLE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*USB[^|]*\|\s*\u2713\s*\|", re.MULTILINE)
+
+
+def _gphoto_status_findings(supported, instructions):
+    failures = []
+    start = supported.find("### GPhoto")
+    if start < 0:
+        return ["SUPPORTED-DRIVERS.md has no '### GPhoto' section"]
+    # The section ends at the next heading of either level, so reordering the
+    # file cannot make the gate demand another vendor's models here.
+    ends = [i for i in (supported.find("\n### ", start + 1), supported.find("\n## ", start + 1)) if i >= 0]
+    section = supported[start:min(ends) if ends else len(supported)]
+    models = GPHOTO_TABLE_ROW_RE.findall(section)
+    if not models:
+        return ["SUPPORTED-DRIVERS.md GPhoto table lists no validated USB models"]
+
+    m = re.search(r"\*\*STATUS:.*?(?:\n\s*\n|\Z)", instructions, re.DOTALL)
+    if not m:
+        return ["gphoto.instructions.md has no '**STATUS:' paragraph"]
+    status = m.group(0)
+    for model in models:
+        # The paragraph may write the whole model or just the body designation
+        # ("D3300"). A designation only counts as a whole token containing a
+        # digit, so "Sony A7 III" is not satisfied by an unrelated "Part III".
+        designation = model.split()[-1]
+        named = model in status or (
+            any(c.isdigit() for c in designation)
+            and re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(designation), status)
+        )
+        if not named:
+            failures.append(
+                "SUPPORTED-DRIVERS.md lists %r as ConformU-validated but the STATUS paragraph "
+                "in .github/instructions/gphoto.instructions.md does not name it" % model
+            )
+    return failures
+
+
+def check_gphoto_status_names_validated_bodies():
+    return _gphoto_status_findings(
+        read("SUPPORTED-DRIVERS.md"),
+        read(".github/instructions/gphoto.instructions.md"),
+    )
+
+
+# Check 13 (issue #571): the tier-2 roster in contract_sweep.h names the drivers
+# that can connect to an in-process fake. Pinned to the fakes on disk the way
+# check 5 pins the blocking-get_connected() list to async_connectable.h.
+
+ROSTER_ROW_RE = re.compile(r'\{\s*"([a-z0-9]+)"\s*,\s*"([a-z0-9]+)"\s*,\s*"(fake_[a-z0-9_]+\.h)"\s*\}')
+ROSTER_ARRAY_RE = re.compile(r"kFakeConnectableRoster\[\]\s*=\s*\{(.*?)\n\};", re.DOTALL)
+
+# fake_*.h files that are helpers other fakes and tests build on, not a driver's
+# connect path, so they carry no roster row.
+HELPER_FAKES = {
+    "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
+    "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
+    "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
+}
+
+
+ROSTER_REGISTRY_ID_RE = re.compile(r"\bX\(\s*([a-z0-9]+_[a-z0-9]+(?:_[a-z0-9]+)*)\s*\)")
+
+
+def _fake_roster_findings(header_text, disk_fakes, helpers=None):
+    helpers = HELPER_FAKES if helpers is None else helpers
+    failures = []
+    m = ROSTER_ARRAY_RE.search(_strip_comments(header_text))
+    rows = ROSTER_ROW_RE.findall(m.group(1)) if m else []
+    if not rows:
+        return ["AlpacaCore/tests/contract_sweep.h has no kFakeConnectableRoster rows (or the array moved): "
+                "the roster cannot be pinned to the fakes on disk"]
+    rostered = {fake for _, _, fake in rows}
+    # Each row's (vendor, type) must be a pair the registry sweeps: an id is
+    # <vendor>_<devicetype>[_<backend>], so the pair is its first two segments.
+    registry_pairs = {tuple(i.split("_")[:2]) for i in ROSTER_REGISTRY_ID_RE.findall(_strip_comments(header_text))}
+    for vendor, dtype, fake in rows:
+        if (vendor, dtype) not in registry_pairs:
+            failures.append(
+                "kFakeConnectableRoster row {%s, %s, %s} names a (vendor, type) pair with no registry entry: "
+                "correct the row or add the X(%s_%s) entry to CONTRACT_SWEEP_ENTRIES" % (vendor, dtype, fake, vendor, dtype))
+    for fake in sorted(disk_fakes):
+        if fake not in rostered and fake not in helpers:
+            failures.append(
+                "AlpacaCore/tests/%s is not in kFakeConnectableRoster (AlpacaCore/tests/contract_sweep.h) and is "
+                "not a HELPER_FAKES entry in scripts/check_docs_drift.py: add a roster row for the driver it "
+                "connects, or name it a helper with a reason" % fake)
+    for vendor, dtype, fake in rows:
+        if fake not in disk_fakes:
+            failures.append(
+                "kFakeConnectableRoster row {%s, %s, %s} names a fake that does not exist under "
+                "AlpacaCore/tests/: remove or repoint the row" % (vendor, dtype, fake))
+    for fake in sorted(helpers):
+        if fake in rostered:
+            failures.append(
+                "STALE HELPER_FAKES entry: %s now has a kFakeConnectableRoster row -- remove it from "
+                "HELPER_FAKES in scripts/check_docs_drift.py" % fake)
+        if fake not in disk_fakes:
+            failures.append(
+                "STALE HELPER_FAKES entry: %s does not exist under AlpacaCore/tests/ -- remove it from "
+                "HELPER_FAKES in scripts/check_docs_drift.py" % fake)
+    return failures
+
+
+def check_fake_roster_matches_disk(root=ROOT):
+    disk = {Path(p).name for p in glob.glob(str(root / "AlpacaCore" / "tests" / "fake_*.h"))}
+    return _fake_roster_findings(read("AlpacaCore/tests/contract_sweep.h", root), disk)
+
+
+STD_REGEX_TEMP_RE = re.compile(r"\bstd::regex\s*[({]")
+STD_REGEX_NAMED_RE = re.compile(r"\bstd::regex\s+(?:const\s+)?(\w+)\s*[({=]")
+
+
+def _static_regex_findings(text, path="AlpacaHTTP/src/http/router.cpp"):
+    code = _strip_comments(text)
+    findings = []
+    seen = 0
+    for m in STD_REGEX_TEMP_RE.finditer(code):
+        seen += 1
+        line = code.count("\n", 0, m.start()) + 1
+        findings.append("%s:%d: std::regex constructed as a temporary -- make it a static const "
+                        "(a per-request build costs 14x a management request, #646)" % (path, line))
+    for m in STD_REGEX_NAMED_RE.finditer(code):
+        seen += 1
+        # The statement so far: back to the previous ';', '{' or '}'.
+        start = max(code.rfind(c, 0, m.start()) for c in ";{}") + 1
+        if not re.search(r"\bstatic\b", code[start:m.start()]):
+            line = code.count("\n", 0, m.start()) + 1
+            findings.append("%s:%d: std::regex %s is not static -- a per-request build costs 14x a "
+                            "management request (#646); the gate wants the static keyword and does not model "
+                            "scope, so a namespace-scope regex needs it too" % (path, line, m.group(1)))
+    if seen == 0:
+        findings.append("no std::regex construction found in %s: the extractor is stale or the regexes moved" % path)
+    return findings
+
+
+def check_router_regexes_static(root=ROOT):
+    return _static_regex_findings(read("AlpacaHTTP/src/http/router.cpp", root))
+
+# --- check 15: README headline counts vs SUPPORTED-DRIVERS.md (issue #684) --
+#
+# README.md carries "- **N validated devices. <Word> brands. One server.**
+# <brand list>". Check 4 gates only the version badge, so this line was three
+# releases stale at 4.0.0 and was moved by hand on the 4.1.0 release PR. N is
+# the recount /bump-release Step 2.4 once spelled out as a grep chain; the
+# script owns it now and the release recipe reads it through --counts, so
+# there is one encoding of the row filter (issue #689). The brand
+# count is not the heading count: two SUPPORTED-DRIVERS.md headings collapse
+# into "Sky-Watcher" and one README item (the Unihedron SQM-LE, a sensor read
+# through the WeeWX driver) has no heading, so the mapping is declared here
+# rather than inferred. A new
+# `### ` heading with no entry in the map is a finding, which is what a new
+# vendor landing without a README mention looks like.
+
+SUPPORTED_HEADING_TO_README_BRAND = {
+    "Astroasis": "Astroasis",
+    "Celestron": "Celestron",
+    "Gemini": "Gemini",
+    "GPhoto": "Canon and Nikon DSLRs",  # no library name in user-facing text since 4.1.0 (issue #691)
+    "iOptron": "iOptron",
+    "OnStep": "OnStep",
+    "Player One": "Player One Astronomy",
+    "QHY": "QHY",
+    "Sky-Watcher Direct Motor Controller": "Sky-Watcher",
+    "SynScan V3/V4": "Sky-Watcher",
+    "SVBONY": "SVBONY",
+    "ToupTek": "ToupTek Astro",
+    "WandererAstro": "WandererAstro",
+    "WeeWX": "WeeWX",
+    "ZWO": "ZWO",
+}
+
+# README brand-list items that are not a SUPPORTED-DRIVERS.md heading, each
+# with the reason. An item in neither this table nor the map above is drift.
+# The reason must be true of the repo as it is: the review of #685 caught the
+# first entry claiming a table row that does not exist.
+README_BRANDS_WITHOUT_HEADING = {
+    "Unihedron SQM-LE (WeeWX plugin)": (
+        "a sky-quality sensor the WeeWX ObservingConditions driver reads through the feed's "
+        "sqm/sqmTemp fields (SkyQuality/SkyTemperature); it has no driver, table row or heading "
+        "of its own in SUPPORTED-DRIVERS.md, and the WeeWX table's only row is the feed itself"),
+}
+
+# The brand-count group admits spaces on purpose (issue #690): a multi-word
+# count ("Twenty One brands") used to fail the whole regex and the gate said
+# "could not find the headline" instead of naming the count; now the line is
+# found and _number_word_to_int rejects the word with the specific message.
+README_HEADLINE_RE = re.compile(
+    r"^- \*\*(\d+) validated devices\. ([A-Za-z][A-Za-z -]*) brands\. One server\.\*\* (.+?)\.?\s*$",
+    re.MULTILINE,
+)
+# Every `### ` heading in SUPPORTED-DRIVERS.md is a vendor today, and this treats
+# them all as one deliberately: a new heading that is NOT a vendor (a `### Notes`
+# or `### Legend` subsection) fails the gate demanding a map entry. That is the
+# strictness the gate is for, not a false drift; give such a heading a different
+# level, or add a declared exemption here, rather than loosening the regex.
+SUPPORTED_VENDOR_HEADING_RE = re.compile(r"^### (.+?)\s*$", re.MULTILINE)
+
+_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+         "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+         "nineteen"]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+
+def _number_word_to_int(word):
+    """'Fifteen' -> 15, 'twenty-one' -> 21; None when it is not a number word.
+    Exactly the forms _int_to_number_word emits: a dangling hyphen ('twenty-')
+    and a spaced compound ('twenty one') are rejected, not rounded (#690)."""
+    w = word.strip().lower()
+    if w in _ONES:
+        return _ONES.index(w)
+    tens, sep, ones = w.partition("-")
+    if tens in _TENS[2:]:
+        if not sep:
+            return _TENS.index(tens) * 10
+        if ones in _ONES[1:10]:
+            return _TENS.index(tens) * 10 + _ONES.index(ones)
+    return None
+
+
+def count_validated_device_rows(supported):
+    """The validated-model recount (the only copy of the rule, issue #689):
+    table rows that are not a separator, a header ('Model Series' /
+    'Device Type') or a '| Source' row, counted when they carry a check mark.
+    /bump-release Step 2.4 gets the number from --counts."""
+    n = 0
+    for line in supported.splitlines():
+        if not line.startswith("| "):
+            continue
+        if re.match(r"^\| *-", line) or "Model Series" in line or "Device Type" in line or line.startswith("| Source"):
+            continue
+        if "\u2713" in line:
+            n += 1
+    return n
+
+
+def _int_to_number_word(n):
+    """15 -> 'fifteen', 21 -> 'twenty-one'; None above 99 (check 15's parser
+    stops there too, so a three-digit brand count needs a wider vocabulary in
+    both directions, not a digit string)."""
+    if not 0 <= n <= 99:
+        return None
+    if n < 20:
+        return _ONES[n]
+    tens, ones = divmod(n, 10)
+    return _TENS[tens] + ("-" + _ONES[ones] if ones else "")
+
+
+def _split_readme_brand_list(text, declared=()):
+    """Split the README brand list on commas, consuming a DECLARED item whole
+    even when it contains a comma (issue #690). `declared` is the set of brand
+    strings the gate accounts for (the map's values plus the no-heading table):
+    at each position the longest run of comma-separated tokens that spells a
+    declared item is taken as one item, so a future "Canon, Nikon and Sony
+    DSLRs" is one brand and not two unaccounted ones plus a brand-word
+    mismatch. An undeclared item with a comma still splits, and each half is
+    then reported as unaccounted, which points at the item itself. The "and "
+    that introduces the last item is stripped from the last item only."""
+    tokens = [t.strip() for t in text.split(",")]
+    tokens = [t for t in tokens if t]
+    declared = set(declared)
+
+    def candidate(run, is_last):
+        item = ", ".join(run)
+        if is_last and item.lower().startswith("and "):
+            item = item[4:].strip()
+        return item
+
+    items = []
+    i = 0
+    while i < len(tokens):
+        taken = None
+        for j in range(len(tokens), i + 1, -1):  # longest run first, single token last
+            item = candidate(tokens[i:j], j == len(tokens))
+            if item in declared:
+                taken = (item, j)
+                break
+        if taken is None:
+            taken = (candidate(tokens[i:i + 1], i + 1 == len(tokens)), i + 1)
+        items.append(taken[0])
+        i = taken[1]
+    return items
+
+
+def _readme_headline_findings(readme, supported, heading_map=None, extras=None):
+    """Check 15 over the two files' text. Pure, so --self-test can drive it."""
+    if heading_map is None:
+        heading_map = SUPPORTED_HEADING_TO_README_BRAND
+    if extras is None:
+        extras = README_BRANDS_WITHOUT_HEADING
+    failures = []
+
+    m = README_HEADLINE_RE.search(readme)
+    if not m:
+        return ["could not find the '- **N validated devices. <Word> brands. One server.** ...' headline in README.md"]
+    readme_devices = int(m.group(1))
+    brand_word = m.group(2)
+    items = _split_readme_brand_list(m.group(3), set(heading_map.values()) | set(extras))
+
+    expected_devices = count_validated_device_rows(supported)
+    if expected_devices == 0:
+        failures.append("SUPPORTED-DRIVERS.md has no validated model rows by count_validated_device_rows -- the row "
+                        "filter is stale or the tables changed shape; check 15 cannot count anything")
+    elif readme_devices != expected_devices:
+        failures.append("README.md says %d validated devices but SUPPORTED-DRIVERS.md has %d validated model rows"
+                        % (readme_devices, expected_devices))
+
+    brand_count = _number_word_to_int(brand_word)
+    if brand_count is None:
+        failures.append("README.md brand count %r is not a number word this check knows (spell it as one word or "
+                        "hyphenated, e.g. 'Fifteen' or 'Twenty-one')" % brand_word)
+    elif brand_count != len(items):
+        failures.append("README.md says %s (%d) brands but its brand list has %d items"
+                        % (brand_word, brand_count, len(items)))
+    if len(set(items)) != len(items):
+        failures.append("README.md brand list repeats an item: %s"
+                        % ", ".join(sorted({i for i in items if items.count(i) > 1})))
+
+    headings = []
+    for h in SUPPORTED_VENDOR_HEADING_RE.findall(supported):
+        if h not in headings:
+            headings.append(h)
+    if not headings:
+        failures.append("SUPPORTED-DRIVERS.md has no '### ' vendor headings -- the heading extractor is stale")
+    for h in headings:
+        if h not in heading_map:
+            failures.append("SUPPORTED-DRIVERS.md heading '### %s' has no entry in SUPPORTED_HEADING_TO_README_BRAND "
+                            "(scripts/check_docs_drift.py): a new brand needs its README list item and a map entry" % h)
+    for h in heading_map:
+        if h not in headings:
+            failures.append("SUPPORTED_HEADING_TO_README_BRAND names '### %s' but SUPPORTED-DRIVERS.md has no such "
+                            "heading -- remove or rename the map entry" % h)
+
+    # Only the brands of headings that still exist count as accounted for, so a
+    # dropped vendor reports its stale map entry AND its orphaned README item in
+    # one run rather than two.
+    mapped = {brand for h, brand in heading_map.items() if h in headings}
+    for h, brand in heading_map.items():
+        if h in headings and brand not in items:
+            failures.append("README.md brand list does not name %r (SUPPORTED-DRIVERS.md heading '### %s')" % (brand, h))
+    for brand in extras:
+        if brand not in items:
+            failures.append("README_BRANDS_WITHOUT_HEADING names %r but the README.md brand list does not -- "
+                            "remove the entry or restore the item" % brand)
+    for item in items:
+        if item not in mapped and item not in extras:
+            failures.append("README.md brand list item %r matches no SUPPORTED-DRIVERS.md heading and is not declared "
+                            "in README_BRANDS_WITHOUT_HEADING" % item)
+    return failures
+
+
+def check_readme_headline_counts(root=ROOT):
+    return _readme_headline_findings(read("README.md", root), read("SUPPORTED-DRIVERS.md", root))
+
+
+def _expected_readme_brands(supported, heading_map, extras):
+    """The README brand items check 15 accounts for: one per mapped heading
+    that exists in SUPPORTED-DRIVERS.md, in heading order and de-duplicated,
+    then the declared no-heading items."""
+    brands = []
+    for h in SUPPORTED_VENDOR_HEADING_RE.findall(supported):
+        brand = heading_map.get(h)
+        if brand is not None and brand not in brands:
+            brands.append(brand)
+    for brand in extras:
+        if brand not in brands:
+            brands.append(brand)
+    return brands
+
+
+def readme_headline_counts_summary(readme, supported, heading_map=None, extras=None):
+    """The --counts report: check 15's numbers computed by check 15's own
+    functions, plus a paste-ready headline. Pure, so --self-test drives it.
+
+    The headline keeps the README's current item order for items that stay
+    and appends new ones at the end, so a release diff shows the additions
+    and not a reorder. A heading with no map entry, and a map entry whose
+    heading is gone, are each named rather than silently left out of the
+    list: the full check fails on both, so a pasted headline that hid either
+    would still leave check 15 red (review of #694)."""
+    if heading_map is None:
+        heading_map = SUPPORTED_HEADING_TO_README_BRAND
+    if extras is None:
+        extras = README_BRANDS_WITHOUT_HEADING
+    devices = count_validated_device_rows(supported)
+    expected = _expected_readme_brands(supported, heading_map, extras)
+    m = README_HEADLINE_RE.search(readme)
+    current = [i for i in _split_readme_brand_list(m.group(3), expected) if i in expected] if m else []
+    ordered = current + [b for b in expected if b not in current]
+    word = _int_to_number_word(len(ordered))
+    word_shown = word.capitalize() if word else "%d (no number word for this count)" % len(ordered)
+    if len(ordered) > 1:
+        listed = ", ".join(ordered[:-1]) + ", and " + ordered[-1]
+    else:
+        listed = ", ".join(ordered)
+    lines = [
+        "validated devices: %d" % devices,
+        "brands: %d (%s)" % (len(ordered), word_shown),
+        "brand list: %s" % ", ".join(ordered),
+        "headline: - **%d validated devices. %s brands. One server.** %s." % (devices, word_shown, listed),
+        "README.md now: %s" % (m.group(0).strip() if m else "(headline not found)"),
+    ]
+    headings = SUPPORTED_VENDOR_HEADING_RE.findall(supported)
+    for h in dict.fromkeys(h for h in headings if h not in heading_map):
+        lines.append("unmapped heading '### %s': add it to SUPPORTED_HEADING_TO_README_BRAND and to the README list" % h)
+    for h in heading_map:
+        if h not in headings:
+            lines.append("stale map entry '### %s': SUPPORTED-DRIVERS.md has no such heading; remove or rename it in "
+                         "SUPPORTED_HEADING_TO_README_BRAND (check 15 fails on it)" % h)
+    return lines
+
+
+def print_counts(root=ROOT):
+    for line in readme_headline_counts_summary(read("README.md", root), read("SUPPORTED-DRIVERS.md", root)):
+        print(line)
+    return 0
+
+
+
+# --- check 16: SUPPORTED-DRIVERS.md Updated date vs README release date (#692)
+
+SUPPORTED_UPDATED_RE = re.compile(r"^## Updated (\S+)\s*$", re.MULTILINE)
+# How far past the badge date the Updated line may run. Releases are weeks
+# apart, so a real gap never approaches this; a typo'd year ("2126-09-27")
+# overshoots it at once. Relative to the badge, not to today, so the check
+# stays pure.
+MAX_UPDATED_DAYS_AHEAD = 366
+README_BADGE_DATE_RE = re.compile(
+    r"^####\s*\[" + VERSION_PATTERN + r"\]\s*-\s*(?P<date>\S+)\s*&middot;\s*\[Changelog\]", re.MULTILINE)
+
+
+def _iso_date(text):
+    """datetime.date for a YYYY-MM-DD string, None for anything else."""
+    import datetime
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return None
+    try:
+        return datetime.date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _updated_date_findings(supported, readme):
+    """Check 16 over the two files' text. Pure, so --self-test can drive it."""
+    failures = []
+    m = SUPPORTED_UPDATED_RE.search(supported)
+    if not m:
+        return ["could not find the '## Updated YYYY-MM-DD' line in SUPPORTED-DRIVERS.md"]
+    updated = _iso_date(m.group(1))
+    if updated is None:
+        failures.append("SUPPORTED-DRIVERS.md '## Updated %s' is not a YYYY-MM-DD date" % m.group(1))
+    b = README_BADGE_DATE_RE.search(readme)
+    if not b:
+        failures.append("could not find the release date in the README.md version badge line")
+        return failures
+    released = _iso_date(b.group("date"))
+    if released is None:
+        failures.append("README.md badge date %r is not a YYYY-MM-DD date" % b.group("date"))
+    elif updated is not None and updated < released:
+        failures.append("SUPPORTED-DRIVERS.md says '## Updated %s' but README.md was released %s: set the Updated "
+                        "line to the release date (/bump-release Step 2.5) or later" % (m.group(1), b.group("date")))
+    elif updated is not None and (updated - released).days > MAX_UPDATED_DAYS_AHEAD:
+        failures.append("SUPPORTED-DRIVERS.md says '## Updated %s', more than %d days after the README.md release "
+                        "date %s: a mistyped year, or a release is long overdue"
+                        % (m.group(1), MAX_UPDATED_DAYS_AHEAD, b.group("date")))
+    return failures
+
+
+def check_supported_drivers_updated_date(root=ROOT):
+    return _updated_date_findings(read("SUPPORTED-DRIVERS.md", root), read("README.md", root))
+
+
+# --- check 17: documented AlpacaError values vs alpaca_errors.h ---------------
+
+ALPACA_ERRORS_H = "AlpacaCore/include/alpacacore/alpaca_errors.h"
+ERROR_CODE_DOCS = ("AGENTS.md", ".claude/commands/driver-build.md")
+# Today's two docs carry ~15 pins; a floor well under that catches an
+# extractor that stops matching without tripping on an ordinary rewording.
+MIN_ERROR_CODE_PINS = 8
+
+_ALPACA_ERROR_NS_RE = re.compile(r"namespace\s+AlpacaError\s*\{(.*?)\}", re.DOTALL)
+_ALPACA_ERROR_DEF_RE = re.compile(r"constexpr\s+int\s+([A-Za-z]\w*)\s*=\s*(0[xX][0-9A-Fa-f]+|\d+)\s*;")
+# An error name as the docs write it: CamelCase, optionally backticked and
+# optionally qualified. CamelCase only, so a protocol constant such as
+# MC_AUX_GUIDE 0x26 is never read as a pin.
+_EC_NAME = r"(?<!\w)`?(?:alpacacore::)?(?:AlpacaError::)?([A-Z][a-z]+(?:[A-Z][a-z]*)+)`?"
+_EC_HEX = r"(0[xX][0-9A-Fa-f]+)\b"
+# `Name` (0xNNN ...)
+_EC_PAREN_RE = re.compile(_EC_NAME + r"\s*\(\s*" + _EC_HEX)
+# Name `0xNNN`
+_EC_TICK_RE = re.compile(_EC_NAME + r"\s+`" + _EC_HEX + r"`")
+# `A` (or `B` for a property, both 0xNNN)
+_EC_BOTH_RE = re.compile(_EC_NAME + r"\s*\(\s*or\s+" + _EC_NAME + r"[^)]*?\bboth\s+" + _EC_HEX)
+# | `Name` | ... (0xNNN ... |  -- an exception-table row: every value in the
+# row belongs to the row's name, whatever other names the cell mentions.
+_EC_ROW_RE = re.compile(r"^\|\s*`([A-Z][A-Za-z]+)`\s*\|(.*)$")
+_EC_ROW_VALUE_RE = re.compile(r"\(\s*" + _EC_HEX)
+
+
+def _alpaca_error_values(header_text):
+    """{name: int} for every constant inside `namespace AlpacaError { ... }`."""
+    m = _ALPACA_ERROR_NS_RE.search(header_text)
+    if not m:
+        return {}
+    return {name: int(value, 0) for name, value in _ALPACA_ERROR_DEF_RE.findall(m.group(1))}
+
+
+def _error_code_pins(text):
+    """(line number, name, hex text) for every error value the doc writes down."""
+    pins = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        row = _EC_ROW_RE.match(line)
+        if row:
+            pins.extend((lineno, row.group(1), h) for h in _EC_ROW_VALUE_RE.findall(row.group(2)))
+            continue
+        for m in _EC_BOTH_RE.finditer(line):
+            pins.append((lineno, m.group(1), m.group(3)))
+            pins.append((lineno, m.group(2), m.group(3)))
+        for regex in (_EC_PAREN_RE, _EC_TICK_RE):
+            pins.extend((lineno, m.group(1), m.group(2)) for m in regex.finditer(line))
+    return pins
+
+
+def _error_code_findings(header_text, docs, min_pins=MIN_ERROR_CODE_PINS):
+    """Check 17 over the header and the docs' text ({path: text}). Pure, so
+    --self-test can drive it."""
+    values = _alpaca_error_values(header_text)
+    if not values:
+        return ["found no AlpacaError constants in %s: the parser is stale or the namespace moved" % ALPACA_ERRORS_H]
+    failures = []
+    total = 0
+    for path, text in docs.items():
+        for lineno, name, hex_text in _error_code_pins(text):
+            total += 1
+            if name not in values:
+                failures.append("%s:%d: `%s` (%s) is not an AlpacaError constant in %s (known: %s)"
+                                % (path, lineno, name, hex_text, ALPACA_ERRORS_H, ", ".join(sorted(values))))
+            elif int(hex_text, 16) != values[name]:
+                failures.append("%s:%d: `%s` is written as %s but %s defines it as 0x%X"
+                                % (path, lineno, name, hex_text, ALPACA_ERRORS_H, values[name]))
+    if total < min_pins:
+        failures.append("found only %d documented error-code value(s) across %s (floor %d): the extractor is "
+                        "stale or the docs stopped writing the values down" % (total, ", ".join(docs), min_pins))
+    return failures
+
+
+def check_error_codes_match_header(root=ROOT):
+    return _error_code_findings(read(ALPACA_ERRORS_H, root), {p: read(p, root) for p in ERROR_CODE_DOCS})
+
+
+# --- check 18: AGENTS.md CI job roster vs ci.yml ------------------------------
+
+CI_ROSTER_HEADING = "## Continuous Integration and Pre-flight"
+CI_ROSTER_BULLET = "- CI ("
+_CI_JOBS_BLOCK_RE = re.compile(r"^jobs:[ \t]*\n(.*?)(?=^\S|\Z)", re.MULTILINE | re.DOTALL)
+_CI_JOB_ID_RE = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+
+
+def _ci_job_ids(ci_text):
+    """The top-level job ids under `jobs:`, in file order (not the `on:` keys)."""
+    m = _CI_JOBS_BLOCK_RE.search(ci_text)
+    return _CI_JOB_ID_RE.findall(m.group(1)) if m else []
+
+
+def _strip_parenthesized(text):
+    """text with every (possibly nested) parenthesised group removed."""
+    out, depth = [], 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        elif not depth:
+            out.append(ch)
+    return "".join(out)
+
+
+def _ci_roster_bullet(agents_text):
+    """The first bullet under the CI heading that starts with `- CI (`,
+    continuation lines included, or None."""
+    start = agents_text.find("\n" + CI_ROSTER_HEADING + "\n")
+    if start == -1:
+        return None
+    section_end = agents_text.find("\n## ", start + 1)
+    section = agents_text[start:section_end if section_end != -1 else len(agents_text)]
+    lines = section.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith(CI_ROSTER_BULLET):
+            bullet = [line]
+            for more in lines[i + 1:]:
+                if not more.startswith("  "):
+                    break
+                bullet.append(more)
+            return "\n".join(bullet)
+    return None
+
+
+def _ci_roster_findings(ci_text, agents_text):
+    """Check 18 over the two files' text. Pure, so --self-test can drive it.
+
+    The roster is every backticked token in the bullet outside parentheses:
+    the descriptions (the ci.yml path, the `[stress]` tags) sit in parentheses
+    after each id, so they are not read as job ids.
+    """
+    jobs = _ci_job_ids(ci_text)
+    if not jobs:
+        return ["found no job ids under `jobs:` in .github/workflows/ci.yml: the parser is stale"]
+    bullet = _ci_roster_bullet(agents_text)
+    if bullet is None:
+        return ["could not find the '%s...' job roster bullet under '%s' in AGENTS.md"
+                % (CI_ROSTER_BULLET, CI_ROSTER_HEADING)]
+    named = _BACKTICK_RE.findall(_strip_parenthesized(bullet))
+    failures = []
+    seen = set()
+    for job in named:
+        if job in seen:
+            failures.append("AGENTS.md CI roster names '%s' twice" % job)
+        seen.add(job)
+        if job not in jobs:
+            failures.append("AGENTS.md CI roster names '%s', which does not exist as a job id in "
+                            ".github/workflows/ci.yml (ids: %s)" % (job, ", ".join(jobs)))
+    for job in jobs:
+        if job not in seen:
+            failures.append("ci.yml job '%s' is missing from the AGENTS.md CI roster bullet ('%s...')"
+                            % (job, CI_ROSTER_BULLET))
+    return failures
+
+
+def check_ci_roster_matches_workflow(root=ROOT):
+    return _ci_roster_findings(read(".github/workflows/ci.yml", root), read("AGENTS.md", root))
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -1283,6 +2096,14 @@ CHECKS = [
     ("TSan filtered runs sync (ci.yml vs ci_preflight.sh)", check_tsan_filtered_runs_sync),
     ("AGPL header form on every first-party source file", check_license_headers),
     ("Cursor rule file path references exist", check_rule_file_paths_exist),
+    ("Skill Device API snapshot matches docs/ schema", check_skill_spec_hash),
+    ("GPhoto STATUS paragraph names every validated body", check_gphoto_status_names_validated_bodies),
+    ("Fake-connectable roster matches the fakes on disk", check_fake_roster_matches_disk),
+    ("Every std::regex in router.cpp is built once (static)", check_router_regexes_static),
+    ("README headline counts match SUPPORTED-DRIVERS.md", check_readme_headline_counts),
+    ("SUPPORTED-DRIVERS.md Updated date is not behind the README release date", check_supported_drivers_updated_date),
+    ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
+    ("AGENTS.md CI job roster matches ci.yml job ids", check_ci_roster_matches_workflow),
 ]
 
 
@@ -1474,6 +2295,550 @@ def self_test():
         check("memory comment check: a root with no first-party files trips the floor",
               any("floor" in f for f in check_memory_comment_paths_exist(empty)))
 
+    # check_skill_spec_hash over a fixture tree: the skill pins the SHA-256
+    # of the LF-normalized Device API schema its endpoint catalog was built
+    # from, so a refreshed docs/ schema must fail until the pin moves.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        spec = "openapi: 3.1.1\npaths: {}\n"
+        pin = hashlib.sha256(spec.encode("utf-8")).hexdigest()
+
+        def write_fixture(spec_text, sources_text):
+            for name, text in ((SKILL_SPEC_PATH, spec_text), (SKILL_SOURCES_PATH, sources_text)):
+                if text is None:
+                    (root / name).unlink(missing_ok=True)
+                    continue
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_bytes(text.encode("utf-8"))
+            return check_skill_spec_hash(root)
+
+        sources = "The schema snapshot has SHA-256:\n\n`%s`\n" % pin
+        check("skill spec hash: a schema matching the pin is not reported",
+              write_fixture(spec, sources) == [])
+        check("skill spec hash: the same schema with CRLF line endings is not reported",
+              write_fixture(spec.replace("\n", "\r\n"), sources) == [])
+        check("skill spec hash: a changed schema is reported",
+              any("does not match" in f for f in write_fixture(spec + "x: 1\n", sources)))
+        check("skill spec hash: a skill doc with no pinned hash is reported",
+              any("no pinned" in f for f in write_fixture(spec, "no hash here\n")))
+        # Two pins is ambiguity, not absence: the old message said "no pinned"
+        # for both and sent the reader looking for a hash that is really there.
+        check("skill spec hash: a skill doc pinning two hashes is reported as ambiguous",
+              any("ambiguous" in f for f in write_fixture(spec, sources + sources)))
+        check("skill spec hash: a missing schema file is reported",
+              any("does not exist" in f for f in write_fixture(None, sources)))
+
+    # check 7 (check_agents_md_paths_exist) over fixture git repositories. The
+    # check shells out to git, so each fixture is a real repository; every
+    # scenario builds its own, so no scenario sees another's cached listing.
+    import os
+    import tempfile
+
+    def attempt(label, fn):
+        # A signature that cannot take a root yet raises TypeError; record that
+        # as a FAIL rather than crashing the whole self-test.
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - any crash is a failed check
+            check("%s (raised %s: %s)" % (label, type(exc).__name__, exc), False)
+            return None
+
+    # Isolated git: no user config or hooks, and no GIT_DIR from an enclosing
+    # hook pointing the fixture's git at the real repository.
+    git_env = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    stripped = ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+    saved_env = {k: os.environ.get(k) for k in list(git_env) + list(stripped)}
+    os.environ.update(git_env)
+    for name in stripped:
+        os.environ.pop(name, None)
+
+    def make_repo(base, agents_dir=True, extra=None):
+        root = Path(base)
+        files = {
+            "AGENTS.md": "".join("See `scripts/f%d.py`.\n" % (i % MIN_MEMORY_COMMENT_FILES) for i in range(MIN_AGENTS_MD_PATH_REFS + 2)),
+            "CONTEXT.md": "# Context\n",
+            "README.md": "# Readme\n",
+            ".github/instructions/a.instructions.md": "# a\n",
+            ".claude/skills/s/SKILL.md": "# s\n",
+            ".gitignore": "scripts/gen/\n",
+        }
+        # Two spare files above MIN_MEMORY_COMMENT_FILES (check 7 ends with the
+        # memory-comment check), so raising that floor by one is not a failure here.
+        for i in range(MIN_MEMORY_COMMENT_FILES + 2):
+            files["scripts/f%d.py" % i] = "# first-party source\n"
+        if agents_dir:
+            files["docs/agents/x.md"] = "# x\n"
+        files.update(extra or {})
+        for name, text in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text, encoding="utf-8")
+        for args in (["init", "-q"], ["add", "-A"],
+                     ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "fixture"]):
+            subprocess.run(["git"] + args, cwd=root, check=True, capture_output=True)
+        return root
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            def repo_fixture(name, **kwargs):
+                (Path(tmp) / name).mkdir()
+                return make_repo(Path(tmp) / name, **kwargs)
+
+            def run_check(root):
+                return attempt("agents md check: accepts a root", lambda: check_agents_md_paths_exist(root))
+
+            found = run_check(repo_fixture("clean"))
+            check("agents md check: a clean fixture repository reports nothing", found == [])
+
+            drift = repo_fixture("drift")
+            with open(drift / "AGENTS.md", "a", encoding="utf-8") as f:
+                f.write("Also `scripts/nope.py` and `scripts/gen/out.py`.\n")
+            found = run_check(drift)
+            check("agents md check: a drifted span is reported",
+                  found is not None and any("scripts/nope.py" in f for f in found))
+            check("agents md check: a gitignored span is not reported",
+                  found is not None and not any("scripts/gen/out.py" in f for f in found))
+
+            # AGENTS.md is one of five document loops in this check; a root
+            # threaded into that one only proves nothing about the other four,
+            # so drift a skill doc and an agent doc too (issue #583).
+            loops = repo_fixture("loops")
+            with open(loops / ".claude/skills/s/SKILL.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/skill_nope.py`.\n")
+            with open(loops / "docs/agents/x.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/agent_nope.py`.\n")
+            found = run_check(loops)
+            check("agents md check: a drifted span in a skill doc is reported",
+                  found is not None and any("SKILL.md" in f and "scripts/skill_nope.py" in f for f in found))
+            check("agents md check: a drifted span in an agent doc is reported",
+                  found is not None and any("docs/agents/x.md" in f and "scripts/agent_nope.py" in f for f in found))
+
+            # CONTEXT.md, the domain glossary, is scanned like AGENTS.md; a
+            # rename must not silently drop it from the check.
+            context = repo_fixture("context")
+            with open(context / "CONTEXT.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/context_nope.py`.\n")
+            found = run_check(context)
+            check("agents md check: a drifted span in CONTEXT.md is reported",
+                  found is not None and any("CONTEXT.md" in f and "scripts/context_nope.py" in f for f in found))
+            nocontext = repo_fixture("nocontext")
+            (nocontext / "CONTEXT.md").unlink()
+            found = run_check(nocontext)
+            check("agents md check: a missing CONTEXT.md is reported",
+                  found is not None and any("CONTEXT.md" in f and "does not exist" in f for f in found))
+
+            # README.md is scanned by name too (issue #693): a drifted span and
+            # a missing file are each a finding, like CONTEXT.md.
+            readme = repo_fixture("readme")
+            with open(readme / "README.md", "a", encoding="utf-8") as f:
+                f.write("See `scripts/readme_nope.py`.\n")
+            found = run_check(readme)
+            check("agents md check: a drifted span in README.md is reported",
+                  found is not None and any("README.md" in f and "scripts/readme_nope.py" in f for f in found))
+            noreadme = repo_fixture("noreadme")
+            (noreadme / "README.md").unlink()
+            found = run_check(noreadme)
+            check("agents md check: a missing README.md is reported",
+                  found is not None and any("README.md" in f and "does not exist" in f for f in found))
+
+            gone = repo_fixture("gone")
+            (gone / ".github/instructions/a.instructions.md").unlink()
+            found = run_check(gone)
+            check("agents md check: a deleted tracked instruction file is reported as missing",
+                  found is not None and any("a.instructions.md" in f and "missing" in f for f in found))
+
+            nested = repo_fixture("nested", extra={"docs/agents/sub/y.md": "# y\n"})
+            found = run_check(nested)
+            check("agents md check: a nested docs/agents file is not reported as missing",
+                  found is not None and found == [])
+
+            # A file written but not yet staged is in the working tree, so a
+            # reference to it is not drift (issue #556a). The fallback tuple in
+            # _tracked_paths has to cover every directory check 7 scans.
+            unstaged = repo_fixture("unstaged")
+            (unstaged / "docs/agents/foo.md").write_text("# foo\n", encoding="utf-8")
+            (unstaged / ".claude/skills/s/NOTES.md").write_text("# notes\n", encoding="utf-8")
+            with open(unstaged / "AGENTS.md", "a", encoding="utf-8") as f:
+                f.write("Also `docs/agents/foo.md` and `.claude/skills/s/NOTES.md`.\n")
+            found = run_check(unstaged)
+            check("agents md check: an unstaged agent or skill doc is not reported as drift",
+                  found is not None and found == [])
+
+            first = repo_fixture("first")
+            second = repo_fixture("second", extra={"scripts/only_second.py": "# only here\n"})
+            listed_first = attempt("tracked paths: accepts a root", lambda: _tracked_paths(first))
+            listed_second = attempt("tracked paths: accepts a root", lambda: _tracked_paths(second))
+            check("tracked paths: two roots in one process do not share a cache",
+                  listed_first is not None and listed_second is not None
+                  and "scripts/only_second.py" not in listed_first[0]
+                  and "scripts/only_second.py" in listed_second[0])
+
+            found = run_check(repo_fixture("noagents", agents_dir=False))
+            check("agents md check: an empty docs/agents trips the floor",
+                  found is not None and any("docs/agents" in f and "floor" in f for f in found))
+    finally:
+        for name, value in saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    gp_table = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a validated model the STATUS paragraph omits is flagged",
+          len(_gphoto_status_findings(gp_table, "**STATUS: validated against the Nikon D3300.**\n\nrest\n")) == 1)
+    gp_mixed = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n| Canon EOS 4000D | USB (PTP) | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a row whose Connection cell is 'USB (PTP)' is still gated",
+          len(_gphoto_status_findings(gp_mixed, "**STATUS: validated: Nikon D3300.**\n\nrest\n")) == 1)
+    gp_roman = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Sony A7 III | USB | \u2713 | x |\n\n### Next\n"
+    check("gphoto status: a designation with no digit ('III') does not match by accident",
+          len(_gphoto_status_findings(gp_roman, "**STATUS: validated: Canon EOS 4000D, see Part III.**\n\nrest\n")) == 1)
+    gp_last = "### GPhoto\n\n| M | C | L | S |\n|--|--|--|--|\n| Nikon D3300 | USB | \u2713 | x |\n\n## Mounts\n\n| M | C | L | S |\n|--|--|--|--|\n| Other Mount 9000 | USB | \u2713 | x |\n"
+    check("gphoto status: the GPhoto section ends at the next '## ' heading, not only the next '### '",
+          _gphoto_status_findings(gp_last, "**STATUS: validated: Nikon D3300.**\n\nrest\n") == [])
+    check("gphoto status: every validated model named passes",
+          _gphoto_status_findings(gp_table, "**STATUS: validated: Nikon D3300, Canon EOS 4000D.**\n\nrest\n") == [])
+
+    roster_hdr = ("#define CS_ZWO(X) X(zwo_telescope)\n"
+                  "#define CS_GEMINI(X) X(gemini_switch) X(gemini_switch_b)\n"
+                  "inline constexpr FakeRosterRow kFakeConnectableRoster[] = {\n"
+                  "    {\"zwo\", \"telescope\", \"fake_mount_server.h\"},\n"
+                  "    {\"gemini\", \"switch\", \"fake_gemini_pdh.h\"},\n"
+                  "};\n")
+    roster_disk = {"fake_mount_server.h", "fake_gemini_pdh.h", "fake_pty_write.h"}
+    roster_helpers = {"fake_pty_write.h": "helper"}
+    check("fake roster: a matching roster and disk produce no finding",
+          _fake_roster_findings(roster_hdr, roster_disk, roster_helpers) == [])
+    f = _fake_roster_findings(roster_hdr, roster_disk | {"fake_new_sdk.h"}, roster_helpers)
+    check("fake roster: a fake on disk with no roster row is flagged by name",
+          len(f) == 1 and "fake_new_sdk.h is not in kFakeConnectableRoster" in f[0])
+    f = _fake_roster_findings(roster_hdr, {"fake_mount_server.h", "fake_pty_write.h"}, roster_helpers)
+    check("fake roster: a roster row whose fake is gone is flagged",
+          len(f) == 1 and "fake_gemini_pdh.h" in f[0] and "does not exist" in f[0])
+    f = _fake_roster_findings(roster_hdr, roster_disk, {"fake_mount_server.h": "now rostered"})
+    check("fake roster: a helper that gained a roster row is a stale helper",
+          any("STALE HELPER_FAKES entry: fake_mount_server.h now has" in x for x in f))
+    f = _fake_roster_findings(roster_hdr, roster_disk, {"fake_pty_write.h": "h", "fake_gone.h": "h"})
+    check("fake roster: a helper whose file is gone is a stale helper",
+          any("STALE HELPER_FAKES entry: fake_gone.h does not exist" in x for x in f))
+    f = _fake_roster_findings(roster_hdr.replace('{"zwo", "telescope"', '{"zwoo", "telescope"'), roster_disk, roster_helpers)
+    check("fake roster: a row naming an unknown vendor is flagged",
+          any("zwoo" in x and "no registry entry" in x for x in f))
+    f = _fake_roster_findings(roster_hdr.replace('{"gemini", "switch"', '{"gemini", "focuser"'), roster_disk, roster_helpers)
+    check("fake roster: a row naming a pair the registry lacks is flagged",
+          any("gemini, focuser" in x and "no registry entry" in x for x in f))
+    only_backend = roster_hdr.replace("X(gemini_switch) X(gemini_switch_b)", "X(gemini_switch_b)")
+    check("fake roster: a pair covered only by a second-backend id (three segments) is a registry pair",
+          "X(gemini_switch)" not in only_backend and _fake_roster_findings(only_backend, roster_disk, roster_helpers) == [])
+    check("fake roster: a missing roster array is a finding, not a silent pass",
+          len(_fake_roster_findings("// nothing here\n", roster_disk, roster_helpers)) == 1)
+    check("fake roster: a row inside a comment is not a row",
+          len(_fake_roster_findings("// {\"a\", \"b\", \"fake_x.h\"},\n" + roster_hdr, roster_disk, roster_helpers)) == 0)
+
+    rx_ok = 'static const std::regex kX(R"(a)");\n'
+    check("static regex: a static const regex is clean", _static_regex_findings(rx_ok) == [])
+    f = _static_regex_findings(rx_ok.replace("static ", ""))
+    check("static regex: dropping 'static' is flagged as not static",
+          len(f) == 1 and "kX is not static" in f[0])
+    f = _static_regex_findings('if (std::regex_match(p, m, std::regex("a"))) {}\n' + rx_ok)
+    check("static regex: an unnamed temporary is flagged (regex_match itself is not)",
+          len(f) == 1 and "temporary" in f[0])
+    check("static regex: a construction inside a comment is not one",
+          _static_regex_findings("// std::regex x(\"a\");\n" + rx_ok) == [])
+    check("static regex: 'static' on the previous line still counts",
+          _static_regex_findings('static\nconst std::regex kX(R"(a)");\n') == [])
+    check("static regex: 'static' belonging to an earlier statement does not count",
+          len(_static_regex_findings('static int n = 0;\nconst std::regex kX(R"(a)");\n')) == 1)
+    f = _static_regex_findings('auto r = std::regex{"a"};\n' + rx_ok)
+    check("static regex: a brace-built temporary is flagged",
+          len(f) == 1 and "temporary" in f[0])
+    f = _static_regex_findings('std::regex const kY("a");\n' + rx_ok)
+    check("static regex: 'std::regex const name' without static is flagged",
+          len(f) == 1 and "kY is not static" in f[0])
+    f = _static_regex_findings(rx_ok.replace("static ", ""))
+    check("static regex: the not-static finding names the static keyword (scope is not modelled)",
+          len(f) == 1 and "static keyword" in f[0])
+    check("static regex: 'static std::regex const name' is clean",
+          _static_regex_findings('static std::regex const kY("a");\n') == [])
+    f = _static_regex_findings("int x = 1;\n")
+    check("static regex: no construction at all is a floor finding, not a pass",
+          len(f) == 1 and "extractor is stale" in f[0])
+
+    # check 15: README headline vs SUPPORTED-DRIVERS.md (issue #684).
+    hl_map = {"Alpha": "Alpha", "Beta Motor": "Beta", "Beta Handset": "Beta", "GPhoto": "DSLRs (via libgphoto2)"}
+    hl_extras = {"Gamma (Alpha plugin)": "a row in the Alpha table"}
+    hl_readme = ("intro\n- **3 validated devices. Four brands. One server.** Alpha, DSLRs (via libgphoto2), "
+                 "Beta, and Gamma (Alpha plugin).\n- **Other.** text\n")
+    hl_supported = ("### Alpha\n\n| Model Series | Connection | Linux | Status |\n|---|---|---|---|\n"
+                    "| A1 | USB | \u2713 | ok |\n| A2 | USB |  | pending |\n\n### Beta Motor\n\n"
+                    "| Model Series | Connection | Linux | Status |\n|---|---|---|---|\n| B1 | USB | \u2713 | ok |\n\n"
+                    "### Beta Handset\n\n| Model Series | Connection | Linux | Status |\n|---|---|---|---|\n"
+                    "| B2 | USB | \u2713 | ok |\n\n### GPhoto\n\n| Source | Connection | Linux | Status |\n"
+                    "|---|---|---|---|\n")
+    check("readme headline: baseline fixtures produce no finding",
+          _readme_headline_findings(hl_readme, hl_supported, hl_map, hl_extras) == [])
+    check("readme headline: the row filter counts check marks and skips separators, headers and '| Source' rows",
+          count_validated_device_rows(hl_supported + "| Model Series \u2713 |\n| Source \u2713 |\n|-- \u2713 |\n") == 3)
+    f = _readme_headline_findings(sub(hl_readme, "**3 validated", "**4 validated"), hl_supported, hl_map, hl_extras)
+    check("readme headline: a device count that disagrees with the validated rows is flagged",
+          len(f) == 1 and "says 4 validated devices but SUPPORTED-DRIVERS.md has 3" in f[0])
+    f = _readme_headline_findings(hl_readme, hl_supported + "### Delta\n\n| Model Series | C | L | S |\n|--|--|--|--|\n| D1 | USB | \u2713 | ok |\n", hl_map, hl_extras)
+    check("readme headline: a validated row added without a README edit is a device-count finding",
+          any("says 3 validated devices but SUPPORTED-DRIVERS.md has 4" in x for x in f))
+    check("readme headline: a new vendor heading with no map entry is flagged",
+          any("heading '### Delta' has no entry in SUPPORTED_HEADING_TO_README_BRAND" in x for x in f))
+    f = _readme_headline_findings(sub(hl_readme, "Four brands", "Five brands"), hl_supported, hl_map, hl_extras)
+    check("readme headline: a brand word that disagrees with the list length is flagged",
+          len(f) == 1 and "says Five (5) brands but its brand list has 4 items" in f[0])
+    f = _readme_headline_findings(sub(hl_readme, "Four brands", "Several brands"), hl_supported, hl_map, hl_extras)
+    check("readme headline: a brand count that is not a number word is flagged",
+          len(f) == 1 and "not a number word" in f[0])
+    check("readme headline: number words parse ('twenty-one' -> 21, 'Fifteen' -> 15, 'ninety' -> 90)",
+          (_number_word_to_int("twenty-one"), _number_word_to_int("Fifteen"), _number_word_to_int("ninety")) == (21, 15, 90))
+    f = _readme_headline_findings(sub(hl_readme, "Alpha, DSLRs", "Alpha, Alpha, DSLRs").replace("Four brands", "Five brands"), hl_supported, hl_map, hl_extras)
+    check("readme headline: a repeated list item is flagged",
+          len(f) == 1 and "repeats an item: Alpha" in f[0])
+    f = _readme_headline_findings(sub(hl_readme, "Beta, and Gamma", "and Gamma").replace("Four brands", "Three brands"), hl_supported, hl_map, hl_extras)
+    check("readme headline: a mapped brand missing from the README list is flagged for each heading that maps to it",
+          len(f) == 2 and all("does not name 'Beta'" in x for x in f))
+    f = _readme_headline_findings(sub(hl_readme, "Beta, and Gamma", "Beta, Omega, and Gamma").replace("Four brands", "Five brands"), hl_supported, hl_map, hl_extras)
+    check("readme headline: a README list item with no heading and no declared reason is flagged",
+          len(f) == 1 and "'Omega' matches no SUPPORTED-DRIVERS.md heading" in f[0])
+    f = _readme_headline_findings(hl_readme, hl_supported.split("### GPhoto")[0], hl_map, hl_extras)
+    check("readme headline: a dropped vendor reports the stale map entry and the orphaned README item in one run",
+          len(f) == 2 and any("names '### GPhoto' but SUPPORTED-DRIVERS.md has no such heading" in x for x in f)
+          and any("'DSLRs (via libgphoto2)' matches no SUPPORTED-DRIVERS.md heading" in x for x in f))
+    f = _readme_headline_findings(hl_readme, sub(hl_supported, "### Beta Handset", "### Beta Wireless"), hl_map, hl_extras)
+    check("readme headline: a renamed heading is both a stale map entry and an unmapped heading",
+          any("names '### Beta Handset' but SUPPORTED-DRIVERS.md has no such heading" in x for x in f)
+          and any("heading '### Beta Wireless' has no entry" in x for x in f))
+    f = _readme_headline_findings(sub(hl_readme, ", and Gamma (Alpha plugin)", "").replace("Four brands", "Three brands"), hl_supported, hl_map, hl_extras)
+    check("readme headline: a declared no-heading brand missing from the list is a stale-table finding",
+          len(f) == 1 and "README_BRANDS_WITHOUT_HEADING names 'Gamma (Alpha plugin)'" in f[0])
+    f = _readme_headline_findings(hl_readme.replace("\u2713", ""), hl_supported.replace("\u2713", ""), hl_map, hl_extras)
+    check("readme headline: no validated rows at all is a floor finding, not a pass",
+          any("cannot count anything" in x for x in f))
+    f = _readme_headline_findings("- **Other.** text\n", hl_supported, hl_map, hl_extras)
+    check("readme headline: a missing headline is a finding",
+          len(f) == 1 and "could not find" in f[0])
+    # --counts (issue #689): the release recipe's numbers come from the same
+    # functions the gate uses, so the summary must agree with a clean baseline
+    # and its number words must round-trip through the gate's parser.
+    check("counts: every number word 0..99 round-trips through the check 15 parser",
+          all(_number_word_to_int(_int_to_number_word(n)) == n for n in range(100))
+          and _int_to_number_word(100) is None)
+    lines = readme_headline_counts_summary(hl_readme, hl_supported, hl_map, hl_extras)
+    check("counts: the summary reports the baseline's device count, brand count and word",
+          lines[0] == "validated devices: 3" and lines[1] == "brands: 4 (Four)")
+    check("counts: the paste-ready headline for a clean baseline is the README's own line",
+          lines[3] == "headline: " + hl_readme.splitlines()[1])
+    check("counts: the summary names no unmapped heading on a clean baseline",
+          not any(x.startswith("unmapped heading") for x in lines))
+    lines = readme_headline_counts_summary(
+        hl_readme, hl_supported + "### Delta\n\n| Model Series | C | L | S |\n|--|--|--|--|\n| D1 | USB | \u2713 | ok |\n",
+        dict(hl_map, Delta="Delta"), hl_extras)
+    check("counts: a new mapped heading raises the counts and is appended after the README's existing order",
+          lines[0] == "validated devices: 4" and lines[1] == "brands: 5 (Five)"
+          and lines[3].endswith("Beta, Gamma (Alpha plugin), and Delta."))
+    lines = readme_headline_counts_summary(
+        hl_readme, hl_supported + "### Delta\n\n| Model Series | C | L | S |\n|--|--|--|--|\n| D1 | USB | \u2713 | ok |\n",
+        hl_map, hl_extras)
+    check("counts: a heading with no map entry is named, not silently dropped from the list",
+          lines[1] == "brands: 4 (Four)" and any("unmapped heading '### Delta'" in x for x in lines))
+    lines = readme_headline_counts_summary(hl_readme, hl_supported, dict(hl_map, Epsilon="Epsilon"), hl_extras)
+    check("counts: a map entry whose heading is gone is named, and its brand is not suggested (review of #694)",
+          lines[1] == "brands: 4 (Four)" and "Epsilon" not in lines[3]
+          and any(x.startswith("stale map entry '### Epsilon'") for x in lines))
+    lines = readme_headline_counts_summary("- **Other.** text\n", hl_supported, hl_map, hl_extras)
+    check("counts: with no README headline the list is the map's own order and the current line is reported missing",
+          lines[2] == "brand list: Alpha, Beta, DSLRs (via libgphoto2), Gamma (Alpha plugin)"
+          and lines[4] == "README.md now: (headline not found)")
+    # issue #690: parse failures name the real cause.
+    f = _readme_headline_findings(sub(hl_readme, "Four brands", "Twenty One brands"), hl_supported, hl_map, hl_extras)
+    check("readme headline: a multi-word brand count reaches the number-word message, not 'headline not found'",
+          len(f) == 1 and "'Twenty One' is not a number word" in f[0])
+    check("readme headline: a dangling hyphen ('twenty-') and a spaced compound are rejected, not rounded",
+          _number_word_to_int("twenty-") is None and _number_word_to_int("twenty one") is None
+          and _number_word_to_int("twenty") == 20)
+    comma_map = dict(hl_map, GPhoto="Canon, Nikon and Sony DSLRs")
+    comma_readme = sub(hl_readme, "DSLRs (via libgphoto2)", "Canon, Nikon and Sony DSLRs")
+    check("readme headline: a declared brand item containing a comma is one item, not two unaccounted ones",
+          _readme_headline_findings(comma_readme, hl_supported, comma_map, hl_extras) == [])
+    check("readme headline: a declared comma item as the LAST entry (after 'and') is still consumed whole",
+          _split_readme_brand_list("Alpha, and Canon, Nikon and Sony DSLRs", {"Alpha", "Canon, Nikon and Sony DSLRs"})
+          == ["Alpha", "Canon, Nikon and Sony DSLRs"])
+    f = _readme_headline_findings(comma_readme, hl_supported, hl_map, hl_extras)
+    check("readme headline: an UNDECLARED comma item splits and each half is reported as unaccounted",
+          any("'Canon' matches no" in x for x in f) and any("'Nikon and Sony DSLRs' matches no" in x for x in f))
+    lines = readme_headline_counts_summary(comma_readme, hl_supported, comma_map, hl_extras)
+    check("counts: the summary keeps a declared comma item whole in the paste-ready headline",
+          lines[1] == "brands: 4 (Four)" and "Canon, Nikon and Sony DSLRs" in lines[3])
+
+    # check 4: VERSION vs README badge, with the ~betaN suffix.
+    b_readme = "#### [5.0.0~beta2] - 2026-11-01 &middot; [Changelog](CHANGELOG.md)\n"
+    check("version badge: a beta VERSION and its beta badge agree",
+          _version_badge_findings("5.0.0~beta2\n", b_readme) == [])
+    check("version badge: a beta badge against the base VERSION is flagged",
+          len(_version_badge_findings("5.0.0\n", b_readme)) == 1)
+    check("version badge: a stable VERSION and badge still agree",
+          _version_badge_findings("4.2.0\n", b_readme.replace("5.0.0~beta2", "4.2.0")) == [])
+    check("version badge: a missing badge line is flagged",
+          len(_version_badge_findings("4.2.0", "# no badge\n")) == 1)
+    b0_readme = b_readme.replace("5.0.0~beta2", "5.0.0~beta0")
+    check("version badge: ~beta0 is rejected even when VERSION and badge agree",
+          _version_badge_findings("5.0.0~beta0\n", b0_readme) == ["VERSION (5.0.0~beta0) is not X.Y.Z or X.Y.Z~betaN (betas count from 1)"])
+    check("version badge: a badge that is not X.Y.Z is not a badge",
+          len(_version_badge_findings("4.2.0\n", b_readme.replace("5.0.0~beta2", "4.2"))) == 1)
+    check("version badge: the form is changelog_fragments.VERSION_RE itself",
+          VERSION_FORM_RE is changelog_fragments.VERSION_RE and README_BADGE_RE.search(b_readme) is not None)
+    check("version badge: ~beta10 is accepted",
+          _version_badge_findings("5.0.0~beta10\n", b_readme.replace("5.0.0~beta2", "5.0.0~beta10")) == [])
+    check("updated date: a ~beta0 badge is not read as a release date",
+          len(_updated_date_findings("# S\n\n## Updated 2026-11-01\n", b0_readme)) == 1)
+    check("updated date: a beta badge still yields its release date",
+          _updated_date_findings("# S\n\n## Updated 2026-11-01\n", b_readme) == [])
+
+    # check 16: SUPPORTED-DRIVERS.md Updated date vs README badge date (issue #692).
+    ud_supported = "# Supported\n\n## Updated 2026-09-27\nintro\n"
+    ud_readme = "#### [4.1.0] - 2026-09-27 &middot; [Changelog](CHANGELOG.md)\n"
+    check("updated date: an Updated line equal to the release date is clean",
+          _updated_date_findings(ud_supported, ud_readme) == [])
+    check("updated date: an Updated line after the release date is clean",
+          _updated_date_findings(ud_supported.replace("09-27", "10-02"), ud_readme) == [])
+    f = _updated_date_findings(ud_supported.replace("09-27", "09-24"), ud_readme)
+    check("updated date: an Updated line behind the release date is flagged with both dates",
+          len(f) == 1 and "Updated 2026-09-24" in f[0] and "released 2026-09-27" in f[0])
+    f = _updated_date_findings(ud_supported.replace("2026-09-27", "2126-09-27"), ud_readme)
+    check("updated date: a mistyped year far ahead of the release date is flagged",
+          len(f) == 1 and "more than %d days after" % MAX_UPDATED_DAYS_AHEAD in f[0])
+    check("updated date: a year ahead exactly is still clean (the bound is loose by design)",
+          _updated_date_findings(ud_supported.replace("2026-09-27", "2027-09-27"), ud_readme) == [])
+    f = _updated_date_findings(ud_supported.replace("2026-09-27", "2026-13-40"), ud_readme)
+    check("updated date: a non-date Updated value is flagged",
+          len(f) == 1 and "not a YYYY-MM-DD date" in f[0])
+    f = _updated_date_findings("# Supported\nintro\n", ud_readme)
+    check("updated date: a missing Updated line is flagged",
+          len(f) == 1 and "could not find the '## Updated" in f[0])
+    f = _updated_date_findings(ud_supported, "# no badge\n")
+    check("updated date: a missing README badge is flagged rather than passing vacuously",
+          len(f) == 1 and "release date in the README.md version badge" in f[0])
+
+    # check 17: documented AlpacaError values vs alpaca_errors.h (issue #682).
+    # attempt() so a helper that is missing or has the wrong signature is a
+    # FAIL line, not a crash that hides every check after it.
+    ec_header = (
+        "namespace alpacacore {\n"
+        "namespace AlpacaError {\n"
+        "    constexpr int Success = 0;\n"
+        "    constexpr int PropertyNotImplemented = 0x400; // 1024\n"
+        "    constexpr int MethodNotImplemented = 0x400;   // 1024\n"
+        "    constexpr int InvalidValue = 0x401;           // 1025\n"
+        "    constexpr int InvalidOperation = 0x40B;       // 1035\n"
+        "    constexpr int ActionNotImplemented = 0x40C;   // 1036\n"
+        "}\n"
+        "constexpr int NotAnAlpacaError = 0x999;\n"
+        "}\n"
+    )
+    ec_agents = (
+        "| Throw | When |\n"
+        "|---|---|\n"
+        "| `ActionNotImplemented` | a name not in `SupportedActions` (0x40C, ASCOM's exception). |\n"
+        "Throw `MethodNotImplemented` (or `PropertyNotImplemented` for a property, both 0x400).\n"
+        "`InvalidOperation` (0x40B) is for a supported member in the wrong state.\n"
+        "Use Celestron MC_AUX_GUIDE 0x26 for guiding.\n"
+    )
+    ec_build = (
+        "Error codes: InvalidValue `0x401`, InvalidOperation `0x40B`.\n"
+        "Assert `AlpacaError::ActionNotImplemented` (0x40C).\n"
+    )
+    ec_docs = {"AGENTS.md": ec_agents, ".claude/commands/driver-build.md": ec_build}
+
+    def ec(header=ec_header, docs=None, min_pins=1):
+        return attempt("error codes", lambda: _error_code_findings(header, docs or ec_docs, min_pins))
+
+    f = ec()
+    check("error codes: the documented values that match the enum are clean", f == [])
+    f = ec(min_pins=100)
+    check("error codes: the pin floor fires when the extractor finds too few pins",
+          f is not None and len(f) == 1 and "found only" in f[0])
+    f = ec(docs=dict(ec_docs, **{"AGENTS.md": sub(ec_agents, "(0x40B)", "(0x40A)")}))
+    check("error codes: a wrong '<Name> (0x...)' value names the file, the line and the expected value",
+          f is not None and len(f) == 1 and "AGENTS.md:5" in f[0] and "InvalidOperation" in f[0]
+          and "0x40A" in f[0] and "0x40B" in f[0])
+    f = ec(docs=dict(ec_docs, **{"AGENTS.md": sub(ec_agents, "`InvalidOperation` (0x40B)", "`InvalidOperate` (0x40B)")}))
+    check("error codes: an unknown '<Name> (0x...)' name names the file and the line and says it is not in the enum",
+          f is not None and len(f) == 1 and "AGENTS.md:5" in f[0] and "InvalidOperate" in f[0]
+          and "not an AlpacaError" in f[0])
+    f = ec(docs=dict(ec_docs, **{".claude/commands/driver-build.md": sub(ec_build, "InvalidValue `0x401`", "InvalidValue `0x402`")}))
+    check("error codes: a wrong 'Name `0x...`' list value is reported with the expected value",
+          f is not None and len(f) == 1 and ".claude/commands/driver-build.md:1" in f[0] and "0x401" in f[0])
+    f = ec(docs=dict(ec_docs, **{"AGENTS.md": sub(ec_agents, "both 0x400", "both 0x401")}))
+    check("error codes: a wrong shared '(or `B` ..., both 0x...)' value is reported for both names",
+          f is not None and len(f) == 2 and any("MethodNotImplemented" in x for x in f)
+          and any("PropertyNotImplemented" in x for x in f))
+    f = ec(docs=dict(ec_docs, **{"AGENTS.md": sub(ec_agents, "(0x40C, ASCOM's", "(0x40D, ASCOM's")}))
+    check("error codes: a wrong value in an exception-table row is pinned to the row's name, not a name in the cell",
+          f is not None and len(f) == 1 and "AGENTS.md:3" in f[0] and "ActionNotImplemented" in f[0]
+          and "0x40C" in f[0])
+    f = ec(docs=dict(ec_docs, **{".claude/commands/driver-build.md": sub(ec_build, "(0x40C)", "(0x400)")}))
+    check("error codes: an 'AlpacaError::' qualified name is pinned like a bare one",
+          f is not None and len(f) == 1 and "ActionNotImplemented" in f[0])
+    f = ec(header=ec_header.replace("constexpr int NotAnAlpacaError = 0x999;\n", ""),
+           docs=dict(ec_docs, **{"AGENTS.md": ec_agents + "`NotAnAlpacaError` (0x999)\n"}))
+    check("error codes: a constant outside namespace AlpacaError is not part of the enum",
+          f is not None and len(f) == 1 and "NotAnAlpacaError" in f[0])
+    f = ec(header="namespace AlpacaError {\n}\n")
+    check("error codes: an enum the parser cannot read is a finding, not a pass",
+          f is not None and any("no AlpacaError constants" in x for x in f))
+
+    # check 18: the AGENTS.md CI job roster vs ci.yml (issue #702).
+    roster_ci = (
+        "on:\n"
+        "  pull_request:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      - main\n"
+        "jobs:\n"
+        "  build-test:\n"
+        "    name: Build\n"
+        "    steps:\n"
+        "      - run: echo\n"
+        "  format:\n"
+        "    runs-on: x\n"
+        "  docs-drift:\n"
+        "    runs-on: x\n"
+    )
+    roster_agents = (
+        "# Agent Instructions\n\n"
+        "## Continuous Integration and Pre-flight\n\n"
+        "Related decision: none.\n\n"
+        "- CI (`.github/workflows/ci.yml`) runs on every PR. Its jobs, by id: `build-test` (vendors OFF),\n"
+        "  `format` (clang-format over `[stress]` changed lines), and `docs-drift`.\n"
+        "- **Layering gate** (`layering`, a later bullet) is not the roster.\n"
+    )
+
+    def roster(ci_text=roster_ci, agents_text=roster_agents):
+        return attempt("ci roster", lambda: _ci_roster_findings(ci_text, agents_text))
+
+    f = roster()
+    check("ci roster: a bullet naming exactly the ci.yml job ids is clean", f == [])
+    f = roster(agents_text=sub(roster_agents, "`build-test` (vendors OFF),\n", "\n"))
+    check("ci roster: a real ci.yml job missing from the bullet is reported by id",
+          f is not None and len(f) == 1 and "'build-test'" in f[0] and "missing" in f[0])
+    f = roster(agents_text=sub(roster_agents, "`format` (clang-format", "`clang-format` (clang-format"))
+    check("ci roster: a bullet naming a job id ci.yml does not define is reported (and the real id as missing)",
+          f is not None and len(f) == 2 and any("'clang-format'" in x and "does not exist" in x for x in f)
+          and any("'format'" in x and "missing" in x for x in f))
+    f = roster(agents_text=sub(roster_agents, "and `docs-drift`", "`docs-drift` and `docs-drift`"))
+    check("ci roster: a job id named twice is reported", f is not None and len(f) == 1 and "twice" in f[0])
+    f = roster(ci_text=roster_ci + "  zizmor:\n    runs-on: x\n")
+    check("ci roster: a job added to ci.yml without a bullet entry is reported",
+          f is not None and len(f) == 1 and "'zizmor'" in f[0])
+    f = roster(agents_text=roster_agents.replace("- CI (", "- Continuous integration ("))
+    check("ci roster: a missing roster bullet is a finding, not a pass",
+          f is not None and len(f) == 1 and "could not find" in f[0])
+    f = roster(ci_text=roster_ci.replace("jobs:\n", "workflows:\n"))
+    check("ci roster: a ci.yml with no jobs: block is a finding, not a pass",
+          f is not None and len(f) == 1 and "no job ids" in f[0])
+
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
 
@@ -1490,4 +2855,15 @@ def self_test():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         sys.exit(self_test())
+    if "--badge-date" in sys.argv:
+        # The README badge's release date, by the same regex check 16 reads it
+        # with; scripts/build_deb.sh dates a beta's changelog stanza from it.
+        b = README_BADGE_DATE_RE.search(read("README.md"))
+        if not b or _iso_date(b.group("date")) is None:
+            print("could not find a dated version badge line in README.md", file=sys.stderr)
+            sys.exit(1)
+        print(b.group("date"))
+        sys.exit(0)
+    if "--counts" in sys.argv:
+        sys.exit(print_counts())
     sys.exit(main())

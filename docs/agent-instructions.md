@@ -4,6 +4,7 @@ Read `AGENTS.md` in full for every task. It owns architecture, concurrency, test
 CI and cross-vendor rules. Then read the applicable files below in full, following
 relevant links. A shared-file change can affect a vendor even when its filename
 does not match a vendor glob: select by task and affected behavior as well as path.
+Domain terms used across these files are defined in [CONTEXT.md](../CONTEXT.md).
 For a cross-vendor audit, read all vendor files. Revisit this index as scope grows.
 
 The `applyTo` fields support GitHub clients. Claude Code uses the matching `paths`
@@ -45,12 +46,11 @@ ToupTek; for an iCAM task, read iOptron and Player One. A vendor comparison requ
 the files for all vendors being compared. The scoped files contain vendor-specific
 deltas only; a rule affecting a second vendor belongs in `AGENTS.md`.
 
-## Agent skills configuration
+## Issue tracker
 
-AGENTS.md's "Agent skills" section points at `docs/agents/issue-tracker.md`,
-`docs/agents/triage-labels.md`, and `docs/agents/domain.md` for how
-issue-tracker, triage-label, and domain-doc skills should behave in this repo.
-Read the relevant one before using or configuring those skills.
+AGENTS.md points at `docs/agents/issue-tracker.md` for `gh` CLI conventions
+when working with GitHub Issues. Read it before creating, listing, or
+commenting on an issue.
 
 ## Failure and decision memory
 

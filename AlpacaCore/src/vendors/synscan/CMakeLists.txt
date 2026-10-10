@@ -8,6 +8,7 @@ if(ALPACACORE_ENABLE_SYNSCAN)
     set(SYNSCAN_SOURCES
         synscan_protocol_wrapper.cpp
         synscan_telescope_driver.cpp
+        synscan_catalog.cpp
     )
 
     add_library(alpacacore_synscan STATIC ${SYNSCAN_SOURCES})
@@ -15,6 +16,10 @@ if(ALPACACORE_ENABLE_SYNSCAN)
     target_include_directories(alpacacore_synscan PRIVATE
         ${CMAKE_SOURCE_DIR}/include
     )
+
+    # Base drivers, logging and AsyncConnectable live in alpacacore; this vendor
+    # links down to it, never the reverse (open-astro#710).
+    target_link_libraries(alpacacore_synscan PRIVATE alpacacore)
 
     message(STATUS "SynScan driver: Serial and TCP connection support enabled")
 endif()

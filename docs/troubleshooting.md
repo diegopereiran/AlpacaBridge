@@ -12,9 +12,11 @@ Common build and runtime issues for AlpacaBridge.
 
 ### Test framework not found
 
-**Warning**: `No test framework found. Install Catch2 or doctest to build tests.`
+**Warning**: `Catch2 not found. Install Catch2 (v2 or v3) to build AlpacaCore tests.`
 
-**Solution**: `sudo apt install catch2`, or disable tests: `cmake .. -DALPACACORE_BUILD_TESTS=OFF`
+**Solution**: `sudo apt install catch2`. A manual CMake configure can opt out instead with
+`cmake -S AlpacaHTTP -B AlpacaHTTP/build -DALPACACORE_BUILD_TESTS=OFF`, but `run_all_tests.sh` and `scripts/ci_preflight.sh`
+always build the tests, so Catch2 is required for those.
 
 ### Vendor SDK not found
 
@@ -43,14 +45,8 @@ Common build and runtime issues for AlpacaBridge.
 
 ### Missing system libraries
 
-**Solution**: Install all build dependencies:
-
-```sh
-sudo apt install build-essential cmake g++ \
-    libusb-1.0-0-dev libudev-dev \
-    nlohmann-json3-dev libcurl4-openssl-dev \
-    catch2
-```
+**Solution**: Install every package in the `Build-Depends` field of `debian/control`, the complete list (it includes `zlib1g-dev`, `libsystemd-dev` and `pkgconf`, which the configure step requires).
+Add `catch2` to build the tests. [development.md](development.md#prerequisites) has the `apt install` command.
 
 ## Runtime issues
 
@@ -74,11 +70,28 @@ sudo apt install build-essential cmake g++ \
 
 See [SUPPORTED-DRIVERS.md](../SUPPORTED-DRIVERS.md) for driver-specific notes.
 
+### The web UI or API answers HTTP 403 "Host '...' is not allowed"
+
+**Why**: this only happens when the Host check is turned on (`http.host_check_enabled: true`); it is off by default and every `Host` name is then served. With it on, the server refuses a request whose `Host` header names something it does not know (issue #392), so a hostile web page cannot reach it through a DNS-rebinding name. It then always allows an IPv4 address or a bracketed IPv6 address, `localhost` and `*.localhost`, the machine's own hostname and `<hostname>.local`, and any `*.local`, `*.home.arpa` or `*.internal` name. A name your router's DNS adds (`astropi.lan`, `astropi.fritz.box`) is not on that list.
+
+**Fix**: open the web UI by the IP address, then use the server settings area ("Restrict Host names" and "Allowed host names") to turn the check off or add the name to the list. The change applies at once and is saved to the config file. The server refuses a save that would lock out the browser you are using, and says which name to add. Or edit the server config file (comma-separated; a leading dot allows a domain and every name under it) and restart the service:
+
+```yaml
+http:
+  allowed_hosts: ".lan, astropi.fritz.box"
+```
+
+On a package install the file is `/var/lib/alpacabridge/config/default.yaml`; edit it as the `alpacabridge` user (see [the motion watchdog section](#the-mount-stopped-by-itself-mid-slew-and-the-log-says-client-silence-motion-watchdog) for why). Neither setting has an environment variable; an old `ALPACAHTTP_ALLOWED_HOSTS` or `ALPACAHTTP_HOST_CHECK` in a systemd drop-in is ignored. `allowed_hosts` is read only while the check is on. The web UI saves both settings through `PUT /management/v1/description` (`HostCheckEnabled`, `AllowedHosts`).
+
+**Notes**:
+- The server reads the machine's hostname once, at start-up. After you rename the machine, restart the service, or the new name gets 403 and the old one is still allowed.
+- A bracketed IPv6 address with a zone id (`[fe80::1%25eth0]`) is refused: the address check does not accept zone ids. Use the hostname, `<hostname>.local`, or the IPv4 address instead.
+
 ### Permission denied
 
 **Solution**:
 1. Ensure you have write permissions in the build directory
-2. Don't build in system directories — use a local `build/` directory
+2. Don't build in system directories — use the component build directory `AlpacaHTTP/build`
 3. For USB devices, add udev rules and join the `dialout` group
 
 ### Device clock resets to a stale time after reboot
@@ -108,17 +121,68 @@ This keeps Alpaca timestamps correct even with no NTP reachable. The hardware RT
 
 **If the SBC does have NTP and a client's clock is wrong**: on the Sky-Watcher direct motor-controller driver, a client's `UTCDate` write is still reported back to that client verbatim, as the ASCOM contract requires, but it no longer feeds the pointing math. `SiderealTime`, `DestinationSideOfPier` and every goto use the SBC's own clock whenever the kernel reports it disciplined. The discipline is sampled when the client writes, and, while a client offset is armed on a host that was undisciplined at the write, re-sampled at most once every 30 s on the pointing path (one `adjtimex` read, no device I/O; issue #405). So a host that acquires NTP discipline later, whether by a step or by NTP slewing a clock that was already close, stops honouring the client's offset for pointing within about 30 s and logs an INFO line saying so; the `UTCDate` readback keeps honouring the client until it writes again. A host that was disciplined at the write and loses discipline afterwards keeps ignoring the offset, which is the safe direction. If pointing is wrong in that state, fix the client's clock; the driver will not follow it.
 
+### The mount stopped by itself mid-slew and the log says "Client-silence motion watchdog"
+
+**Symptom**: a goto or a `MoveAxis` command stops on its own, with an `ERROR`-level log line like `Client-silence motion watchdog: no request reached <name> #<n> for 34 s (limit 30 s) while it was slewing; stopping motion, Connected left true.` The device stays `Connected` — the client can still see and reconnect to it.
+
+**What happened**: no Alpaca request reached that telescope for longer than the configured limit while it was actively slewing (a goto, a park, a find-home, or a `MoveAxis` at a nonzero rate). AlpacaBridge treats that as a client that crashed, a host that went to sleep, or a network that dropped — with nobody left watching a moving axis, it stops the axes itself (`AbortSlew`, then `MoveAxis(axis, 0)` on each) rather than let the mount keep driving with no supervision. This is a safety feature (issue #547), not a bug — it exists specifically so a live mount does not keep slewing unattended after the thing that commanded the slew has gone away.
+
+**It will never fire on a mount that is only tracking or guiding.** The watchdog arms only while `Slewing` is true (a goto/park/home/MoveAxis in progress); ordinary sidereal tracking and `PulseGuide` never set `Slewing`, so a quietly tracking mount with a disconnected client is left alone.
+
+**Any request to the device resets the timer**, including a client's own routine `Slewing` polls — normal NINA/PHD2/ConformU polling (every few seconds) never comes close to the limit. Any request that itself blocks past the limit is also covered: it counts as activity for its whole duration, not just when it started, so a long call does not get aborted out from under the client that is waiting on it. (The synchronous slews `SlewToCoordinates`, `SlewToTarget` and `SlewToAltAz` are refused with `MethodNotImplemented`; use the `...Async` forms, which return at once and are watched through `Slewing`.) A genuine trip means requests really did stop arriving for that long — which also means a request from any OTHER client still addressing the same telescope (a planetarium app polling position, say) keeps the watchdog disarmed even after the client that started the motion has gone away.
+
+**To change the limit or turn it off**: set `motion_watchdog_seconds` under `server:` in the server config file (default 30; 0 disables it). A slower-polling client may want a longer value; disabling it removes this backstop entirely, so only do that if you have another way to guarantee a hung client's slew gets stopped.
+
+On a package install the server config file is `/var/lib/alpacabridge/config/default.yaml`, owned by the `alpacabridge` service user. The package does not ship it (the web UI creates it on the first Server Info save), so it may not exist yet. Edit or create it as that user, because a file created with plain `sudo` is owned by root and later web UI saves then fail with "Unable to open config file for writing":
+
+```sh
+sudo -u alpacabridge nano /var/lib/alpacabridge/config/default.yaml
+```
+
+Put the key under the `server:` section (the section name at the start of the line, the key indented with spaces):
+
+```yaml
+server:
+  motion_watchdog_seconds: 0
+```
+
+The value is read once at start, so apply it with `sudo systemctl restart alpacabridge`. Alternatively, set the `ALPACAHTTP_MOTION_WATCHDOG_SECONDS` environment variable, which overrides the file: run `sudo systemctl edit alpacabridge`, add the lines below, save, then `sudo systemctl restart alpacabridge`.
+
+```ini
+[Service]
+Environment=ALPACAHTTP_MOTION_WATCHDOG_SECONDS=0
+```
+
+### A Sky-Watcher direct mount points 12 hours out in hour angle (Dec axis sense)
+
+**Symptom**: after a goto, the Sky-Watcher direct (motor controller) mount ends up with the telescope on the wrong side of the sky, and the pier side and the real direction disagree by 12 hours of hour angle.
+
+**Cause**: the driver knows the direction of the Dec axis counts (`eps`) only for boards that were measured: EQ-AL55i Pro (mount code `0x09`), EQM-35 Pro (`0x32`) and Wave 150i (`0x45`). Any other board keeps the shipped model `k = +1` (the home term sign, `eps` times the hemisphere sign), which is `eps = +1` in the north and `eps = -1` in the south, and is wrong for a board wired the other way (issue #582, #579). The connect log says where `eps` came from: `from the measured table`, `from the user override`, `from the unmeasured-board default`, or `Motor board not identified`.
+
+**Fix**: set **Dec axis sense** (`decAxisSense` in the device config) from one reading on your own mount. With the mount bare (no telescope), at its home position and tracking off, send a Dec-only `MoveAxis` until the Dec axis has turned about +90 degrees (`a2 = +90`), keeping the RA axis at home. Then look at which way the dovetail points:
+
+| Dovetail points | Your site | Dec axis sense |
+| --- | --- | --- |
+| West | Northern hemisphere | `normal` |
+| East | Northern hemisphere | `reversed` |
+| West | Southern hemisphere | `reversed` |
+| East | Southern hemisphere | `normal` |
+
+`auto` (the default) keeps the measured table, and `k = +1` (eps +1 north, -1 south) for a board that is not in it. `normal` and `reversed` set `eps` only, never the hemisphere term, so a mount you move to the other hemisphere stays right without a change. The setting is used on connect, also when the board does not identify itself, and the device name in the web UI shows where `eps` came from (`eps: measured`, `eps: override normal`, `eps: override reversed`, `eps: unmeasured default` or `eps: identify failed`). Pick the value in the Dec axis sense list of the Sky-Watcher form; saving the form keeps it. An override that disagrees with a measured board logs a WARN and is used anyway.
+
+If you set it, please post your reading (mount code from the connect log, dovetail side, latitude) on issue #579 so the board can join the measured table.
+
 ## Clean build
 
 If all else fails, try a clean build:
 
 ```sh
-rm -rf build
-mkdir build
-cd build
-cmake ..
-cmake --build . --parallel
+rm -rf AlpacaHTTP/build
+cmake -S AlpacaHTTP -B AlpacaHTTP/build
+cmake --build AlpacaHTTP/build --parallel
 ```
+
+Run it from the repository root; it builds into `AlpacaHTTP/build`, the directory `./build_and_run.sh` also uses (that script then installs and starts the server).
 
 ## Getting help
 

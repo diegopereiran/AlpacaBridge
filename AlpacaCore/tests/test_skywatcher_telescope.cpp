@@ -15,7 +15,9 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <cmath>
 #include <functional>
+#include <limits>
 
 #include "catch2_compat.h"
 
@@ -70,13 +72,6 @@ TEST_CASE("SkyWatcher Telescope Driver - Defaults", "[skywatcher][telescope][uni
     REQUIRE_FALSE(driver->get_can_set_pier_side());
     REQUIRE(driver->get_can_set_declination_rate());
     REQUIRE(driver->get_can_set_right_ascension_rate());
-    REQUIRE(driver->get_can_move_axis(0));
-    REQUIRE(driver->get_can_move_axis(1));
-    REQUIRE_FALSE(driver->get_can_move_axis(2));
-
-    // Out-of-range axis raises InvalidValue even while disconnected (#516).
-    require_alpaca_error([&] { (void)driver->get_can_move_axis(-1); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&] { (void)driver->get_can_move_axis(5); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - Device metadata", "[skywatcher][telescope][unit]") {
@@ -185,14 +180,28 @@ TEST_CASE("SkyWatcher Telescope Driver - Value range validation", "[skywatcher][
     require_alpaca_error([&] { driver->set_slew_settle_time(-1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_aperture_diameter(-1.0); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_focal_length(-1.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    // #574: a NaN or infinity passes `x < min || x > max` (both comparisons
+    // are false), so the driver's own range check must reject non-finite
+    // values explicitly rather than relying on the comparison to catch them.
+    const double nan_value = std::nan("");
+    const double pos_inf = std::numeric_limits<double>::infinity();
+    const double neg_inf = -std::numeric_limits<double>::infinity();
+    require_alpaca_error([&] { driver->set_target_right_ascension(nan_value); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_right_ascension(pos_inf); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_right_ascension(neg_inf); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(nan_value); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(pos_inf); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->set_target_declination(neg_inf); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - State machine", "[skywatcher][telescope][unit]") {
     auto driver = make_driver(0);
 
-    // Disconnected state machine facts that need no hardware.
-    CHECK_FALSE(driver->get_at_park());
-    CHECK_FALSE(driver->get_at_home());
+    // Disconnected state machine facts that need no hardware. AtPark and AtHome throw NotConnected like every
+    // other operational property (open-astro#656); they used to return the driver-side parked_ / at_home_ flags.
+    require_alpaca_error([&] { (void)driver->get_at_park(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_at_home(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_declination_rate() == 0.0);
     CHECK(driver->get_right_ascension_rate() == 0.0);
 
@@ -244,4 +253,43 @@ TEST_CASE("SkyWatcher Telescope Driver - Unsupported methods", "[skywatcher][tel
     require_alpaca_error([&] { driver->set_declination_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_right_ascension_rate(1.0); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_tracking_rate(1); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// #627: `x < min || x > max` is false for NaN, so NaN was stored by all three
+// site setters. Sky-Watcher's setters validate without a connection.
+TEST_CASE("SkyWatcher Telescope Driver - non-finite site input is rejected",
+          "[skywatcher][telescope][unit][nonfinite]") {
+    auto driver = make_driver();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    SECTION("SiteElevation") {
+        driver->set_site_elevation(120.0);
+        require_alpaca_error([&] { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_elevation() == 120.0);
+    }
+    SECTION("SiteLatitude") {
+        driver->set_site_latitude(35.0);
+        require_alpaca_error([&] { driver->set_site_latitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_latitude() == 35.0);
+    }
+    SECTION("SiteLongitude") {
+        driver->set_site_longitude(-106.0);
+        require_alpaca_error([&] { driver->set_site_longitude(nan); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_site_longitude() == -106.0);
+    }
+}
+
+// #627: the guide-rate range check is `fraction < 0 || fraction > 1`, which NaN
+// passes, so a NaN rate was stored (and, for iOptron, clamped to NaN and
+// written to the mount). The finite check runs before the connection check,
+// like every other parameter validation, so a disconnected driver proves it.
+TEST_CASE("SkyWatcher Telescope Driver - non-finite guide rate is rejected",
+          "[skywatcher][telescope][unit][nonfinite]") {
+    auto driver = make_driver();
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    require_alpaca_error([&]() { driver->set_guide_rate({nan, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
 }

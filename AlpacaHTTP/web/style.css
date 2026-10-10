@@ -201,9 +201,50 @@ h2 {
 }
 
 .device-card h3 {
+    /* Flex so the status dot centers on the name's line box instead of
+       sitting on the text baseline. */
+    display: flex;
+    align-items: center;
     color: var(--text);
     font-size: 14px;
     font-weight: 600;
+}
+
+.status-dot {
+    --status-dot-size: 0.65em;
+    --status-dot-color: #d4a72c;
+    position: relative;
+    display: inline-block;
+    width: var(--status-dot-size);
+    height: var(--status-dot-size);
+    margin-right: 0.5em;
+    border-radius: 50%;
+    background: var(--status-dot-color);
+    flex: none;
+}
+
+.status-dot.status-connected { --status-dot-color: #0BDA51; }
+.status-dot.status-idle { --status-dot-color: #d4a72c; }
+.status-dot.status-error { --status-dot-color: #f85149; }
+
+/* Pulsing halo for "online" only; it is absolutely positioned, so no layout shift. */
+.status-dot.status-connected::before {
+    content: '';
+    position: absolute;
+    inset: calc(var(--status-dot-size) / 4 * -1);
+    background: inherit;
+    border-radius: 50%;
+    opacity: 0;
+    animation: status-dot-pulse 2s ease infinite;
+}
+
+@keyframes status-dot-pulse {
+    0% { opacity: 0.7; transform: scale(0.5); }
+    40%, 100% { opacity: 0; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .status-dot.status-connected::before { animation: none; }
 }
 
 .device-card.device-error {
@@ -679,6 +720,12 @@ input[type="range"] {
 
 .server-clock.drift {
     color: #f08a7a;
+}
+
+/* open-astro#677: set while the clock shows "clock error"; a tap shows why. */
+.server-clock[role="button"] {
+    cursor: pointer;
+    text-decoration: underline dotted;
 }
 
 /* Clock lives in the page header bar; the section-card margins don't apply there. */
@@ -1191,3 +1238,30 @@ header > .server-clock {
 }
 .wifi-segment button.active { background: var(--accent); color: #fff; }
 .wifi-country-select { max-width: 140px; }
+
+/* Software update card (docs/software-update.md) */
+.update-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin: 4px 2px 0; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.update-log { margin-top: 10px; max-height: 260px; overflow: auto; }
+.update-log.hidden { display: none; }
+.update-notes { margin: 12px 2px 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.update-notes.hidden { display: none; }
+.update-notes-header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.update-notes-header h4 { margin: 0; }
+.update-notes-header a { font-size: 12.5px; }
+.update-notes-body { max-height: 320px; overflow: auto; font-size: 13.5px; line-height: 1.45; }
+.update-notes-body h4, .update-notes-body h5 { margin: 12px 0 4px; }
+.update-notes-body p { margin: 6px 0; }
+.update-notes-body ul { margin: 4px 0 8px 18px; padding: 0; }
+.update-notes-body li { margin: 4px 0; }
+.update-notes-body pre { margin: 6px 0; padding: 8px; overflow: auto; border-radius: 6px; background: rgba(0, 0, 0, 0.25); font-size: 12px; }
+#update-status-line.update-available { color: var(--accent); font-weight: 600; }
+#update-message.error, #update-installer-line.error { color: #f08a7a; }
+
+/* Help lines under a server setting. */
+.info-note {
+    display: block;
+    margin-top: 4px;
+    font-size: 0.85em;
+    opacity: 0.75;
+}

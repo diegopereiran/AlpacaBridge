@@ -156,7 +156,8 @@ TEST_CASE("Gemini Flat Panel Pro Driver - State machine", "[gemini][flatpanel][u
     REQUIRE(driver->get_connected() == false);
 
     // Platform 7 DeviceState: while disconnected the operational getters throw
-    // and are omitted, leaving just the TimeStamp. The non-compliant "Connected"
+    // and are omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list. The non-compliant "Connected"
     // entry must never appear.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
@@ -168,7 +169,7 @@ TEST_CASE("Gemini Flat Panel Pro Driver - State machine", "[gemini][flatpanel][u
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("Gemini Flat Panel Pro Driver - Create by index for auto-detect", "[gemini][flatpanel][unit]") {
@@ -369,4 +370,20 @@ TEST_CASE("Gemini Flat Panel Pro Driver - A CalibratorOff overlapping an inline 
     CHECK_FALSE(panel.light_on());
     CHECK(panel.index_of(">D#") > panel.index_of(">B200#"));
     CHECK(panel.index_of(">B0#") == panel.index_of(">D#") + 1);
+}
+
+TEST_CASE("Gemini flat panel wrapper - a late reply to the previous command is discarded",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    alpacacore::vendor::gemini::GeminiFlatPanelProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::FlatPanelConnectionConfig config;
+    config.serial_port = panel.slave_path();
+    config.model = alpacacore::vendor::gemini::FlatPanelModel::Pro;
+    wrapper.connect(config);
+    wrapper.set_brightness(77);
+
+    // A reply that missed its command's read window is still in the tty buffer.
+    panel.push_unsolicited("*J5#");
+    CHECK(wrapper.get_brightness() == 77);
+    wrapper.disconnect();
 }

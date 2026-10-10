@@ -120,7 +120,8 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - State machine", "[ioptron][filterw
     REQUIRE(driver->get_connecting() == false);
 
     // Platform 7 DeviceState: Position throws while disconnected and is
-    // omitted, leaving just the TimeStamp.
+    // omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
     for (const auto& entry : state) {
@@ -130,7 +131,7 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - State machine", "[ioptron][filterw
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("iOptron iEFW Filter Wheel Driver - Model codes", "[ioptron][filterwheel][unit]") {

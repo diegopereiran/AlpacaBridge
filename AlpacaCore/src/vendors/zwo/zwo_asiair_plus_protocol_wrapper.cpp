@@ -15,7 +15,6 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_protocol_wrapper.h>
 #include <fcntl.h>
-#include <pwm_gpio.h>  // vendored from external/ZWO/asiair-plus/
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -30,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include "pwm_gpio.h"  // first-party, AlpacaCore/src/vendors/zwo/
+
 namespace alpacacore::vendor::zwo {
 
 namespace {
@@ -37,7 +38,7 @@ namespace {
 constexpr const char* kLogCategory = "ZWO_ASIAIR_PLUS";
 
 // Kernel ioctl indices reserved by the airplus-gpios device tree node.
-// See external/ZWO/asiair-plus/pwm_gpio.h for the full mapping.
+// See AlpacaCore/src/vendors/zwo/pwm_gpio.h for the full mapping.
 constexpr int kKernelIndexMasterEnable = 3;
 constexpr int kKernelIndexDcPortBase   = 4;  // DC ports 1..4 at indices 4..7
 
@@ -203,6 +204,24 @@ public:
         // touch it.
         std::lock_guard<std::mutex> lock(mutex_);
         if (fd_ >= 0) {
+            // Preserve-power policy: a worker stops wherever it is in the
+            // cycle, so a partial-duty line may be left in either level. Drive
+            // each PWM line to the steady level of its duty (duty > 0 ON,
+            // duty 0 OFF) before the fd goes. Boolean ports already hold
+            // their commanded level. Raw polarity is inverted: 0 = ON.
+            for (std::size_t i = 0; i < ports_.size(); ++i) {
+                if (!ports_[i].pwm_enabled) {
+                    continue;
+                }
+                gpio_level_t lvl{};
+                lvl.index = kernel_index_for(i);
+                lvl.level = port_states_[i]->value.load() > 0 ? 0 : 1;
+                if (::ioctl(fd_, PWM_GPIO_SET_LEVEL, &lvl) != 0) {
+                    const int err = errno;
+                    ALPACA_LOG_WARN(kLogCategory, "ASIAIR Plus: failed to settle PWM port " + std::to_string(i) +
+                                                      " before close: " + util::errno_string(err));
+                }
+            }
             ::close(fd_);
             fd_ = -1;
         }

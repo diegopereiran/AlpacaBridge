@@ -8,6 +8,7 @@ if(ALPACACORE_ENABLE_WEEWX)
 
     set(WEEWX_SOURCES
         weewx_observingconditions_driver.cpp
+        weewx_catalog.cpp
     )
 
     add_library(alpacacore_weewx STATIC ${WEEWX_SOURCES})
@@ -15,6 +16,10 @@ if(ALPACACORE_ENABLE_WEEWX)
     target_include_directories(alpacacore_weewx PRIVATE
         ${CMAKE_SOURCE_DIR}/include
     )
+
+    # Base drivers, logging and AsyncConnectable live in alpacacore; this vendor
+    # links down to it, never the reverse (open-astro#710).
+    target_link_libraries(alpacacore_weewx PRIVATE alpacacore)
 
     target_link_libraries(alpacacore_weewx PRIVATE CURL::libcurl)
 

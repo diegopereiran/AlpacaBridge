@@ -40,7 +40,7 @@ Ask the following **one at a time**, waiting for each answer before moving on. I
    - If the device only supports one transport, omit the suffix — file is `Linux-arm64.txt`.
    - If the device supports multiple and this run only tests one, use the suffix — file is `Linux-arm64-<transport>.txt`. Existing reports already exist for the same device — those other transports stay untouched.
 
-5. **Test SBC host** — defaults to `openastro.lan` (see the rig identity above; if that does not resolve, `nmap -sn 192.168.1.0/24 | grep -i openastro` finds a suffixed name). ConformU itself runs on the SBC against `http://localhost:6800`; the pre-flight `curl` checks below run from the dev machine against `http://<host>:6800`. Only ask when the user names a different rig.
+5. **Test SBC host** — defaults to `openastro.lan` (see the rig identity above; if that does not resolve, `nmap -sn 192.168.1.0/24 | grep -i openastro` finds a suffixed name). ConformU itself runs on the SBC against `http://localhost:6800`; the pre-flight `curl` checks below run from the dev machine against `http://<host>:6800`. Those checks need `.lan` allowed as a `Host` on the rig only when the Host check is enabled (`http.host_check_enabled`, off by default): then the server answers HTTP 403 to a `Host` that is not an IP address, `localhost`, its own hostname, a `*.local`, `*.home.arpa` or `*.internal` name, or listed in `http.allowed_hosts` (issue #392), so add `.lan` in the web UI "Allowed host names" field (open the UI by IP address) or `http.allowed_hosts`; `/deploy-test` Step 4 removes the old environment drop-in. Only ask when the user names a different rig.
 
 6. **Device number** — defaults to `0`. Most single-device setups stay at 0.
 
@@ -81,6 +81,8 @@ Expect a JSON response containing `ServerName` or `Manufacturer`. If the request
 
 > "AlpacaBridge is not reachable at `http://<host>:<port>`. Start it (`./build_and_run.sh`) and re-run `/conformu`."
 
+If it answers HTTP 403 with `Host '<host>:<port>' is not allowed` (only with the Host check enabled), add `.lan` in the web UI "Allowed host names" field (open the UI by IP address), or use the rig's IP address as `<host>`; no drop-in. Every `curl` below needs the same fix.
+
 ### 2b. Device is configured
 
 ```bash
@@ -102,6 +104,20 @@ Expect `Value: true`, `ErrorNumber: 0`. If `Value: false`:
 > "Device `<vendor> <model>` is configured but not connected. Connect it via the web UI before running ConformU."
 
 If `ErrorNumber` is non-zero (e.g. NotConnected because hardware is unplugged), report the exact error and stop.
+
+### 2c2. SynScan telescope only: the handset answers more than the echo
+
+A SynScan connect only gates on one echo, so a handset that answers that and then goes silent comes up `Connected=true` with every query timing out (issue #881). Read a position value through the driver twice, 3 s apart: the driver serves a position read in the last 2 s from its cache (`kPositionCacheTtl`) without asking the handset, so only the second read is sure to reach it:
+
+```bash
+curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=1"
+sleep 3
+curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=2"
+```
+
+Expect `ErrorNumber: 0` from both, each within about a second. A timeout, `Timeout waiting for SynScan response`, or `communications compromised` means the handset is stuck:
+
+> "The SynScan handset is not answering. Disconnect the device (web UI, or `curl -X PUT http://<host>:<port>/api/v1/telescope/<n>/connected -d 'Connected=false&ClientID=1&ClientTransactionID=3'`), unplug the handset's USB from the SBC, power-cycle the mount, bring the handset to its main screen, wait 30 s, plug the USB back in, then reconnect and re-run `/conformu`."
 
 ### 2d. Capture the current AB log level (so we can restore it later)
 
@@ -133,7 +149,7 @@ Save the directory. Today's log file is named per the daily convention (check th
 
 ### 2f2. Telescope runs: site set and clock settled (HARD STOP)
 
-**Site.** Motor-controller mounts (Sky-Watcher) store no site. Since PR #353 the driver refuses `Connected = true` with `InvalidOperation` until both site latitude and longitude have been set (device config or the Alpaca setters), so on a freshly imaged SBC ConformU fails at connect and never reaches CheckMethods; a `0` readback is an explicitly set value (null island), not "unset". Before PR #353 the unset site read back as `0`/`0`, ConformU omitted the offset-rate sub-tests ("expected condition at latitudes close to the equator") and aborted CheckMethods with "The highest elevation available ... is below the horizon" (PR #221, run 2). Set the site **in the device config** before the run (the standard rig site is `39.739194, -104.990306, 1609 m`); since #444 a value written through the Alpaca setters is also learned into the device's `registered_devices.json` entry (`learnSiteFromClient`, on by default), so it survives a restart too; with the opt-out set the setters satisfy the guard for the session only. ConformU's own report will not say `InvalidOperation` — the router reports every failed connect as `NotConnected` — but since #358 the message it shows is the driver's own sentence naming the missing fields, not a bare "Connection failed", so a failing run says what to fix without opening the server log. Confirm the readback:
+**Site.** Motor-controller mounts (Sky-Watcher) store no site. Since PR #353 the driver refuses `Connected = true` with `InvalidOperation` until both site latitude and longitude have been set (device config or the Alpaca setters), so on a freshly imaged SBC ConformU fails at connect and never reaches CheckMethods; a `0` readback is an explicitly set value (null island), not "unset". Before PR #353 the unset site read back as `0`/`0`, ConformU omitted the offset-rate sub-tests ("expected condition at latitudes close to the equator") and aborted CheckMethods with "The highest elevation available ... is below the horizon" (PR #221, run 2). Set the site **in the device config** before the run (the standard rig site is `39.739194, -104.990306, 1609 m`); since #444 a value written through the Alpaca setters is also learned into the device's `registered_devices.json` entry (`learnSiteFromClient`, on by default), so it survives a restart too; with the opt-out set the setters satisfy the guard for the session only. ConformU's own report will not say `InvalidOperation` — the router reports every failed connect as a `DriverException` (`NotConnected` before #776) — but since #358 the message it shows is the driver's own sentence naming the missing fields, not a bare "Connection failed", so a failing run says what to fix without opening the server log. Confirm the readback:
 
 ```bash
 for m in sitelatitude sitelongitude; do curl -sS "http://<host>:6800/api/v1/<type>/<n>/$m?ClientID=1&ClientTransactionID=1" | jq .Value; done
@@ -146,6 +162,8 @@ ssh astro@<host> 'chronyc tracking | grep -E "System time|Frequency|Update inter
 ```
 
 Require a `System time` offset in the low-millisecond range and a non-zero `Update interval`. On a Lima VM also confirm the host agent is not stepping: `grep "guest clock adjusted" ~/.lima/<vm>/ha.stderr.log | tail -3` must show nothing within the last few minutes, and re-check it after the run -- a step inside the run window invalidates the affected measurements even if ConformU passed. Skip for non-telescope devices.
+
+**Motion limits off.** Run the Sky-Watcher direct driver with `minAltitudeDeg` and `meridianLimitMinutes` unset (the default): ConformU slews to arbitrary targets, and a goto below the altitude floor is refused with `InvalidValue` (open-astro#436). Clear both fields in the device config before the run and restore them afterwards.
 
 **The ConformU host's clock too.** Since #301 the Sky-Watcher direct driver ignores a client-supplied `UTCDate` for pointing whenever the SBC's kernel reports its clock NTP-disciplined, so ConformU can no longer make the driver agree with a wrong clock of its own by writing `UTCDate`. If a run flags `SiderealTime`, check the clock on the machine running ConformU before suspecting the driver (issue #412): a ConformU host more than a few minutes off produces exactly that finding against a correct driver.
 
@@ -350,8 +368,20 @@ Honor the project rules from `/driver-build`:
 After user approval, apply each edit. If multiple files are touched, group them logically. Run the unit tests for the vendor:
 
 ```bash
-cd AlpacaCore && cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests "[<vendor>]"
+cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests "[<vendor>]"
 ```
+
+Build into `build-vendors`, not `build`. Since #588 a default pre-flight leaves `AlpacaCore/build`
+holding the ASan+UBSan, **vendors-OFF** binary from its last pass, so reusing it here rebuilds a
+tree with no driver compiled in: the `"[<vendor>]"` filter matches nothing and Catch2 exits rc 2,
+a failure that says nothing about the fix. A **fresh** `build-vendors` would have the driver
+anyway -- `ALPACACORE_ENABLE_ALL_VENDORS` defaults ON (`AlpacaCore/CMakeLists.txt:22`) -- so the
+`-D` is insurance for the case that actually bites: a `build-vendors` left from an earlier
+vendors-OFF configure, where the umbrella option is cached OFF and the per-vendor option it does
+not force off (`AlpacaCore/CMakeLists.txt:22-45`) is what puts your driver back. The separate
+directory is what keeps the cached
+`-fsanitize` flags out: CMake seeds `CMAKE_CXX_FLAGS` from `CXXFLAGS` on the first configure of a
+directory and caches it, so a reconfigure of `build` would stay sanitized whatever you pass.
 
 If unit tests pass, tell the user:
 
@@ -560,7 +590,7 @@ After files are saved and `SUPPORTED-DRIVERS.md` is updated, tell the user:
 
 > "ConformU validated — 0 errors, 0 issues, 0 timing issues. Saved to `AlpacaCore/conformu/<Vendor>/<Model>/`. SUPPORTED-DRIVERS.md updated. AB log level restored to `<original-level>`. Run `/commit` to stage and commit these changes — the hard-block in `/commit` Step 3 will re-verify the report counts as a final safety net before the commit lands."
 
-Do NOT run `git add` or `git commit` from this skill. Leave staging and commit message authoring to `/commit`, which has the proper component grouping, CHANGELOG handling, and the redundant ConformU validation gate.
+Do NOT run `git add` or `git commit` from this skill. Leave staging and commit message authoring to `/commit`, which has the proper component grouping, changelog fragment handling, and the redundant ConformU validation gate.
 
 ## Workflow notes
 

@@ -28,6 +28,7 @@ if(ALPACACORE_ENABLE_SVBONY)
     set(SVBONY_SOURCES
         svbony_sdk_wrapper.cpp
         svbony_camera_driver.cpp
+        svbony_catalog.cpp
     )
 
     add_library(alpacacore_svbony STATIC ${SVBONY_SOURCES})
@@ -36,6 +37,10 @@ if(ALPACACORE_ENABLE_SVBONY)
         ${CMAKE_SOURCE_DIR}/include
         ${SVB_SDK_INCLUDE}
     )
+
+    # Base drivers, logging and AsyncConnectable live in alpacacore; this vendor
+    # links down to it, never the reverse (open-astro#710).
+    target_link_libraries(alpacacore_svbony PRIVATE alpacacore)
 
     target_link_libraries(alpacacore_svbony PRIVATE ${SVB_LIB_PATH})
 

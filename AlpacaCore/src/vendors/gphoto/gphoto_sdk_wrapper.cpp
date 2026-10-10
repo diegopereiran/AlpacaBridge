@@ -22,7 +22,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
+#include <optional>
+#include <thread>
 #include <unordered_map>
 
 namespace alpacacore::vendor::gphoto {
@@ -35,12 +38,11 @@ constexpr const char* kLogTag = "GPhoto";
     throw AlpacaException(what + ": " + gp_result_as_string(gp_result), AlpacaError::DriverException);
 }
 
-CameraWidget* find_widget_or_null(CameraWidget* root, const std::string& name) {
-    CameraWidget* widget = nullptr;
-    if (gp_widget_get_child_by_name(root, name.c_str(), &widget) != GP_OK) {
-        return nullptr;
-    }
-    return widget;
+int clamp_to_timeout_ms(std::chrono::steady_clock::duration remaining) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+    if (ms <= 0) return 0;
+    if (ms > std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
+    return static_cast<int>(ms);
 }
 
 }  // namespace
@@ -189,16 +191,17 @@ public:
 
     bool has_widget(int handle, const std::string& name) {
         Camera* camera = camera_for(handle);
-        CameraWidget* root = get_config_root(camera);
-        bool found = find_widget_or_null(root, name) != nullptr;
-        gp_widget_free(root);
-        return found;
+        CameraWidget* widget = get_single_widget_or_null(camera, name);
+        if (widget == nullptr) {
+            return false;
+        }
+        gp_widget_free(widget);
+        return true;
     }
 
     std::vector<std::string> get_choices(int handle, const std::string& name) {
         Camera* camera = camera_for(handle);
-        CameraWidget* root = get_config_root(camera);
-        CameraWidget* widget = find_widget_or_null(root, name);
+        CameraWidget* widget = get_single_widget_or_null(camera, name);
         std::vector<std::string> choices;
         if (widget != nullptr) {
             int count = gp_widget_count_choices(widget);
@@ -208,46 +211,21 @@ public:
                     choices.emplace_back(choice);
                 }
             }
+            gp_widget_free(widget);
         }
-        gp_widget_free(root);
         return choices;
     }
 
-    std::string get_choice_value(int handle, const std::string& name) {
-        Camera* camera = camera_for(handle);
-        CameraWidget* root = get_config_root(camera);
-        CameraWidget* widget = find_widget_or_null(root, name);
-        if (widget == nullptr) {
-            gp_widget_free(root);
-            throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
-        }
-        char* value = nullptr;
-        // libgphoto2's C API takes an untyped void* out-param whose pointee
-        // type depends on the widget type; for a text/radio/menu widget it
-        // writes a `const char*` through it, so a char** here is required,
-        // not a mistake.
-        int result = gp_widget_get_value(widget, &value);  // NOLINT(bugprone-multi-level-implicit-pointer-conversion)
-        std::string out = (result == GP_OK && value != nullptr) ? value : "";
-        gp_widget_free(root);
-        if (result != GP_OK) {
-            throw_gp_error("gp_widget_get_value failed for " + name, result);
-        }
-        return out;
-    }
+    std::string get_choice_value(int handle, const std::string& name) { return get_string_value(handle, name); }
 
     void set_choice_value(int handle, const std::string& name, const std::string& value) {
         Camera* camera = camera_for(handle);
-        CameraWidget* root = get_config_root(camera);
-        CameraWidget* widget = find_widget_or_null(root, name);
-        if (widget == nullptr) {
-            gp_widget_free(root);
-            throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
-        }
+        CameraWidget* widget = get_single_widget_or_throw(camera, name);
         int result = gp_widget_set_value(widget, value.c_str());
         if (result == GP_OK) {
-            result = gp_camera_set_config(camera, root, context_);
+            result = gp_camera_set_single_config(camera, name.c_str(), widget, context_);
         }
-        gp_widget_free(root);
+        gp_widget_free(widget);
         if (result != GP_OK) {
             throw_gp_error("Failed to set " + name + " = " + value, result);
         }
@@ -255,15 +233,10 @@ public:
 
     bool get_toggle_value(int handle, const std::string& name) {
         Camera* camera = camera_for(handle);
-        CameraWidget* root = get_config_root(camera);
-        CameraWidget* widget = find_widget_or_null(root, name);
-        if (widget == nullptr) {
-            gp_widget_free(root);
-            throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
-        }
+        CameraWidget* widget = get_single_widget_or_throw(camera, name);
         int toggle_value = 0;
         int result = gp_widget_get_value(widget, &toggle_value);
-        gp_widget_free(root);
+        gp_widget_free(widget);
         if (result != GP_OK) {
             throw_gp_error("gp_widget_get_value failed for " + name, result);
         }
@@ -272,44 +245,19 @@ public:
 
     void set_toggle_value(int handle, const std::string& name, bool on) {
         Camera* camera = camera_for(handle);
-        CameraWidget* root = get_config_root(camera);
-        CameraWidget* widget = find_widget_or_null(root, name);
-        if (widget == nullptr) {
-            gp_widget_free(root);
-            throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
-        }
+        CameraWidget* widget = get_single_widget_or_throw(camera, name);
         int toggle_value = on ? 1 : 0;
         int result = gp_widget_set_value(widget, &toggle_value);
         if (result == GP_OK) {
-            result = gp_camera_set_config(camera, root, context_);
+            result = gp_camera_set_single_config(camera, name.c_str(), widget, context_);
         }
-        gp_widget_free(root);
+        gp_widget_free(widget);
         if (result != GP_OK) {
             throw_gp_error(std::string("Failed to set ") + name + (on ? "=1" : "=0"), result);
         }
     }
 
-    std::string get_text_value(int handle, const std::string& name) {
-        Camera* camera = camera_for(handle);
-        CameraWidget* root = get_config_root(camera);
-        CameraWidget* widget = find_widget_or_null(root, name);
-        if (widget == nullptr) {
-            gp_widget_free(root);
-            throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
-        }
-        char* value = nullptr;
-        // libgphoto2's C API takes an untyped void* out-param whose pointee
-        // type depends on the widget type; for a text/radio/menu widget it
-        // writes a `const char*` through it, so a char** here is required,
-        // not a mistake.
-        int result = gp_widget_get_value(widget, &value);  // NOLINT(bugprone-multi-level-implicit-pointer-conversion)
-        std::string out = (result == GP_OK && value != nullptr) ? value : "";
-        gp_widget_free(root);
-        if (result != GP_OK) {
-            throw_gp_error("gp_widget_get_value failed for " + name, result);
-        }
-        return out;
-    }
+    std::string get_text_value(int handle, const std::string& name) { return get_string_value(handle, name); }
 
     GPhotoCaptureResult capture_and_download(int handle) {
         Camera* camera = camera_for(handle);
@@ -321,48 +269,84 @@ public:
         return download_and_delete(camera, path);
     }
 
-    GPhotoCaptureResult wait_for_bulb_file_and_download(int handle) {
+    // libgphoto2 PTP bulb protocol (the ptp2.so camlib exposes it the same
+    // way for Canon and Nikon): the caller flips the "bulb" toggle widget on
+    // to open the shutter, holds for the requested duration while pumping
+    // the event queue through drain_events() below (see
+    // gphoto_camera_driver.cpp's abortable hold loop), flips it off to
+    // close, and then polls here for the GP_EVENT_FILE_ADDED the camera
+    // posts once it has written the frame. Validated on a Nikon D3300 with
+    // libgphoto2 2.5.31 (issue #569): 60 s and 300 s bulb frames through
+    // this exact sequence.
+    void drain_events(int handle, std::chrono::milliseconds budget) {
         Camera* camera = camera_for(handle);
-
-        // Modern libgphoto2 PTP bulb protocol (both Canon and Nikon ptp2.so
-        // camlib expose it identically): the caller flips the "bulb" toggle
-        // widget on to open the shutter, sleeps for the requested duration
-        // (its own abortable loop -- see gphoto_camera_driver.cpp), then
-        // flips it off to close. The camera then posts GP_EVENT_FILE_ADDED
-        // with the path of the frame it just wrote; this method waits for
-        // that event and downloads the file. Caller has already put the
-        // shutter speed widget on its "bulb" choice.
-        //
-        // TODO(gphoto/nikon): verified against libgphoto2 2.5.31 ptp2.so
-        // source/strings only -- not yet run against real Nikon D5300
-        // hardware. If the D5300's firmware needs a different bulb sequence
-        // (older bodies sometimes require capturetarget=Memory card first,
-        // or a settle delay after opening the shutter before it will accept
-        // a close), that will surface as a bulb capture timeout in
-        // ConformU/hardware validation and should be fixed here.
-        //
-        // Some bodies also require an explicit gp_camera_capture()-style
-        // trigger here instead of a passive event wait; fall back to that if
-        // the event wait times out (also a TODO pending hardware access).
-        constexpr int kEventWaitTimeoutMs = 15000;
-        CameraEventType event_type = GP_EVENT_UNKNOWN;
-        void* event_data = nullptr;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kEventWaitTimeoutMs);
-        while (std::chrono::steady_clock::now() < deadline) {
-            int result = gp_camera_wait_for_event(camera, 1000, &event_type, &event_data, context_);
-            if (result == GP_OK && event_type == GP_EVENT_FILE_ADDED && event_data != nullptr) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        // Poll at least once even for a zero budget so a caller can flush
+        // whatever is already queued without waiting.
+        do {
+            const auto now = std::chrono::steady_clock::now();
+            CameraEventType event_type = GP_EVENT_UNKNOWN;
+            void* event_data = nullptr;
+            int result = gp_camera_wait_for_event(camera, clamp_to_timeout_ms(deadline - now), &event_type, &event_data,
+                                                  context_);
+            if (result != GP_OK) {
+                // Never throw from the hold loop: the shutter is open and a
+                // throw here would leave nobody to close it. Sleep out the
+                // rest of the slice so the caller's timing still holds.
+                if (event_data != nullptr) free(event_data);
+                ALPACA_LOG_DEBUG(kLogTag, std::string("Event poll during bulb hold failed (ignored): ") +
+                                              gp_result_as_string(result));
+                const auto remaining = deadline - std::chrono::steady_clock::now();
+                if (remaining > std::chrono::steady_clock::duration::zero()) {
+                    std::this_thread::sleep_for(remaining);
+                }
+                return;
+            }
+            if (event_type == GP_EVENT_FILE_ADDED && event_data != nullptr) {
+                // The shutter is open, so this exposure cannot have produced
+                // a file yet: this is a frame from an earlier exposure whose
+                // wait gave up (or that was aborted) before the camera
+                // finished writing it. Leaving it queued would hand it to
+                // the NEXT poll_bulb_file_and_download() as this exposure's
+                // frame, so consume it here and delete it from the camera.
                 auto* path = static_cast<CameraFilePath*>(event_data);
-                CameraFilePath local_path = *path;
+                ALPACA_LOG_DEBUG(kLogTag, std::string("Stale file-added event during bulb hold, discarding: ") +
+                                              path->folder + "/" + path->name);
+                int delete_result = gp_camera_file_delete(camera, path->folder, path->name, context_);
+                if (delete_result != GP_OK) {
+                    ALPACA_LOG_DEBUG(kLogTag, std::string("Failed to delete stale file from camera: ") +
+                                                  gp_result_as_string(delete_result));
+                }
+            }
+            if (event_data != nullptr) {
+                free(event_data);
+            }
+        } while (std::chrono::steady_clock::now() < deadline);
+    }
+
+    std::optional<GPhotoCaptureResult> poll_bulb_file_and_download(int handle, std::chrono::milliseconds timeout) {
+        Camera* camera = camera_for(handle);
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        do {
+            const auto now = std::chrono::steady_clock::now();
+            CameraEventType event_type = GP_EVENT_UNKNOWN;
+            void* event_data = nullptr;
+            int result = gp_camera_wait_for_event(camera, clamp_to_timeout_ms(deadline - now), &event_type, &event_data,
+                                                  context_);
+            if (result != GP_OK) {
+                if (event_data != nullptr) free(event_data);
+                throw_gp_error("gp_camera_wait_for_event failed while waiting for the bulb frame", result);
+            }
+            if (event_type == GP_EVENT_FILE_ADDED && event_data != nullptr) {
+                CameraFilePath local_path = *static_cast<CameraFilePath*>(event_data);
                 free(event_data);
                 return download_and_delete(camera, local_path);
             }
             if (event_data != nullptr) {
                 free(event_data);
-                event_data = nullptr;
             }
-        }
-        throw AlpacaException("Bulb capture: no file-added event from camera within timeout",
-                              AlpacaError::DriverException);
+        } while (std::chrono::steady_clock::now() < deadline);
+        return std::nullopt;
     }
 
 private:
@@ -394,13 +378,63 @@ private:
         session.camera = nullptr;
     }
 
-    CameraWidget* get_config_root(Camera* camera) {
-        CameraWidget* root = nullptr;
-        int result = gp_camera_get_config(camera, &root, context_);
-        if (result != GP_OK) {
-            throw_gp_error("gp_camera_get_config failed", result);
+    // One widget by name through libgphoto2's single-config API
+    // (gp_camera_get_single_config / gp_camera_set_single_config, available
+    // since libgphoto2 2.5.10). The previous shape fetched the WHOLE config
+    // tree with gp_camera_get_config, looked one widget up in it, and for a
+    // setter wrote the whole tree back with gp_camera_set_config. On a
+    // Nikon D3300 that full walk fails while the body is busy -- mid-bulb,
+    // or right after a capture it refused -- so the toggle that closes a
+    // bulb shutter reported "Unspecified error", the capture was never
+    // terminated and the camera's PTP stack hung until a power cycle, and
+    // a session whose priming capture had failed reported "shutterspeed2"
+    // absent from a tree the walk had silently truncated. The gphoto2 CLI's
+    // --set-config takes this single-widget path and the same bulb sequence
+    // succeeded on the same body every time (issue #569,
+    // docs/failures/0009-gphoto-nikon-bulb-full-config-walk.md).
+    //
+    // ptp2 answers GP_ERROR_BAD_PARAMETERS for a name it has no widget for
+    // (camlibs/ptp2/config.c, MODE_SINGLE_GET); anything else is a real
+    // failure and throws, so a busy camera reads as an error rather than as
+    // a missing widget. The returned widget is owned by the caller
+    // (gp_widget_free).
+    CameraWidget* get_single_widget_or_null(Camera* camera, const std::string& name) {
+        CameraWidget* widget = nullptr;
+        int result = gp_camera_get_single_config(camera, name.c_str(), &widget, context_);
+        if (result == GP_ERROR_BAD_PARAMETERS || result == GP_ERROR_NOT_SUPPORTED) {
+            return nullptr;
         }
-        return root;
+        if (result != GP_OK) {
+            throw_gp_error("gp_camera_get_single_config failed for " + name, result);
+        }
+        return widget;
+    }
+
+    CameraWidget* get_single_widget_or_throw(Camera* camera, const std::string& name) {
+        CameraWidget* widget = get_single_widget_or_null(camera, name);
+        if (widget == nullptr) {
+            throw AlpacaException("Widget not present: " + name, AlpacaError::PropertyNotImplemented);
+        }
+        return widget;
+    }
+
+    // Shared body of get_choice_value / get_text_value: both are string-valued
+    // widgets to libgphoto2 (radio/menu and text).
+    std::string get_string_value(int handle, const std::string& name) {
+        Camera* camera = camera_for(handle);
+        CameraWidget* widget = get_single_widget_or_throw(camera, name);
+        char* value = nullptr;
+        // libgphoto2's C API takes an untyped void* out-param whose pointee
+        // type depends on the widget type; for a text/radio/menu widget it
+        // writes a `const char*` through it, so a char** here is required,
+        // not a mistake.
+        int result = gp_widget_get_value(widget, &value);  // NOLINT(bugprone-multi-level-implicit-pointer-conversion)
+        std::string out = (result == GP_OK && value != nullptr) ? value : "";
+        gp_widget_free(widget);
+        if (result != GP_OK) {
+            throw_gp_error("gp_widget_get_value failed for " + name, result);
+        }
+        return out;
     }
 
     GPhotoCaptureResult download_and_delete(Camera* camera, const CameraFilePath& path) {
@@ -493,8 +527,13 @@ std::string GPhotoSDKWrapper::get_text_value(int handle, const std::string& name
 
 GPhotoCaptureResult GPhotoSDKWrapper::capture_and_download(int handle) { return pimpl_->capture_and_download(handle); }
 
-GPhotoCaptureResult GPhotoSDKWrapper::wait_for_bulb_file_and_download(int handle) {
-    return pimpl_->wait_for_bulb_file_and_download(handle);
+void GPhotoSDKWrapper::drain_events(int handle, std::chrono::milliseconds budget) {
+    pimpl_->drain_events(handle, budget);
+}
+
+std::optional<GPhotoCaptureResult> GPhotoSDKWrapper::poll_bulb_file_and_download(int handle,
+                                                                                 std::chrono::milliseconds timeout) {
+    return pimpl_->poll_bulb_file_and_download(handle, timeout);
 }
 
 }  // namespace alpacacore::vendor::gphoto

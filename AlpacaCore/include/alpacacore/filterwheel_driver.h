@@ -32,9 +32,13 @@ public:
     virtual ~FilterWheelDriver() = default;
 
     // Platform 7 operational state (IFilterWheelV3): Position (-1 while moving)
-    // plus a TimeStamp. Inline so the vtable stays weak; the value comes from
-    // the same getter as the GET endpoint.
+    // plus a TimeStamp. A disconnected driver returns the empty list, with no TimeStamp.
+    // Inline so the vtable stays weak; the value comes from the same getter as
+    // the GET endpoint.
     std::vector<DeviceState> get_device_state() const override final {
+        if (!get_connected()) {
+            return {};
+        }
         std::vector<DeviceState> state;
         try {
             state.push_back({"Position", DeviceStateValue{static_cast<std::int32_t>(get_position())}});

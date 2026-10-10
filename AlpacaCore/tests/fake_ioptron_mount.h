@@ -23,10 +23,12 @@
 #ifndef _WIN32
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "fake_mount_server.h"
@@ -44,6 +46,22 @@ public:
 
     bool ok() const { return server_.ok(); }
     int port() const { return server_.port(); }
+
+    /// open-astro#575: answer ":MS1"/":MS2" with "0" (GOTO rejected, as the
+    /// firmware does for a target below the altitude limit) instead of "1".
+    void set_reject_goto(bool reject) { reject_goto_.store(reject); }
+
+    /// open-astro#728: answer the position, Alt/Az and status reads (":GEP", ":GAC", ":GLS") with a short "0#" the
+    /// driver cannot parse, so every such read fails until this is cleared. Commands are still acknowledged.
+    void set_fail_reads(bool fail) { fail_reads_.store(fail); }
+
+    /// open-astro#728: reset the driver's connection, so its next send (a blind ":Q#" included) fails.
+    void reset_link() { server_.reset_connections(); }
+
+    /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
+    /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
+    /// make Connecting observable.
+    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -74,6 +92,8 @@ private:
     }
 
     std::string respond(const std::string& chunk) {
+        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
         std::string out;
         std::string cmd;
         for (char ch : chunk) {
@@ -97,11 +117,23 @@ private:
         if (cmd == ":MountInfo#") {
             return model_code_;  // 4 bytes, no '#', as the real firmware
         }
+        if (fail_reads_.load() && (cmd == ":GEP#" || cmd == ":GAC#" || cmd == ":GLS#")) {
+            return "0#";
+        }
         if (cmd == ":GLS#") {
             // sign + 16 digits (site), then 6 status digits: GPS, system
             // status (1 = tracking, 2 = slewing), rate, speed, time source,
             // hemisphere.
             return "+0000000000000000010001#";
+        }
+        // The driver no longer reads :GAL / :GMT (#763). Keep these answers:
+        // without them the old override failed its read and never sent :SAL /
+        // :SMT, so the #763 case would pass with the fix reverted.
+        if (cmd == ":GAL#") {
+            return "+00#";  // user altitude limit 0 degrees
+        }
+        if (cmd.rfind(":GMT", 0) == 0) {
+            return "0030#";  // meridian treatment: stop, 30 degrees past
         }
         if (cmd == ":GEP#") {
             const long long ra = ra_units_.load();
@@ -117,6 +149,9 @@ private:
             return "1";
         }
         if (cmd == ":MS1#" || cmd == ":MS2#") {
+            if (reject_goto_.load()) {
+                return "0";  // rejected: nothing moves
+            }
             // Land at the target plus the firmware's final-approach error.
             ra_units_.store(pending_ra_ + static_cast<long long>(landing_error_arcsec_ * 100.0));
             dec_units_.store(pending_dec_);
@@ -136,12 +171,15 @@ private:
 
     std::string model_code_;
     double landing_error_arcsec_;
+    std::atomic<int> hold_ms_{0};
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
     long long pending_ra_ = 0;
     long long pending_dec_ = 0;
     std::atomic<long long> ra_units_{0};
     std::atomic<long long> dec_units_{0};
+    std::atomic<bool> reject_goto_{false};
+    std::atomic<bool> fail_reads_{false};
     FakeMountServer server_;
 };
 

@@ -7,6 +7,15 @@ Resolved incident records live in `docs/failures/`; design rationale lives in
 `docs/decisions/`. Keep current rules here and in scoped instruction files, with
 short pointers to those records rather than copying their history into new rules.
 
+Domain terms that are easy to confuse (device number vs enumeration index, API vs
+persisted config, cancelled vs superseded, Connected vs link health, fake vs rig
+evidence) are defined in [CONTEXT.md](CONTEXT.md); module names are in
+[the architecture overview](docs/architecture.md#modules).
+
+Issues live in GitHub Issues on `open-astro/AlpacaBridge`, via the `gh` CLI —
+see `docs/agents/issue-tracker.md` for conventions, including the `P1`-`P5`
+priority label every open issue carries.
+
 ## Load the complete instructions before working
 
 Read this entire file before planning, reviewing, or editing, even if the client
@@ -327,10 +336,10 @@ choreography, not a driver fault — verify by checking that every slew lands on
 
 ConformU 4.5 times `Park` (and every ITelescopeV4 initiator) against the 1 s STANDARD
 target and completes it by polling `AtPark`/`Slewing`. Never block through a park slew.
-The proven shape (SkyWatcher, then SynScan / Celestron in issue #208; Bisque pending on `fix/bisque-async-park`): reap the
+The proven shape (SkyWatcher, then SynScan / Celestron in issue #208, the Celestron and SynScan flow now one `util::run_park_slew()`; Bisque pending on `fix/bisque-async-park`): reap the
 slew task, snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
 `parking_` flag, then dispatch the slew + completion poll + tracking stop in the joinable
-task thread, releasing the mutex between polls (`task_wait_for`, cancellable). `AtPark` and
+task thread, releasing the mutex between polls (`ctx.wait_for()` on the operation slot, cancellable). `AtPark` and
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
 `parking_`; the task polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
@@ -355,12 +364,17 @@ therefore carries `target_ra_set_` **and** `target_dec_set_`, each set only by i
 setter. One flag for both is a review-blocking regression — it was the original shape in
 all seven drivers and took two passes to remove (#304, then #346).
 
+Protect each target value and flag with the driver's mutex. The three target-consuming
+operations snapshot both values and flags while holding it, then release it before calling
+the coordinate operation that acquires the same non-recursive mutex.
+
 The paths that legitimately define both coordinates at once set or clear both: the slew
-and sync *coordinate* forms, any target seeding from the mount's own position (SynScan's
-pulse-guide accumulator), the post-slew position-override and arrival reads, and the
-connect/disconnect resets. `SlewToTarget`, `SlewToTargetAsync` and `SyncToTarget` require
-the pair and must check it — Celestron and SynScan were both missing that check on the
-synchronous form, which one shared flag hid, since any target write made it pass.
+and sync *coordinate* forms, the post-slew position-override and arrival reads, and the
+connect/disconnect resets. A pulse-guide position estimate is internal state, not either
+public target property (SynScan keeps it separately). `SlewToTarget`,
+`SlewToTargetAsync` and `SyncToTarget` require the pair and must check it — Celestron and
+SynScan were both missing that check on the synchronous form, which one shared flag hid,
+since any target write made it pass.
 
 Hardware-free coverage per driver: read each property before any write, write RA alone and
 check Dec still throws while RA reads back, confirm the three `*ToTarget` calls refuse the
@@ -375,6 +389,7 @@ half-set pair, then write Dec and expect both. A driver whose setters write to t
 | `NotConnected` | Any operational property/method called while disconnected. |
 | `PropertyNotImplemented` | A property the hardware genuinely lacks (e.g. `Offsets` list, `SubExposureDuration`). |
 | `MethodNotImplemented` | A method the hardware lacks (e.g. `PulseGuide` when `CanPulseGuide` is false). |
+| `ActionNotImplemented` | `Action()` called with a name the driver does not list in `SupportedActions` (0x40C, ASCOM's `ActionNotImplementedException`). An unsupported `CommandBlind`/`CommandBool`/`CommandString` is `MethodNotImplemented`, not this. |
 | `NotImplemented` | A generic unsupported action (e.g. `set_temp_comp(true)` with no temp-comp support) — never `DriverException` for "not supported". |
 | `InvalidOperation` | Valid call, wrong state (e.g. changing readout mode/geometry mid-exposure). |
 | `DriverException` | A genuine internal/driver failure only — not a stand-in for any of the above. |
@@ -407,6 +422,19 @@ connect/open path — the fd is typically opened `O_NONBLOCK`, so `connect_seria
 must `clear_nonblocking()` after `tcsetattr` (not just the probe), or reads ignore
 `VMIN`/`VTIME` and `write_all` fails on `EAGAIN`. Use the **same abort-on-failure
 pattern** (`close(fd); return false/""`) at every call site.
+
+**Exception — Sky-Watcher direct serial.** On the **connected link**, that driver
+deliberately keeps the fd **non-blocking** and bounds its reads and writes with `poll()`
+instead, because some USB CDC-ACM virtual COM ports do not honour `VMIN`/`VTIME` and a
+blocking `read()` on a board that went quiet parks forever in `n_tty_read`, wedging the
+driver. There `connect_serial()` calls `set_nonblocking()`, `settle_serial`/`exchange_serial`
+reads go through a `poll(POLLIN)`-bounded helper, and frame sends go through a
+`poll(POLLOUT)`-bounded write (not `write_all`, which would fail fast on an `EAGAIN` before
+the first byte). Do **not** "fix" that back to `clear_nonblocking` — see the Sky-Watcher
+scoped instructions. The auto-detect *probe* path, `probe_skywatcher_port`, keeps its fd
+non-blocking and bounds each read with `poll(POLLIN)` against its 1500 ms budget the same way,
+and so does the SynScan echo guard it runs first at 115200 (`exchange_synscan_echo_on_fd` in
+`util/synscan_handset_probe.h`), so a silent candidate on such an adapter cannot hang the scan.
 
 ### Camera ROI alignment (all camera vendors)
 
@@ -522,7 +550,7 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   ("<device> communications compromised: <reason>", the iOptron `device_faulted_` vocabulary),
   *commanded values included*: "what we last asked for" is no more trustworthy than the stale
   frame once the device is unreachable. Use `DriverException`, not `NotConnected`: `Connected`
-  stays true (the client decides whether to reconnect) so `NotConnected` would contradict it.
+  stays true while the fault is young (past `util::kLinkStalenessBound` a driver that adopted [decision 0009](docs/decisions/0009-link-loss-and-relink-policy.md) drops it) so `NotConnected` would contradict it.
   Where ASCOM has a word for "unknown" (`CoverState`/`CalibratorState::Unknown`) return it
   instead of throwing on the read; commands still throw.
 - **Static metadata keeps answering** (names, descriptions, ranges, `CanWrite`, driver-side
@@ -531,7 +559,7 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
 - **Recovery is automatic**: keep polling/reading at the normal cadence while faulted so the
   first frame clears the latch without a reconnect (a re-plugged hub on the same node).
 - **Test it hardware-free** with the pty fakes: `set_muted(true)` (hung MCU, healthy fd) and
-  `sever_link()` (master closed, reads/writes EIO) — `tests/fake_serial_streamer.h` for any
+  `sever_link()` (master closed: writes fail with EIO, reads return 0 at once) — `tests/fake_serial_streamer.h` for any
   streaming device, `fake_gemini_pdh.h` for the polled one. Assert: fault latches within the
   threshold, `Connected` still true, static metadata OK, nothing on the wire while faulted,
   and the next frame restores service.
@@ -599,6 +627,53 @@ empty on Windows. When an auto-detect driver finds no ports, throw
 hard-coded "no device found" string, so the Windows path reports "auto-detect not
 supported on this platform" instead of implying missing hardware.
 
+### Auto-detect resolves at connect, never in a factory (`util/connection_resolver.h`)
+
+A persisted device is constructed at server start-up, and the hardware is often
+not there yet: a Wi-Fi mount is still joining the access point, a USB adapter is
+powered after the SBC. Every auto-detect factory (`create_*_auto`,
+`_auto_network`, `_by_index`) used to run its serial probe or subnet sweep at
+construction, so the factory threw, the router logged "Failed to load persisted
+device", the web UI showed `(failed to load)`, and nothing ever retried (issue
+#659, iOptron HAE over Wi-Fi on the Pi rig). Rules:
+
+- **The factory hands the driver a `util::ConnectionResolver<Info>`** (the
+  scan as a callable that returns the endpoint or throws the operator-facing
+  refusal) and constructs without touching the bus. The scan body stays a
+  plain function (`resolve_<vendor>_<mode>(index)`) so it is reusable and
+  testable on its own.
+- **The connect path calls `util::connect_resolved(info_, resolved_, resolver_,
+  try_connect)`** under whatever lock it already holds. `try_connect` throws on
+  failure (the existing `if (!protocol.connect(info)) throw ...` moved into the
+  lambda). The helper retries the last resolved endpoint before scanning again,
+  so repeated ConformU / NINA connects stay under the Platform 7 5 s `Connect()`
+  budget. **Re-scanning is opt-in**: the retry falls through to the resolver
+  only when the lambda throws `util::StaleEndpoint`, which it does for a
+  vanished serial or HID node (`util::device_node_missing()`), a refused network
+  connect, or a failed identity gate (SynScan's echo test). Every other
+  exception propagates: a scan DTR-resets every CP210x / CH340 device on the
+  box, so a wheel still homing or a handshake that missed once must never start
+  one (review of #660). The scan's own message propagates as the connect
+  refusal (#358), so it reaches the client and `LastConnectError`. **The first
+  connect after a service restart pays the scan** (5.5 s for the iOptron Wi-Fi
+  sweep, up to two boots for the CFW3 probe) inside the Platform 7 `Connecting`
+  window, so before a ConformU run against a freshly restarted service connect
+  the device once from the web UI, or give it an explicit port or host.
+- **Every driver converted from a construction-time scan (the ten in #660)
+  exposes a `create_*_deferred(device_number, resolver, ...)` seam** and ships
+  the cases in `tests/deferred_connect_cases.h` over its fake:
+  refused (construction succeeds, the refusal is the connect error, sync and
+  async), reused (one scan across a reconnect), re-resolved (the fake behind the
+  resolved endpoint dies, a new one appears, the driver reaches it). A driver
+  with no fake (Astroasis, hidapi) ships the refusal case alone and says so.
+  Put the vendor's cheap identity gate (SynScan's echo test) INSIDE the
+  `try_connect` lambda: the helper only re-scans when the lambda throws, and a
+  stale port another adapter now owns still opens.
+- Drivers that resolve inside `set_connected(true)` by hand (iEFW
+  `resolve_serial_port_locked()`, Gemini PDH / flat panel, WandererAstro) already
+  meet the rule; do not move them back into a factory. A new `_auto` or
+  `_by_index` factory that scans at construction is a review-blocking regression.
+
 ### Serial auto-detect scan (`util/serial_by_id_scan.h`)
 
 Every auto-detect `enumerate_*_ports()` scans `/dev/serial/by-id` and, for most
@@ -661,14 +736,17 @@ independently broken the same way, before it was centralised:
 ### Platform 7 InterfaceVersion + DeviceState
 
 - Drivers advertise ASCOM Platform 7 interface versions: Camera 4 (ICameraV4),
-  Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2.
+  Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, CoverCalibrator 2 (ICoverCalibratorV2),
+  ObservingConditions 2.
   Keep `get_interface_version()` and its unit-test assertion in sync when adding a driver.
 - **Do not** write a per-vendor `get_device_state()`. Each device base class
   (`CameraDriver`, `TelescopeDriver`, …) implements it once, inline, building the
   operational-property list by calling that device's own property getters inside a
   `try { … } catch (const std::exception&) {}` (a getter that throws — `AlpacaException`
   or any unwrapped vendor error — is omitted, never propagated) and
-  appending a `TimeStamp` via the inline `device_state_timestamp()` helper. Using the
+  appending a `TimeStamp` via the inline `device_state_timestamp()` helper. A disconnected
+  driver returns the empty list with no `TimeStamp` (each base class checks `get_connected()`
+  first). Using the
   same getters as the GET endpoints guarantees DeviceState ↔ GET consistency, which is
   what ConformU checks. A new vendor driver inherits the compliant DeviceState for free.
 - DeviceState is **not an atomic snapshot**: each getter locks the driver mutex
@@ -700,8 +778,9 @@ independently broken the same way, before it was centralised:
 - When adding a vendor in `AlpacaCore/CMakeLists.txt`, always update:
   1. `option(ALPACACORE_ENABLE_<VENDOR> ...)`
   2. `ALPACACORE_ENABLE_ALL_VENDORS` logic (only if implemented)
-  3. conditional `add_subdirectory(src/vendors/<vendor>)` + link
+  3. conditional `add_subdirectory(src/vendors/<vendor>)` + `target_link_libraries(alpacacore_builtins PRIVATE alpacacore_<vendor>)`. A vendor whose descriptor factory `register_builtin_factories()` registers (`AlpacaCore/src/catalog/builtin_catalog.cpp`) also needs `target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_<VENDOR>)` next to that link, or the registration compiles empty with no build error (see the Astroasis block in `AlpacaCore/CMakeLists.txt`)
   4. install rules for vendor target
+- The dependency runs one way: `alpacacore` <- `alpacacore_<vendor>` <- `alpacacore_builtins` <- `alpacahttp` (#710). The vendor's own `CMakeLists.txt` links `alpacacore` PRIVATE; `alpacacore` never links a vendor library, takes no `ALPACACORE_ENABLE_<VENDOR>` definition and compiles no `src/vendors/` source (`scripts/check_layering.py` rules L1-L3).
 - If vendor libs are discovered by pkg-config, prefer imported targets (example: `PkgConfig::LIBUSB`) so dependent test binaries get correct link paths.
 - When adding a new vendor SDK under `AlpacaCore/external/<vendor>/`, add an allowlist entry to `AlpacaCore/.gitignore` so the SDK binaries (`.a`, `.so`, `.dll`, firmware files, etc.) are not blocked by the global compiled-file ignore rules. Follow the existing pattern: `!external/<VENDOR>/**`.
 
@@ -838,7 +917,7 @@ vendor that ignores either ships a silently broken form:
 ## Debian Packaging
 
 - Package files live in `debian/` (control, rules, copyright, service file, maintainer scripts).
-- **`debian/changelog` is generated, never edited.** It is untracked/gitignored and derived from the root `CHANGELOG.md` by `scripts/changelog_to_deb.py` (same design as the OpenAstro Guider). Build the package with `scripts/build_deb.sh`, which generates the changelog (version from the `VERSION` file, validated with `dpkg-parsechangelog`) and then runs `dpkg-buildpackage -us -uc -b`. Do not run `dpkg-buildpackage` directly on a fresh checkout — it will fail on the missing `debian/changelog`. The in-progress CHANGELOG section uses this repo's `## [X.Y.Z] - UNRELEASED` convention; the generator synthesizes an `UNRELEASED` stanza from it when `VERSION` has not been released yet, and warns when `VERSION` and the section label disagree.
+- **`debian/changelog` is generated, never edited.** It is untracked/gitignored and derived from the root `CHANGELOG.md` by `scripts/changelog_to_deb.py` (same design as the OpenAstro Guider). Build the package with `scripts/build_deb.sh`, which generates the changelog (version from the `VERSION` file, validated with `dpkg-parsechangelog`) and then runs `dpkg-buildpackage -us -uc -b`. Do not run `dpkg-buildpackage` directly on a fresh checkout — it will fail on the missing `debian/changelog`. In-progress work is the `changelog.d/` fragments (see the changelog rule below) plus any legacy `## [X.Y.Z] - UNRELEASED` section still in `CHANGELOG.md`; the generator synthesizes an `UNRELEASED` stanza from them when `VERSION` has not been released yet, and warns when `VERSION` (a beta by its base version: `5.0.0~beta1` matches `[5.0.0]`) and a legacy section label disagree. A beta `VERSION` (`X.Y.Z~betaN`) gets a `beta` stanza instead, dated noon UTC on the README badge date (`build_deb.sh` passes it as `--date`, which the generator requires for a beta), so a beta `.deb` is reproducible rather than stamped with the build time.
 - The `.deb` installs to:
   - `/usr/bin/alpacabridge` — server binary.
   - `/usr/lib/alpacabridge/` — vendor shared libraries (e.g. `libqhyccd.so`, `libASICamera2.so`).
@@ -848,17 +927,45 @@ vendor that ignores either ships a silently broken form:
   - `/usr/sbin/fxload` — QHY firmware loader.
   - `/etc/alpacabridge/` — default config (`registered_devices.json`).
 - When adding a new vendor with shared libraries, update `debian/rules` `override_dh_auto_install` to copy them into `$(STAGING)/usr/lib/alpacabridge/`.
-- To cut a release, run `/bump-release` (`.claude/commands/bump-release.md`): it bumps the `VERSION` file, dates the `## [X.Y.Z]` CHANGELOG.md heading, updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
+- To cut a release or a beta, run `/bump-release` (`.claude/commands/bump-release.md`; beta and stable modes, [beta channel](docs/beta-channel.md)). A stable release bumps the `VERSION` file, assembles the `changelog.d/` fragments into the dated `## [X.Y.Z]` CHANGELOG.md section (`scripts/changelog_fragments.py --release`), updates the README badge and device count, writes the plain-language notes in `docs/releases/<version>.md` that become the GitHub Release body, and tags the merge. A beta sets `VERSION` `X.Y.0~betaN` and the badge, writes its notes file under `docs/releases/` from `--preview`, consumes no fragments and writes no dated section — **do NOT edit `debian/changelog`; it is generated** (see the packaging note above).
+
+### Beta channel and stable branches
+
+Development stays on `main`; a release is not cut from `main` alone. `/bump-release` cuts
+`stable/X.Y` from `main`, tags betas `vX.Y.Z-beta.N` on it (`VERSION` `X.Y.Z~betaN`, the Debian
+spelling; `release.yml` maps the tag through `scripts/release_tag.py`), promotes the same branch
+to `vX.Y.Z`, and every beta tag and the promotion are merged back into `main` with a merge commit
+(never squash). A merge down keeps the receiving branch's `VERSION` and README badge, so `main` never
+carries a beta `VERSION`; only a stable release newer than `main`'s comes across. The stable branch
+takes bug and stability fixes only, landed on the branch (PR with `--base stable/X.Y`), never
+cherry-picked; `stable/X.Y` retires when the next release is promoted, not when its branch is cut.
+Cutting, tagging, promoting and the merge-down PR stay with the upstream maintainer and
+diegopereiran. Branch model, promotion criteria, opt-in steps and the three version spellings:
+[docs/beta-channel.md](docs/beta-channel.md).
 
 ### Version bump policy (SemVer)
 
-`VERSION` and the `## [X.Y.Z] - UNRELEASED` CHANGELOG heading move together, per
-SemVer: **new driver/feature = minor bump; fix- or docs-only = patch; breaking change
-(dropped platform, config-schema break) = major.** The UNRELEASED section carries
-forward cumulatively until release — if it already sits at a minor bump and another
-driver lands, the number stays; a feature landing on a patch-level UNRELEASED raises
-it to the next minor. `/commit` and `/submit-pr` enforce this; it is documented here
-so a driver-building agent bumps correctly without them.
+The release derives the NEXT version from the `changelog.d/` fragments
+(`python3 scripts/changelog_fragments.py --bump`); a PR never sets one. `VERSION` and the README
+badge stay at the last release until `/bump-release` Step 2 writes them (check 4 ties `VERSION`
+to the dated badge line, so bumping it early would date a release that has not happened). The
+bump size rule: **new driver/feature (an unqualified `### Added` fragment entry) = minor bump;
+fix- or docs-only = patch; breaking change (dropped platform, config-schema break, a
+`### Breaking changes` entry) = major.** The bump is the highest severity across all fragments
+since the last release, and a legacy `## [X.Y.Z] - UNRELEASED` heading still in `CHANGELOG.md` is a
+floor. `/commit` and `/submit-pr` check the fragment's categories.
+
+### Changelog fragments (one file per PR)
+
+Every PR that changes code, tests, scripts, CI or docs adds `changelog.d/<branch-slug>.md` (the
+branch name after its last `/`, lowercased) and **never edits `CHANGELOG.md`** (except to correct a misfiled or wrong entry, which the PR
+description says): parallel PRs that all edited
+its one UNRELEASED section conflicted on every merge to main. Format, categories and commands are
+in [`changelog.d/README.md`](changelog.d/README.md), including its "Breaking or not" test, which
+applies to fixes too: a saved config that no longer loads or a call that now fails is breaking even
+when it is the fix. `scripts/changelog_fragments.py --check`
+validates every fragment (the `docs-drift` CI job and pre-flight run it with `--self-test`), and
+apart from such corrections only `/bump-release` writes `CHANGELOG.md`, through `--release`.
 
 ## Testing Requirements
 
@@ -873,6 +980,10 @@ Related failure: [Release builds disabled HTTP assertions](docs/failures/0004-nd
 - Use tags to separate unit/integration/hardware behavior when applicable.
 - Use Catch2 macros (`REQUIRE`, `CHECK`, `CHECK_THROWS_AS`, etc.) via the `catch2_compat.h` header.
 - **AlpacaHTTP hand-rolled tests must not use `assert()`.** The AlpacaHTTP tests (`test_routing`, `test_json`, `test_config`, `test_discovery`) are plain `int main()` programs, not Catch2. They use the always-on `EXPECT()` macro from `AlpacaHTTP/tests/test_assert.h`. Never use `<cassert>` `assert()` there: it is compiled out under `-DNDEBUG` — which Release, `debian/rules`, and the shipped `.deb` all define — so an assert-based check silently does nothing in an optimized build. Worse, an `assert(side_effecting_call())` (e.g. `assert(request.parse(...))`) means the call itself never runs under `NDEBUG`, so the test exercises nothing and can crash on the resulting empty state. `run_all_tests.sh` and CI build *without* `NDEBUG`, so this class of bug hides until someone builds Release. `EXPECT()` evaluates its expression exactly once and aborts on failure regardless of build type.
+
+### New test cases name their falsifying mutation
+
+A test case that has never failed pins nothing. Every case a PR adds or renames is listed in the PR body in a `## Falsified by` section after `## What Changed`, one line each: `- "<case name>": <path>:<line> <change>`, where `<path>:<line>` is production code (under `AlpacaCore/src`, `AlpacaCore/include`, `AlpacaHTTP/src` or `AlpacaHTTP/web`) and `<change>` (at least three words) is the one edit that makes the case fail. A test-helper path is accepted only when the case is about the helper (`Fake*`, `PtyPair`, `StressCallGuard`, `[stress-guard]`). New means a Catch2 registration macro, a `test('...')` in `AlpacaHTTP/tests/web/`, or a top-level `main()` block in an AlpacaHTTP hand-rolled test that opens with `// case: <name>`, whose name is absent from the merge-base; a moved case is not new, a renamed one is. A hand-rolled file whose `main()` is flat (no scoped `    {` blocks) never produces a new case. A merge-down PR (head `merge-down/X.Y-to-<main|X.Z>` against that base, adding no commit that is not already on `stable/X.Y`; `scripts/merge_down.py`, `docs/beta-channel.md`) is exempt: its cases were listed on the fix PRs that landed them on `stable/X.Y`. `scripts/check_falsified_by.py` checks the shape only (`--self-test` covers the parser); the review chain applies the mutation and confirms the case fails.
 
 ### Required Test Cases for Every New Vendor Device Driver
 
@@ -896,7 +1007,7 @@ Every new driver **must** ship with at least the following 8 unit test cases, pl
 4. **Unsupported actions** `[<vendor>][<device>][unit]`
    - `CHECK` `get_supported_actions()` is empty (unless the driver defines actions).
    - `CHECK` `can_action("anything") == false`.
-   - `CHECK_THROWS_AS` for `action()`, `command_blind()`, `command_bool()`, `command_string()`.
+   - `require_alpaca_error` with `ActionNotImplemented` (0x40C) for `action()`, and with `MethodNotImplemented` (0x400) for `command_blind()`, `command_bool()`, `command_string()` (unless the driver implements command pass-through: a pass-through driver checks the connection first, so disconnected it throws `NotConnected` (0x407), and the test asserts that instead) — the codes case 8 and the [exception table](#ascom-exception-vocabulary-pick-the-right-one--conformu-checks-it) require. A bare `CHECK_THROWS_AS(..., AlpacaException)` passes for any error code, so it cannot catch the wrong one.
 
 5. **Device-specific behavior** — at least one test covering behavior unique to the device type:
    - Cameras: sub-exposure support (`get_sub_exposure_duration` / `set_sub_exposure_duration` throw if unsupported).
@@ -910,13 +1021,13 @@ Every new driver **must** ship with at least the following 8 unit test cases, pl
 
 7. **State machine contracts** — device state follows ASCOM rules without needing hardware (e.g. `CameraState == Idle` before any exposure, `Slewing == false` when not connected, `IsPulseGuiding == false` when idle). These have caught real bugs: iOptron's settle loop prematurely declared slews complete, SynScan's `IsPulseGuiding` always returned false, SVBONY's `CameraState` got stuck after SDK hangs.
 
-8. **Unsupported method error codes** — a method the device doesn't support must throw with the correct error code (usually `InvalidOperation` or `MethodNotImplemented`), not a generic `DriverException`. ConformU distinguishes "not implemented" from "driver error."
+8. **Unsupported method error codes** — a method the device doesn't support must throw `MethodNotImplemented` (or `PropertyNotImplemented` for a property, both 0x400), not a generic `DriverException`. `InvalidOperation` (0x40B) is for a *supported* member called in a state where it can't currently run, not for a member the hardware lacks — see the [ASCOM exception vocabulary table](#ascom-exception-vocabulary-pick-the-right-one--conformu-checks-it). ConformU distinguishes "not implemented" from "driver error." `Action()` called with a name not in `SupportedActions` throws `ActionNotImplemented` (0x40C) instead — a distinct code, not `MethodNotImplemented`.
 
    Cases 6-8 are the **ASCOM contract tests**: they exist specifically because a generic "does it throw?" test (case 3/4) is not enough to pass ConformU, which checks the exact Alpaca error code and state-machine behavior. See `/driver-build` Step 7 for the full pattern, worked examples per device type, and the `require_alpaca_error` helper. **Minimum 8 test cases, 30+ assertions total** — cases 6-8 alone should add 10-15 assertions on top of the 5 basic cases; if you have significantly fewer you are probably not testing enough error codes and state transitions.
 
 9. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test. This is an `AlpacaHTTP`-level integration test, additional to the 8 vendor unit tests above, not a substitute for cases 6-8.
 
-### Hardware-free driver tests via the SDK seam (ToupTek and QHY — extend to other vendors)
+### Hardware-free driver tests via the SDK seam (ToupTek, QHY and gphoto — extend to other vendors)
 
 The ToupTek drivers take the SDK through the abstract `ToupTekSDK` interface
 (`touptek_sdk_wrapper.h`): production factories pass the `ToupTekSDKWrapper`
@@ -933,7 +1044,9 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   test reproducing the failure (throw from the exact call that regressed).
 - When touching another vendor's wrapper significantly, adopt the same seam
   shape there (one abstract interface + factory overload + scripted fake) —
-  the reusable pattern from issue #104. The two existing seams differ in one
+  the reusable pattern from issue #104. The gphoto camera has the same seam since
+  #546 (`GPhotoSDK` / `FakeGPhotoSDK` / `LockedGPhotoSDK`, plus a `RawDecoder`
+  seam for libraw). The two original seams differ in one
   detail worth copying deliberately rather than by accident: `ToupTekSDK` has
   a public virtual destructor, `QHYSDK` a protected non-virtual one. **Prefer
   the QHY form for a new seam.** Nothing owns a seam pointer in either design
@@ -1034,18 +1147,24 @@ than one that drops a frame.
 When adding a test file for a new vendor device:
 - Add `test_<vendor>_<device>.cpp` to the conditional `TEST_SOURCES` list in `AlpacaCore/tests/CMakeLists.txt`, guarded by `if(TARGET alpacacore_<vendor>)`.
 - Add `target_link_libraries(alpacacore_tests PRIVATE alpacacore_<vendor>)` in the matching conditional block.
-- Build and run all tests (`cmake --build build --target alpacacore_tests && ./build/tests/alpacacore_tests`) before considering the driver complete.
+- Build and run all tests (`cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests`, from `AlpacaCore/`) before considering the driver complete. Use `build-vendors`, not `build`: since #588 a default pre-flight leaves the `build` directory under AlpacaCore/ holding a sanitized, vendors-OFF configure, and CMake caches `CMAKE_CXX_FLAGS` from the first configure of a directory, so reusing it compiles no driver and stays sanitized whatever you pass.
 
 ## Continuous Integration and Pre-flight
 
 Related decision: [Documentation drift gates](docs/decisions/0003-docs-drift-gates.md).
 
-- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner: `build-test` (vendors OFF) + `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `clang-format`, `clang-tidy`, `cppcheck`, `unicode`, `shellcheck`, `javascript`, and `zizmor`.
-- **Every job in every workflow carries a `timeout-minutes` bound** (issue #363). The numbers are sized from the observed healthy runtime of recent green runs with wide headroom (`sanitizers-tsan` 30 min against a healthy max of 5, `build-vendors`/`sanitizers` 25, `build-test` 20, `clang-tidy` 25 -- it does the all-vendors build `build-vendors` does plus libgpiod from source and `clang-tidy-diff` over every changed line, so it gets that job's bound rather than a smaller one -- `cppcheck` 20 -- its dominant cost is building cppcheck 2.17 from source on the runner with no cache, so it gets the same bound as the build jobs rather than a text-scan-sized one -- the text scans 10; `release` 10, `codeql` 30, `claude-review` 45). They exist because the `[stress]` suite is the one place a regression can *hang* rather than fail, and GitHub's 6-hour default turned that into six hours of runner time before any signal. **When you add a job, give it a bound**, and when a job legitimately outgrows its bound raise the number rather than trimming the work to fit -- these are a backstop against a wedge, not a performance target. Note the deliberate gap on `claude-review`: its 45 min bound is longer than `/pr-checker`'s 30 min verdict-poll budget, so a review running past 30 min times the skill out while CI still lets the job finish. That is the intended precedence (the bound exists to catch a wedged job, not to pace the reviewer); a poll timeout is a re-poll, not a broken workflow.
+- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `coverage` (gcovr line coverage, all vendors), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- **`Falsified by:` gate** (`.github/workflows/pr-body.yml`, job `falsified-by`, `scripts/check_falsified_by.py`, pre-flight gate 2b2 reading `PR_BODY_FILE`): every test case a PR adds or renames needs a line `- "<case name>": <path>:<line> <change>` under a `## Falsified by` heading in the PR body (after `## What Changed`), naming the production-code mutation that fails it. It runs on `opened`, `edited`, `synchronize` and `reopened`, takes the body only through `env: PR_BODY` (never into a `run:` line) and is not a required check. One exemption: a merge-down PR skips the check, because every case it carries was already gated on its own fix PR against `stable/X.Y` and would read as new again against the receiving branch's merge-base. `scripts/merge_down.py` decides it, in the job and in gate 2b2 alike: a head named `merge-down/X.Y-to-main` or `merge-down/X.Y-to-X.Z` in this repository, the base that name targets, and no non-merge commit that is not already on `stable/X.Y` (`docs/beta-channel.md`). See Testing Requirements.
+- **PR template gate** (`.github/workflows/pr-body.yml`, job `pr-template`, `scripts/check_pr_template.py`, pre-flight gate 2b3 reading `PR_BODY_FILE`): the PR body must keep every `## ` section of `.github/PULL_REQUEST_TEMPLATE.md`, each with content of its own (a template line copied unchanged, a bare `-` or an HTML comment does not count), and the Checklist must keep its `- [ ]` items. A heading of the form `A or B` also accepts `## A` or `## B`. The rules are read from the template, so editing the template changes the gate. GitHub fills the template in only for a PR opened from the web page with an empty body; `gh pr create --body`, the API and agents skip it. Bot PRs (Dependabot) skip the job. Same triggers and `env: PR_BODY` rule as the `Falsified by:` gate; not a required check until a maintainer marks it.
+- **Layering gate** (`scripts/check_layering.py`, the `layering` CI job and pre-flight gate 2f, issue #651): counts `#include <alpacacore/vendor/...>` lines under `AlpacaHTTP/` and in the catalog schema files, and fails when either exceeds the baseline held in the script (`MAX_ALPACAHTTP_VENDOR_INCLUDES`, `MAX_CATALOG_SCHEMA_VENDOR_INCLUDES`). Each vendor descriptor slice of [device-catalog](docs/decisions/0004-device-catalog.md) lowers the AlpacaHTTP constant in the PR that deletes the includes; the baseline never rises. The gate also enforces CMake rules L1-L3 on every `CMakeLists.txt` and `*.cmake` under `AlpacaCore/` and `AlpacaHTTP/` (except below `external/` and `build*` directories), including `target_sources(alpacacore ...)` and the directory-scoped `ALPACACORE_ENABLE_` definitions in `AlpacaHTTP/CMakeLists.txt` that precede its `add_subdirectory(../AlpacaCore ...)` (issue #723); the dependency-direction bullet under [CMake and Vendor Integration](#cmake-and-vendor-integration) says what they forbid.
+- **Contract sweep** (`AlpacaCore/tests/contract_sweep.h` + `test_contract_sweep.cpp`, issue #571): every (vendor, device type) pair the server constructs, whether through a `Router::register_device_from_config()` arm or a device-catalog factory (`AlpacaCore/src/vendors/*/*_catalog.cpp`), has one registry entry, and the sweep runs the tier-1 ASCOM contract cases over each disconnected, one ctest case per (driver, case) named `Contract sweep - <vendor>_<type> - <case>`. A driver that differs states the expectation in its registry entry with a source (protocol document, hardware run, or assumption); a new driver gets an entry, not a copy of the assertions. `scripts/check_contract_sweep.py` (the `contract-sweep` CI job and pre-flight gate 2g) fails on a router arm's pair with no entry and no `ALLOWLIST` reason (`UNSWEPT PAIR`), a router arm or catalog file whose `create_*` backend no registry entry calls (`UNSWEPT BACKEND`), a construct its text parser does not follow (`PARSER LIMIT`), a stale allow-list entry, and a guard the tests CMake does not define for `alpacacore_tests` (the `ALPACACORE_ENABLE_<VENDOR>` macros are not inherited from the vendor targets, so without the definition the registry compiles empty and the sweep passes vacuously). The catalog's pairs are not parsed: two cases in `test_contract_sweep.cpp` walk `DeviceCatalog::describe()` and require a registry entry for every available descriptor, and a descriptor for every registry entry of a catalog vendor (a vendor with a descriptor or a factory, read from `DeviceCatalog::factory_keys()`, so a vendor whose whole schema registration is missing still fails). A catalog-built pair cannot be allow-listed. The docs-drift script pins the fake-connectable roster in the same header to the `fake_*.h` files on disk. Tier 2 runs the connected cases over every `kFakeConnectableRoster` row, one ctest case per (row, applicable case; target flags on telescopes only, `InvalidValue` on types with a static out-of-range probe), named `Contract sweep tier 2 - <vendor>_<type> - <case>`. A row whose fake cannot hold a connect open states why in `connecting_unobservable`, and the tier-1 `get_at_park` pins are gone (`AtPark` throws `NotConnected` on every telescope).
+- **Every job in every workflow carries a `timeout-minutes` bound** (issue #363). The numbers are sized from the observed healthy runtime of recent green runs with wide headroom (`sanitizers-tsan` 30 min against a healthy max of 5, `build-vendors`/`sanitizers` 25, `build-test` 20, `coverage` 30 -- the all-vendors build and suite at `-O0` with gcov instrumentation, so it sits above `build-vendors` -- `clang-tidy` 25 -- it does the all-vendors build `build-vendors` does plus libgpiod from source and `clang-tidy-diff` over every changed line, so it gets that job's bound rather than a smaller one -- `cppcheck` 20 -- its dominant cost is building cppcheck 2.17 from source on the runner with no cache, so it gets the same bound as the build jobs rather than a text-scan-sized one -- the text scans 10; `release` 10, `beta-deb` 30 -- the all-vendors Release build of the beta `.deb` in a trixie container -- `codeql` 30, `claude-review` 45). They exist because the `[stress]` suite is the one place a regression can *hang* rather than fail, and GitHub's 6-hour default turned that into six hours of runner time before any signal. **When you add a job, give it a bound**, and when a job legitimately outgrows its bound raise the number rather than trimming the work to fit -- these are a backstop against a wedge, not a performance target. Note the deliberate gap on `claude-review`: its 45 min bound is longer than `/pr-checker`'s 30 min verdict-poll budget, so a review running past 30 min times the skill out while CI still lets the job finish. That is the intended precedence (the bound exists to catch a wedged job, not to pace the reviewer); a poll timeout is a re-poll, not a broken workflow.
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
+- **The ASan+UBSan pass runs by default in pre-flight** (issue #588); `RUN_SANITIZERS=0` skips it and reports `[SKIP]`, which is the right call for docs/CI-only work but not much else — it was on by default precisely because it had been the one configuration neither CI nor a contributor ran, and a deterministic 20/20 failure sat in the tree undetected as a result (`RUN_TSAN` is separate and still opt-in). This means a new class of local failure: a sanitizer finding in code the ordinary build passes. **When the sanitizer cannot observe a case rather than having found a defect in it, gate the case out of sanitized builds — do not loosen the assertion**, which would silently cost coverage in `build-test` and `build-vendors` too. The worked example is the `ALPACACORE_TESTS_SANITIZED` guard in `AlpacaCore/tests/test_fake_pty_write.cpp`, whose EMFILE case exhausts the process's descriptors so UBSan cannot obtain one for its vptr check; it returns early with a `WARN` under sanitizers and runs for real everywhere else. A genuine finding, by contrast, is a bug — fix it.
+- **Pi 4 ASan host limitation:** Debian's Raspberry Pi kernel is built with a 39-bit AArch64 virtual address space, which cannot host ASan's 64-bit allocator. Run the sanitizer pass on a 48-bit-VA kernel/host; see [the Pi 4 ASan failure record](docs/failures/0010-rpi4-asan-39-bit-va.md). Do not treat the runtime abort as a passing check.
 - **cppcheck is pinned to 2.17.x, built from source in CI.** The `ubuntu-24.04-arm` runner's apt cppcheck is 2.13, which classifies some checks differently from the 2.17 on a Debian Trixie dev box (e.g. `virtualCallInConstructor` is a `warning` in 2.13 but reclassified in 2.17). Since `ci_preflight.sh` runs whatever cppcheck the dev box has, that version skew let the local pre-flight and CI disagree. Building 2.17 from source (checksum-verified, mirroring the libgpiod-from-source step) keeps them aligned. **Keep the cppcheck `--suppress` list identical between `ci.yml` and `ci_preflight.sh`** — `scripts/check_docs_drift.py` (the `docs-drift` CI job / pre-flight gate) now fails if they diverge, so this can't silently drift again.
 - **Web UI JavaScript is gated by `node --check` AND `node --test`** (the `javascript` job + pre-flight gate). The web UI is hand-written static JS served as-is, with no bundler and no `package.json`, so the syntax check was the only gate for a long time — and a syntax check catches a missing brace and nothing else. That was defensible while `app.js` was DOM wiring; it stopped being defensible when the file grew pure functions with a real contract (issue #385). **Pure helpers go in `AlpacaHTTP/web/format.js`, not `app.js`**: that file touches no DOM and no `app.js` global, `index.html` loads it first, and it ends with a `typeof module !== 'undefined'` export block that browsers ignore, so `AlpacaHTTP/tests/web/*.test.js` can `require` it from Node with no browser stub. `node --test` ships with the Node CI already installs, so there is nothing to add to the toolchain. A helper that reaches for `document` belongs in `app.js` and stays untested — keep the split honest rather than growing a DOM stub. The first cases are the by-hand verification table from PR #359 made executable (several `TZ` settings, local midnight, and `Intl.DateTimeFormat` patched to throw, to return incomplete parts, and to answer in 12-hour form); each was mutation-verified against the guard it covers, and the 12-hour case is the one that matters most, because it renders a plausible-looking WRONG time rather than an obvious failure.
-- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together; `scripts/check_docs_drift.py` fails the build if they disagree. The same script also fails if a `docs/development.md` build-options table row goes missing for a CMake `ALPACACORE_ENABLE_*` option, if `VERSION` and the README badge disagree, if AGENTS.md, a scoped instruction file under `.github/instructions/`, an agent-skills doc under `docs/agents/`, or a memory record under `docs/failures/` or `docs/decisions/` references a repo path that doesn't exist, if a first-party source comment names a memory record that doesn't exist, if the QHYSDK seam's interface / `LockedQHYSDK` / sweep lists disagree (issue #394), if the `sanitizers-tsan` job's filtered runs or their zero-test greps differ from the ones `ci_preflight.sh` spells out (issue #341), if a first-party source file under the `AlpacaCore/` or `AlpacaHTTP/` src, include, tests or examples tree does not carry the current AGPL-3.0-or-later header block starting within its first 25 lines, naming the pre-#113 long form when that is what it finds (issue #450), or if a backticked repo path in the Cursor rule files (`AlpacaCore/.cursor/rules/`, `AlpacaHTTP/.cursor/rules/`) or in `AlpacaCore/external/README.md` does not exist, resolved against the component the file lives under (issue #457), or if `async_connectable.h`'s blocking-`get_connected()` lists drift from the drivers (issue #381): it classifies every `get_connected()` override under `AlpacaCore/src/vendors/` by its body and fails on a blocking driver missing from a list, a lock-free one still named in it, or a count of either list stated anywhere the globs reach.
+- `zizmor`'s pinned version + sha256 appear in both `ci.yml` and `ci_preflight.sh` — bump them together; `scripts/check_docs_drift.py` fails the build if they disagree. The same script also fails if a `docs/development.md` build-options table row goes missing for a CMake `ALPACACORE_ENABLE_*` option, if `VERSION` and the README badge disagree, if AGENTS.md, `CONTEXT.md`, `README.md` (issue #693; `scripts/check_instruction_structure.py` scans the relative links of `README.md`, `SUPPORTED-DRIVERS.md` and `CHANGELOG.md`, percent-decoded, with a floor on distinct targets per file, and reads `<img src>` targets in every document it scans), a scoped instruction file under `.github/instructions/`, an agent-skills doc under `docs/agents/`, a Claude skill doc under `.claude/skills/`, or a memory record under `docs/failures/` or `docs/decisions/` references a repo path that doesn't exist, if a first-party source comment names a memory record that doesn't exist, if the QHYSDK seam's interface / `LockedQHYSDK` / sweep lists disagree (issue #394), if the `sanitizers-tsan` job's filtered runs or their zero-test greps differ from the ones `ci_preflight.sh` spells out (issue #341), if a first-party source file under the `AlpacaCore/` or `AlpacaHTTP/` src, include, tests or examples tree does not carry the current AGPL-3.0-or-later header block starting within its first 25 lines, naming the pre-#113 long form when that is what it finds (issue #450), or if a backticked repo path in the Cursor rule files (`AlpacaCore/.cursor/rules/`, `AlpacaHTTP/.cursor/rules/`) or in `AlpacaCore/external/README.md` does not exist, resolved against the component the file lives under (issue #457), if the LF-normalized SHA-256 of `docs/AlpacaDeviceAPI_v1.yaml` no longer matches the snapshot pinned in `.claude/skills/ascom-alpaca-protocol/references/version-and-sources.md` (the skill's endpoint catalog was generated from that snapshot, and `/driver-build` Step 0 refreshes the schema from upstream), or if `async_connectable.h`'s blocking-`get_connected()` lists drift from the drivers (issue #381): it classifies every `get_connected()` override under `AlpacaCore/src/vendors/` by its body and fails on a blocking driver missing from a list, a lock-free one still named in it, or a count of either list stated anywhere the globs reach. It also fails if any `std::regex` in `AlpacaHTTP/src/http/router.cpp` is not declared `static` (issue #657: a per-request regex build cost a device-path request 14x a management request), or if a model in `SUPPORTED-DRIVERS.md`'s GPhoto table is not named in the STATUS paragraph of `.github/instructions/gphoto.instructions.md`; that gate is one-directional and covers only rows whose Connection cell starts with `USB`. It also fails if the README headline (`N validated devices. <Word> brands. One server.` plus the brand list) disagrees with `SUPPORTED-DRIVERS.md` (check 15, issue #684): N is recounted by the script's own row filter (`count_validated_device_rows`; `/bump-release` Step 2.4 reads it through `python3 scripts/check_docs_drift.py --counts` rather than restating the greps, issue #689), the spelled-out brand word must equal the length of the README list, and every `### ` vendor heading must map onto a list item through the explicit `SUPPORTED_HEADING_TO_README_BRAND` table in the script (two Sky-Watcher headings collapse into one item; `README_BRANDS_WITHOUT_HEADING` declares the Unihedron SQM-LE item, a sensor the WeeWX driver reads through the feed's `sqm` fields, with no row or heading of its own). A new vendor heading therefore needs its README list item, the recounted word, and a map entry in the same PR. A declared brand item may contain a comma (it is matched whole before the list is split) and a brand count must be one word or hyphenated (issue #690). Check 16 (issue #692) requires the hand-maintained `## Updated YYYY-MM-DD` line in `SUPPORTED-DRIVERS.md` to be a real date no older than the README badge's release date: `/bump-release` Step 2.5 sets it to the release date, `/conformu` and `/commit` bump it between releases, and it may run ahead of the badge but never behind, nor more than a year ahead (a mistyped year). Check 17 (issue #682) pins every AlpacaError value AGENTS.md and `.claude/commands/driver-build.md` write down, in the forms `` `Name` (0x40C) ``, ``Name `0x401` ``, `` `A` (or `B` ..., both 0x400) `` and an exception-table row, to the enum in `AlpacaCore/include/alpacacore/alpaca_errors.h`: an unknown name or a different value fails with the file, the line and the header's value. Check 18 (issue #702) fails when a `ci.yml` job id is missing from the CI roster bullet at the top of this section, or the bullet names an id `ci.yml` does not define; ids are read from backticked tokens outside parentheses, so give each id's description in parentheses after it.
 - **Concurrency now has automated coverage — but only where a driver is registered with the stress harness.** The `sanitizers-tsan` job (issue #101) builds all-vendors with ThreadSanitizer and runs the `[stress]` connect/disconnect/operate suite (`AlpacaCore/tests/concurrency_stress.h`): lifecycle storms from N threads, destruction racing an in-flight connect, and the racing-disconnect-never-dropped settle check. Locally: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. Registered so far: ToupTek camera / AFW / AAF focuser / thermal switch (over the fake SDK seam, wrapped in `LockedToupTekSDK`), ZWO EFW + camera + EAF focuser + CAA rotator + dew heater switch, Player One Phoenix + camera + thermal switch, SVBONY camera, Bisque, OnStep, and — over the loopback fake-mount TCP seam (`tests/fake_mount_server.h`, which drives drivers into the *connected* state so the poll/pulse/GOTO/teardown threads actually run) — the ZWO, Celestron, SynScan, and iOptron telescopes, plus the SkyWatcher telescope over its own loopback UDP simulator (`tests/fake_skywatcher_mount.h`), plus (fail-fast, no fake seam) the iOptron iEFW filter wheel, iEAF focuser, and iMate PowerBox Switch, and the Astroasis Oasis focuser (hidapi, no fake seam exists), plus the WandererAstro cover calibrator, filter wheel and box switch over the pty streamer fake (`tests/fake_serial_streamer.h`) with the request/response rotator fail-fast, plus the Gemini PDH Advanced 3 Switch and Flat Panel Pro CoverCalibrator over their pty-backed fakes (`tests/fake_gemini_pdh.h`, `tests/fake_gemini_flatpanel.h`) with the Gemini focuser fail-fast, and the WeeWX ObservingConditions driver over an unreachable URL. **When you add or substantially change a driver, add a `[stress]` TEST_CASE for it** — one factory + one operate callback (see `test_touptek_concurrency_stress.cpp` for the overall shape; since #326 every one of the 15 merged registrations uses the guard on every call, so any of them is a correct example, and none defines a local `call()` helper -- the gate rejects one outright). Wrap each call in the operate callback with `alpacacore::test::StressCallGuard` (`concurrency_stress.h`, issue #322) rather than a local `try/catch` — `run_lifecycle_stress` wraps the WHOLE callback in one try/catch, not each call inside it, so on a fail-fast path a single throw silently skips every call after it unless each one is guarded individually. `StressCallGuard` samples **one line per distinct failure mode with its occurrence count**, not the first N events (#377) — the old cap let one thread faulting in a tight loop fill every slot with copies of one message before another thread recorded once, which is worst in a *connected* registration where a live driver throws often and the single distinct failure that mattered is the one crowded out. It swallows the expected `NotConnected` by default and counts everything else it catches (a non-`std::exception` throw is never caught by anything here and still `std::terminate`s the binary, exactly as it would without the guard), so the case ends with `INFO(guard.report());`, then `CHECK(guard.unexpected_count() == 0)`, then `CHECK(guard.total_calls() > 0)` — **all three lines, always**: only the first `CHECK` turns counting into a failure, and a file that wraps every call correctly and omits it passes whatever the storm throws while *looking* like it follows the pattern (#379); the `INFO` is what makes a failure legible, since without it the `CHECK` reports only the expansion (`3 == 0`) and names nothing it swallowed; and the `total_calls()` line is what stops the zero-check passing **vacuously** (#334), since a guard that was never invoked reports zero unexpected throws exactly like one that saw a hundred clean calls, so a storm that silently stopped exercising the driver — a renamed method, a guard clause that now short-circuits, a device target that quietly stopped building — would still report a passing run. `check_stress_registration.py` enforces all three lines, plus the guard's presence itself (its `GUARD_ALLOWLIST` is empty since #326 -- a new registration that skips the guard is a gate failure, not an allow-list entry, unless it says why) and rejects a local `call()` helper outright, that being the hand-rolled try/catch the guard replaced — this replaces re-deciding the guard's catch type per file, which flip-flopped across review rounds before #322. Its constructor argument **REPLACES** the default set rather than adding to it — pass `{NotConnected, PropertyNotImplemented}`, not just `{PropertyNotImplemented}`, or every racing-disconnect throw in the storm is counted as a regression and the case fails nondeterministically. **A registration that runs *connected* (over `fake_mount_server.h`, `fake_skywatcher_mount.h`, or any full-seam fake) must widen the expected set explicitly this way** — `NotConnected` alone fits a never-connected, fail-fast path, but an operate callback exercising a live driver can legitimately hit `InvalidValue`, `MethodNotImplemented`, or `InvalidWhileParked` (a slew racing a park) from ordinary calls too — remember `NotImplemented`/`PropertyNotImplemented`/`MethodNotImplemented` all share one numeric code (see the class doc), so they're not separately distinguishable inside the expected set. Drivers without a registration are still covered only by code review against the [concurrency checklist](#driver-concurrency--lifecycle-read-before-writing-a-driver); do not assume green CI means thread-safe for them. **The QHY SDK seam's three parallel lists are gated** (#394): `scripts/check_docs_drift.py` compares `QHYSDK`'s pure virtuals, `LockedQHYSDK`'s overrides and the forward-sweep method list in `test_qhy_fake_sdk.cpp`, and separately fails on a forward that does not go through `locked()`, with ONE named exception: `cancel_exposure()` must take its own `cancel_mutex_` and must NOT go through `locked()` (#339), because production's cancel deliberately skips the per-handle call mutex so it can interrupt a download already blocked on the same handle, and routing it through the shared mutex would queue it behind the very call it exists to interrupt — do not "fix" it back under `mutex_`; the gate rejects that shape. The compiler forces a forward to EXIST (an unimplemented pure virtual leaves the decorator abstract) but never that it takes the mutex, which is the only reason the decorator exists — an unlocked forward makes the fake racy under a storm and produces a TSan report naming the *fake*, the exact confusion the decorator was built to prevent. Model any future SDK decorator the same way. Rule (a) above has one sanctioned in-tree escape hatch: `FakeQHYSDK::before_call`, a hook that is null in every ordinary test and that a case sets deliberately to make one named fake method block (the three #339 cases use it to prove the slowest-forward watchdog, the cancel forward's own timing and the cancel overtake); a case that sets it owns the consequences and must release the block before its driver is destroyed. `scripts/check_stress_registration.py` (the `stress-registration` CI job / pre-flight gate) fails on any vendor/device-type pair that is neither registered nor explicitly allow-listed there, so the currently-unregistered drivers are tracked in one place instead of only in this paragraph. **Name a registration file `<something>_concurrency_stress.cpp` and add it inside the vendor's `if(TARGET alpacacore_<vendor>)` block in `AlpacaCore/tests/CMakeLists.txt`** — the gate enforces both halves: the file glob carries no `test_` prefix (issue #376: the prefix used to be load-bearing, so a file following the documented naming was rejected as a stray `[stress]` case), and a registration file listed in the unconditional `TEST_SOURCES` block is a failure (issue #396), because rule 3 below assumes every `[stress]` case compiles conditionally. That covers a file listed *both* ways too, since CMake de-duplicates the repeated source and the ungated mention is the one that decides, and `if(NOT TARGET ...)` does not count as gating, because it compiles the file exactly when the vendor is absent — one that does not re-satisfies the TSan zero-test grep with no vendor coverage at all, which is the exact failure that grep exists to catch, reached from the other direction. The script's C++ scans strip comments first (issue #386), so an illustrative case macro in a doc comment is documentation and not a registration — `concurrency_stress.h` carries one as the live proof — but **string literals are not stripped**, so keep examples in comments; and they cover every Catch2 registration macro (`SCENARIO`, the `TEMPLATE_*` family, the `_METHOD` fixture variants, `METHOD_AS_TEST_CASE`, `TEST_CASE_PERSISTENT_FIXTURE`, `REGISTER_TEST_CASE`) -- if Catch2 ever grows another, add it to `CATCH_TEST_MACROS`, since a macro missing from that tuple is invisible to the stray-`[stress]` rule and join adjacent tag literals the way the preprocessor does, so `"[vendor][camera]" "[stress]"` is three tags rather than two (issue #393). It separately rejects two tag mistakes per TEST_CASE, each scoped to where that mistake actually costs something: a `[stress-guard]`-without-`[stress]` case inside a `*_concurrency_stress.cpp` file (that tag is for harness self-tests only — a registration wearing it would still get TSan and still read as registered while dropping out of the vendor-coverage count), and a `[stress]` case anywhere else under `AlpacaCore/tests/` (a file outside that glob can compile unconditionally, in which case one such case alone satisfies the TSan job's vendor zero-coverage grep and makes it vacuous — this actually happened, see `test_async_connectable.cpp`). Note the first rule is deliberately limited to registration files: `[stress-guard]` is legitimate anywhere else, which is the whole point of the tag — a vendor case parked outside that glob wearing it would read as registered to a human without counting toward vendor coverage, but that is a naming problem rather than a tag one, and the gate does not try to catch it. Note also that the gate keys on vendor/device-type pairs, so a registered driver masks every other driver of the same vendor and type. Masked pairs today: the two ZWO ASIAIR switch drivers behind the ZWO dew-heater switch registration, the Gemini Cover Lite class plus the Rev2 model path behind the Flat Panel Pro registration, and the integrated QHY CFW driver (camera handle) behind the standalone QHYCFW3 USB registration. All are covered by code review only (the QHY one also by its fake-SDK unit cases). **`scripts/check_stress_registration.py`'s docstring is the authoritative list** — this sentence is a pointer to it, not a second copy, because it has already gone stale once by naming only ZWO. **SDK-callback paths especially**: the TSan suppressions mute any report with a vendor-blob frame on the stack, so a race in driver code invoked from an SDK internal thread is invisible to CI unless that callback path is exercised through a fake-SDK seam (fully instrumented, no suppression applies) — when you add an SDK callback to a driver, register a fake-seam stress path for it in the same change.
 
 
@@ -1073,7 +1192,58 @@ Related decision: [Documentation drift gates](docs/decisions/0003-docs-drift-gat
 - Retention: `logging.retention_days` (default 90, 0 = forever, env `ALPACAHTTP_LOG_RETENTION_DAYS`) auto-deletes daily files whose embedded date is older than `today − retention_days`. Pruning runs once on startup and again on day-rollover inside the file sink. Today's active file is never pruned.
 - Web portal exposes `GET /management/v1/logfiles`, `GET /management/v1/logfiles/{name}[?download=1]`, and `DELETE /management/v1/logfiles/{name}`. Filenames are validated against the daily pattern to prevent path traversal. `util::read_log_file` enforces a 10 MiB per-request cap; web viewer warns and suggests download above 5 MiB.
 - Log level set via `POST/PUT /management/v1/loglevel` is persisted to `config/runtime_state.json` and reapplied on the next start (overrides `default.yaml`'s `logging.level`). Delete that file to fall back to the YAML default. Persistence failures are logged at WARNING and never block the API response.
-- Alpaca-style management responses (including the new logfile endpoints) return HTTP 200 even when `ErrorNumber != 0` — clients must inspect the body, not the HTTP status.
+- Alpaca-style management responses (including the new logfile endpoints) return HTTP 200 even when `ErrorNumber != 0` — clients must inspect the body, not the HTTP status. One exception: `configuredevice` refusals of a GPIO line, GPIO chip or device path outside the board's allowlist, and a duplicate GPIO line, answer HTTP 400 (issue #765).
+
+## Privileged operations from the daemon (polkit + root helper unit)
+
+The service runs as the `alpacabridge` user with `NoNewPrivileges=true`, so
+`sudo`, setuid helpers and `pkexec` cannot work from inside it, and the project
+policy is no subprocesses in the daemon. Three mechanisms exist; pick by what
+the operation needs, never add a fourth without a decision record:
+
+- **An ambient capability** for an in-process syscall (`CAP_SYS_TIME` for
+  `clock_settime`, `CAP_NET_ADMIN` for nl80211). Granted in
+  `debian/alpacabridge.service`; keep `CapabilityBoundingSet` equal to the
+  ambient set.
+- **A polkit rule on a system D-Bus service** the daemon already talks to
+  in-process over sd-bus (NetworkManager for the WiFi card,
+  `debian/alpacabridge.polkit-rules`).
+- **A root-owned oneshot systemd unit started over sd-bus, authorised by a
+  polkit rule scoped to that one unit and the `start` verb** (the software
+  update, `debian/alpacabridge-update.service` +
+  `debian/alpacabridge-software-update` + `debian/alpacabridge-update.polkit-rules`,
+  `docs/software-update.md`). Use this for anything that must run as root and
+  has no D-Bus API (apt, dpkg, mount, mkfs). Rules that came out of building it:
+  - **The daemon passes no arguments.** What runs is fixed in the unit's
+    `ExecStart`; parameters travel through a file the daemon writes and the
+    helper reads if they ever must, never through the D-Bus call.
+  - **Pass only `alpacabridge.service` to `dh_installsystemd`**
+    (`override_dh_installsystemd` in `debian/rules`). It otherwise generates
+    enable/start/restart snippets for EVERY non-template unit in the package,
+    `[Install]` section or not, and the new postinst would restart the helper
+    from inside the apt run the helper is executing.
+  - **A root helper never writes into a directory the service user owns.**
+    The transcript first went to the daemon's `LogsDirectory` (`/var/log/AlpacaBridge`,
+    owned by `alpacabridge`): root truncating and `chmod`-ing a path there
+    follows a symlink the service user planted, and no `[ -L ]` check in the
+    script closes the race (PR #745 review). Give the helper unit its own
+    `LogsDirectory=` (root:root 0755) and pin the path on both sides with a test
+    (`kUpdateLogPath` vs `LOG=` in the script).
+  - **The helper's transcript is the durable record**, not systemd's state: a
+    finished oneshot unit is garbage-collected and `LoadUnit` then reports it
+    as never run. The helper ends its log with a result marker the daemon
+    parses; `installer_state()` trusts systemd for "running" (active, or a
+    start job still queued), "failed" (`ActiveState=failed`) and
+    "unavailable" (`LoadState` not loaded), and resolves an inactive unit
+    from the transcript marker (`classify_installer_state()`).
+  - **Read unit state with `LoadUnit`, not `GetUnit`**: `GetUnit` answers
+    `NoSuchUnit` for a unit that is not loaded, which a never-started helper is.
+  - **Start the unit in a separate cgroup from the daemon** (any unit is) when
+    the operation restarts the daemon itself; a child process would die with it.
+  - **Inject the privileged half behind a seam** (`SoftwareUpdateBackend`) so
+    the policy (what may start, when, what the status means) is unit-tested
+    over a scripted backend; the sd-bus and libcurl code is validated on the
+    rig, where `polkitd` and the packaged rule exist.
 
 ## Vendor-Specific Notes
 
@@ -1096,17 +1266,3 @@ Historical evidence: [July 2026 code audit](docs/failures/2026-07-11-code-audit.
 - Do not add vendor SDK usage to AlpacaHTTP.
 - Do not add desktop GUI frameworks (Qt, GTK, wxWidgets, etc.). The web UI in `AlpacaHTTP/web/` is the only user interface.
 - Do not invent device types outside the ASCOM Alpaca standard set (Camera, CoverCalibrator, Dome, FilterWheel, Focuser, ObservingConditions, Rotator, SafetyMonitor, Switch, Telescope). Shutter control is part of the **Dome** interface (`OpenShutter`/`CloseShutter`/`ShutterStatus`), not a standalone device. A non-standard `Shutter` device type existed as unused scaffolding and was removed 2026-06-09 — clients (NINA, ConformU) cannot consume non-standard types, so they break interoperability.
-
-## Agent skills
-
-### Issue tracker
-
-Issues live in GitHub Issues on `open-astro/AlpacaBridge`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context layout at repo root (created lazily by `/domain-modeling`). See `docs/agents/domain.md`.

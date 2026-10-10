@@ -274,3 +274,62 @@ test('localZoneLabel returns a label, and an empty string when Intl throws', () 
         }
     }));
 });
+
+test('formatServerClock does not throw on an Invalid Date (issue #511)', () => {
+    // A finite but absurd clock Value (1e15 s) passes Number.isFinite() and
+    // yields an Invalid Date; the catch arm's toISOString() used to throw.
+    withTZ('UTC', () => withFormat(({ formatServerClock }) => {
+        assert.doesNotThrow(() => formatServerClock(new Date(1e18)));
+        assert.equal(formatServerClock(new Date(1e18)), '--:--:--');
+        assert.equal(formatServerClock(new Date(NaN), 'UTC'), '--:--:--');
+    }));
+});
+
+test('isValidClockSeconds rejects non-finite and out-of-range Values (issue #511)', () => {
+    withFormat(({ isValidClockSeconds }) => {
+        assert.equal(isValidClockSeconds(1.7e9), true);
+        assert.equal(isValidClockSeconds(1e15), false);
+        assert.equal(isValidClockSeconds(-1e15), false);
+        assert.equal(isValidClockSeconds(NaN), false);
+        assert.equal(isValidClockSeconds(Infinity), false);
+        assert.equal(isValidClockSeconds('1700000000'), false);
+        assert.equal(isValidClockSeconds(null), false);
+    });
+});
+
+test('serverClockError surfaces a synctime ErrorMessage and nothing on success (issue #677)', () => {
+    withFormat(({ serverClockError }) => {
+        // The #670 refusal, verbatim, is what the clock must show.
+        const message = 'Host clock is outside 2000-01-01..2100-01-01 UTC; set the time with POST ' +
+            '/management/v1/synctime.';
+        assert.equal(serverClockError({ ErrorNumber: 1035, ErrorMessage: message }), message);
+        // A success reply, and anything that is not an Alpaca error reply, is no error.
+        assert.equal(serverClockError({ ErrorNumber: 0, ErrorMessage: '', Value: 1.7e9 }), '');
+        assert.equal(serverClockError(null), '');
+        assert.equal(serverClockError(undefined), '');
+        assert.equal(serverClockError({ Value: 1.7e9 }), '');
+        assert.equal(serverClockError({ ErrorNumber: '1035', ErrorMessage: message }), '');
+        // An error with no usable text still says so, with its number.
+        assert.equal(serverClockError({ ErrorNumber: 1035, ErrorMessage: '   ' }), 'Server clock error 1035');
+        assert.equal(serverClockError({ ErrorNumber: 1035 }), 'Server clock error 1035');
+        assert.equal(serverClockError({ ErrorNumber: 1035, ErrorMessage: 42 }), 'Server clock error 1035');
+    });
+});
+
+test('deviceStatus maps Connected, LoadError, LastConnectError and unknown', () => {
+    const { deviceStatus } = require('../../web/format.js');
+    assert.strictEqual(deviceStatus({ Connected: true }).state, 'connected');
+    assert.strictEqual(deviceStatus({ Connected: false }).state, 'idle');
+    assert.strictEqual(deviceStatus({ Connected: false }).text, 'Loaded, not connected');
+    assert.strictEqual(deviceStatus({}).state, 'error');
+    assert.strictEqual(deviceStatus({ Connected: true, LastConnectError: 'port busy' }).text, 'Error: port busy');
+    const both = deviceStatus({ LoadError: true, LastConnectError: 'x' });
+    assert.strictEqual(both.state, 'error');
+    assert.match(both.text, /failed to load.*x/);
+    const faulted = deviceStatus({ Connected: true, LinkFault: 'no status frame for 12 s' });
+    assert.strictEqual(faulted.state, 'error');
+    assert.match(faulted.text, /Link fault: no status frame/);
+    assert.strictEqual(deviceStatus({ Connected: false, LastConnectError: '' }).state, 'idle');
+    // Any fault is red, connected or not.
+    assert.strictEqual(deviceStatus({ Connected: false, LinkFault: 'late read' }).state, 'error');
+});

@@ -84,6 +84,89 @@ git remote -v | grep upstream
   > `git remote add upstream https://github.com/open-astro/AlpacaBridge.git`"
 - PRs from forks target `open-astro/AlpacaBridge:main` as the base.
 
+### Base branch (`--base`) and merge-down mode (`--merge-down`)
+
+The base is `main` unless the user passes `--base stable/X.Y`: a fix for a release in its beta
+(see `docs/beta-channel.md`). Only bug and stability fixes go there (no features, refactors or new
+drivers); say so and stop if the diff is not one. With `--base stable/X.Y`, read every `main` in
+Steps 3-7 as `stable/X.Y` (`git log stable/X.Y..HEAD`, `gh pr create --base stable/X.Y`, and
+`PREFLIGHT_BASE=origin/stable/X.Y` for the pre-flight), and the changelog fragment is still required.
+
+`--merge-down stable/X.Y [--into stable/X.Z]` opens the merge-down PR that follows each beta tag,
+the stable tag and each hotfix: `stable/X.Y` -> `main` by default, or a hotfix into a newer
+`stable/X.Z` (`--into`; a hotfix during the next beta goes to both, as two PRs). Its head is a
+short-lived branch cut from the stable branch, **never `stable/X.Y` itself**: the repository deletes
+a PR's head branch on merge (`delete_branch_on_merge`), and `/pr-checker`'s update-branch step
+merges the base into the head, which on `stable/X.Y` would put `main`'s unreleased work on the
+stable branch. The head is named per receiving branch, `merge-down/X.Y-to-main` or
+`merge-down/X.Y-to-X.Z`, so merging one of a hotfix's two PRs never deletes the other's head. First
+confirm an active ruleset protects the stable branches, or stop and ask the maintainer to add one.
+The list endpoint returns no conditions, so read each active ruleset by id:
+
+```bash
+for id in $(gh api repos/open-astro/AlpacaBridge/rulesets --jq '.[] | select(.enforcement=="active") | .id'); do
+  gh api "repos/open-astro/AlpacaBridge/rulesets/${id}" \
+    --jq '"\(.id) \((.conditions.ref_name.include // []) | join(",")) rules=\([.rules[].type] | join(","))"'
+done
+# one line must include refs/heads/stable/** (or refs/heads/stable/*) with rules deletion and non_fast_forward
+# (~DEFAULT_BRANCH is main's own ruleset, not this one)
+```
+
+Then build the head (the receiving branch is merged into it, so the version files are resolved
+before the PR exists):
+
+```bash
+SRC=X.Y; TGT=main                     # or TGT=X.Z for a hotfix into stable/X.Z
+BASE_BRANCH="$([ "${TGT}" = main ] && echo main || echo "stable/${TGT}")"
+HEAD_BRANCH="merge-down/${SRC}-to-${TGT}"
+git fetch origin "stable/${SRC}" "${BASE_BRANCH}"
+# -B: the local branch from the previous merge down survives its merge (origin deletes only the
+# remote copy); reset it to the current stable tip instead of reusing the old one.
+git checkout -B "${HEAD_BRANCH}" "origin/stable/${SRC}"
+git merge --no-ff --no-commit "origin/${BASE_BRANCH}" || true   # VERSION/README conflicts are expected
+```
+
+**Version files.** The receiving branch keeps its own `VERSION` and README badge line: `main` names
+the newest stable release, never a beta, and `stable/X.Z` keeps its own beta. The one exception is
+a merge into `main` that brings a stable release newer than `main`'s `VERSION` (the promotion, or a
+hotfix before the next promotion): then the stable side's `VERSION` and badge come across, because
+that release is now the newest. Everything else, `docs/releases/` notes included, comes across as
+it is (each notes file is named for its version, so none conflict). Keep the receiving side with:
+
+```bash
+KEEP="origin/${BASE_BRANCH}"
+# The promotion / hotfix-into-main exception: a newer, non-beta stable VERSION wins.
+[ "${TGT}" = main ] && python3 -c 'import sys; sys.path.insert(0, "scripts"); from changelog_fragments import is_beta, version_tuple as v; s, m = sys.argv[1:]; sys.exit(0 if not is_beta(s) and v(s) > v(m) else 1)' \
+  "$(git show "origin/stable/${SRC}:VERSION")" "$(git show origin/main:VERSION)" && KEEP="origin/stable/${SRC}"
+git checkout "${KEEP}" -- VERSION
+# Replaces the badge line, or the whole conflict hunk when both sides changed it.
+python3 -c 'import re,sys; p="README.md"; s=open(p).read(); b=r"(?:#### \[.*\n)+"; open(p,"w").write(re.sub(r"^(?:<{7} .*\n" + b + r"(?:\|{7}.*\n(?:#### \[.*\n)*)?={7}\n" + b + r">{7} .*$|#### \[.*$)", lambda m: sys.argv[1], s, count=1, flags=re.M))' \
+  "$(git show "${KEEP}:README.md" | grep -m1 '^#### \[')"
+git add VERSION README.md
+```
+
+In `CHANGELOG.md` a dated `## [X.Y.Z]` section is inserted in version order below the receiving
+branch's sections. Resolve any other conflict by hand, then check and push:
+
+```bash
+python3 scripts/check_docs_drift.py          # VERSION and badge agree (check 4)
+# Stop on an unresolved conflict: check 4 reads only the first badge line, so it passes over markers.
+[ -z "$(git diff --name-only --diff-filter=U)" ] && ! git diff --cached | grep -qE '^\+(<{7}|>{7})( |$)' &&
+git commit --no-edit
+git push -u origin "${HEAD_BRANCH}"
+gh pr create --base "${BASE_BRANCH}" --head "${HEAD_BRANCH}" --title "Merge stable/${SRC} into ${BASE_BRANCH}"
+```
+
+Run the pre-flight with `PREFLIGHT_BASE=origin/${BASE_BRANCH}`. Skip the fragment, version and
+Falsified-by questions (the commits were already reviewed on the branch). The `falsified-by` job
+and pre-flight gate 2b2 skip a merge down through `scripts/merge_down.py`, only when the head name,
+the base it names and the commits all match: a commit that is not already on `stable/X.Y` (other
+than the merge commit) puts the PR back under the gate. The body fills
+`.github/PULL_REQUEST_TEMPLATE.md` (what the tag carried; "No issue exists"). Merge it with
+`/pr-checker`, which uses the merge-commit method, **never squash**: squashing would hide the
+branch history and make the next merge down conflict again. The head is deleted on merge, as
+intended; `stable/X.Y` is untouched.
+
 ## Step 3 — Analyze the branch for PR content
 
 Gather all changes on this branch relative to `main`:
@@ -105,51 +188,57 @@ Review the branch contents and warn the user about anything that's missing:
 
 - [ ] **Unit tests**: Does the branch include Catch2 tests? (required for all driver code)
 - [ ] **ConformU results**: If this is a driver PR, is an arm64 ConformU report included AND clean (verified in Step 1 — errors=0, issues=0, timing issues=0)?
-- [ ] **CHANGELOG.md**: Is there an entry under `## [x.x.x] - UNRELEASED`, and does the version match the **Versioning policy** below for everything on this branch?
+- [ ] **Changelog fragment**: Does the branch add `changelog.d/<branch-slug>.md` (and leave `CHANGELOG.md` alone), with categories that match the **Versioning policy** below for everything on this branch?
 - [ ] **SUPPORTED-DRIVERS.md**: If this adds or validates a driver, is the table updated?
 - [ ] **AGENTS.md**: Were lessons learned captured?
 - [ ] **AGPL license headers**: `check_docs_drift.py` check 9 fails CI on any first-party source file without the current header, so this is only a reminder to run it (the pre-flight does).
 - [ ] **SDK cleanup**: If SDK files were added under `external/`, have Windows/macOS/32-bit/demo files been removed?
 
-Present the checklist to the user with pass/fail status. If critical items are missing (tests, CHANGELOG), recommend fixing before submitting but let the user decide.
+Present the checklist to the user with pass/fail status. If critical items are missing (tests, changelog fragment), recommend fixing before submitting but let the user decide.
 
-### Verify the UNRELEASED version (Versioning policy)
+### Verify the changelog fragment and its version (Versioning policy)
 
-Look at everything this branch adds/changes (from the diff above) and confirm the
-`## [x.x.x] - UNRELEASED` heading in `CHANGELOG.md` reflects the **highest-severity** change.
+Look at everything this branch adds/changes (from the diff above) and confirm the branch's
+fragment, `changelog.d/<branch-slug>.md`, files each change under the category the release turns
+into the right version bump. The release derives the version from the fragments
+(`python3 scripts/changelog_fragments.py --bump`); a fragment carries none.
 AlpacaBridge is an end-user appliance, so "breaking" means breaks an existing user's install/
 setup. Bump relative to the last **released** version:
 
 - **MAJOR** `x.0.0` — breaks an existing user (drop a platform, remove a driver, config-format
-  change needing migration, change a default that alters behavior).
+  change needing migration, change a default that alters behavior, a saved config that loaded is
+  now refused at start-up, a call that succeeded is now refused): `### Breaking changes`. Apply the
+  "Breaking or not" test in `changelog.d/README.md` to every change, fixes included; a fix with a
+  breaking consequence keeps its `Fixed` bullet and adds a `Breaking changes` one.
 - **MINOR** `x.Y.0` — new backward-compatible capability: **a new driver**, new device/model
-  support, a new optional feature/flag. Resets patch to 0.
+  support, a new optional feature/flag. Resets patch to 0: an unqualified `### Added`.
 - **PATCH** `x.y.Z` — no new capability: bug fix to an existing driver, ConformU re-validation,
-  packaging fix, docs/skill/spec changes.
+  packaging fix, docs/skill/spec changes: any other category, `### Added (tests)` included.
 
-A branch that adds a new driver MUST be a minor bump, never a patch. If the UNRELEASED heading
-undershoots (e.g. it says `2.0.1` but the branch adds a driver, so it should be `2.1.0`), flag
-it and recommend running `/commit` to correct the heading before opening the PR — don't open a
-PR with a version that misrepresents the change.
+A branch that adds a new driver MUST have an unqualified `### Added` entry, never only a
+`Fixed`/`Changed` one. If the fragment undershoots, flag it and recommend running `/commit` to
+correct it before opening the PR — don't open a PR whose fragment misrepresents the change. The
+branch must not edit `CHANGELOG.md`, except to correct a misfiled or wrong entry (say so in the PR
+description); run `python3 scripts/changelog_fragments.py --check`.
 
 ### Release version bump (ask the user — MANDATORY, every run)
 
-Most PRs leave the version as `UNRELEASED` and the actual release is cut separately. On **every**
+Most PRs leave the version alone and the actual release is cut separately. On **every**
 run of this skill, before pushing, ask the user whether this PR is cutting the release — never
 skip or assume the answer:
 
-> "Is this PR cutting the `<UNRELEASED version>` release? If so I can update the `VERSION` file
-> and the `README.md` version badge to `<UNRELEASED version>` (and date the CHANGELOG entry) so
-> they're ready for release. Otherwise I'll leave everything as UNRELEASED."
+> "Is this PR cutting the `<next version>` release? If so I can update the `VERSION` file
+> and the `README.md` version badge to `<next version>` and assemble the changelog fragments into
+> a dated CHANGELOG section so they're ready for release. Otherwise I'll leave everything alone."
 
 - **If NO** (default for feature / driver / fix PRs) — leave the `VERSION` file, the `README.md`
-  badge, and the CHANGELOG `UNRELEASED` heading untouched. Proceed to Step 4.
-- **If YES** — finalize the version (the `[x.x.x]` from the CHANGELOG UNRELEASED heading):
+  badge, `CHANGELOG.md` and the fragments untouched. Proceed to Step 4.
+- **If YES** — finalize the version (`python3 scripts/changelog_fragments.py --bump` proposes it):
   1. Write the bare version (e.g. `2.1.0`) into the `VERSION` file — `printf '%s\n' <version> > VERSION`.
   2. Update the README badge line `#### [x.x.x] - YYYY-MM-DD &middot; [Changelog](CHANGELOG.md)`
      to the new version and **today's date**.
-  3. Change the CHANGELOG heading `## [x.x.x] - UNRELEASED` to `## [x.x.x] - YYYY-MM-DD` (today),
-     so `VERSION`, the README badge, and the CHANGELOG agree.
+  3. Assemble the fragments: `python3 scripts/changelog_fragments.py --release x.x.x --date YYYY-MM-DD`
+     (today; it writes the dated section and deletes the fragments), so `VERSION`, the README badge, and the CHANGELOG agree.
   4. These are now uncommitted changes (Step 1 required a clean tree). Show the user the diff and
      a commit message (e.g. `Release <version>`) for approval, commit them on this branch
      following the project's commit conventions, then continue to the Step 4 pre-flight and push.
@@ -179,15 +268,18 @@ The script reproduces, in order, the CI jobs that can run on this arm64 host and
 7. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
 8. **javascript** — `node --check` of web UI JS AND `node --test AlpacaHTTP/tests/web/*.test.js` (the file form -- the directory form breaks on Node 22), if either `AlpacaHTTP/web/*.js` or `AlpacaHTTP/tests/web/*.js` changed (CI `javascript`)
 9. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
+10. **Sanitizers (ASan + UBSan, vendors OFF)** — `run_all_tests.sh` under `-fsanitize=address,undefined` (CI `sanitizers`); on by default, skip with `RUN_SANITIZERS=0` for docs/CI-only changes
 
-It **auto-installs** every missing tool so each gate actually runs rather than being skipped: `clang-tidy`/`cppcheck`/`shellcheck`/`clang-format`/`nodejs` via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The two `run_all_tests.sh` invocations are full rebuilds and are the slow part — that's expected.
+It **auto-installs** every missing tool so each gate actually runs rather than being skipped: `clang-tidy`/`cppcheck`/`shellcheck`/`clang-format`/`nodejs` via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The three `run_all_tests.sh` invocations (vendors OFF, vendors ON, and the sanitized pass) are full rebuilds and are the slow part — that's expected.
 
 Knobs:
 - `PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh` — fork contributors whose PR base is the upstream remote.
-- `RUN_SANITIZERS=1 ./scripts/ci_preflight.sh` — also reproduce the ASan+UBSan `sanitizers` job (a third rebuild). Recommended when the branch changes C++ runtime logic; skip for docs/CI-only changes.
+- `RUN_SANITIZERS=0 ./scripts/ci_preflight.sh` — skip the ASan+UBSan `sanitizers` reproduction (a third rebuild). The pass is **on by default** since #588, because it was the one configuration neither CI nor a human ran; opt out only for docs/CI-only changes.
 - `PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh` — never apt-install; missing tools are reported `[SKIP]` instead.
 
-**Gate:** the script exits non-zero if any mandatory check failed. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed) or `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled — in the latter case, surface it so the user knows CI will still enforce that gate.
+It can also exit non-zero before any check runs, when `PREFLIGHT_BASE` (or the default base) cannot be resolved (`ERROR: cannot resolve the diff base '<base>' to a commit.` or `ERROR: no merge-base between the diff base '<base>' and HEAD.`); report that error and the base it tried, not a failing check, and fix the base as the message says.
+
+**Gate:** the script exits non-zero if any mandatory check failed or the diff base could not be resolved. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` only appears when a check is not applicable (no matching files changed), when `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled, or when `RUN_SANITIZERS=0` opted out of the ASan+UBSan pass — in the last two cases, surface it so the user knows CI will still enforce that gate.
 
 ## Step 5 — Push the branch
 
@@ -213,35 +305,20 @@ Confirm the push succeeded before proceeding.
 
 ### PR body
 
-Build the body from the branch's commits and diffs. Use this structure:
+Build the body from the branch's commits and diffs. The body is
+`.github/PULL_REQUEST_TEMPLATE.md` filled in:
 
-```markdown
-## Summary
-- Bullet points summarizing what this PR does (1-4 bullets)
-- Include vendor, device model, and key technical details
-- Reference ConformU results if applicable (e.g., "0 errors, 0 issues on arm64")
+- Every section has real content (Thinking Path, Linked Issues or Issue Description, What Changed, Verification, Risks, Model Used, Checklist).
+- Delete the HTML comments.
+- Tick a checklist box only when it is true. Leave "All CI gates are green" and "Claude Review passes with no open P1, P2s, recommendations, or follow-ups" unticked when you open the PR.
+- Driver PRs: the vendor and device model, the unit-test case and assertion counts, the ConformU result and the report path (`AlpacaCore/conformu/<Vendor>/<Model>/<arch>/`) go under **Verification**.
+- Web UI Before / After tables go under **Verification**.
+- The body ends with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+- Check the shape before you submit: save the body to a file and run `python3 scripts/check_pr_template.py --body-file <file>` (pre-flight runs it when `PR_BODY_FILE` is set). The `pr-template` job in `.github/workflows/pr-body.yml` runs the same check on the PR.
 
-## Changes
-Group by component using bold tags:
-- **Vendor Device Driver** (AlpacaCore): what was added/changed
-- **Vendor Device Support** (AlpacaHTTP): router, web UI changes
-- **Vendor Unit Tests**: test count and assertion count
-- **Vendor SDK**: version and location
-- **ConformU Validation**: platforms tested, results
-- **Documentation**: CHANGELOG, SUPPORTED-DRIVERS.md, AGENTS.md updates
+### Falsified by (new test cases)
 
-## Test plan
-- [ ] Local CI pre-flight green: `run_all_tests.sh` (vendors OFF + ON), clang-format, unicode scan, and (when installed) clang-tidy/cppcheck
-- [ ] Unit tests pass (`cd build && ctest`)
-- [ ] ConformU (latest release, but NOT arm64 4.5.0 — see `/conformu` step 2g) passes on Linux arm64
-- [ ] Web UI configuration works in browser
-- [ ] Device connects and operates correctly
-(Include only items relevant to this PR)
-
-## ConformU results
-(If applicable — link to the report files in the branch)
-- **arm64**: `AlpacaCore/conformu/Vendor/Model/arm64/`
-```
+Run `python3 scripts/check_falsified_by.py --base <merge-base>` first; it lists each new or renamed test case in the diff. For every one, draft a line under a `## Falsified by` heading placed after `## What Changed` in the body: `- "<case name>": <production path>:<line> <the one edit that makes the case fail>`. Read the code the case exercises to propose the mutation, then ask the user to confirm or correct each one. Never invent a mutation you have not read in the code. No new cases: omit the section. Before submitting, save the body to a file and run `PR_BODY_FILE=<file> ./scripts/ci_preflight.sh` (or `python3 scripts/check_falsified_by.py --body-file <file>`); the `falsified-by` job in `.github/workflows/pr-body.yml` runs the same check on the PR.
 
 ### Present for approval
 

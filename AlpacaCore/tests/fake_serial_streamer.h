@@ -18,8 +18,9 @@
 // interval and records every '\n'-terminated command line it receives. Two
 // failure modes for the issue #237 link-health tests:
 //   - set_muted(true): the stream stops, the fd stays healthy (hung MCU);
-//   - sever_link(): the pty master closes, so the driver's reads and writes
-//     fail with EIO from then on (USB re-enumeration / unplug), and
+//   - sever_link(): the pty master closes, so the driver's writes fail with
+//     EIO and its reads return 0 at once from then on (USB re-enumeration /
+//     unplug), and
 //     slave_path() is empty afterwards: the path named a pty that no longer
 //     exists, so copy it before the cut if the test still needs it.
 
@@ -39,8 +40,16 @@ namespace alpacacore::test {
 
 class FakeSerialStreamer {
 public:
-    FakeSerialStreamer(std::string frame, std::chrono::milliseconds interval)
-        : pty_("FakeSerialStreamer"), interval_ms_(static_cast<int>(interval.count())), frame_(std::move(frame)) {
+    /// @p first_frame_hold is a start-up window, not a one-shot: no frame is sent until that long after the worker
+    /// started, and nothing is consumed (later frames stream as normal). A connect that waits for the first streamed
+    /// frame stays open until then. It is a constructor argument because the worker starts streaming inside the
+    /// constructor: a setter called afterwards races the first frames. Used by the contract sweep.
+    FakeSerialStreamer(std::string frame, std::chrono::milliseconds interval,
+                       std::chrono::milliseconds first_frame_hold = std::chrono::milliseconds(0))
+        : pty_("FakeSerialStreamer"),
+          first_frame_hold_ms_(static_cast<int>(first_frame_hold.count())),
+          interval_ms_(static_cast<int>(interval.count())),
+          frame_(std::move(frame)) {
         // The pty pair is owned by pty_ (fake_pty_write.h), constructed
         // before this body runs; a setup failure throws from there with
         // nothing left open (issue #387).
@@ -59,7 +68,6 @@ public:
         frame_ = std::move(frame);
     }
     void set_muted(bool muted) { muted_.store(muted); }
-
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return commands_;
@@ -85,6 +93,7 @@ private:
     void run() {
         std::string pending;
         char buf[64];
+        const auto started = std::chrono::steady_clock::now();
         auto last_stream = std::chrono::steady_clock::now() - std::chrono::hours(1);
         while (!stop_.load()) {
             struct pollfd pfd {};
@@ -107,7 +116,8 @@ private:
                 }
             }
             const auto now = std::chrono::steady_clock::now();
-            if (!muted_.load() && now - last_stream >= std::chrono::milliseconds(interval_ms_)) {
+            if (!muted_.load() && now - started >= std::chrono::milliseconds(first_frame_hold_ms_) &&
+                now - last_stream >= std::chrono::milliseconds(interval_ms_)) {
                 last_stream = now;
                 std::string frame;
                 {
@@ -125,6 +135,7 @@ private:
     std::thread worker_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> muted_{false};
+    const int first_frame_hold_ms_;
     int interval_ms_;
 
     mutable std::mutex mutex_;

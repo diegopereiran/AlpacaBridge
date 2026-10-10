@@ -14,6 +14,7 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/device_registry.h>
 #include <alpacacore/dome_driver.h>
@@ -26,7 +27,10 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/host_clock.h>
+#include <alpacacore/util/motion_policy.h>
+#include <alpacahttp/software_update.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -52,12 +56,33 @@ struct RouteMatch {
     std::string method_name;
     bool is_management = false;
     std::string management_endpoint;
+    // #574: set when the path's device-number digits don't fit in a valid
+    // uint32_t range (either overflowed to a wrapped value, or the digit
+    // string itself overflowed even a 64-bit parse). device_type and
+    // method_name are still populated from the match so handle_device can
+    // report a specific 400 instead of falling through to a device lookup
+    // against the wrapped/default device_number.
+    bool device_number_invalid = false;
 };
 
 class Router {
 public:
     Router();
     ~Router();
+
+    // open-astro#664: a hook that adds descriptors to the catalog before
+    // load_persisted_devices() runs, so a ConfigSource::Persisted device can
+    // see them. Router() (above) delegates to this with an empty hook;
+    // production never passes one -- only tests, which need a descriptor the
+    // built-in registration functions don't provide, use it.
+    using CatalogExtension = std::function<void(alpacacore::catalog::DeviceCatalog&)>;
+    explicit Router(const CatalogExtension& extend_catalog);
+
+    // The catalog this router consults before its arm chain
+    // (register_device_from_config()) and serves at GET
+    // /management/v1/devicecatalog. Non-const: tests add descriptors to it
+    // directly via alpacahttp::test_catalog helpers.
+    alpacacore::catalog::DeviceCatalog& catalog() { return catalog_; }
 
     // Set management driver (from AlpacaCore)
     void set_management_driver(std::shared_ptr<alpacacore::ManagementDriver> mgmt_driver);
@@ -96,6 +121,16 @@ public:
         alpacacore::util::HostClock::IsSynchronizedFn is_synchronized, alpacacore::util::HostClock::SetTimeFn set_time,
         alpacacore::util::HostClock::HasRtcFn has_rtc = [] { return false; });
 
+    // open-astro#670: test seam for the wall clock GET /management/v1/synctime
+    // reports. Production never sets it; the default is system_clock::now.
+    //
+    // open-astro#675: safe to call while requests are being served, like
+    // set_host_clock_hooks() (#399). The clock lives in an immutable snapshot
+    // that a request copies under a mutex and calls with the lock released, so
+    // a replacement never destroys the callable a request thread is inside.
+    using NowFn = std::function<std::chrono::system_clock::time_point()>;
+    void set_now_fn(NowFn now_fn);
+
     // open-astro#314: re-run the hardware-RTC probe and cache the answer.
     // Called from the server's RTC probe thread, never from a request path
     // and never from the reactor: the
@@ -103,6 +138,60 @@ public:
     // adapter timeout, and the connect initiator it used to sit on is timed
     // against the 1 s STANDARD target.
     void refresh_rtc_probe() { host_clock_.refresh_rtc(); }
+
+    // open-astro#547: the client-silence motion watchdog's configured
+    // interval. Defaults to AlpacaCore's kClientSilenceStopInterval (30 s,
+    // util/motion_policy.h); Server sets it from Config at construction. An
+    // atomic, not a mutex: read every ~1 s by the timer thread, written at
+    // most once at startup (and by tests), so a lock would buy nothing.
+    void set_motion_watchdog_interval(std::chrono::milliseconds interval) {
+        motion_watchdog_ms_.store(interval.count(), std::memory_order_relaxed);
+    }
+    std::chrono::milliseconds motion_watchdog_interval() const {
+        return std::chrono::milliseconds(motion_watchdog_ms_.load(std::memory_order_relaxed));
+    }
+
+    // open-astro#776: how long PUT Connected=true waits for a connect task.
+    void set_connect_wait_limit(std::chrono::milliseconds limit) {
+        connect_wait_limit_ms_.store(limit.count(), std::memory_order_relaxed);
+    }
+    std::chrono::milliseconds connect_wait_limit() const {
+        return std::chrono::milliseconds(connect_wait_limit_ms_.load(std::memory_order_relaxed));
+    }
+
+    // open-astro#392: extra names route() accepts as a request's Host, on
+    // top of the built-in ones (IP literals, localhost, this machine's name,
+    // *.local, *.home.arpa, *.internal). An entry with a leading dot is a
+    // suffix (".lan" allows "lan" and every "*.lan"); entries are normalized
+    // like the Host header and empty ones dropped. Replaces the previous list.
+    // Server sets it from Config at construction; PUT /management/v1/description
+    // (AllowedHosts) calls it too, after the self-lockout, env-fixed and
+    // cross-origin checks: when the check is on, a rebound page cannot get a
+    // request past it, and cross-origin writes are refused with 403.
+    void set_allowed_hosts(const std::vector<std::string>& hosts);
+
+    // http.host_check_enabled: whether route() applies the Host allowlist at
+    // all. Off by default, so a request is not refused for its Host name; the
+    // Origin==Host cross-origin guard does not depend on it. Lock-free, so it
+    // may be flipped while requests run; the next request sees the new value.
+    void set_host_check_enabled(bool enabled) { host_check_enabled_.store(enabled, std::memory_order_release); }
+
+    // open-astro#547: check every registered telescope for client silence
+    // during motion and stop any that have gone quiet past the configured
+    // interval. Called once a second from the server's existing low-
+    // frequency timer thread (open-astro#314's rtc_probe_thread_, retasked
+    // to tick this too) -- never from the reactor (get_slewing()/
+    // abort_slew() are mount I/O, up to the transport timeout) and never
+    // while holding any router lock (it takes only each driver's own
+    // mutex_, so calling it under a router lock would be a new, undocumented
+    // lock-order edge).
+    void run_motion_watchdogs(std::chrono::steady_clock::time_point now);
+
+    // Software update (docs/software-update.md): the manager behind
+    // /management/v1/update/*. Server installs one over the production
+    // backend; tests inject one over a scripted backend. Without it the
+    // endpoints answer NOT_IMPLEMENTED, like restart without its callback.
+    void set_software_update_manager(std::unique_ptr<util::SoftwareUpdateManager> manager);
 
     // Set shutdown callback (called when shutdown endpoint is requested)
     void set_shutdown_callback(std::function<void()> callback);
@@ -113,9 +202,31 @@ public:
     Response route(const Request& request, std::uint32_t server_transaction_id);
 
 private:
+    // open-astro#664: populated in the constructor, before load_persisted_devices().
+    alpacacore::catalog::DeviceCatalog catalog_;
+
     std::shared_ptr<alpacacore::ManagementDriver> management_driver_;
     std::function<void()> shutdown_callback_;
     std::function<void()> restart_callback_;
+
+    // open-astro#392: normalized allowed_hosts entries, replaced wholesale by
+    // set_allowed_hosts() and read by every request; the lock guards only the
+    // pointer copy. machine_hostname_ is set once in the constructor.
+    std::shared_ptr<const std::vector<std::string>> allowed_hosts_ = std::make_shared<const std::vector<std::string>>();
+    mutable std::mutex allowed_hosts_mutex_;
+    std::atomic<bool> host_check_enabled_{false};
+    // Serializes a description PUT's validate, persist and apply, so two
+    // writes cannot interleave and leave the file and memory disagreeing.
+    // route() never takes it.
+    std::mutex description_write_mutex_;
+    std::string machine_hostname_;
+
+    // open-astro#547.
+    std::atomic<std::chrono::milliseconds::rep> motion_watchdog_ms_{
+        std::chrono::duration_cast<std::chrono::milliseconds>(alpacacore::util::kClientSilenceStopInterval).count()};
+
+    // open-astro#776.
+    std::atomic<std::chrono::milliseconds::rep> connect_wait_limit_ms_{60000};
 
     // Lazily constructed on first /management/v1/wifi/* request so setups
     // without NetworkManager (or without a wifi adapter) pay no cost.
@@ -124,6 +235,10 @@ private:
     std::unique_ptr<util::WifiManager> wifi_manager_;
     std::mutex wifi_manager_init_mutex_;
     util::WifiManager& wifi_manager();
+
+    // Set once at construction by Server (or a test), read by every
+    // /management/v1/update/* request; the manager serializes internally.
+    std::unique_ptr<util::SoftwareUpdateManager> software_update_;
 
     // Parse route from path
     RouteMatch parse_route(const std::string& path);
@@ -139,14 +254,20 @@ private:
     Response handle_build_info(const Request& request, std::uint32_t server_tx_id);
     Response handle_configured_devices(const Request& request, std::uint32_t server_tx_id);
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
+    // open-astro#664: GET /management/v1/devicecatalog, serving catalog_json::describe_json(catalog_).
+    Response handle_device_catalog(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
     Response handle_restart(const Request& request, std::uint32_t server_tx_id);
     Response handle_sync_time(const Request& request, std::uint32_t server_tx_id);
+    std::shared_ptr<const NowFn> current_now_fn() const;
     // WiFi manager (see docs/wifi-manager-design.md); match.method_name
     // carries the sub-endpoint (status/scan/profiles/connect/ap/country/radio)
     // and, for profile deletes, the UUID.
     Response handle_wifi(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
+    // Software update (docs/software-update.md); match.method_name carries
+    // the sub-endpoint (status/check/install).
+    Response handle_software_update(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
     Response handle_log_level(const Request& request, std::uint32_t server_tx_id);
     Response handle_logs(const Request& request, std::uint32_t server_tx_id);
     Response handle_log_files_list(const Request& request, std::uint32_t server_tx_id);
@@ -178,8 +299,14 @@ private:
     // anyway and left for the driver's connect-time guard to refuse.
     enum class ConfigSource : std::uint8_t { Api, Persisted };
 
+    //
+    // \p learned_config, when given, receives the keys the registration worked
+    // out about the device that the entry does not yet carry (a ZWO camera's
+    // serialNumber, cameraName and uniqueId, #914). The caller stores them
+    // with the entry: this function never writes the persisted list itself,
+    // because the API path has not added the entry to it yet.
     bool register_device_from_config(const nlohmann::json& config, std::string& error_message,
-                                     ConfigSource source = ConfigSource::Api);
+                                     ConfigSource source = ConfigSource::Api, nlohmann::json* learned_config = nullptr);
 
     // Issue #380, generalising the rule #353 introduced for the Sky-Watcher
     // site-coordinate check: what a validation failure inside
@@ -394,6 +521,11 @@ private:
     // const-propagation, which a unique_ptr silently drops: a const Router
     // method could reach a non-const HostClock through the pointer.
     alpacacore::util::HostClock host_clock_;
+    // open-astro#675: replaced wholesale by set_now_fn(), never mutated; see
+    // current_now_fn().
+    std::shared_ptr<const NowFn> now_fn_ =
+        std::make_shared<const NowFn>([] { return std::chrono::system_clock::now(); });
+    mutable std::mutex now_fn_mutex_;
 };
 
 } // namespace alpacahttp

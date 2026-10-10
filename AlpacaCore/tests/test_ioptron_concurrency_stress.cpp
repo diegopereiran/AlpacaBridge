@@ -51,6 +51,10 @@ alpacacore::vendor::ioptron::ConnectionInfo ioptron_endpoint(int port) {
 
 void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
+    guard([&] { scope.set_target_right_ascension(5.0); });
+    guard([&] { scope.set_target_declination(20.0); });
+    guard([&] { static_cast<void>(scope.get_target_right_ascension()); });
+    guard([&] { static_cast<void>(scope.get_target_declination()); });
     guard([&] { static_cast<void>(scope.get_tracking()); });
     guard([&] { static_cast<void>(scope.get_right_ascension()); });
     guard([&] { static_cast<void>(scope.get_declination()); });
@@ -60,6 +64,7 @@ void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
     guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
     guard([&] { scope.pulse_guide(0, 50); });
     guard([&] { scope.abort_slew(); });
+    guard([&] { scope.slew_to_target(); });
 }
 
 }  // namespace
@@ -90,9 +95,9 @@ TEST_CASE("iOptron telescope - concurrent connect/disconnect/slew/pulse stress",
     // to be named. A real driver defect would show up as a code outside this
     // set, and guard.report() names every distinct one it saw.
     alpacacore::test::StressCallGuard guard{
-        alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
-        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::NotImplemented,
-        alpacacore::AlpacaError::DriverException};
+        alpacacore::AlpacaError::NotConnected,     alpacacore::AlpacaError::InvalidValue,
+        alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::ValueNotSet,
+        alpacacore::AlpacaError::NotImplemented,   alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { telescope_operate(guard, d); });
 
     // open-astro#326: settle_connected() rather than a bare set_connected():
@@ -152,13 +157,15 @@ TEST_CASE("iOptron telescope - destruction mid-operation (slew/pulse threads liv
 //
 // The filter wheel uses create_iefw_filterwheel_by_index: its :DeviceInfo#
 // port scan runs inside the async connect task, so construction is trivial
-// and the fail-fast happens on connect() as expected. The focuser's
-// create_ieaf_focuser_by_index is NOT the same shape -- it scans for a port
-// SYNCHRONOUSLY at construction and throws immediately if none is found
-// (see ioptron_ieaf_focuser_driver.cpp), so it cannot be used here; this
-// uses the explicit-port create_ieaf_focuser("/dev/ttyUSB0") instead, the
-// same convention test_ioptron_ieaf_focuser.cpp's unit tests already use,
-// which defers to connect() like every other case in this file.
+// and the fail-fast happens on connect() as expected. Since #659 the
+// focuser's create_ieaf_focuser_by_index has the same shape (the scan runs
+// inside set_connected(true)), so it could be used here too; this file
+// keeps the explicit-port create_ieaf_focuser("/dev/ttyUSB0") on purpose:
+// the by-index connect would run enumerate_ieaf_ports() on every storm
+// iteration, and on a dev box with a Prolific adapter attached that probe
+// opens (and DTR-toggles) real hardware. The explicit port defers to
+// connect() like every other case in this file, and the by-index factory's
+// laziness is pinned by test_ioptron_ieaf_focuser_deferred_connect.cpp.
 TEST_CASE("iEFW filter wheel - concurrent connect/disconnect/operate stress", "[ioptron][filterwheel][stress]") {
     auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel_by_index(0, 0);
 

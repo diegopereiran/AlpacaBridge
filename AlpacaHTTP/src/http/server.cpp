@@ -25,65 +25,22 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
+
+#include "thread_join.h"
 
 namespace alpacahttp {
 
 namespace {
 
-// Threads that failed both join() AND detach() (should not be reachable in
-// practice -- see join_or_abandon() below) are moved here instead of a bare
-// `new std::thread(...)` with the pointer discarded. Two requirements this
-// container has to satisfy at once, which is why it looks the way it does:
-// (a) it must stay REACHABLE for the life of the process, so the `sanitizers`
-// CI job's LeakSanitizer does not report the parked thread's allocation as an
-// indistinguishable ordinary leak; (b) the parked std::thread objects must
-// NEVER be destroyed, because they are still joinable() (both join() and
-// detach() throw without clearing libstdc++'s internal id) and a joinable
-// thread's destructor calls std::terminate(). A plain function-local or
-// namespace-scope `static std::vector<std::thread>` satisfies (a) but not
-// (b): it has a non-trivial destructor registered with `__cxa_atexit`, which
-// runs at normal process exit and would abort there instead of never. A
-// heap-allocated container reached through a static POINTER that is never
-// deleted satisfies both: `new` keeps it reachable (satisfying LSan), and
-// nothing ever runs its destructor (satisfying the no-terminate() guarantee).
-std::mutex g_abandoned_threads_mutex;
-std::vector<std::thread>& abandoned_threads() {
-    static auto* threads = new std::vector<std::thread>();
-    return *threads;
-}
-
-// Join `thread`, and if pthread_join fails (EDEADLK/ESRCH/EINVAL) fall back to
-// detach() instead of a second join() attempt. A second join() is not safe
-// here: libstdc++ only clears a thread's id on a SUCCESSFUL join, so the
-// object is still joinable() after the exception, and a caller running under
-// lifecycle_mutex_ (join_orphaned_threads()'s callers) that retried join()
-// could block on it -- if the thread is not actually gone but merely blocked
-// waiting for that same mutex (run_server()'s spawn phase takes it), the
-// retry would deadlock instead of throwing. detach() makes the destructor a
-// no-op at the cost of never confirming the thread has exited; if detach()
-// also throws (both calls failing on the same OS handle is not reachable in
-// practice), the thread object is parked in abandoned_threads() rather than
-// left to destruct joinable, which would call std::terminate().
-void join_or_abandon(std::thread& thread, const char* context) {
-    try {
-        thread.join();
-        return;
-    } catch (const std::system_error& e) {
-        util::log_error(std::string(context) + ": pthread_join failed (" + e.code().message() +
-                        "), detaching thread instead of reaping it");
-    }
-    try {
-        thread.detach();
-    } catch (const std::system_error& e) {
-        util::log_error(std::string(context) + ": detach also failed (" + e.code().message() +
-                        ") after a failed join; leaking the thread object rather than terminating");
-        std::lock_guard<std::mutex> guard(g_abandoned_threads_mutex);
-        abandoned_threads().push_back(std::move(thread));
-    }
-}
+// join_or_abandon() and its fallback-tracking container now live in
+// http/thread_join.{h,cpp} (issue #561), so they can be exercised from tests
+// via an injectable joiner/detacher and a process-wide test hook. All call
+// sites below keep the exact one-arg call shape they had before the move.
+using detail::join_or_abandon;
 
 }  // namespace
 
@@ -96,6 +53,16 @@ Server::Server(const Config& config)
                             config_.profile_name());
     router_.set_config_path(config_.config_path());
     router_.set_sync_system_clock_from_clients(config_.sync_system_clock_from_clients());
+    router_.set_motion_watchdog_interval(std::chrono::seconds(config_.motion_watchdog_seconds()));
+    router_.set_allowed_hosts(config_.allowed_hosts());
+    router_.set_host_check_enabled(config_.host_check_enabled());
+    // Software update (docs/software-update.md): the helper unit writes its
+    // transcript to a root-owned directory of its own, never the daemon's log
+    // directory (software_update.h explains why), so the path is fixed.
+    router_.set_software_update_manager(std::make_unique<util::SoftwareUpdateManager>(
+        util::SoftwareUpdateSettings{alpacahttp::kVersion, config_.update_packages_url(), util::kDefaultPackageName,
+                                     config_.update_release_notes_url(), config_.update_release_url()},
+        std::make_unique<util::SystemSoftwareUpdateBackend>(util::kDefaultInstallerUnit, util::kUpdateLogPath)));
 
     // The reactor's wake pipe lives as long as the Server. Non-blocking on
     // both ends: a wake is one byte, and a full pipe already means a wake is
@@ -248,8 +215,8 @@ void Server::stop() {
         // live one. Between this `!running_` read and the lock inside, a
         // restart (handle_restart_request() stops then starts on a detached
         // thread) can install a running server -- adopting it hangs this
-        // caller forever, which for the example embedder is the process never
-        // exiting.
+        // caller forever, which for an embedder that also calls stop() is the
+        // process never exiting.
         join_server_thread(std::this_thread::get_id(), /*only_if_stopped=*/true);
         return;
     }
@@ -278,8 +245,13 @@ void Server::stop() {
         wake_reactor();
         // The RTC probe timer, woken out of its wait the same way. It holds
         // no connections and serves no request, so it can go first; a pass
-        // already inside the probe finishes its read before the flag is
-        // observed, which is bounded by the bus timeout (#314).
+        // already in flight finishes before the flag is observed. That pass
+        // can be an RTC read (bounded by the bus timeout, #314) or, since
+        // #547, a client-silence watchdog tick inside get_slewing()/
+        // abort_slew()/move_axis() on every registered telescope, each
+        // bounded by that mount's own transport timeouts (Sky-Watcher's stop
+        // confirm alone is kAxisStopTimeout = 5 s per axis). The join below
+        // has no deadline of its own.
         {
             std::lock_guard<std::mutex> lock(rtc_probe_mutex_);
             rtc_probe_stop_ = true;
@@ -349,9 +321,9 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
     // Take sole ownership of the thread under server_thread_mutex_, then act
     // on it with the lock released. Whoever wins the move joins; every other
     // caller finds server_thread_ empty and returns, so exactly one join()
-    // ever runs on it. stop() is re-entrant from another thread (the shutdown
-    // endpoint's detached thread runs the shutdown callback, which can make
-    // the embedder's loop call stop() as well), and concurrent join() on one
+    // ever runs on it. stop() is re-entrant from another thread (the restart
+    // endpoint's detached thread stops the server, and an embedder that also
+    // calls stop() can run it at the same time), and concurrent join() on one
     // std::thread is UB -- in practice the second pthread_join throws
     // std::system_error that nothing catches, i.e. std::terminate().
     //
@@ -363,8 +335,8 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
     // matter:
     //
     //  - Exactly one caller may join. stop() is re-entrant from another thread
-    //    (the shutdown endpoint's detached thread runs the shutdown callback,
-    //    which can make the embedder's own loop call stop() too), and
+    //    (the restart endpoint's detached thread stops the server, and an
+    //    embedder that also calls stop() can run it at the same time), and
     //    concurrent join() on one std::thread is UB -- in practice the second
     //    pthread_join throws std::system_error that nothing catches.
     //
@@ -386,8 +358,8 @@ void Server::join_server_thread(std::thread::id current_id, bool only_if_stopped
         // releases the mutex, so by the time it wakes the winner may already
         // have finished its join, returned from stop() and called
         // start_async() again -- the restart path (handle_restart_request()
-        // stops and restarts while the embedder's loop, seeing is_running()
-        // false, calls stop() too) does exactly that. Re-reading
+        // stops and restarts, while an embedder that also calls stop() from
+        // its own thread can land in between) does exactly that. Re-reading
         // server_thread_ blind would then adopt the NEW server's thread and
         // join it, hanging stop() forever while the restarted server runs on.
         const std::uint64_t generation = server_thread_generation_;
@@ -479,14 +451,21 @@ void Server::close_wake_pipe() {
     }
 }
 
-std::uint16_t Server::bound_port() const {
-    auto fd = server_fd_.load();
+// Not authoritative from another thread: the SO_ACCEPTCONN check below
+// narrows the fd-reuse window but does not close it. An fd number recycled
+// into an unrelated LISTENING socket between that check and getsockname()
+// still yields a stranger's port (#562). Fine for its test-only callers;
+// anything that must know the port for sure reads it on the server thread,
+// as run_server() does before it publishes the descriptor.
+std::uint16_t Server::bound_port() const { return listening_port(server_fd_.load()); }
+
+std::uint16_t Server::listening_port(util::SocketHandle fd) {
     if (fd == util::kInvalidSocket) {
         return 0;
     }
     // fd can be closed and its number reused by an unrelated socket between
-    // the load above and here (a concurrent stop() or rebind_listener()) --
-    // the same hazard rebind_listener() guards when reclaiming the OLD fd
+    // the caller's load and here (a concurrent stop() or rebind_listener())
+    // -- the same hazard rebind_listener() guards when reclaiming the OLD fd
     // number, with the same check. Confirm it is still a listening socket
     // before trusting getsockname()'s answer, so a race reports 0 (unknown)
     // instead of a stranger's port.
@@ -627,23 +606,37 @@ void Server::run_server() {
         return;
     }
 
+    // Resolve the port once, on this thread, before the descriptor is
+    // published and anyone else can close it. With http_port 0 the OS picked
+    // it; the rebind below and the startup log need that number, not the
+    // configured 0 (#562, #564).
+    const std::uint16_t resolved_port = port != 0 ? static_cast<std::uint16_t>(port) : listening_port(server_fd);
+    if (resolved_port == 0) {
+        util::log_error("Failed to read back the ephemeral HTTP port the listener bound");
+        util::socket_close(server_fd);
+        running_ = false;
+        return;
+    }
+
     // Store server_fd so we can close it from stop()
     server_fd_.store(server_fd);
 
-    util::log_info("Server listening on port " + std::to_string(port));
+    util::log_info("Server listening on port " + std::to_string(resolved_port));
 
     // The listener fd can go bad underneath us without stop() being called (a
     // stray double-close elsewhere in the process can free and then re-close
     // our fd number). Observed once in the field: the accept loop broke
     // silently and the whole server shut down "successfully" mid ConformU
     // run. Recreate the listener instead of dying.
-    auto last_rebind = std::chrono::steady_clock::time_point::min();
+    // Empty until the first rebind. Not time_point::min(): now() - min()
+    // overflows the signed tick count (UB, caught by UBSan).
+    std::optional<std::chrono::steady_clock::time_point> last_rebind;
     auto rebind_listener = [&]() -> bool {
         // Backoff ACROSS rebind cycles too: if the fd-loss condition recurs
         // immediately after a successful rebind, sleep instead of spinning
         // select-fail -> rebind -> select-fail with continuous error logging.
         auto now = std::chrono::steady_clock::now();
-        if (now - last_rebind < std::chrono::seconds(2)) {
+        if (last_rebind && now - *last_rebind < std::chrono::seconds(2)) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         last_rebind = now;
@@ -660,7 +653,11 @@ void Server::run_server() {
             }
         }
         for (int attempt = 0; attempt < 10 && running_; ++attempt) {
-            util::SocketHandle fd = create_listener(port);
+            // The resolved port, never the configured one: with http_port 0 a
+            // fresh ephemeral bind would move the server to a port no client
+            // or discovery reply knows. If it cannot be re-bound, recovery
+            // fails as for any fixed port.
+            util::SocketHandle fd = create_listener(resolved_port);
             if (fd != util::kInvalidSocket) {
                 server_fd_.store(fd);
                 server_fd = fd;
@@ -894,8 +891,10 @@ void send_error(util::SocketHandle socket_fd, int status, const char* reason, co
     Response error_response;
     error_response.set_status(status, reason);
     error_response.set_body(body);
-    std::string response_str = error_response.to_string();
-    util::socket_send_all(socket_fd, response_str.c_str(), response_str.size());
+    const std::string response_headers = error_response.to_header_string();
+    const std::string& response_body = error_response.body();
+    util::socket_send_allv(socket_fd, response_headers.data(), response_headers.size(), response_body.data(),
+                           response_body.size());
 }
 
 // True when the client wants the connection kept open after this request
@@ -962,8 +961,8 @@ bool may_persist(const Request& request, const Response& response) {
     }
     // Without Content-Length the response is framed by connection close, so
     // it cannot share a connection with anything after it. Every router path
-    // sets a body (and therefore a length) today, and Response::to_string()
-    // now defaults the header when a handler does not, but this stays as the
+    // sets a body (and therefore a length) today, and to_header_string() now
+    // defaults the header when a handler does not, but this stays as the
     // structural guard: a future bodyless response must close, not desync.
     if (response.get_header("Content-Length").empty()) {
         return false;
@@ -1194,12 +1193,16 @@ Server::ServeResult Server::serve_one_request(Connection& conn) {
     // client would read "keep-alive" while the server closes the socket
     // right after sending, a protocol-violating response (review round
     // 3). Explicitly writing "close" here is identical to leaving the
-    // header unset, since Response::to_string() defaults to "close".
+    // header unset, since Response::to_header_string() defaults to "close".
     response.set_header("Connection", keep_alive ? "keep-alive" : "close");
 
-    // Send response (loop until fully sent; MSG_NOSIGNAL prevents SIGPIPE)
-    std::string response_str = response.to_string();
-    if (!util::socket_send_all(conn.fd, response_str.c_str(), response_str.size())) {
+    // Send both buffers as one vectored write: small responses avoid the
+    // Nagle/delayed-ACK stall of separate header/body sends, and large bodies
+    // do not require a second full-sized HTTP response string.
+    const std::string response_headers = response.to_header_string();
+    const std::string& response_body = response.body();
+    if (!util::socket_send_allv(conn.fd, response_headers.data(), response_headers.size(), response_body.data(),
+                                response_body.size())) {
         util::log_warning("Failed to send full response: " + util::socket_error_message(util::socket_get_last_error()));
         return ServeResult::Close;
     }
@@ -1362,17 +1365,37 @@ void Server::wake_reactor() {
 // pass landing a few microseconds early is silently swallowed, which would
 // make the effective period 60 s). It is settable for the same reason the keep-alive
 // cap is -- a test cannot wait half a minute to see the thread do its job.
+//
+// open-astro#547: this same thread also ticks the client-silence motion
+// watchdog now (see the declaration's comment in server.h for why it rides
+// here rather than spawning a thread per device). The loop wakes every
+// kTimerTick (1 s, the watchdog's cadence) and calls
+// Router::run_motion_watchdogs() on every pass; the RTC probe keeps its own,
+// longer period via a separate deadline checked on each tick and re-armed
+// from the probe time, so consecutive probes stay a full interval apart.
 void Server::rtc_probe_loop() {
-    const auto interval = std::chrono::seconds(config_.rtc_probe_interval_seconds());
+    constexpr auto kTimerTick = std::chrono::seconds(1);
+    const auto rtc_interval = std::chrono::seconds(config_.rtc_probe_interval_seconds());
+    auto next_rtc = std::chrono::steady_clock::now() + rtc_interval;
     while (true) {
         {
             std::unique_lock<std::mutex> lock(rtc_probe_mutex_);
-            rtc_probe_cv_.wait_for(lock, interval, [this] { return rtc_probe_stop_; });
+            rtc_probe_cv_.wait_for(lock, kTimerTick, [this] { return rtc_probe_stop_; });
             if (rtc_probe_stop_) {
                 return;
             }
         }
-        router_.refresh_rtc_probe();
+        const auto now = std::chrono::steady_clock::now();
+        router_.run_motion_watchdogs(now);
+        if (now >= next_rtc) {
+            router_.refresh_rtc_probe();
+            // From now, not from the old deadline: each 1 s tick overshoots
+            // slightly, so `next_rtc += rtc_interval` lets the probe phase
+            // drift and, once per wrap, lands two probes only 30 ticks (just
+            // over 30 s) apart -- most of the +1 s margin over
+            // HostClock::kRtcProbeRateLimit gone.
+            next_rtc = now + rtc_interval;
+        }
     }
 }
 
@@ -1526,9 +1549,15 @@ void Server::handle_shutdown_request() {
         } catch (...) {
             util::log_error("Shutdown callback threw unknown exception");
         }
+        // The embedder asked to be told, so the embedder owns the stop: the
+        // example server's loop calls server.stop() once and that call returns
+        // only after every server thread is joined. A second stop() from here
+        // raced it (the concurrent-stop case in test_server_socket.cpp) and
+        // dropped is_running() before the embedder had acted (#713).
+        return;
     }
 
-    stop();
+    stop();  // no callback installed: the handler is the only thing that can stop the server
 }
 
 void Server::handle_restart_request() {
@@ -1557,8 +1586,15 @@ void Server::handle_restart_request() {
     }
 
     util::log_info("Restarting HTTP server");
+    // Made odd BEFORE stop() clears running_, even again only after
+    // start_async() has returned: is_running() never reads false across the
+    // join window. If run_server() then fails to bind, it clears running_
+    // itself and is_running() drops for real -- the embedder exits 1 and
+    // systemd respawns.
+    ++restart_epoch_;
     stop();
     start_async();
+    ++restart_epoch_;
     restart_requested_ = false;
 }
 

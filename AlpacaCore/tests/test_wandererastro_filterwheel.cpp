@@ -143,7 +143,8 @@ TEST_CASE("WandererAstro FilterWheel Driver - State machine", "[wandererastro][f
     REQUIRE(driver->get_connecting() == false);
 
     // Platform 7 DeviceState: while disconnected the Position getter throws and
-    // is omitted, leaving just the TimeStamp; there must be no non-compliant
+    // is omitted, and TimeStamp itself is withheld too, leaving the
+    // ASCOM-required empty list; there must be no non-compliant
     // "Connected" entry.
     const auto state = driver->get_device_state();
     bool has_timestamp = false;
@@ -154,7 +155,7 @@ TEST_CASE("WandererAstro FilterWheel Driver - State machine", "[wandererastro][f
             has_timestamp = true;
         }
     }
-    REQUIRE(has_timestamp);
+    REQUIRE_FALSE(has_timestamp);
 }
 
 TEST_CASE("WandererAstro FilterWheel Protocol Wrapper - Disconnected behavior", "[wandererastro][filterwheel][unit]") {
@@ -193,8 +194,23 @@ TEST_CASE("WandererAstro FilterWheel Protocol Wrapper - Disconnected behavior", 
 #include <thread>
 
 #include "fake_serial_streamer.h"
+#include "fake_task_clock.h"
 
 namespace {
+
+// Moves the fake clock by @p d, then waits (bounded, real time) for the
+// reader thread's next pass: its silence check is the one clock read a muted
+// or severed link makes per pass, taken under the lock the driver's getters
+// also take, so a getter called after this returns sees that pass's verdict.
+bool advance_one_pass(alpacacore::test::FakeTaskClock& clock, std::chrono::nanoseconds d) {
+    clock.advance(d);
+    return clock.wait_for_now_calls(clock.now_calls() + 1, std::chrono::milliseconds(2000));
+}
+
+// set_muted() can land just after the streamer committed one more frame to the
+// pty; give the reader time to take it at the current virtual time before the
+// clock moves, or it would restart the silence window.
+void drain_after_mute() { std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
 
 template <typename Pred>
 bool wait_until_sfw(Pred pred, std::chrono::milliseconds limit) {
@@ -215,8 +231,10 @@ const char* const kSfwFrame = "WSFW368A20260124A3ABCDEFGHIA0A0A0A0A0A0A0A0A1A\n"
 
 TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and moves (issue #237)",
           "[wandererastro][filterwheel][unit][fake]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
     alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
-    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(driver->get_position() == 2);  // wire slot 3 -> Alpaca 2
@@ -230,8 +248,15 @@ TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and m
             return true;
         }
     };
-    CHECK(wait_until_sfw(position_throws, std::chrono::milliseconds(15000)));
+    drain_after_mute();
+    // The 10 s limit is inclusive: exactly 10 s of silence still serves the cache.
+    REQUIRE(advance_one_pass(clock, std::chrono::seconds(10)));
+    CHECK(driver->get_position() == 2);
+    // One millisecond more latches the fault.
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
+    CHECK(position_throws());
     CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
     require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->set_position(5); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(wheel.received("6"));  // no move went on the wire while faulted
@@ -241,5 +266,6 @@ TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and m
     wheel.set_muted(false);
     CHECK(wait_until_sfw([&] { return !position_throws(); }, std::chrono::milliseconds(3000)));
     CHECK(driver->get_position() == 2);
+    CHECK(driver->get_link_fault().empty());
     CHECK_NOTHROW(driver->set_connected(false));
 }
