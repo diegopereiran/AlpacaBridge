@@ -53,6 +53,8 @@ struct FakeHidState {
     bool moving = false;
     bool dead = false;         // reads time out, as a pulled cable does
     bool fail_config = false;  // MaxStep (0x30) goes unanswered
+    bool fail_move = false;    // the device moves (0x36) but the reply is lost
+    bool fail_halt = false;    // the device stops (0x37) but the reply is lost
     int closes = 0;
     std::vector<std::uint8_t> pending;
 
@@ -108,11 +110,13 @@ public:
             case 0x36:
                 ++state_->moves;
                 state_->moving = true;
+                if (state_->fail_move) break;
                 resp.insert(resp.end(), {1, 0});
                 break;
             case 0x37:
                 ++state_->halts;
                 state_->moving = false;
+                if (state_->fail_halt) break;
                 resp.insert(resp.end(), {1, 0});
                 break;
             default:
@@ -185,6 +189,31 @@ TEST_CASE("Astroasis Focuser Driver - Move and Halt invalidate the status cache"
     CHECK(driver->get_is_moving());
     driver->halt();
     CHECK_FALSE(driver->get_is_moving());
+}
+
+// Falsified by: astroasis_focuser_driver.cpp:268 delete status_cache_.invalidate() in move()'s catch block.
+TEST_CASE("Astroasis Focuser Driver - failed move still invalidates the status cache", "[astroasis][focuser][unit]") {
+    auto state = std::make_shared<FakeHidState>();
+    auto driver = make_fake_focuser(state);
+    driver->set_connected(true);
+
+    CHECK_FALSE(driver->get_is_moving());  // fills the cache
+    state->fail_move = true;
+    CHECK_THROWS_AS(driver->move(2000), alpacacore::AlpacaException);
+    CHECK(driver->get_is_moving());  // the device moved; a stale frame says false
+}
+
+// Falsified by: astroasis_focuser_driver.cpp:249 delete status_cache_.invalidate() in halt()'s catch block.
+TEST_CASE("Astroasis Focuser Driver - failed halt still invalidates the status cache", "[astroasis][focuser][unit]") {
+    auto state = std::make_shared<FakeHidState>();
+    auto driver = make_fake_focuser(state);
+    driver->set_connected(true);
+
+    driver->move(2000);
+    CHECK(driver->get_is_moving());  // fills the cache with moving=true
+    state->fail_halt = true;
+    CHECK_THROWS_AS(driver->halt(), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_is_moving());  // the device stopped; a stale frame says true
 }
 
 // Falsified by: astroasis_focuser_driver.cpp delete protocol_.disconnect() in the MaxStep catch at connect.
