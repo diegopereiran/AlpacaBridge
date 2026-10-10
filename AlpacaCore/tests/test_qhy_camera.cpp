@@ -802,7 +802,7 @@ TEST_CASE("QHY Camera Driver - aborting a pending download leaves ImageReady fal
     driver->start_exposure(0.05, true);
     {
         std::unique_lock<std::mutex> lock(gate_mutex);
-        REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return download_entered; }));
+        CHECK(gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return download_entered; }));
     }
     driver->abort_exposure();
     CHECK_FALSE(driver->get_image_ready());
