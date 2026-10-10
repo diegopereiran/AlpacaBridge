@@ -189,9 +189,7 @@ public:
 
     bool get_absolute() const override { return true; }
 
-    bool get_is_moving() const override {
-        return read_status().moving;
-    }
+    bool get_is_moving() const override { return read_status().moving; }
 
     int get_max_step() const override {
         ensure_connected();
@@ -203,9 +201,7 @@ public:
         return max_step_.load();
     }
 
-    int get_position() const override {
-        return read_status().position;
-    }
+    int get_position() const override { return read_status().position; }
 
     double get_step_size() const override {
         // No mutex_: touches nothing it guards -- ensure_connected() is

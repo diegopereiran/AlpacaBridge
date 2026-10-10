@@ -23,9 +23,9 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <vector>
 #include <thread>
 #include <variant>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -45,13 +45,13 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 // keeps a handle after handing the transport to the driver.
 struct FakeHidState {
     std::mutex mutex;
-    int status_reads = 0;   // cmd 0x32
-    int config_reads = 0;   // cmd 0x30 / 0x3a
-    int moves = 0;          // cmd 0x36
-    int halts = 0;          // cmd 0x37
+    int status_reads = 0;  // cmd 0x32
+    int config_reads = 0;  // cmd 0x30 / 0x3a
+    int moves = 0;         // cmd 0x36
+    int halts = 0;         // cmd 0x37
     int position = 1234;
     bool moving = false;
-    bool dead = false;      // reads time out, as a pulled cable does
+    bool dead = false;  // reads time out, as a pulled cable does
     std::vector<std::uint8_t> pending;
 
     int transactions() {
