@@ -301,6 +301,36 @@ TEST_CASE("ToupTek camera - malformed frame fails ImageReady and a later valid f
     driver->set_connected(false);
 }
 
+TEST_CASE("ToupTek camera - no delivered frame fails ImageReady and ImageArray", "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    driver->start_exposure(0.01, true);
+
+    const auto image_ready_error = [&] {
+        try {
+            (void)driver->get_image_ready();
+        } catch (const AlpacaException& e) {
+            return e.error_code();
+        }
+        return 0;
+    };
+    REQUIRE(eventually([&] { return image_ready_error() == alpacacore::AlpacaError::DriverException; }));
+
+    const auto image_array_error = [&] {
+        try {
+            (void)driver->get_image_array();
+        } catch (const AlpacaException& e) {
+            return e.error_code();
+        }
+        return 0;
+    };
+    CHECK(image_array_error() == alpacacore::AlpacaError::DriverException);
+    driver->set_connected(false);
+}
+
 TEST_CASE("ToupTek camera - aborting a held image wait leaves ImageReady false without an error",
           "[touptek][camera][unit][fakesdk]") {
     auto fake = make_fake_with_camera();

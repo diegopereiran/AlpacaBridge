@@ -1811,6 +1811,10 @@ private:
         if (out_width <= 0 || out_height <= 0 || actual_width <= 0 || actual_height <= 0) {
             alpacacore::util::throw_invalid_camera_image("invalid ToupTek frame dimensions");
         }
+        // start_exposure() even-pads the sensor-space ROI before binning so the
+        // SDK must deliver the requested output dimensions. Unlike QHY's SDK,
+        // ToupTek's smaller positive dimensions violate that ROI contract; do
+        // not synthesize pixels from a frame the SDK reports as truncated.
         if (actual_width < out_width || actual_height < out_height) {
             alpacacore::util::throw_invalid_camera_image("ToupTek frame is smaller than the requested ROI");
         }
