@@ -41,11 +41,13 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     name: Create GitHub Release (CHANGELOG or beta notes)
+    permissions:
+      contents: write   # gh release create/edit
     runs-on: ubuntu-24.04-arm   # text-only; kept on arm64 for a single-arch fleet
     timeout-minutes: 10
     env:
@@ -212,6 +214,8 @@ jobs:
     # its pre-release is how a tester installs it. Stable releases stay
     # notes-only; their .deb ships through apt.openastro.net alone.
     name: Attach the .deb to a beta pre-release
+    permissions:
+      contents: write   # gh release upload
     needs: release
     if: needs.release.outputs.prerelease == 'true'
     runs-on: ubuntu-24.04-arm
