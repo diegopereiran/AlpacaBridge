@@ -1309,10 +1309,11 @@ public:
                 // the SDK will deliver (expected_w, one wider than num for an odd
                 // NumX) or num_x when the SDK delivers one column fewer (the edge
                 // fill). The row count is the larger of the two the same way,
-                // plus one row of crash-insurance.
+                // plus two rows of crash-insurance: the SDK writes got_h rows
+                // before any check here can run.
                 const std::size_t bytes_per_pixel = active_16bit ? 2 : 1;
                 const int stride_px = std::max(expected_w, active_num_x);
-                const int buffer_rows = std::max(expected_h, active_num_y) + 1;
+                const int buffer_rows = std::max(expected_h, active_num_y) + 2;
                 std::vector<std::uint8_t> pixel_buffer(static_cast<std::size_t>(stride_px) * bytes_per_pixel *
                                                        static_cast<std::size_t>(buffer_rows));
 
@@ -1358,12 +1359,14 @@ public:
                 // frame below that is malformed (#913) and must not be padded
                 // into a plausible image; a frame at it that is still one row or
                 // column short of num is the sensor-edge fill (#977).
-                ALPACA_LOG_DEBUG("ToupTek", "Frame " + std::to_string(got_w) + "x" + std::to_string(got_h) +
-                                                " for ROI " + std::to_string(roi_w) + "x" + std::to_string(roi_h) +
-                                                " at bin " + std::to_string(active_bin) + " (expected " +
-                                                std::to_string(expected_w) + "x" + std::to_string(expected_h) +
-                                                ", requested " + std::to_string(active_num_x) + "x" +
-                                                std::to_string(active_num_y) + ")");
+                if (::alpacacore::logging::get_log_level() <= ::alpacacore::logging::LogLevel::Debug) {
+                    ALPACA_LOG_DEBUG("ToupTek", "Frame " + std::to_string(got_w) + "x" + std::to_string(got_h) +
+                                                    " for ROI " + std::to_string(roi_w) + "x" + std::to_string(roi_h) +
+                                                    " at bin " + std::to_string(active_bin) + " (expected " +
+                                                    std::to_string(expected_w) + "x" + std::to_string(expected_h) +
+                                                    ", requested " + std::to_string(active_num_x) + "x" +
+                                                    std::to_string(active_num_y) + ")");
+                }
                 if (got_w < static_cast<unsigned>(expected_w) || got_h < static_cast<unsigned>(expected_h)) {
                     alpacacore::util::throw_invalid_camera_image(
                         "ToupTek frame is smaller than the frame the ROI predicts");
