@@ -102,6 +102,9 @@
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#include <alpacacore/vendor/altair/altair_camera_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
@@ -579,6 +582,16 @@ inline ContractEntry contract_entry_gphoto_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ALTAIR
+// Built on the real Altair SDK singleton, disconnected: like touptek_camera,
+// construction enumerates but opens nothing.
+inline ContractEntry contract_entry_altair_camera() {
+    return make_entry(
+        "altair_camera", "altair", "camera", DeviceType::Camera,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::altair::create_altair_camera(n, 0); }, kSrcAgents);
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 inline ContractEntry contract_entry_touptek_camera() {
     return make_entry(
@@ -780,6 +793,11 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #else
 #define CS_TOUPTEK(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CS_ALTAIR(X) X(altair_camera)
+#else
+#define CS_ALTAIR(X)
+#endif
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 #define CS_TOUPTEK_STELLAVITA(X) X(touptek_switch)
 #else
@@ -816,6 +834,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     CS_GPHOTO(X) \
     CS_TOUPTEK(X) \
     CS_TOUPTEK_STELLAVITA(X) \
+    CS_ALTAIR(X) \
     CS_WANDERERASTRO(X) \
     CS_ASTROASIS(X)
 // clang-format on
@@ -871,6 +890,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
+    {"altair", "camera", "fake_touptek_sdk.h"},  // the ToupTek camera driver behind the Altair factory
     {"svbony", "camera", "fake_svbony_sdk.h"},
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},

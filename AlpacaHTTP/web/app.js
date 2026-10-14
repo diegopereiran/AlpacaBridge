@@ -341,6 +341,7 @@ const INDEX_FIELDS = [
     { fieldId: 'qhy-cfw3-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'qhy-focuser-index', vendor: 'qhy', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'altair-camera-index', vendor: 'altair', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'gphoto-camera-index', vendor: 'gphoto', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
@@ -1043,6 +1044,8 @@ function startEditDevice(device) {
         setFormValue('astroasis-hid-path', config.hidPath);
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
+    } else if (vendor === 'altair') {
+        setFormValue('altair-camera-index', config.cameraIndex);
     } else if (vendor === 'gphoto') {
         setFormValue('gphoto-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek' && deviceType === 'switch') {
@@ -2763,6 +2766,11 @@ function updateVendorOptions() {
         svbonyOption.disabled = !isCamera;
         svbonyOption.hidden = !isCamera;
     }
+    const altairOption = vendorSelect.querySelector('option[value="altair"]');
+    if (altairOption) {
+        altairOption.disabled = !isCamera;
+        altairOption.hidden = !isCamera;
+    }
     const gphotoOption = vendorSelect.querySelector('option[value="gphoto"]');
     if (gphotoOption) {
         gphotoOption.disabled = !isCamera;
@@ -2839,6 +2847,9 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
+    if (!isCamera && vendorSelect.value === 'altair') {
+        vendorSelect.value = '';
+    }
     if (!isCamera && vendorSelect.value === 'gphoto') {
         vendorSelect.value = '';
     }
@@ -2889,6 +2900,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('qhy-config').style.display = 'block';
     } else if (vendor === 'svbony') {
         document.getElementById('svbony-config').style.display = 'block';
+    } else if (vendor === 'altair') {
+        document.getElementById('altair-config').style.display = 'block';
     } else if (vendor === 'gphoto') {
         document.getElementById('gphoto-config').style.display = 'block';
     } else if (vendor === 'touptek') {
@@ -4229,6 +4242,9 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'svbony') {
         const svbonyCameraIndex = readOptionalNumber(formData, 'svbonyCameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
+    } else if (deviceData.vendor === 'altair') {
+        const altairCameraIndex = readOptionalNumber(formData, 'altairCameraIndex');
+        deviceData.cameraIndex = altairCameraIndex !== null ? altairCameraIndex : 0;
     } else if (deviceData.vendor === 'gphoto') {
         const gphotoCameraIndex = readOptionalNumber(formData, 'gphotoCameraIndex');
         deviceData.cameraIndex = gphotoCameraIndex !== null ? gphotoCameraIndex : 0;
