@@ -9,10 +9,8 @@
 class MainWidget : public QWidget
 {
     Q_OBJECT
-    ToupcamDeviceV2 m_cur;
-    HToupcam        m_hcam;
     QComboBox*      m_cmb_res;
-    QSlider*        m_slider_expoTime;
+    QSlider*        m_sld_expoTime;
     QLineEdit*      m_edt_expoTime;
     QPushButton*    m_btn_expoTime;
     QLabel*         m_lbl_temp;
@@ -22,7 +20,25 @@ class MainWidget : public QWidget
     QPushButton*    m_btn_open;
     QPushButton*    m_btn_snap;
     QPushButton*    m_btn_trigger;
+    QStackedWidget* m_showWidget;
+    QRadioButton*   m_rdo_trigger;
+    QRadioButton*   m_rdo_video;
+    QComboBox*      m_cmb_triggerSource;
+    QRadioButton*   m_rdo_poly;
+    QRadioButton*   m_rdo_image;
+    QRadioButton*   m_rdo_OpenTEC;
+    QRadioButton*   m_rdo_CloseTEC;
+    QLineEdit*      m_edt_TECtarget;
+    QPushButton*    m_btn_setTEC;
+    QLabel*         m_lbl_Temperature;
+    QRadioButton*   m_rdo_lowBit;
+    QRadioButton*   m_rdo_highBit;
+    QSlider*        m_sld_frameRate;
+    QLabel*         m_lbl_frameRate;
+    LineDataPanel*  m_LineDataPanel;
     QTimer*         m_timer;
+    ToupcamDeviceV2 m_cur;
+    HToupcam        m_hcam;
     unsigned        m_imgWidth;
     unsigned        m_imgHeight;
     ushort*         m_pData;
@@ -31,19 +47,9 @@ class MainWidget : public QWidget
     int             m_temp;
     int             m_tint;
     unsigned        m_count;
-    QStackedWidget* m_showWidget;
-    int             m_bshow;
-    LineDataPanel*  m_LineDataPanel;
-    QRadioButton*   m_rdo_trigger;
-    QRadioButton*   m_rdo_video;
-    QRadioButton*   m_rdo_poly;
-    QRadioButton*   m_rdo_image;
-    QRadioButton*   m_rdo_OpenTEC;
-    QRadioButton*   m_rdo_CloseTEC;
-    QLineEdit*      m_edt_TECtarget;
-    QPushButton*    m_btn_setTEC;
-    QLabel*         m_lbl_Temperature;
     unsigned        m_depth;
+    unsigned        m_pFourCC;
+    int             m_bshow;
 
 public:
     MainWidget(QWidget* parent = nullptr);
@@ -58,6 +64,8 @@ private:
     void onBtnSetTEC();
     void onRdoPoly();
     void onRdoImage();
+    void onRdoLowBit();
+    void onRdoHighBit();
     void onRdoTrigger();
     void onRdoVideo();
     void onRdoOpenTEC();

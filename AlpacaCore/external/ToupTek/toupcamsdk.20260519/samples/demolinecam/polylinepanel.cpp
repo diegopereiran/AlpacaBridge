@@ -653,7 +653,13 @@ void LineDataPanel::OnLineDataExport()
     }
 }
 
-void LineDataPanel::OnBuffer(ushort* pRaw, int width, int bitdepth)
+void LineDataPanel::OnBufferPL16(ushort* pRaw, int width, int bitdepth)
+{
+    if (!m_bPause)
+        m_ctrl->OnBuffer(pRaw, width, bitdepth);
+}
+
+void LineDataPanel::OnBufferPL8(uchar* pRaw, int width, int bitdepth)
 {
     if (!m_bPause)
         m_ctrl->OnBuffer(pRaw, width, bitdepth);

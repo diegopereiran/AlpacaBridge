@@ -259,7 +259,7 @@ public:
 };
 
 /**
- * Thin wrapper around the ToupTek SDK (toupcamsdk 20260128).
+ * Thin wrapper around the ToupTek SDK (toupcamsdk 20260519).
  *
  * - Singleton because the SDK global enumeration state is process-scoped.
  * - A std::mutex serializes calls into the SDK (the SDK is thread-safe, but

@@ -72,7 +72,7 @@ static void __stdcall EventCallback(unsigned nEvent, void* pCallbackCtx)
             }
             if (g_bSave)
             {
-                try 
+                try
                 {
                     //Save converted image in a local file
                     char path[128];
@@ -80,7 +80,7 @@ static void __stdcall EventCallback(unsigned nEvent, void* pCallbackCtx)
                     cv::imwrite(path, g_image);
                     printf("succesd to save image\n");
                 }
-                catch (cv::Exception& ex) 
+                catch (cv::Exception& ex)
                 {
                     printf("Exception in saving mat image: %s\n", ex.what());
                 }

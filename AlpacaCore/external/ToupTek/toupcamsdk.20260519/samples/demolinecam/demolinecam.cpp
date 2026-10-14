@@ -3,10 +3,18 @@
 
 MainWidget::MainWidget(QWidget* parent)
     : QWidget(parent)
-    , m_hcam(nullptr), m_timer(new QTimer(this))
-    , m_imgWidth(0), m_imgHeight(0), m_pData(nullptr), m_pshowData(nullptr)
-    , m_res(0), m_temp(TOUPCAM_TEMP_DEF), m_tint(TOUPCAM_TINT_DEF), m_count(0), m_bshow(0)
     , m_LineDataPanel(new LineDataPanel(this))
+    , m_timer(new QTimer(this))
+    , m_hcam(nullptr)
+    , m_imgWidth(0)
+    , m_imgHeight(0)
+    , m_pData(nullptr)
+    , m_pshowData(nullptr)
+    , m_res(0)
+    , m_temp(TOUPCAM_TEMP_DEF)
+    , m_tint(TOUPCAM_TINT_DEF)
+    , m_count(0)
+    , m_bshow(false)
 {
     setMinimumSize(1440, 512);
     showMaximized();
@@ -37,15 +45,23 @@ MainWidget::MainWidget(QWidget* parent)
         gboxres->setLayout(v);
     }
 
+    QGroupBox* gboxbitdepth = new QGroupBox("Bit depth");
+    {
+        m_rdo_lowBit = new QRadioButton("8");
+        connect(m_rdo_lowBit, &QRadioButton::clicked, this, &MainWidget::onRdoLowBit);
+        m_rdo_highBit = new QRadioButton("16");
+        connect(m_rdo_highBit, &QRadioButton::clicked, this, &MainWidget::onRdoHighBit);
+        QHBoxLayout* h = new QHBoxLayout();
+        h->addWidget(m_rdo_lowBit);
+        h->addWidget(m_rdo_highBit);
+        gboxbitdepth->setLayout(h);
+    }
+
     QGroupBox* gboxexp = new QGroupBox("Exposure");
     {
-        m_slider_expoTime = new QSlider(Qt::Horizontal);
-        m_slider_expoTime->setEnabled(false);
-        m_btn_expoTime = new QPushButton("Set Expotime");
-        m_btn_expoTime->setEnabled(false);
-        m_edt_expoTime = new QLineEdit();
-        m_edt_expoTime->setEnabled(false);
-        connect(m_slider_expoTime, &QSlider::valueChanged, this, [this](int value)
+        m_sld_expoTime = new QSlider(Qt::Horizontal);
+        m_sld_expoTime->setEnabled(false);
+        connect(m_sld_expoTime, &QSlider::valueChanged, this, [this](int value)
         {
             if (m_hcam)
             {
@@ -53,6 +69,9 @@ MainWidget::MainWidget(QWidget* parent)
                 Toupcam_put_ExpoTime(m_hcam, value * 1000);
             }
         });
+
+        m_btn_expoTime = new QPushButton("Set Expotime");
+        m_btn_expoTime->setEnabled(false);
         connect(m_btn_expoTime, &QPushButton::clicked, this, [this]()
         {
             if (m_hcam)
@@ -60,11 +79,14 @@ MainWidget::MainWidget(QWidget* parent)
                 int nexpo = m_edt_expoTime->text().toInt();
                 Toupcam_put_ExpoTime(m_hcam, nexpo * 1000);
                 {
-                    const QSignalBlocker blocker(m_slider_expoTime);
-                    m_slider_expoTime->setValue(nexpo);
+                    const QSignalBlocker blocker(m_sld_expoTime);
+                    m_sld_expoTime->setValue(nexpo);
                 }
             }
         });
+
+        m_edt_expoTime = new QLineEdit();
+        m_edt_expoTime->setEnabled(false);
 
         QHBoxLayout* h = new QHBoxLayout();
         h->addWidget(m_edt_expoTime);
@@ -72,7 +94,7 @@ MainWidget::MainWidget(QWidget* parent)
         h->addWidget(m_btn_expoTime);
         QVBoxLayout* v = new QVBoxLayout();
         v->addLayout(h);
-        v->addWidget(m_slider_expoTime);
+        v->addWidget(m_sld_expoTime);
         gboxexp->setLayout(v);
     }
 
@@ -94,18 +116,62 @@ MainWidget::MainWidget(QWidget* parent)
         m_rdo_trigger = new QRadioButton("Trigger");
         connect(m_rdo_trigger, &QRadioButton::clicked, this, &MainWidget::onRdoTrigger);
         m_rdo_trigger->setEnabled(false);
+
         m_rdo_video = new QRadioButton("Video");
         connect(m_rdo_video, &QRadioButton::clicked, this, &MainWidget::onRdoVideo);
         m_rdo_video->setEnabled(false);
-        m_btn_trigger = new QPushButton("Trigger");
+
+        m_btn_trigger = new QPushButton("Soft Trigger");
         connect(m_btn_trigger, &QPushButton::clicked, this, &MainWidget::onBtnTrigger);
         m_btn_trigger->setEnabled(false);
+
+        m_cmb_triggerSource = new QComboBox();
+        m_cmb_triggerSource->setEnabled(false);
+        m_cmb_triggerSource->addItem("Opto-isolated input");
+        m_cmb_triggerSource->addItem("GPIO0");
+        m_cmb_triggerSource->addItem("GPIO1");
+        m_cmb_triggerSource->addItem("Counter");
+        m_cmb_triggerSource->addItem("PWM");
+        m_cmb_triggerSource->addItem("Software");
+        m_cmb_triggerSource->setCurrentIndex(0);
+        connect(m_cmb_triggerSource, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
+        {
+            Toupcam_IoControl(m_hcam, 0, TOUPCAM_IOCONTROLTYPE_SET_TRIGGERSOURCE, index, NULL);
+            m_btn_trigger->setEnabled(index == 5 ? true : false);
+        });
+
         QHBoxLayout* h = new QHBoxLayout();
         h->addWidget(m_rdo_video);
         h->addWidget(m_rdo_trigger);
+        h->addWidget(m_cmb_triggerSource);
         h->addWidget(m_btn_trigger);
         gboxTriggermode->setLayout(h);
         m_rdo_video->setChecked(true);
+    }
+
+    QGroupBox* gboxframerate = new QGroupBox("Frame Rate");
+    {
+        m_lbl_frameRate = new QLabel();
+        m_sld_frameRate = new QSlider(Qt::Horizontal);
+        m_sld_frameRate->setEnabled(false);
+        connect(m_sld_frameRate, &QSlider::valueChanged, this, [this](int val)
+        {
+            if (m_hcam)
+            {
+                m_lbl_frameRate->setText(QString::asprintf("%.1lf", val / 10.0));
+                Toupcam_put_Option(m_hcam, TOUPCAM_OPTION_PRECISE_FRAMERATE, val);
+            }
+        });
+
+        QHBoxLayout* hlyt = new QHBoxLayout();
+        hlyt->addWidget(new QLabel("FrameRate:"));
+        hlyt->addStretch();
+        hlyt->addWidget(m_lbl_frameRate);
+        QVBoxLayout* vlyt = new QVBoxLayout();
+        vlyt->addLayout(hlyt);
+        vlyt->addWidget(m_sld_frameRate);
+
+        gboxframerate->setLayout(vlyt);
     }
 
     QGroupBox* gboxTEC = new QGroupBox("TEC");
@@ -113,16 +179,18 @@ MainWidget::MainWidget(QWidget* parent)
         m_rdo_OpenTEC = new QRadioButton("Open");
         connect(m_rdo_OpenTEC, &QRadioButton::clicked, this, &MainWidget::onRdoOpenTEC);
         m_rdo_OpenTEC->setEnabled(false);
+
         m_rdo_CloseTEC = new QRadioButton("Close");
         connect(m_rdo_CloseTEC, &QRadioButton::clicked, this, &MainWidget::onRdoCloseTEC);
         m_rdo_CloseTEC->setEnabled(false);
+
         m_edt_TECtarget = new QLineEdit();
         m_edt_TECtarget->setEnabled(false);
+
         m_btn_setTEC = new QPushButton("Set");
         connect(m_btn_setTEC, &QPushButton::clicked, this, &MainWidget::onBtnSetTEC);
         m_btn_setTEC->setEnabled(false);
         m_lbl_Temperature = new QLabel("0");
-
 
         QHBoxLayout* h1 = new QHBoxLayout();
         h1->addWidget(new QLabel("TEC target:"));
@@ -144,6 +212,7 @@ MainWidget::MainWidget(QWidget* parent)
     {
         m_btn_open = new QPushButton("Open");
         connect(m_btn_open, &QPushButton::clicked, this, &MainWidget::onBtnOpen);
+
         m_btn_snap = new QPushButton("Snap");
         m_btn_snap->setEnabled(false);
         connect(m_btn_snap, &QPushButton::clicked, this, &MainWidget::onBtnSnap);
@@ -154,8 +223,10 @@ MainWidget::MainWidget(QWidget* parent)
         v->addWidget(m_btn_open);
         v->addWidget(m_btn_snap);
         v->addWidget(gboxres);
+        v->addWidget(gboxbitdepth);
         v->addWidget(gboxTriggermode);
         v->addWidget(gboxexp);
+        v->addWidget(gboxframerate);
         v->addWidget(gboxTEC);
         v->addWidget(gboxshowmode);
         v->addWidget(m_lbl_frame);
@@ -164,7 +235,6 @@ MainWidget::MainWidget(QWidget* parent)
     }
 
     {
-
         m_lbl_video = new QLabel();
         m_showWidget = new QStackedWidget();
         m_showWidget->addWidget(m_LineDataPanel);
@@ -230,7 +300,7 @@ void MainWidget::closeCamera()
     m_btn_open->setText("Open");
     m_timer->stop();
     m_lbl_frame->clear();
-    m_slider_expoTime->setEnabled(false);
+    m_sld_expoTime->setEnabled(false);
     m_btn_expoTime->setEnabled(false);
     m_edt_expoTime->setEnabled(false);
     m_btn_snap->setEnabled(false);
@@ -239,8 +309,10 @@ void MainWidget::closeCamera()
     m_rdo_video->setEnabled(false);
     m_rdo_trigger->setEnabled(false);
     m_btn_trigger->setEnabled(false);
+    m_cmb_triggerSource->setEnabled(false);
     m_rdo_OpenTEC->setEnabled(false);
     m_rdo_CloseTEC->setEnabled(false);
+    m_sld_frameRate->setEnabled(false);
 }
 
 void MainWidget::closeEvent(QCloseEvent*)
@@ -264,14 +336,12 @@ void MainWidget::startCamera()
     m_pshowData = new uchar[m_imgWidth * m_imgHeight];
     unsigned uimax = 0, uimin = 0, uidef = 0;
     Toupcam_get_ExpTimeRange(m_hcam, &uimin, &uimax, &uidef);
-    m_slider_expoTime->setRange(uimin / 1000, uimax / 1000);
+    m_sld_expoTime->setRange(uimin / 1000, uimax / 1000);
     handleExpoEvent();
 
     Toupcam_put_Option(m_hcam, TOUPCAM_OPTION_BITDEPTH, 1);
     Toupcam_put_Option(m_hcam, TOUPCAM_OPTION_RAW, 1);
     Toupcam_put_AutoExpoEnable(m_hcam, 0);
-    unsigned pFourCC;
-    Toupcam_get_RawFormat(m_hcam, &pFourCC, &m_depth);
     if (SUCCEEDED(Toupcam_StartPullModeWithCallback(m_hcam, eventCallBack, this)))
     {
         m_rdo_video->setChecked(true);
@@ -280,7 +350,7 @@ void MainWidget::startCamera()
         m_btn_snap->setEnabled(true);
         m_btn_expoTime->setEnabled(true);
         m_edt_expoTime->setEnabled(true);
-        m_slider_expoTime->setEnabled(true);
+        m_sld_expoTime->setEnabled(true);
         m_rdo_video->setEnabled(true);
         m_rdo_trigger->setEnabled(true);
         m_timer->start(1000);
@@ -301,6 +371,31 @@ void MainWidget::startCamera()
             if (SUCCEEDED(Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_TECTARGET, &nTECtarget)))
                 m_edt_TECtarget->setText(QString::number(nTECtarget / 10.0));
         }
+
+        if (m_cur.model->flag & TOUPCAM_FLAG_PRECISE_FRAMERATE)
+        {
+            m_sld_frameRate->setEnabled(true);
+            int nMaxFramerate, nMinFramerate, nFramerate;
+            Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_MAX_PRECISE_FRAMERATE, &nMaxFramerate);
+            Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_MIN_PRECISE_FRAMERATE, &nMinFramerate);
+            Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_PRECISE_FRAMERATE, &nFramerate);
+            m_sld_frameRate->setRange(nMinFramerate, nMaxFramerate);
+            m_sld_frameRate->setValue(nFramerate);
+        }
+        else
+        {
+            m_sld_frameRate->setEnabled(false);
+        }
+
+        int maxdepth = Toupcam_get_MaxBitDepth(m_hcam);
+        m_rdo_highBit->setText(QString::number(maxdepth));
+        m_rdo_highBit->setEnabled(true);
+        m_rdo_lowBit->setEnabled(true);
+        Toupcam_get_RawFormat(m_hcam, &m_pFourCC, &m_depth);
+        if (m_depth == 8)
+            m_rdo_lowBit->setChecked(true);
+        else
+            m_rdo_highBit->setChecked(true);
     }
     else
     {
@@ -407,12 +502,18 @@ void MainWidget::onBtnSetTEC()
 
 void MainWidget::onRdoTrigger()
 {
-    m_btn_trigger->setEnabled(true);
-    Toupcam_put_Option(m_hcam, TOUPCAM_OPTION_TRIGGER, 1);
+    m_cmb_triggerSource->setEnabled(true);
+    int index;
+    Toupcam_IoControl(m_hcam, 0, TOUPCAM_IOCONTROLTYPE_GET_TRIGGERSOURCE, NULL, &index);
+    m_cmb_triggerSource->setCurrentIndex(index);
+    m_btn_trigger->setEnabled(index == 5 ? true : false);
+
+    Toupcam_put_Option(m_hcam, TOUPCAM_OPTION_TRIGGER, 2);
 }
 
 void MainWidget::onRdoVideo()
 {
+    m_cmb_triggerSource->setEnabled(false);
     m_btn_trigger->setEnabled(false);
     Toupcam_put_Option(m_hcam, TOUPCAM_OPTION_TRIGGER, 0);
 }
@@ -443,6 +544,36 @@ void MainWidget::onRdoImage()
     m_showWidget->setCurrentIndex(1);
 }
 
+void MainWidget::onRdoLowBit()
+{
+    Toupcam_put_Option(m_hcam, TOUPCAM_OPTION_BITDEPTH, 0);
+    Toupcam_get_RawFormat(m_hcam, &m_pFourCC, &m_depth);
+    if (m_cur.model->flag & TOUPCAM_FLAG_PRECISE_FRAMERATE)
+    {
+        int nMaxFramerate, nMinFramerate, nFramerate;
+        Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_MAX_PRECISE_FRAMERATE, &nMaxFramerate);
+        Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_MIN_PRECISE_FRAMERATE, &nMinFramerate);
+        Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_PRECISE_FRAMERATE, &nFramerate);
+        m_sld_frameRate->setRange(nMinFramerate, nMaxFramerate);
+        m_sld_frameRate->setValue(nFramerate);
+    }
+}
+
+void MainWidget::onRdoHighBit()
+{
+    Toupcam_put_Option(m_hcam, TOUPCAM_OPTION_BITDEPTH, 1);
+    Toupcam_get_RawFormat(m_hcam, &m_pFourCC, &m_depth);
+    if (m_cur.model->flag & TOUPCAM_FLAG_PRECISE_FRAMERATE)
+    {
+        int nMaxFramerate, nMinFramerate, nFramerate;
+        Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_MAX_PRECISE_FRAMERATE, &nMaxFramerate);
+        Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_MIN_PRECISE_FRAMERATE, &nMinFramerate);
+        Toupcam_get_Option(m_hcam, TOUPCAM_OPTION_PRECISE_FRAMERATE, &nFramerate);
+        m_sld_frameRate->setRange(nMinFramerate, nMaxFramerate);
+        m_sld_frameRate->setValue(nFramerate);
+    }
+}
+
 void MainWidget::eventCallBack(unsigned nEvent, void* pCallbackCtx)
 {
     MainWidget* pThis = reinterpret_cast<MainWidget*>(pCallbackCtx);
@@ -456,23 +587,35 @@ void MainWidget::handleImageEvent()
     {
         if (m_bshow == 1)
         {
-            ushort* pdata = reinterpret_cast<ushort*>(m_pData);
-            const int bitShift = m_depth - 8;
-#pragma omp parallel for simd
-            for (unsigned y = 0; y < height; ++y)
+            if (m_depth > 8)
             {
-                unsigned index = y * width;
-                for (unsigned x = 0; x < width; ++x)
-                    m_pshowData[index + x] = pdata[index + x] >> bitShift;
-            }
+                ushort* pdata = reinterpret_cast<ushort*>(m_pData);
+                const int bitShift = m_depth - 8;
+                for (unsigned y = 0; y < height; ++y)
+                {
+                    unsigned index = y * width;
+                    for (unsigned x = 0; x < width; ++x)
+                        m_pshowData[index + x] = pdata[index + x] >> bitShift;
+                }
 
-            QImage image(m_pshowData, width, height, QImage::Format_Grayscale8);
-            QImage newimage = image.scaled(m_lbl_video->width(), m_lbl_video->height(), Qt::KeepAspectRatio, Qt::FastTransformation);
-            m_lbl_video->setPixmap(QPixmap::fromImage(newimage));
+                QImage image(m_pshowData, width, height, QImage::Format_Grayscale8);
+                QImage newimage = image.scaled(m_lbl_video->width(), m_lbl_video->height(), Qt::KeepAspectRatio, Qt::FastTransformation);
+                m_lbl_video->setPixmap(QPixmap::fromImage(newimage));
+            }
+            else
+            {
+                uchar* pdata = reinterpret_cast<uchar*>(m_pData);
+                QImage image(pdata, width, height, QImage::Format_Grayscale8);
+                QImage newimage = image.scaled(m_lbl_video->width(), m_lbl_video->height(), Qt::KeepAspectRatio, Qt::FastTransformation);
+                m_lbl_video->setPixmap(QPixmap::fromImage(newimage));
+            }
         }
         else
         {
-            m_LineDataPanel->OnBuffer(reinterpret_cast<ushort*>(m_pData), width, m_depth);
+            if (m_depth > 8)
+                m_LineDataPanel->OnBufferPL16(reinterpret_cast<ushort*>(m_pData), width, m_depth);
+            else
+                m_LineDataPanel->OnBufferPL8(reinterpret_cast<uchar*>(m_pData), width, m_depth);
         }
     }
 }
@@ -483,8 +626,8 @@ void MainWidget::handleExpoEvent()
     Toupcam_get_ExpoTime(m_hcam, &time);
     time /= 1000;
     {
-        const QSignalBlocker blocker(m_slider_expoTime);
-        m_slider_expoTime->setValue(int(time));
+        const QSignalBlocker blocker(m_sld_expoTime);
+        m_sld_expoTime->setValue(int(time));
     }
     {
         const QSignalBlocker blocker(m_edt_expoTime);
@@ -501,7 +644,7 @@ void MainWidget::handleStillImageEvent()
         if (SUCCEEDED(Toupcam_PullStillImage(m_hcam, &vec[0], 24, &width, &height)))
         {
             QImage image(&vec[0], width, height, QImage::Format_RGB888);
-            image.save(QString::asprintf("demoqt_%u.jpg", ++m_count));
+            image.save(QString::asprintf("demolinecam_%u.jpg", ++m_count));
         }
     }
 }

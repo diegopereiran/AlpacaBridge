@@ -135,7 +135,8 @@ public slots:
     void OnZoomBestfit();
     void OnLineDataPause();
     void OnLineDataExport();
-    void OnBuffer(ushort* pRaw, int width, int bitdepth);
+    void OnBufferPL16(ushort* pRaw, int width, int bitdepth);
+    void OnBufferPL8(uchar* pRaw, int width, int bitdepth);
 
 private:
     CLineDataCtrl*     m_ctrl;
