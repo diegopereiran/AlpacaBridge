@@ -85,7 +85,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path) {
     std::error_code path_error;
     const std::filesystem::path canonical = std::filesystem::canonical(port_path, path_error);
     const std::string registry_path = path_error ? port_path : canonical.string();
-    struct stat held{}, current{};
+    struct stat held {}, current{};
     if (serial_fd_ >= 0 && registry_path == registered_port_path_ && ::fstat(serial_fd_, &held) == 0 &&
         ::stat(port_path.c_str(), &current) == 0 && held.st_nlink != 0 && held.st_dev == current.st_dev &&
         held.st_ino == current.st_ino && held.st_rdev == current.st_rdev) {
@@ -120,7 +120,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path) {
             throw_link_error("cannot claim exclusive serial access: " + util::errno_string(errno));
         }
         exclusive = true;
-        struct termios settings{};
+        struct termios settings {};
         if (::tcgetattr(fd, &settings) != 0) {
             throw_link_error("cannot read serial settings: " + util::errno_string(errno));
         }
@@ -319,7 +319,7 @@ void CelestronCgxProtocol::wait_for_locked(short events, std::chrono::steady_clo
         if (std::chrono::steady_clock::now() >= deadline) {
             throw_link_error("AUX transaction timed out");
         }
-        struct pollfd descriptor{};
+        struct pollfd descriptor {};
         descriptor.fd = serial_fd_;
         descriptor.events = events;
         const int result = ::poll(&descriptor, 1, poll_timeout_ms(deadline));

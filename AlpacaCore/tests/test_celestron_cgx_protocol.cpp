@@ -140,7 +140,7 @@ TEST_CASE("Celestron CGX AUX link - healthy same-port reconnect keeps the sessio
 
     // PTYs ignore baud in their data path. A marker speed detects a needless
     // reopen/reconfigure without accessing the wrapper's private descriptor.
-    struct termios settings{};
+    struct termios settings {};
     REQUIRE(::tcgetattr(::fileno(observer.get()), &settings) == 0);
     REQUIRE(::cfsetispeed(&settings, B57600) == 0);
     REQUIRE(::cfsetospeed(&settings, B57600) == 0);
@@ -180,7 +180,7 @@ TEST_CASE("Celestron CGX AUX link - desync advances generation and recovers on t
         alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
         protocol.connect_serial(mount.slave_path());
         const auto healthy = protocol.session_generation();
-        struct termios settings{};
+        struct termios settings {};
         REQUIRE(::tcgetattr(::fileno(observer.get()), &settings) == 0);
         REQUIRE(::cfsetispeed(&settings, B57600) == 0);
         REQUIRE(::cfsetospeed(&settings, B57600) == 0);

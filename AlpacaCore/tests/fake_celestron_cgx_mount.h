@@ -302,7 +302,7 @@ private:
 
     void run() {
         while (!stop_.load()) {
-            struct pollfd descriptor{};
+            struct pollfd descriptor {};
             descriptor.fd = pty_.master_fd();
             descriptor.events = POLLIN;
             const int ready = ::poll(&descriptor, 1, 20);
