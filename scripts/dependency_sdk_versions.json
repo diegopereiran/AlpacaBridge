@@ -71,6 +71,6 @@
   },
   "system_libraries": [
     {"name": "libgphoto2", "repo": "gphoto/libgphoto2", "debian": "libgphoto2", "baseline": "2.5.31"},
-    {"name": "libraw", "repo": "LibRaw/LibRaw", "debian": "libraw", "baseline": "0.21.4"}
+    {"name": "libraw", "repo": "LibRaw/LibRaw", "debian": "libraw", "baseline": "0.22.2"}
   ]
 }
