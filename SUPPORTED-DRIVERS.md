@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-13
+## Updated 2026-10-14
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -38,6 +38,25 @@ This document lists all hardware vendors and device types that are verified to w
   - **Debian 13 (Trixie)**: Wi-Fi has been tested from Raspberry Pi to the mount. Due to the limited Wi-Fi power management on the Raspberry Pi, it is highly recommended to disable low power mode if you opt to connect via Wi-Fi to the mount. A USB connection to the mount is recommended when possible, as commands are much quicker and more reliable.
 
 ## Camera Drivers
+
+### Altair
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| ALTAIR178M3 (mono, IMX178) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Altair/ALTAIR178M3/) |
+| ALTAIR662M2 (mono, IMX662) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Altair/ALTAIR662M2/) |
+
+<details>
+<summary><strong>Altair Camera Driver Notes</strong></summary>
+
+- **SDK**: Altair altaircamsdk 60.31589.20260531 (`libaltaircam.so`, shipped in the `.deb` with its udev rule `99-altaircam.rules`), MIT licensed (`license.txt` in the SDK tree). Altair Astro cameras are ToupTek OEM hardware, and the driver is the ToupTek camera driver running over Altair's own SDK, so readout modes, Offset (black level), binning and cooling behave as in the ToupTek notes below.
+- **Connection**: USB. Select vendor **Altair** in the web UI, not ToupTek: the ToupTek SDK does not list Altair cameras (USB vendor id `16d0`), and each camera should be configured under one vendor only.
+- **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and pass counts for that model.
+- **Tested model**: ALTAIR178M3 (uncooled mono, IMX178, 3040x2048, 2.4 micron pixels, firmware 3.5.0.20230826, ST4 guide port) on an OrangePi 3 LTS (Allwinner H6, Armbian trixie), ConformU 4.5.1 run on the board against AlpacaBridge over localhost, 2026-10-05.
+- **Tested model**: ALTAIR662M2 (uncooled mono, IMX662, 1920x1080, 2.9 micron pixels, ST4 guide port) on an arm64 dev VM with a ToupTek GPCMOS01200KPF attached at the same time, ConformU 4.5.1 over localhost, 2026-10-14: each camera enumerated under its own vendor only, and the ToupTek camera passed the same run under the ToupTek vendor.
+- **USB 2 port on the OrangePi 3 LTS**: on that board's USB 3 port the camera loses full frames with no error (the exposure never completes), at every speed level and through the vendor SDK alone; on its USB 2 port it delivered every frame, 0.81 s per full 16-bit frame. The ConformU run above used the USB 2 port. If exposures time out on another SBC, try a USB 2 port before suspecting the driver.
+
+</details>
 
 ### GPhoto
 
