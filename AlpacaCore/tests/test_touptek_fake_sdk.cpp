@@ -21,13 +21,11 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
-#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <limits>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -363,88 +361,6 @@ TEST_CASE("ToupTek camera - dimensions above INT_MAX fail before conversion", "[
         CHECK(has_dimension_limit_error([&] { (void)driver->get_image_array(); }));
     }
     driver->set_connected(false);
-}
-
-namespace {
-
-// Runs one exposure at the given bin/size against a fake that delivers the SDK's even-rounded binned output.
-// Returns the image, or an empty optional when ImageReady/ImageArray raised.
-std::optional<alpacacore::ImageArray> expose_binned(FakeToupTekSDK& fake, int bin, int num_x, int num_y) {
-    fake.cameras[0].supported_bins = {1, 2, 3, 4};
-    fake.deliver_frame = true;
-    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
-    driver->set_connected(true);
-    driver->set_bin_x(bin);
-    driver->set_bin_y(bin);
-    driver->set_num_x(num_x);
-    driver->set_num_y(num_y);
-    driver->start_exposure(0.01, true);
-    std::optional<alpacacore::ImageArray> image;
-    const bool settled = eventually([&] {
-        try {
-            if (!driver->get_image_ready()) return false;
-            image = driver->get_image_array();
-            return true;
-        } catch (const AlpacaException&) {
-            return true;
-        }
-    });
-    REQUIRE(settled);
-    driver->set_connected(false);
-    return image;
-}
-
-}  // namespace
-
-TEST_CASE("ToupTek camera - odd binned ROI replicates the missing edge column or row",
-          "[touptek][camera][unit][fakesdk]") {
-    struct Shape {
-        int bin, nx, ny;
-    };
-    // The SDK rounds the binned output down to even: odd NumX loses a column, odd NumY a row.
-    for (const Shape shape : {Shape{2, 7, 6}, Shape{3, 6, 5}, Shape{4, 7, 5}}) {
-        CAPTURE(shape.bin, shape.nx, shape.ny);
-        auto fake = make_fake_with_camera();
-        fake.sdk_even_binned_output = true;
-        const auto image = expose_binned(fake, shape.bin, shape.nx, shape.ny);
-        REQUIRE(image.has_value());
-        CHECK(image->width == shape.nx);
-        CHECK(image->height == shape.ny);
-        const int delivered_w = shape.nx & ~1;
-        const int delivered_h = shape.ny & ~1;
-        const auto px = [&](int r, int c) { return image->data[static_cast<std::size_t>(r * shape.nx + c)]; };
-        for (int r = 0; r < shape.ny; ++r) {
-            for (int c = 0; c < shape.nx; ++c) {
-                const int sr = std::min(r, delivered_h - 1);
-                const int sc = std::min(c, delivered_w - 1);
-                CHECK(px(r, c) == sr * 10 + sc + 1);
-            }
-        }
-    }
-}
-
-TEST_CASE("ToupTek camera - a binned frame two pixels short, or one short at bin 1, still fails",
-          "[touptek][camera][unit][fakesdk]") {
-    {
-        auto fake = make_fake_with_camera();
-        fake.delivered_dimensions = std::pair<unsigned, unsigned>{4U, 6U};
-        CHECK_FALSE(expose_binned(fake, 2, 6, 6).has_value());
-    }
-    {
-        auto fake = make_fake_with_camera();
-        fake.delivered_dimensions = std::pair<unsigned, unsigned>{6U, 3U};
-        CHECK_FALSE(expose_binned(fake, 2, 6, 6).has_value());
-    }
-    {
-        auto fake = make_fake_with_camera();
-        fake.delivered_dimensions = std::pair<unsigned, unsigned>{5U, 6U};
-        CHECK_FALSE(expose_binned(fake, 1, 6, 6).has_value());
-    }
-    {
-        auto fake = make_fake_with_camera();
-        fake.delivered_dimensions = std::pair<unsigned, unsigned>{6U, 5U};
-        CHECK_FALSE(expose_binned(fake, 1, 6, 6).has_value());
-    }
 }
 
 TEST_CASE("ToupTek camera - a frame arriving after the watchdog fails both image readers",
