@@ -1,2 +1,2 @@
 ### Changed
-- **Dependency baseline: libraw 0.22.2** (tooling, issue #1138): the libraw baseline in `scripts/dependency_sdk_versions.json` moves from 0.21.4 to 0.22.2, a bug-fix-only LibRaw release; the gphoto driver uses the same LibRaw calls and the package still takes libraw from Debian, so nothing is pinned or rebuilt.
+- **Dependency baseline: libraw 0.22.2** (tooling, issue #1138): the libraw baseline in `scripts/dependency_sdk_versions.json` moves from 0.21.4 to 0.22.2. LibRaw 0.22 adds raw decoding for newer Canon, Nikon, Sony and Fujifilm bodies (used by the gphoto driver once Debian ships it) and 0.22.1/0.22.2 are bug-fix releases; the driver's LibRaw calls are unchanged and the package still takes libraw from Debian, so nothing is pinned or rebuilt.
