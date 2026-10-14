@@ -557,8 +557,17 @@
 
                 <!-- Celestron NexStar Telescope Configuration -->
                 <div id="celestron-config" class="vendor-config" style="display: none;">
-                    <h3>Celestron NexStar Telescope Configuration</h3>
+                    <h3>Celestron Telescope Configuration</h3>
 
+                    <div class="form-group">
+                        <label for="celestron-protocol">Mount Connection:</label>
+                        <select id="celestron-protocol" name="celestronProtocol" required>
+                            <option value="nexstar">NexStar hand controller</option>
+                            <option value="cgx-aux">CGX / CGX-L direct USB (no hand controller)</option>
+                        </select>
+                    </div>
+
+                    <div id="celestron-nexstar-only">
                     <div class="form-group">
                         <label for="celestron-alignment-mode">Alignment Mode:</label>
                         <select id="celestron-alignment-mode" name="celestronAlignmentMode">
@@ -577,17 +586,37 @@
                             <option value="network">Network/WiFi</option>
                         </select>
                     </div>
+                    </div>
 
                     <!-- Serial Connection -->
                     <div id="celestron-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="celestron-port-path">Serial Port:</label>
                             <input type="text" id="celestron-port-path" name="celestronPortPath" placeholder="/dev/ttyUSB0">
-                            <small>Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.</small>
+                            <small id="celestron-port-help">Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.</small>
                         </div>
-                        <div class="form-group">
+                        <div class="form-group" id="celestron-baud-group">
                             <label for="celestron-baud-rate">Baud Rate:</label>
                             <input type="number" id="celestron-baud-rate" name="celestronBaudRate" value="9600" min="1200" max="115200">
+                        </div>
+                    </div>
+
+                    <div id="celestron-cgx-site-config" style="display: none;">
+                        <h4>Direct USB Site</h4>
+                        <div class="form-group">
+                            <label for="celestron-cgx-site-latitude">Site Latitude (degrees):</label>
+                            <input type="number" id="celestron-cgx-site-latitude" name="celestronSiteLatitude"
+                                   min="-90" max="90" step="any" placeholder="45.0">
+                        </div>
+                        <div class="form-group">
+                            <label for="celestron-cgx-site-longitude">Site Longitude (degrees east):</label>
+                            <input type="number" id="celestron-cgx-site-longitude" name="celestronSiteLongitude"
+                                   min="-180" max="180" step="any" placeholder="-75.0">
+                        </div>
+                        <div class="form-group">
+                            <label for="celestron-cgx-site-elevation">Site Elevation (meters, optional):</label>
+                            <input type="number" id="celestron-cgx-site-elevation" name="celestronSiteElevation"
+                                   min="-300" max="10000" step="any">
                         </div>
                     </div>
 
