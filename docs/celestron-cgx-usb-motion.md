@@ -70,7 +70,8 @@ FindHome was verified; reference preservation on that path remains unqualified.
 Final live reads verified Connected and AtHome true; AtPark, Slewing, Tracking
 and IsPulseGuiding false; Dec +90, side 0. The original site and 50% Dec guide
 setting survived the tests; WARNING logging was restored and chrony remained
-synchronized. Pending source/evidence changes remain uncommitted and unpushed.
+synchronized. At the time of this checkpoint, source/evidence changes were
+uncommitted and unpushed; they have since been committed to this PR.
 
 ## ConformU first-issue run
 
@@ -109,11 +110,11 @@ the initial stages 1–2 deployment was reported with hash prefix `c3c3d5e`.
 The stop-budget fix and retest used the then-deployed binary SHA-256
 `a381d1a5156d76ee4c5524793f3a0d3729a85a417f3987f9a27c429e0132b744`.
 These are binary hashes, not proof from the Pi checkout's stale git metadata.
-This documentation update uses only local operator logs
-`/tmp/opencode/cgx-stage12-hardware.log` and
-`/tmp/opencode/cgx-stage12-hardware-retest.log`, current source/tests and reported
-software results, plus the full-speed stop and stage 3 guide logs below; it
-performed no rig access or deployment.
+This documentation update uses the operator's stage 1–2 and retest logs, current
+source/tests and reported software results, plus the full-speed stop and stage 3
+guide logs below; it performed no rig access or deployment. Unless linked to a
+published report, log-derived results here are operator-reported summaries;
+their raw logs are not publicly attached.
 The latest section records four stopped ConformU attempts followed by the
 completed run 5 pass, with its exact hardware/build scope and remaining limits.
 
@@ -197,8 +198,8 @@ guiding suite or ConformU.
 
 ### Full-speed same-branch stop repeat
 
-The main operator's approved follow-up on the `a381d1a5` binary is in
-local `/tmp/opencode/cgx-fullspeed-stop.log`. Both operations passed during
+The main operator recorded an approved follow-up on the `a381d1a5` binary.
+Both operations passed during
 full-speed same-branch motion from the Dec +85 setup:
 
 | Operation | Initiator | Completion | Pending at return | Dec before → after | Tracking after stop |
@@ -223,9 +224,8 @@ the earlier first-issue ConformU run into a pass.
 ## Stage 3: northern Normal-branch Dec guide evidence
 
 The approved operator sequence at Dec +85 / side 0 used 50% and 100% sidereal
-Dec guide rates, each in order **N1, N1, S1, S1, N5, S5** (seconds). Local
-`/tmp/opencode/cgx-guide-stage3.log` contains the JSON samples and
-`/tmp/opencode/cgx-guide-stage3.trace` the raw serial trace. Both blocks measured
+Dec guide rates, each in order **N1, N1, S1, S1, N5, S5** (seconds). The operator
+recorded JSON samples and a raw serial trace. Both blocks measured
 zero Dec drift over their two-second baseline. The following values are parsed
 from the JSON, in arcseconds; error is **measured minus signed expected**.
 Immediate means the first inactive sample; settled means the final tail value.
@@ -277,8 +277,8 @@ passed** at this checkpoint. That full-suite result predates the final arrival
 patch below and is **not final-build full-suite qualification**. Earlier hardware
 results retain their own provenance and limits.
 
-Local `/tmp/opencode/cgx-review-report.md` records final native normal, UBSan and
-TSan focused runs, each **80 cases / 1785 assertions**, plus **2 lifecycle/
+The operator's review report records final native normal, UBSan and TSan
+focused runs, each **80 cases / 1785 assertions**, plus **2 lifecycle/
 destruction stress cases / 5 assertions** each, without sanitizer diagnostics.
 The review rebuilt the Celestron archive and directly linked the four focused
 CGX test files; source/test hashes matched the workspace throughout those
@@ -304,15 +304,13 @@ Both local reports use **ConformU 4.5.1.54507**, native arm64 on localhost,
 Telescope 0. Their watchdogs stopped at the first finding (exit -15), rather
 than producing a full-suite verdict:
 
-- **Run 1:** `/tmp/opencode/cgx-conformu-stage12.txt` and
-  `/tmp/opencode/cgx-conformu-stage12.done`. Connection/reference checks reached
+- **Run 1:** The operator's report and done record show connection/reference checks reached
   property and Park tests, but parked `PulseGuide(East, 0)` returned
   `InvalidValue` instead of `InvalidWhileParked`. Zero milliseconds is valid;
   current source checks connection/ownership/operational state before returning
   a no-op and sends **no guide packet**. It is not coerced to a 10 ms pulse.
   Invalid direction or negative/out-of-range duration still fails validation.
-- **Run 2:** `/tmp/opencode/cgx-conformu-stage12-run2.txt` and
-  `/tmp/opencode/cgx-conformu-stage12-run2.done`. Parked zero-duration handling,
+- **Run 2:** The operator's report and done record show parked zero-duration handling,
   Unpark, AbortSlew, FindHome and basic East/North/overlap guide checks passed.
   The first extended guide at **HA -9 / North 5 s / 50%** failed: reported Dec
   movement **40.2 arcsec**, expected **37.6**, difference **+2.6**, against a
@@ -325,7 +323,7 @@ site/elevation, guide rates, tracking rate and SlewSettleTime, and the original
 
 ### First post-GOTO BeyondPole guide diagnostic
 
-Local `/tmp/opencode/cgx-postgoto-guiding.log` records North 5 s at 50%, after
+The operator's post-GOTO guide log records North 5 s at 50%, after
 GOTO to **HA -9 / Dec +85 / BeyondPole (side 1)**, with 0, 2 and 10 s delays.
 Expected movement was +37.60275 arcsec. Errors are measured minus expected:
 
@@ -345,8 +343,7 @@ and tracking false. Encoder measurements still do not establish optical accuracy
 
 ### Run 3: extended guides passed, return-to-start RA failed
 
-Local `/tmp/opencode/cgx-conformu-stage12-run3.txt` and
-`/tmp/opencode/cgx-conformu-stage12-run3.done` record the `c575880f` run with raw
+The operator's report and done record describe the `c575880f` run with raw
 strace capture. All **16 extended guide checks** passed: North/South/East/West
 at each HA **-9, +9, -3, +3**. The logged North/South differences were
 0.1–0.8 arcsec against the 1 arcsec tolerance; East/West differences were
@@ -408,7 +405,7 @@ At this SLOW checkpoint, normal, UBSan and TSan each passed **82 cases / 1922
 assertions**, plus **2 stress cases / 5 assertions**; the prior FAST-only
 implementation was falsified by the updated corrective-command regression.
 
-Local `/tmp/opencode/cgx-slow-pilot.log` records the approved hardware pilot:
+The operator's pilot log records the approved hardware sequence:
 
 | Target/check | Arrival time | RA error (arcsec) | Dec error (arcsec) | Side | Tracking |
 | --- | ---: | ---: | ---: | --- | --- |
@@ -442,10 +439,10 @@ nor recovery falls back to stale labels. Owning constraints are in
 The main operator's local DeviceState timing logs each contain **25** hardware
 calls:
 
-| Build / local log | Median | Maximum | Calls >100 ms |
+| Build | Median | Maximum | Calls >100 ms |
 | --- | ---: | ---: | ---: |
-| `2aaff73f` / `/tmp/opencode/cgx-devicestate-before.log` | 115.146 ms | 121.709 ms | 25/25 |
-| `9c353c87` / `/tmp/opencode/cgx-devicestate-after.log` | 34.763 ms | 39.586 ms | 0/25 |
+| `2aaff73f` | 115.146 ms | 121.709 ms | 25/25 |
+| `9c353c87` | 34.763 ms | 39.586 ms | 0/25 |
 
 This verifies stationary timing improvement on this rig, not a moving-state
 timing guarantee or a completed ConformU verdict.
@@ -471,8 +468,8 @@ local logs/source/tests only; the main operator remains the sole hardware operat
 Following explicit user approval to save qualification, the published report is
 [Linux-arm64-usb.txt](../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt).
 It is a new report; the CGX-L hand-controller report remains unchanged. The raw
-382-line `/tmp/opencode/cgx-conformu-stage12-run5.txt` remains private and
-unchanged. The publication applies only the approved site/elevation and
+382-line operator log remains private and unchanged. The publication applies
+only the approved site/elevation and
 latitude-derived Sync-coordinate privacy substitutions, keeping the 0.1-arcsec
 residuals, timestamps, units, pass results and timing rows, followed by an
 explicitly labelled publication note without an invented ASCOM timestamp.
@@ -505,16 +502,17 @@ guide overlap); its **one WARN** was the deliberate UTCDate +1-hour test against
 an NTP-disciplined host. No unexpected transport failure occurred in that window.
 These daemon log levels are distinct from the ConformU report's zero findings.
 
-Local `/tmp/opencode/cgx-post-conform-software-report.md` records the post-run
-all-vendor build refresh and **full native Core 2129/2129 plus HTTP 16/16 passed**,
+The operator's post-run software check recorded an all-vendor build refresh and
+**full native Core 2129/2129 plus HTTP 16/16 passed**,
 without failures/timeouts. All nine local/native source/build files matched
 before and after execution, and the rebuilt server hash matches the run 5 binary.
 This is the current full-suite result, replacing the earlier pre-arrival/telemetry
 2120-case checkpoint for current-source coverage. Focused normal/UBSan/TSan
 **89 cases / 2024 assertions**, telemetry **7/102**, and stress **2/5** per
 configuration remain separately recorded checks, not additional post-run runs.
-The main operator reports final static checks passed. Documentation/report work
-remains uncommitted and unpushed, with no source edits or rig access by this agent.
+The main operator reports final static checks passed. At that checkpoint,
+documentation/report work was uncommitted and unpushed; it has since been
+committed to this PR. The documenting agent made no source edits or rig accesses.
 
 ## Remaining qualification
 
