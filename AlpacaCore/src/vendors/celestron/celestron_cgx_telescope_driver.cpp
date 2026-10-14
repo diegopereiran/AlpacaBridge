@@ -746,6 +746,7 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
     stop_slot_.cancel_all_and_join();
     motion_slot_.cancel_all_and_join();
     pulse_slot_.cancel_all_and_join();
+    // Coordinate reads intentionally wait behind stop/checkpoint I/O; cached-only reads may proceed.
     motion_start_lock.lock();
     std::exception_ptr stop_failure;
     if (protocol_.is_connected()) {
