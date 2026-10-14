@@ -9,9 +9,10 @@ Targets stayed at Dec +60 to +85 degrees and HA +/-1 or +/-3 hours; each complet
 sequence returned home with tracking/guiding off. These are encoder-derived
 coordinates and API state, not optical pointing or southern/CGX-L qualification.
 
-Build provenance is `driver/celestron-cgx-usb`, local committed identity checkpoint
-`5452f384` plus the pending fixes documented below. The Pi checkout's git metadata
-predates copied source updates; do not identify the run from that metadata alone.
+Build provenance at this historical checkpoint was `driver/celestron-cgx-usb`,
+local committed identity checkpoint `5452f384` plus then-pending fixes below.
+The Pi checkout's git metadata predates copied source updates; do not identify
+the run from that metadata alone.
 The final installed/server-build SHA-256 for that rig session matched:
 `b1ea1bf0f4524f4af7319a834a1fce8134d27fd561e383ed6b2c2f7ee5007606`.
 
@@ -447,7 +448,8 @@ calls:
 This verifies stationary timing improvement on this rig, not a moving-state
 timing guarantee or a completed ConformU verdict.
 
-Reported current native normal, UBSan and TSan focused runs each passed
+At this telemetry checkpoint, reported native normal, UBSan and TSan focused
+runs each passed
 **89 cases / 2024 assertions**, including **7 telemetry cases / 102 assertions**,
 plus **2 stress cases / 5 assertions** per configuration. The new
 `AlpacaCore/tests/test_celestron_cgx_telemetry.cpp` is registered in the Celestron
@@ -506,9 +508,11 @@ The operator's post-run software check recorded an all-vendor build refresh and
 **full native Core 2129/2129 plus HTTP 16/16 passed**,
 without failures/timeouts. All nine local/native source/build files matched
 before and after execution, and the rebuilt server hash matches the run 5 binary.
-This is the current full-suite result, replacing the earlier pre-arrival/telemetry
-2120-case checkpoint for current-source coverage. Focused normal/UBSan/TSan
-**89 cases / 2024 assertions**, telemetry **7/102**, and stress **2/5** per
+This is the full-suite result for the run 5 source snapshot, replacing the earlier
+pre-arrival/telemetry 2120-case checkpoint for that snapshot. Later PR follow-up
+checks are recorded in the [review follow-up](celestron-cgx-cgxl-usb-review.md#pr-1148-review-follow-up--2026-10-14).
+Focused normal/UBSan/TSan **89 cases / 2024 assertions**, telemetry **7/102**,
+and stress **2/5** per
 configuration remain separately recorded checks, not additional post-run runs.
 The main operator reports final static checks passed. At that checkpoint,
 documentation/report work was uncommitted and unpushed; it has since been

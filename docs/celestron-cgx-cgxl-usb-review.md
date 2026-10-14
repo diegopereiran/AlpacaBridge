@@ -43,6 +43,10 @@ dynamics, rate units or physical calibration. Hardware qualification remains sep
 
 ## Hardware-free follow-up — 2026-10-13
 
+This section records a historical checkpoint, not the current validation status.
+Subsequent native runtime and mutation results are in the 2026-10-14 follow-up
+above. A full local pre-flight is still not claimed.
+
 The follow-up based on `ff836c44` adds explicit elapsed-time encoder motion,
 fractional signed motion and wrap handling, physical/encoder-label separation,
 a fixed simulated home origin, and a held-fragment rendezvous that teardown wakes.
@@ -63,31 +67,22 @@ and the contract sweep; clang-format **18.1.8** changed-line check against the P
 base; clang-tidy **18.1.3** on the CGX driver with a source-only line filter;
 docs-drift, layering, contract/stress registration, connect-error hook,
 changelog validation and whitespace checks. Source-scoped tidy does not certify
-unchanged shared-header warnings. No runtime tests were run in this continuation:
-the host is x86_64, and the existing ARM container cannot execute. Native arm64
-CTest, sanitizers, runtime mutation checks and full pre-flight remain pending.
-ConformU was not re-run. Publishing this follow-up does not qualify the hardware
-or replace the pending native arm64 runtime checks.
+unchanged shared-header warnings. At that checkpoint no runtime tests had run:
+the host was x86_64, and the existing ARM container could not execute. Native
+arm64 CTest, sanitizers, runtime mutation checks and full pre-flight were pending.
+ConformU was not re-run in that continuation. Those source-only checks did not
+qualify the hardware or replace native runtime validation.
 
-### Proposed Falsified by entries (runtime confirmation pending)
+### Mutation evidence
 
-These targets cover the cases added or renamed in the working-tree follow-up.
-They are candidates, not claims of observed RED runs; refresh line numbers and
-execute each mutation on native arm64 before copying them into the PR body.
-The PR's older cases still need their own entries.
-
-- "Celestron CGX AUX link - ignores request echoes and assembles fragmented replies": AlpacaCore/src/vendors/celestron/celestron_cgx_protocol_wrapper.cpp:174 accept matching commands without checking reply addresses.
-- "Celestron CGX fake - sever cancels a held reply": AlpacaCore/tests/fake_celestron_cgx_mount.h:234 remove the teardown condition-variable notification.
-- "Celestron CGX fake - advances GOTO and tracking from elapsed simulated time": AlpacaCore/tests/fake_celestron_cgx_mount.h:104 replace the elapsed motion budget with zero.
-- "Celestron CGX fake - encoder relabel does not move physical position": AlpacaCore/tests/fake_celestron_cgx_mount.h:413 write MC_SET_POSITION into physical_position instead of encoder_offset.
-- "Celestron CGX fake - fractional motion wraps and rejects overflowing time": AlpacaCore/tests/fake_celestron_cgx_mount.h:105 discard fractional motion remainder between advances.
-- "Celestron CGX geometry - pins RA wrap and pole-side boundaries with encoder fixtures": AlpacaCore/src/vendors/celestron/celestron_cgx_geometry.cpp:129 return unwrapped right ascension from the conversion.
-- "Celestron CGX USB Telescope Driver - stalled GOTO times out and stops both axes": AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp:828 remove the GOTO deadline error check.
-- "Celestron CGX USB Telescope Driver - pins guide polarity in both hemispheres and pointing branches": AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp:1118 remove the southern guide-velocity sign reversal.
-- "Celestron CGX USB Telescope Driver - rounds and segments guide durations at packet boundaries": AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp:1125 truncate duration conversion instead of rounding to centiseconds.
-- "Celestron CGX USB Telescope Driver - isolates two mounts and forgets calibration on reconnect": AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp:543 publish calibrated true during every connection reset.
+The initial proposed mutations from this checkpoint are superseded by the tested
+98-entry list in [PR #1148](https://github.com/open-astro/AlpacaBridge/pull/1148).
+The 2026-10-14 follow-up above records the observed outcomes and their limits.
 
 ## P1 — fix before hardware qualification
+
+These are findings at the original `1c23cefa` review baseline, not open defects
+at the current PR head. Resolution and remaining qualification are recorded above.
 
 1. **Ambiguous first-axis command failure leaves unowned motion.** In
    `start_home_operation()` and `start_slew_operation()`, the first RA command
