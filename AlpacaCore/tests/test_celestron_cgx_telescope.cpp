@@ -111,6 +111,54 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect waits for an in-fligh
     CHECK_FALSE(driver->get_connected());
 }
 
+TEST_CASE("Celestron CGX USB Telescope Driver - disconnect checkpoint leaves cached getters responsive",
+          "[celestron][cgx][telescope][integration]") {
+    using namespace std::chrono_literals;
+    for (const bool fail_checkpoint : {false, true}) {
+        INFO("fail_checkpoint=" << fail_checkpoint);
+        alpacacore::test::FakeCelestronCgxMount mount;
+        REQUIRE(mount.ok());
+        mount.set_auto_complete_motions(true);
+        auto info = test_info();
+        info.port_path = mount.slave_path();
+        auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+        driver->set_connected(true);
+        driver->find_home();
+        REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
+        mount.fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x01});
+        auto disconnect = std::async(std::launch::async, [&] { driver->set_connected(false); });
+        const bool collecting = mount.wait_for_reply_fragment(2s);
+        auto guide_rate = std::async(std::launch::async, [&] { return driver->get_guide_rate(); });
+        const auto readable = guide_rate.wait_for(100ms);
+        std::promise<void> entered;
+        auto tracking = std::async(std::launch::async, [&] {
+            entered.set_value();
+            driver->set_tracking(true);
+        });
+        entered.get_future().wait();
+        const auto queued = tracking.wait_for(100ms);
+        if (fail_checkpoint) mount.corrupt_next_reply_checksum();
+        // Always release the transport before assertions can unwind and join callers.
+        mount.release_reply_tail();
+        CHECK(collecting);
+        CHECK((readable == std::future_status::ready));
+        CHECK((guide_rate.get().ra > 0.0));
+        CHECK((queued == std::future_status::timeout));
+        if (fail_checkpoint)
+            require_alpaca_error([&] { disconnect.get(); }, alpacacore::AlpacaError::DriverException);
+        else
+            CHECK_NOTHROW(disconnect.get());
+        require_alpaca_error([&] { tracking.get(); }, alpacacore::AlpacaError::NotConnected);
+        CHECK_FALSE(driver->get_connected());
+        driver->set_connected(true);
+        if (fail_checkpoint)
+            require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidOperation);
+        else
+            CHECK_NOTHROW(driver->set_tracking(true));
+        driver->set_connected(false);
+    }
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - modern identity is read-only and preserves the build number",
           "[celestron][cgx][telescope]") {
     alpacacore::test::FakeCelestronCgxMount mount;
@@ -203,6 +251,9 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop acknowledgement waits for c
     mount.set_stop_completion_reads(2);
     CHECK_NOTHROW(driver->abort_slew());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
+    // Each axis must exhaust both busy replies before publishing completion.
+    CHECK((mount.count_command(0x10, 0x13) >= 3));
+    CHECK((mount.count_command(0x11, 0x13) >= 3));
     CHECK_FALSE(driver->get_is_pulse_guiding());
     mount.set_stop_completion_reads(0);
     driver->set_connected(false);

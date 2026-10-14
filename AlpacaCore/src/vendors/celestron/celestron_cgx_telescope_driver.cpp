@@ -402,11 +402,9 @@ private:
 
 CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTelescopeDriver& driver, bool cancel_motion)
     : driver_(driver), connection_lock_(driver.transition_mutex_), lock_(driver.motion_start_mutex_) {
+    driver_.require_connected();
     if (driver_.motion_transition_ || driver_.disconnecting_) {
         throw AlpacaException("Celestron CGX is changing motion ownership", AlpacaError::InvalidOperation);
-    }
-    if (!driver_.connected_.load()) {
-        throw AlpacaException("Celestron CGX USB is not connected", AlpacaError::NotConnected);
     }
     if (driver_.stop_slot_.running()) {
         throw AlpacaException("Celestron CGX stop is still finishing", AlpacaError::InvalidOperation);
@@ -679,12 +677,17 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
                 motion_transition_ = false;
                 disconnecting_ = false;
             }
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             bool retained = reference_valid_locked() && disconnected_checkpoint_ && reference_firmware_ == firmware;
             if (retained) {
+                const auto saved_checkpoint = *disconnected_checkpoint_;
+                const auto reference_generation = reference_generation_;
+                lock.unlock();
                 const auto checkpoint = read_stopped_checkpoint();
-                retained = std::abs(signed_cgx_encoder_delta(checkpoint.first, disconnected_checkpoint_->first)) <= 2 &&
-                           std::abs(signed_cgx_encoder_delta(checkpoint.second, disconnected_checkpoint_->second)) <= 2;
+                lock.lock();
+                retained = reference_valid_locked() && reference_generation_ == reference_generation &&
+                           std::abs(signed_cgx_encoder_delta(checkpoint.first, saved_checkpoint.first)) <= 2 &&
+                           std::abs(signed_cgx_encoder_delta(checkpoint.second, saved_checkpoint.second)) <= 2;
             }
             if (!retained) {
                 calibrated_ = false;
@@ -748,8 +751,16 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
     if (protocol_.is_connected()) {
         try {
             stop_axes_checked();
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (reference_valid_locked()) disconnected_checkpoint_ = read_stopped_checkpoint();
+            std::unique_lock<std::mutex> lock(mutex_);
+            disconnected_checkpoint_.reset();
+            if (reference_valid_locked()) {
+                const auto reference_generation = reference_generation_;
+                lock.unlock();
+                const auto checkpoint = read_stopped_checkpoint();
+                lock.lock();
+                if (reference_valid_locked() && reference_generation_ == reference_generation)
+                    disconnected_checkpoint_ = checkpoint;
+            }
         } catch (...) {
             stop_failure = std::current_exception();
         }
@@ -792,6 +803,7 @@ void CelestronCgxTelescopeDriver::set_connected(bool connected) {
     pulse_slot_.clear_failure();
     stop_slot_.clear_failure();
     motion_transition_ = false;
+    disconnecting_ = false;
     if (stop_failure) std::rethrow_exception(stop_failure);
 }
 
@@ -1301,6 +1313,7 @@ void CelestronCgxTelescopeDriver::pulse_guide(int direction, int duration_ms) {
     }
     require_connected();
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
+    require_connected();
     if (motion_transition_ || disconnecting_)
         throw AlpacaException("Celestron CGX is changing motion ownership", AlpacaError::InvalidOperation);
     if (motion_slot_.running() || pulse_slot_.running()) {
