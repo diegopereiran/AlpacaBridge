@@ -442,8 +442,8 @@ Every camera SDK constrains ROI geometry, and the pattern is the same everywhere
 call, and pad outputs if needed** — ConformU's read-back checks must see the requested
 geometry. Per-SDK constraints (the only vendor-specific part): ZWO width%8 / height%2
 after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek even
-sensor-resolution width/height/offset (see the ToupTek odd-bin-factor note for the
-3×3 subtlety).
+sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
+odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
 
 ### FilterWheel semantics (all vendors)
 
