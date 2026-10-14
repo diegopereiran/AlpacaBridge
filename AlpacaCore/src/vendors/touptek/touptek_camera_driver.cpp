@@ -1331,7 +1331,7 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     ImageArray image = build_image_array(pixel_buffer, active_16bit, active_num_x, active_num_y,
-                                                         static_cast<int>(got_w), static_cast<int>(got_h));
+                                                         static_cast<int>(got_w), static_cast<int>(got_h), active_bin);
                     alpacacore::util::validate_image_array(image);
                     last_image_ = std::move(image);
                     image_cached_ = true;
@@ -1798,7 +1798,7 @@ private:
     // endian native) bytes per pixel — the same stride passed as WaitImageV4's
     // nRowPitch (M14).
     ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, bool is_16bit, int out_width, int out_height,
-                                 int actual_width, int actual_height) const {
+                                 int actual_width, int actual_height, int bin) const {
         ImageArray image;
         image.width = out_width;
         image.height = out_height;
@@ -1806,11 +1806,15 @@ private:
         if (out_width <= 0 || out_height <= 0 || actual_width <= 0 || actual_height <= 0) {
             alpacacore::util::throw_invalid_camera_image("invalid ToupTek frame dimensions");
         }
-        // start_exposure() even-pads the sensor-space ROI before binning so the
-        // SDK must deliver the requested output dimensions. Unlike QHY's SDK,
-        // ToupTek's smaller positive dimensions violate that ROI contract; do
-        // not synthesize pixels from a frame the SDK reports as truncated.
-        if (actual_width < out_width || actual_height < out_height) {
+        // start_exposure() even-pads the sensor-space ROI before binning, but the
+        // SDK rounds the binned OUTPUT down to even (TOUPCAM_OPTION_BINNING), so an
+        // odd NumX/NumY at bin >= 2 arrives one column/row short. Accept exactly
+        // that one-pixel shortfall and replicate the last delivered column/row;
+        // any other shortfall violates the ROI contract and is not synthesized.
+        const int missing_cols = actual_width < out_width ? out_width - actual_width : 0;
+        const int missing_rows = actual_height < out_height ? out_height - actual_height : 0;
+        if ((missing_cols > 0 && (missing_cols != 1 || bin < 2)) ||
+            (missing_rows > 0 && (missing_rows != 1 || bin < 2))) {
             alpacacore::util::throw_invalid_camera_image("ToupTek frame is smaller than the requested ROI");
         }
         const std::size_t bpp = is_16bit ? 2 : 1;
@@ -1819,14 +1823,21 @@ private:
             alpacacore::util::throw_invalid_camera_image("ToupTek frame buffer is shorter than its dimensions");
         }
         image.data.resize(output_pixels);
+        // The buffer keeps out_width-pixel row stride, so a short row leaves its last
+        // pixel unwritten and a short frame leaves the last stride unwritten: read
+        // those from the neighbouring delivered column/row instead.
+        const int last_col = out_width - 1 - missing_cols;
+        const int last_row = out_height - 1 - missing_rows;
         for (int row = 0; row < out_height; ++row) {
             for (int col = 0; col < out_width; ++col) {
-                std::size_t src_idx = static_cast<std::size_t>(row) *
-                                      static_cast<std::size_t>(out_width) +
-                                      static_cast<std::size_t>(col);
+                std::size_t dst_idx =
+                    static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) + static_cast<std::size_t>(col);
+                std::size_t src_idx =
+                    static_cast<std::size_t>(std::min(row, last_row)) * static_cast<std::size_t>(out_width) +
+                    static_cast<std::size_t>(std::min(col, last_col));
                 std::size_t byte_idx = src_idx * bpp;
                 if (byte_idx + bpp <= buffer.size()) {
-                    image.data[src_idx] =
+                    image.data[dst_idx] =
                         is_16bit ? static_cast<std::int32_t>(static_cast<std::uint16_t>(buffer[byte_idx]) |
                                                              (static_cast<std::uint16_t>(buffer[byte_idx + 1]) << 8))
                                  : static_cast<std::int32_t>(buffer[byte_idx]);

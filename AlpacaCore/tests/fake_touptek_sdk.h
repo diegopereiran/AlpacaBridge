@@ -85,6 +85,11 @@ public:
     bool deliver_frame = false;
     std::optional<std::pair<unsigned, unsigned>> delivered_dimensions;
     std::vector<std::uint8_t> frame_bytes;
+    // When true, wait_image mimics the real SDK's binned output: roi width/height divided by the binning, rounded
+    // down to even at bin >= 2 (TOUPCAM_OPTION_BINNING), written at `row_pitch` stride with pixel (r, c) =
+    // r * 10 + c + 1 (little-endian for 16-bit). Columns and rows the SDK does not deliver stay untouched.
+    // Ignored when `delivered_dimensions` is set.
+    bool sdk_even_binned_output = false;
     // Thread-safe view of `calls` (the driver's background threads hit the
     // fake concurrently with the test body).
     int call_count(const char* fn) const {
@@ -172,7 +177,7 @@ public:
         hit("trigger");
         require_open(h);
     }
-    bool wait_image(HToupcam h, unsigned timeout_ms, void* buffer, int, int row_pitch, unsigned& actual_width,
+    bool wait_image(HToupcam h, unsigned timeout_ms, void* buffer, int bits, int row_pitch, unsigned& actual_width,
                     unsigned& actual_height) override {
         hit("wait_image");
         require_open(h);
@@ -187,6 +192,26 @@ public:
         }
         actual_width = delivered_dimensions ? delivered_dimensions->first : roi_.width;
         actual_height = delivered_dimensions ? delivered_dimensions->second : roi_.height;
+        if (sdk_even_binned_output && !delivered_dimensions) {
+            actual_width = roi_.width / static_cast<unsigned>(bin_);
+            actual_height = roi_.height / static_cast<unsigned>(bin_);
+            if (bin_ >= 2) {
+                actual_width &= ~1U;
+                actual_height &= ~1U;
+            }
+            const std::size_t bpp = bits > 8 ? 2 : 1;
+            auto* out = static_cast<std::uint8_t*>(buffer);
+            for (unsigned r = 0; buffer != nullptr && r < actual_height; ++r) {
+                for (unsigned c = 0; c < actual_width; ++c) {
+                    const unsigned value = r * 10 + c + 1;
+                    std::uint8_t* px =
+                        out + static_cast<std::size_t>(r) * static_cast<std::size_t>(row_pitch) + c * bpp;
+                    px[0] = static_cast<std::uint8_t>(value & 0xFF);
+                    if (bpp == 2) px[1] = static_cast<std::uint8_t>(value >> 8);
+                }
+            }
+            return true;
+        }
         const std::size_t required = static_cast<std::size_t>(row_pitch) * actual_height;
         if (buffer != nullptr && !frame_bytes.empty()) {
             std::memcpy(buffer, frame_bytes.data(), std::min(required, frame_bytes.size()));
