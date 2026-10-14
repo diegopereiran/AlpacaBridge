@@ -1606,6 +1606,7 @@ def check_router_regexes_static(root=ROOT):
 # vendor landing without a README mention looks like.
 
 SUPPORTED_HEADING_TO_README_BRAND = {
+    "Altair": "Altair",
     "Astroasis": "Astroasis",
     "Celestron": "Celestron",
     "Gemini": "Gemini",
