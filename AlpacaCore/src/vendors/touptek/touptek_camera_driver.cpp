@@ -1152,14 +1152,12 @@ public:
             // and height, and the ROI must fit the sensor. The binned span is
             // (num * bin); for odd bin factors that product can be odd (e.g.
             // 3x3 → 4167), which the SDK rejects — no frame is delivered and
-            // ImageReady never sets. Round the span UP to even so the SDK
-            // floor-bins it back to exactly num output pixels (the +1 pad is
-            // < bin for any bin >= 2), and round the offset DOWN to even. If
-            // padding the span pushes the right/bottom edge past the sensor
-            // (an edge-touching sub-frame where num*bin already reached the
-            // limit), shift the even offset left/up by the overflow instead of
-            // shrinking the span — that keeps the output count at num, so the
-            // pixel buffer sized from active_num_x/y stays correct.
+            // ImageReady never sets. Round the span UP to even and the offset
+            // DOWN to even. If the +1 pad pushes the right/bottom edge past the
+            // sensor, shift the even offset left/up by the overflow (at most
+            // one sensor pixel) instead of shrinking the span. What the SDK
+            // then delivers for the span is worked out below (expected_w/h);
+            // the pixel buffer is sized from that, not from num.
             int span_w = active_num_x * active_bin;
             int span_h = active_num_y * active_bin;
             span_w += (span_w & 1);
@@ -1367,7 +1365,8 @@ public:
                                                 ", requested " + std::to_string(active_num_x) + "x" +
                                                 std::to_string(active_num_y) + ")");
                 if (got_w < static_cast<unsigned>(expected_w) || got_h < static_cast<unsigned>(expected_h)) {
-                    alpacacore::util::throw_invalid_camera_image("ToupTek frame is smaller than the requested ROI");
+                    alpacacore::util::throw_invalid_camera_image(
+                        "ToupTek frame is smaller than the frame the ROI predicts");
                 }
 
                 {
@@ -1860,7 +1859,8 @@ private:
         // a malformed frame (#913), and the exposure worker has already checked
         // the frame against the size the ROI math predicted.
         if (actual_width + 1 < out_width || actual_height + 1 < out_height) {
-            alpacacore::util::throw_invalid_camera_image("ToupTek frame is smaller than the requested ROI");
+            alpacacore::util::throw_invalid_camera_image(
+                "ToupTek frame is more than one pixel smaller than the requested ROI");
         }
         const int last_col = std::min(actual_width, out_width) - 1;
         const int last_row = std::min(actual_height, out_height) - 1;
