@@ -1,0 +1,2 @@
+### Fixed
+- **A stored ZWO camera with one wrong-typed field still claims its uniqueId** (AlpacaHTTP router, review of #1163): since the ZWO camera moved into the device catalog, a stored camera entry with one field of the wrong JSON type (a hand-edited numeric `serialNumber`) was skipped as a whole when another camera was registered, so its `uniqueId` was no longer checked and `configuredevice` accepted a second camera with the same UniqueID. Only the wrong-typed field is now left out, as before the move. Pinned by the new case in `test_routing.cpp`.

@@ -2912,6 +2912,38 @@ int main() {
         // false (the entry would be skipped and not listed).
     }
     {
+        // case: zwo camera stored entry with one wrong-typed field still claims its uniqueId
+        // A hand-edited numeric serialNumber fails that entry's own load, but must not hide
+        // its uniqueId from the duplicate check: the API refuses a second camera reusing it.
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        {
+            std::ofstream out(file, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9716},
+                                           {"cameraIndex", 0},
+                                           {"serialNumber", 5},
+                                           {"uniqueId", "ZWO_UID_00112233445566aa"}}})
+                       .dump();
+        }
+        alpacahttp::Router stored;
+        EXPECT(listed_entry(stored, "Camera", 9716).is_null());
+        const nlohmann::json body = {{"vendor", "zwo"},
+                                     {"deviceType", "camera"},
+                                     {"deviceNumber", 9717},
+                                     {"cameraIndex", 1},
+                                     {"uniqueId", "ZWO_UID_00112233445566aa"}};
+        const auto reply =
+            nlohmann::json::parse(route_request(stored, "POST", "/management/v1/configuredevice", body.dump()).body());
+        EXPECT(reply.value("ErrorNumber", 0) != 0);
+        EXPECT(reply.value("ErrorMessage", std::string()).find("uniqueId") != std::string::npos);
+        EXPECT(listed_entry(stored, "Camera", 9717).is_null());
+        // Falsified by: skipping the whole stored entry as a peer when one of its fields has the
+        // wrong JSON type (its uniqueId is then not claimed and the reuse is accepted).
+    }
+    {
         // zwo / filterwheel
         const auto cfg =
             roundtrip_config(router,
