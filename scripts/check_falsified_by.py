@@ -112,10 +112,11 @@ def hand_rolled_cases(diff_text, head_text):
 
     The diff only says which lines were added; the marker text is read from
     `head_text` (the file at HEAD), because git may slide an inserted block so
-    that its added `    {` is the next existing block's opener (issue #993). An added
-    line that is exactly `    {` and sits after the `int main(` line must be followed in
-    `head_text` by `// case: <name>`, else it is an error. A case is an added
-    `// case: <name>` line after `main(` whose previous HEAD line is `    {`.
+    that the added `    {` is the next existing block's opener (issue #993). So a
+    block is judged by its body, not its opener: for each `    {` after `main(` in
+    `head_text`, the block is new only when the first non-blank line after it was
+    added, and that line must then be `// case: <name>` (collected), else it is an error.
+    A block whose first line was not added existed before and is skipped.
     Scoped blocks in helper functions above `main()` are not cases.
     """
     m = MAIN_RE.search(head_text)
@@ -135,19 +136,22 @@ def hand_rolled_cases(diff_text, head_text):
     def line(no):
         return head[no - 1] if 1 <= no <= len(head) else ""
 
+    added_set = set(added)
     names, errors = {}, []
-    for no in added:
-        if no <= main_line:
+    for no in range(main_line + 1, len(head) + 1):
+        if line(no).rstrip() != "    {":
             continue
-        if line(no).rstrip() == "    {":
-            nxt = next((line(k) for k in (no + 1, no + 2) if line(k).strip()), "")
-            if not CASE_MARKER_RE.match(nxt):
-                errors.append("added top-level block in an AlpacaHTTP test has no `// case: <name>` marker "
-                              "on its first line (block at line %d)" % no)
-        mk = CASE_MARKER_RE.match(line(no))
-        prev = next((line(k) for k in (no - 1, no - 2) if line(k).strip()), "")
-        if mk and prev.rstrip() == "    {":
+        first = next((k for k in range(no + 1, len(head) + 1) if line(k).strip()), None)
+        # The block is new only when its own first body line is added; a shared opener
+        # (slider placement) leaves that line untouched.
+        if first is None or first not in added_set:
+            continue
+        mk = CASE_MARKER_RE.match(line(first))
+        if mk:
             names[mk.group("name")] = set()
+        else:
+            errors.append("added top-level block in an AlpacaHTTP test has no `// case: <name>` marker "
+                          "on its first line (block at line %d)" % no)
     return names, errors
 
 
@@ -480,7 +484,6 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     check("hand-rolled missing marker error", len(errs) == 1)
 
     # Hand-rolled blocks: only after the `int main(` line of the HEAD file.
-    head = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n    }\n}\n"
     diff = "+++ b/f.cpp\n@@ -0,0 +6,4 @@\n+    {\n+        // case: marker one\n+        EXPECT(1);\n+    }\n"
     head = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n        // case: marker one\n        EXPECT(1);\n    }\n}\n"
     names, errs = hand_rolled_cases(diff, head)
@@ -501,6 +504,16 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     sdiff = "@@ -2,0 +3,4 @@\n+        // case: new first\n+        EXPECT(1);\n+    }\n+    {\n"
     names, errs = hand_rolled_cases(sdiff, slid)
     check("slid block: real case name collected, no false marker error", set(names) == {"new first"} and not errs)
+    unm = ("int main() {\n    {\n        // case: new first\n        EXPECT(1);\n    }\n"
+           "    {\n        EXPECT(2);\n    }\n}\n")
+    names, errs = hand_rolled_cases(sdiff, unm)
+    check("slid block before an unmarked existing block: no false error", set(names) == {"new first"} and not errs)
+    two = "int main() {\n    {\n        EXPECT(1);\n    }\n    {\n        EXPECT(2);\n    }\n}\n"
+    names, errs = hand_rolled_cases("@@ -0,0 +3,3 @@\n+        EXPECT(1);\n+    }\n+    {\n", two)
+    check("unmarked new block before an existing one: one error", not names and len(errs) == 1)
+    mid = "int main() {\n    {\n        EXPECT(1);\n        // case: mid\n    }\n        {\n        // case: nest\n        }\n}\n"
+    names, errs = hand_rolled_cases("@@ -0,0 +4,1 @@\n+        // case: mid\n@@ -0,0 +7,1 @@\n+        // case: nest\n", mid)
+    check("marker not right after a top-level opener is not a case", not names and not errs)
     names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        x();\n+    }\n", "void f() {}\n")
     check("file without main has no cases", not names and not errs)
     span = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n        // case: spans main\n    }\n}\n"
