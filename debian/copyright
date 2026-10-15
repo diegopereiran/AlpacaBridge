@@ -104,12 +104,16 @@ License: LGPL-2.1-or-later
 Files: AlpacaCore/external/libgphoto2/*
 Copyright: 1999-2026 Scott Fritzinger, Lutz Mueller, Marcus Meissner and
            libgphoto2 contributors
-License: LGPL-2.1-or-later
+License: LGPL-2.1-or-later and GPL-2.0-or-later
 Comment: libgphoto2 is LGPL-2.1-or-later (COPYING in the tarball); some of its
  camlibs carry their own GPL-2.0-or-later COPYING. Redistributed as an
  unmodified upstream source tarball and built at package build time into
- /usr/lib/alpacabridge/libgphoto2 for the gphoto camera driver. The licence
- text is the LGPL-2.1 paragraph of the libgpiod stanza above.
+ /usr/lib/alpacabridge/libgphoto2 for the gphoto camera driver.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in
+ "/usr/share/common-licenses/LGPL-2.1" and of the GNU General Public
+ License version 2 or later in "/usr/share/common-licenses/GPL-2".
 
 Files: AlpacaCore/external/Bisque/*
 Copyright: Software Bisque, Inc.

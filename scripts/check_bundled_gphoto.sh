@@ -22,7 +22,10 @@ ALLOWED_RPATH_ROOT=/usr/lib/alpacabridge
 while [ $# -gt 0 ]; do
   case "$1" in
     --pid)
-      [ $# -ge 2 ] && [ -n "$2" ] || { echo "--pid needs a process id" >&2; exit 2; }
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "--pid needs a process id" >&2
+        exit 2
+      fi
       PID="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac

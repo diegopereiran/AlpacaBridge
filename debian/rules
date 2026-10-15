@@ -198,8 +198,12 @@ override_dh_installsystemd:
 	dh_installsystemd alpacabridge.service
 
 # Tell dh_shlibdeps where to find bundled proprietary shared libraries
+# The server's RPATH names only the libgphoto2 bundle (CMAKE_SKIP_BUILD_RPATH),
+# and dh_shlibdeps -l only sets the deprecated LD_LIBRARY_PATH, which
+# dpkg-shlibdeps ignores for build-api >= 1: pass the private library
+# directories to dpkg-shlibdeps itself.
 override_dh_shlibdeps:
-	dh_shlibdeps -l$(STAGING)/usr/lib/alpacabridge -l$(STAGING)/usr/lib/alpacabridge/libgphoto2/lib
+	dh_shlibdeps -- -l$(STAGING)/usr/lib/alpacabridge -l$(STAGING)/usr/lib/alpacabridge/libgphoto2/lib
 
 # Ship the vendor SDK binaries byte-identical to AlpacaCore/external/: the
 # release SBOM (scripts/dependency_snapshot.py --spdx) refuses a vendor file
