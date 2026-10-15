@@ -149,7 +149,7 @@ run_system_setup() {
     sudo install -m 644 "${rule}" /etc/udev/rules.d/
   done
 
-  qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux_arm64_26.06.04"
+  qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux_arm64_26.07.28"
   if [[ -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
     echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
     sudo mkdir -p /lib/firmware/qhy
@@ -193,7 +193,7 @@ run_system_setup() {
     sudo ldconfig
   fi
 
-  playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
+  playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64"
   if [[ -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then
     echo "Installing Player One Camera shared library to /usr/local/lib"
     sudo cp -a "${playerone_lib_dir}/libPlayerOneCamera.so"* /usr/local/lib/

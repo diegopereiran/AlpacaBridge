@@ -92,7 +92,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>iOptron Camera Driver Notes</strong></summary>
 
-- **Backend**: the iCAM cameras are rebadged Player One cameras (iCAM178M = USB `a0a0:178b`, iCAM462C = `a0a0:462a`, iCAM464C = `a0a0:464a`; the Player One SDK enumerates them by their iCAM names). It is served by the Player One camera driver (Player One Camera SDK v3.10.0) and needs the `ALPACACORE_ENABLE_PLAYERONE` build flag; iOptron publishes no camera SDK.
+- **Backend**: the iCAM cameras are rebadged Player One cameras (iCAM178M = USB `a0a0:178b`, iCAM462C = `a0a0:462a`, iCAM464C = `a0a0:464a`; the Player One SDK enumerates them by their iCAM names). It is served by the Player One camera driver (Player One Camera SDK v3.10.1) and needs the `ALPACACORE_ENABLE_PLAYERONE` build flag; iOptron publishes no camera SDK.
 - **Configuration**: select vendor iOptron, device type Camera, and the Player One SDK camera index. The index is shared with any Player One-branded cameras on the same system.
 - **Behavior**: identical to the Player One camera driver (see Player One Driver Notes below), including dew heater and fan Actions on cooled models.
 - **Validated**: ConformU 4.5.0 on iCAM178M (mono), iCAM462C (color, RGGB) and iCAM464C (color) hardware (Raspberry Pi, Linux arm64, 2026-08-26): 0 errors, 0 issues, all members within timing targets on all three.
@@ -112,7 +112,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>Player One Driver Notes</strong></summary>
 
-- **SDK**: Player One Camera SDK v3.10.0 (build target)
+- **SDK**: Player One Camera SDK v3.10.1 (build target)
 - **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
 - **Tested models**: Ceres 462M (uncooled), Mars-C II (uncooled guide camera, IMX290), and Uranus-C PRO (cooled, IMX585) on Linux arm64.
 - **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
@@ -132,7 +132,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>QHY Driver Notes</strong></summary>
 
-- **SDK**: QHY CCD SDK 26.06.04.16 (build target)
+- **SDK**: QHY CCD SDK 26.07.28.10 (build target)
 - **Connection**: USB (requires udev rules and firmware; see below)
 - **Cooler power**: `CanGetCoolerPower` returns false; cooler power reporting is not implemented to avoid SDK timeouts.
 - **PulseGuide**: runs the SDK guide call on a detached thread so the initiator returns immediately (ControlQHYCCDGuide blocks for the full pulse duration on real hardware).
@@ -216,7 +216,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **SDK**: ZWO ASI Camera SDK Version 1.41 (build target)
 - **Connection**: USB (requires libusb-1.0)
-- **ASI533MC Pro validation**: re-validated with ConformU 4.5.1 on Linux arm64 with ASI Camera SDK 1.41, 2026-10-15: 0 errors, 0 issues, all members within timing targets.
+- **ASI533MC Pro and ASI120MM Mini validation**: both re-validated with ConformU 4.5.1 on Linux arm64 with ASI Camera SDK 1.41, 2026-10-15: 0 errors, 0 issues, all members within timing targets.
 - **Camera identity**: a saved camera binds by its serial number, not by the SDK's enumeration order, which can change across a reboot. The first start records `serialNumber` and `cameraName` in the entry (`cameraIndex` and `cameraId` stay as hints), so the device number keeps following the same camera. A body whose serial cannot be read binds by `cameraName` and reports a stored `ZWO_UID_...` UniqueID; two serial-less bodies of one model are told apart by `cameraIndex` only. An entry with no `cameraName` (a new entry, or the first start after the upgrade) opens each connected ZWO camera once to read its serial; while another program holds a camera (for example a guiding app on the same host) that open fails, so the entry binds by model name plus `cameraIndex` like a serial-less body and reports a stored `ZWO_UID_...` UniqueID; once the serial can be read at a later start (or when the entry is saved again), it binds by serial and the UniqueID changes to `ZWO_SN_<serial>`; until then the UniqueID reads `ZWO_SN_<serial>` while the camera is connected and the stored `ZWO_UID_...` while it is not. Behaviour with a guider running is not checked on hardware.
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
 - **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and the pass counts for that camera (the run date is readable from the `LastExposureStartTime` lines in the report).
@@ -349,7 +349,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>QHY FilterWheel Driver Notes</strong></summary>
 
-- **SDK**: QHY CCD SDK 26.06.04.16 (shared with the QHY camera driver)
+- **SDK**: QHY CCD SDK 26.07.28.10 (shared with the QHY camera driver)
 - **Connection**: USB — controlled through the SAME physical handle as its paired QHY camera (not a separately enumerable device); the camera and filter wheel driver share one `OpenQHYCCD` via a reference-counted handle in `QHYSDKWrapper`, and can be connected/disconnected independently.
 - **Tested model**: miniCam8M integrated CFW (8-slot) on Linux arm64
 - **ConformU**: 4.4.0 — 0 errors, 0 issues, 0 timing issues
@@ -516,6 +516,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB (requires libusb-1.0)
 - **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
 - **EAF and EAFN**: the EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) is served by the same driver with the same configuration as the EAF; there is no model selector. `Name` is whatever the EAF SDK reports for the unit; both validated units report `EAF`.
+- **Max Step**: the EAF stops a move at the max step stored in the unit and does so silently, and `MaxStep` reports that stored value. The optional `maxStep` setting (1 to the unit's own step range; blank = leave the stored value alone) is written to the unit at connect with `EAFSetMaxStep` when it differs from the stored one, and `MaxStep` then reports it. A value above the unit's step range is clamped to it, with a warning in the log. A unit that stores max step 0 with no `maxStep` set still connects, as before the setting existed: `MaxStep` reads 0 and each `Move` is refused until Max Step is set.
 
 </details>
 

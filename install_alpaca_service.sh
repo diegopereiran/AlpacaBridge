@@ -82,7 +82,7 @@ install_udev_rules() {
   fi
 
   # QHY cameras require firmware files that the udev rules load via fxload.
-  local qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux_arm64_26.06.04"
+  local qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux_arm64_26.07.28"
   if [[ -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
     echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
     sudo mkdir -p /lib/firmware/qhy
@@ -137,7 +137,7 @@ install_udev_rules() {
   fi
 
   # Install Player One Camera shared library (SmartGuider dlopens this directly)
-  local playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
+  local playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64"
   if [[ -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then
     echo "Installing Player One Camera shared library to /usr/local/lib"
     sudo cp -a "${playerone_lib_dir}/libPlayerOneCamera.so"* /usr/local/lib/

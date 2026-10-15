@@ -448,6 +448,22 @@ function updateAutoNumbering() {
     maybeAutoFillIndexFields();
 }
 
+// Persisted devices that did not register. They are not in the standard
+// configureddevices list (open-astro#576); this UI-only extension endpoint
+// serves them so the error card can still be edited or removed. A failure here
+// leaves the registered devices usable.
+async function fetchFailedDevices() {
+    try {
+        const response = await fetch(API_BASE + '/management/v1/faileddevices?ts=' + Date.now(), { cache: 'no-store' });
+        if (!response.ok) return [];
+        const data = await response.json();
+        if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return [];
+        return data.Value;
+    } catch (e) {
+        return [];
+    }
+}
+
 // Load devices
 async function loadDevices() {
     const devicesList = document.getElementById('devices-list');
@@ -508,6 +524,8 @@ async function loadDevices() {
             }
         }
         
+        devices = devices.concat(await fetchFailedDevices());
+
         if (devices.length === 0) {
             currentDevices = [];
             devicesList.innerHTML = `
@@ -1275,6 +1293,8 @@ function startEditDevice(device) {
 
     setFormValue('focuser-index', config.focuserIndex);
     setFormValue('focuser-id', config.focuserId);
+    // Another vendor's focuser also saves maxStep (QHY): only a ZWO focuser fills this input, blank = not set.
+    setFormValue('zwo-focuser-max-step', vendor === 'zwo' && deviceType === 'focuser' ? config.maxStep : '');
     setFormValue('rotator-index', config.rotatorIndex);
     setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
@@ -1382,7 +1402,7 @@ async function pollDeviceStatus() {
         if (!response.ok) return;
         const data = await response.json();
         if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return;
-        for (const device of data.Value) {
+        for (const device of data.Value.concat(await fetchFailedDevices())) {
             const status = deviceStatus(device);
             document.querySelectorAll('.status-dot').forEach(dot => {
                 if (dot.dataset.deviceType === String(device.DeviceType) &&
@@ -4214,6 +4234,14 @@ document.getElementById('device-form').addEventListener('submit', async function
                     deviceData.focuserId = focuserId;
                 }
             }
+            // Blank means "not set": the key is left out, never sent as 0 or a default.
+            const zwoMaxStepValue = formData.get('zwoFocuserMaxStep');
+            if (zwoMaxStepValue !== null && zwoMaxStepValue !== undefined && zwoMaxStepValue !== '') {
+                const zwoMaxStep = Number.parseInt(zwoMaxStepValue, 10);
+                if (!Number.isNaN(zwoMaxStep)) {
+                    deviceData.maxStep = zwoMaxStep;
+                }
+            }
         }
         if (normalizedType === 'rotator') {
             const rotatorIndex = Number.parseInt(formData.get('rotatorIndex'), 10);
@@ -4653,7 +4681,7 @@ function renderDeviceSettings(config) {
         }
         const value = key === 'filterNames'
             ? formatFilterNamesShort(config[key])
-            : formatSettingValue(config[key]);
+            : formatConfigSettingValue(key, config[key]);
         rows.push(`
             <div class="setting-row">
                 <span class="setting-label">${escapeHtml(label)}</span>
@@ -4707,6 +4735,18 @@ function renderDeviceSettings(config) {
             </div>
         </div>
     `;
+}
+
+const SITE_COORDINATE_KEYS = new Set(['siteLatitude', 'siteLongitude']);
+
+function formatConfigSettingValue(key, value) {
+    if (SITE_COORDINATE_KEYS.has(key)) {
+        const site = formatSiteCoordinate(value);
+        if (site !== null) {
+            return site;
+        }
+    }
+    return formatSettingValue(value);
 }
 
 function formatSettingValue(value) {
