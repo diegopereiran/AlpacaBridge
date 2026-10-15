@@ -139,7 +139,33 @@ else
   pass "no ld.so.conf entry mentions libgphoto2"
 fi
 
-# 7. Rig use: the running server maps libgphoto2 only from the bundle.
+# 7. The bundle is linked with full RELRO (BIND_NOW), as the distro libgphoto2 is:
+#    it parses data from untrusted USB devices.
+for lib in "${BUNDLE_LIB}/libgphoto2.so.6" "${BUNDLE_LIB}/libgphoto2_port.so.12" "${PTP2}"; do
+  if [ -z "${lib}" ] || [ ! -e "${lib}" ]; then fail "readelf -d ${lib:-the camlib}: file is missing"; continue; fi
+  flags="$(readelf -dW "${lib}" 2>&1 | grep -E '\((FLAGS|FLAGS_1|BIND_NOW)\)' || true)"
+  indent <<< "${flags:-(no FLAGS entry)}"
+  if grep -qE '\(BIND_NOW\)|\(FLAGS\).*BIND_NOW|\(FLAGS_1\).*NOW' <<< "${flags}"; then
+    pass "readelf -d ${lib}: BIND_NOW (full RELRO)"
+  else
+    fail "readelf -d ${lib}: no BIND_NOW, so only partial RELRO"
+  fi
+done
+
+# 8. The package ships no build-only file under the bundle prefix.
+if files="$(dpkg -L alpacabridge 2>&1)"; then
+  extra="$(grep -E "^${GPHOTO_PREFIX}/(bin|include|lib/pkgconfig|lib/udev)(/|\$)|^${GPHOTO_PREFIX}/lib/libgphoto2(_port)?\.so\$" <<< "${files}" || true)"
+  if [ -n "${extra}" ]; then
+    indent <<< "${extra}"
+    fail "dpkg -L alpacabridge: build-only files under ${GPHOTO_PREFIX}/"
+  else
+    pass "dpkg -L alpacabridge: no bin/, include/, pkgconfig/, udev helper or unversioned .so under ${GPHOTO_PREFIX}/"
+  fi
+else
+  fail "dpkg -L could not read the alpacabridge package: ${files}"
+fi
+
+# 9. Rig use: the running server maps libgphoto2 only from the bundle.
 if [ -n "${PID}" ]; then
   maps="$(grep libgphoto2 "/proc/${PID}/maps" 2>&1 | awk '{print $6}' | sort -u)"
   indent <<< "${maps}"

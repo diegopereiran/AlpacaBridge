@@ -815,7 +815,7 @@ Do **all** of the following when adding a new vendor SDK. Skipping any step will
 
 ### Bundled library built from a vendored tarball (libgphoto2)
 
-libgphoto2 is not a prebuilt `.so` under `external/`: `scripts/build_bundled_gphoto.sh` builds the vendored tarball into `/usr/lib/alpacabridge/libgphoto2`, which is found through the executables' `DT_RPATH` and never registered with ldconfig ([decision 0012](docs/decisions/0012-bundled-libgphoto2.md)). A new file shipped under that prefix, or a change to how it is found, goes through `debian/rules` and `scripts/check_bundled_gphoto.sh`, and the SDK pins are read from the script's `--print-pins`.
+libgphoto2 is not a prebuilt `.so` under `external/`: `scripts/build_bundled_gphoto.sh` builds the vendored tarball into `/usr/lib/alpacabridge/libgphoto2`, which is found through the executables' `DT_RPATH` and never registered with ldconfig ([decision 0012](docs/decisions/0012-bundled-libgphoto2.md)). A new file shipped under that prefix, or a change to how it is found, goes through `debian/rules` and `scripts/check_bundled_gphoto.sh`, and the version and sha256 pins live only in that script (CI and `debian/rules` run it; the acceptance script and the installers read them through `--print-pins`).
 
 ### Dynamic Linker Registration
 

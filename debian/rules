@@ -85,11 +85,17 @@ override_dh_auto_install:
 	  $(STAGING)/usr/lib/alpacabridge/
 
 	# libgphoto2 (library, camlibs, iolibs) in its private prefix. Not on the
-	# ldconfig path: the server finds it through its DT_RPATH. The headers and
-	# pkg-config files are build-time only and do not ship.
+	# ldconfig path: the server finds it through its DT_RPATH. The headers,
+	# pkg-config files, *-config scripts, unversioned .so links and the
+	# check-ptp-camera udev helper (the generated rules do not call it) are
+	# build-time only and do not ship.
 	cp -a $(GPHOTO_STAGE)/usr/lib/alpacabridge/. $(STAGING)/usr/lib/alpacabridge/
 	rm -rf $(STAGING)/usr/lib/alpacabridge/libgphoto2/include \
-	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/pkgconfig
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/pkgconfig \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/bin \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/udev \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/libgphoto2.so \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/libgphoto2_port.so
 
 	# --- Register vendor library path with the dynamic linker ---
 	install -d $(STAGING)/etc/ld.so.conf.d

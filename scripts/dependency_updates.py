@@ -401,7 +401,7 @@ def system_body(r: dict) -> str:
             f"| Field | Value |\n|---|---|\n| Recorded baseline (Debian trixie `{r['debian']}`) | `{r['current']}` |\n"
             f"| Upstream | `{r['latest']}` |\n| Source | {r['source']} |\n\n"
             "The build takes this library from Debian (`debian/control`), so there is no pin to bump. Review "
-            "what the new release adds or fixes for the driver (for libgphoto2: new camera bodies), and set "
+            "what the new release adds or fixes for the driver (for LibRaw: new camera raw formats), and set "
             "the `baseline` in `scripts/dependency_sdk_versions.json` to the upstream version (without a `v` "
             "prefix, as Debian spells it) once reviewed, or when Debian ships it. This issue closes by itself once the baseline matches.\n\n"
             "Opened by `.github/workflows/dependency-updates.yml`.\n")

@@ -11,8 +11,9 @@
 # it builds in a temporary directory that is removed on exit, so a sudo run
 # leaves no root-owned tree in the checkout.
 #
-# The pins below are the single source of truth: CI, debian/rules and the
-# acceptance script read them through --print-pins. The README beside the
+# The pins below are the single source of truth: CI and debian/rules run this
+# script, and the acceptance script and the two installers read them through
+# --print-pins. The README beside the
 # tarball records the same values (bump procedure there).
 #
 # The prefix is compiled into libgphoto2 (camlib and iolib directories), and the
@@ -75,10 +76,12 @@ tar -xf "${TARBALL}" -C "${BUILD_DIR}"
   cd "${SRC_DIR}"
   # --disable-new-dtags makes the rpath a DT_RPATH, which the loader applies to
   # transitive lookups, so libgphoto2.so.6 finds its own libgphoto2_port.so.12.
+  # -z relro -z now gives full RELRO, as Debian's own libgphoto2 build has; the
+  # caller's LDFLAGS (debian/rules exports dpkg-buildflags) are kept in front.
   ./configure --prefix="${GPHOTO_PREFIX}" --disable-static --disable-nls --disable-docs \
     --with-camlibs=standard --with-libexif=auto --with-libxml-2.0=auto \
     --with-libcurl=no --with-gdlib=no --with-libtiff-4=no \
-    LDFLAGS="-Wl,-rpath,${GPHOTO_PREFIX}/lib -Wl,--disable-new-dtags"
+    LDFLAGS="${LDFLAGS:-} -Wl,-z,relro -Wl,-z,now -Wl,-rpath,${GPHOTO_PREFIX}/lib -Wl,--disable-new-dtags"
   make -j"${JOBS}"
   make install DESTDIR="${DESTDIR}"
 )

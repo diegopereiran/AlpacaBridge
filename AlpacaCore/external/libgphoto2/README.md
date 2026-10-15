@@ -39,8 +39,9 @@ Update all of these in one commit:
 
 1. The tarball here (delete the old one) and this README (URL, size, sha256).
 2. `LIBGPHOTO2_VER` and `LIBGPHOTO2_SHA256` in `scripts/build_bundled_gphoto.sh`
-   (the only pin in code: CI, `debian/rules` and `scripts/check_bundled_gphoto.sh`
-   read it through `--print-pins`).
+   (the only pin in code: CI and `debian/rules` run the script, and
+   `scripts/check_bundled_gphoto.sh`, `build_and_run.sh` and
+   `install_alpaca_service.sh` read it through `--print-pins`).
 3. The `AlpacaCore/external/libgphoto2` entry in `scripts/dependency_sdk_versions.json`
    (`version`, `source`), then `git add` the files and run
    `python3 scripts/dependency_snapshot.py --pin`.
