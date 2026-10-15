@@ -17,10 +17,13 @@ BUNDLE_LIB="${GPHOTO_PREFIX}/lib"
 PTP2="$(find "${BUNDLE_LIB}/libgphoto2" -name ptp2.so 2>/dev/null | head -n 1)"
 RULES=/usr/lib/udev/rules.d/61-alpacabridge-libgphoto2.rules
 PID=""
+ALLOWED_RPATH_ROOT=/usr/lib/alpacabridge
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --pid) PID="${2:-}"; shift 2 ;;
+    --pid)
+      [ $# -ge 2 ] && [ -n "$2" ] || { echo "--pid needs a process id" >&2; exit 2; }
+      PID="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -47,10 +50,11 @@ check_ldd() {
   fi
 }
 
-# A camlib may not list libgphoto2.so.6 itself, so require only libgphoto2_port.
+# A library or camlib does not list libgphoto2.so.6 as its own dependency (ldd of
+# libgphoto2.so.6 omits itself), so require only libgphoto2_port.
 check_ldd_port() {
   local target="$1" out bad
-  if [ -z "${target}" ] || [ ! -e "${target}" ]; then fail "ldd of the ptp2 camlib: file is missing"; return; fi
+  if [ -z "${target}" ] || [ ! -e "${target}" ]; then fail "ldd of ${target:-the camlib}: file is missing"; return; fi
   out="$(ldd "${target}" 2>&1)"
   echo "${out}" | grep -i 'libgphoto2' | sed 's/^/    /'
   bad="$(echo "${out}" | grep -i 'libgphoto2' | grep -vF "${BUNDLE_LIB}/" || true)"
@@ -70,8 +74,19 @@ check_rpath() {
   out="$(readelf -d "${target}" 2>&1)"
   entries="$(echo "${out}" | grep -E '\((RPATH|RUNPATH)\)' || true)"
   indent <<< "${entries}"
-  stray="$(echo "${entries}" | grep -oE '\[[^]]*\]' | tr -d '[]' | tr ':' '\n' \
-           | grep -v '^$' | grep -vE '^/usr/lib/alpacabridge(/|$)' || true)"
+  # Split on ':' keeping empty entries: glibc reads an empty entry as the current
+  # directory. An entry with '..' could climb out of the prefix.
+  stray="$(echo "${entries}" | grep -oE '\[[^]]*\]' | tr -d '[]' \
+           | awk -F: -v pre="${ALLOWED_RPATH_ROOT}" '
+               function inside(d) { return index(d, pre) == 1 && (length(d) == length(pre) || substr(d, length(pre) + 1, 1) == "/") }
+               $0 == "" { print "<empty>"; next }
+               { for (i = 1; i <= NF; i++)
+                   if ($i == "") print "<empty>"
+                   else if ($i ~ /\.\./ || !inside($i)) print $i }
+               END { print "@@end" }')"
+  # A failed awk prints no sentinel: treat that as a stray entry, never as clean.
+  if [ "${stray##*$'\n'}" = "@@end" ]; then stray="${stray%@@end}"; stray="${stray%$'\n'}"
+  else stray="<could not parse the dynamic section>"; fi
   if echo "${entries}" | grep '(RPATH)' | grep -qF "${BUNDLE_LIB}" && [ -z "${stray}" ]; then
     pass "readelf -d ${target}: (RPATH) names ${BUNDLE_LIB}, nothing outside /usr/lib/alpacabridge"
   else
@@ -82,7 +97,7 @@ check_rpath() {
 # 1. The server resolves libgphoto2 from the bundle.
 check_ldd "${SERVER}"
 # 2. The bundle's own library and camlib do too.
-check_ldd "${BUNDLE_LIB}/libgphoto2.so.6"
+check_ldd_port "${BUNDLE_LIB}/libgphoto2.so.6"
 check_ldd_port "${PTP2}"
 # 3. The loader path is a DT_RPATH.
 check_rpath "${SERVER}"
@@ -99,9 +114,11 @@ else
 fi
 
 # 6. The package no longer depends on the distro's libgphoto2.
-depends="$(dpkg-query -W -f '${Depends}' alpacabridge 2>&1)"
+if depends="$(dpkg-query -W -f '${Depends}' alpacabridge 2>&1)"; then dpkg_ok=1; else dpkg_ok=0; fi
 echo "    Depends: ${depends}"
-if echo "${depends}" | grep -qE 'libgphoto2-6|libgphoto2-port12'; then
+if [ "${dpkg_ok}" -eq 0 ]; then
+  fail "dpkg-query could not read the alpacabridge package: ${depends}"
+elif echo "${depends}" | grep -qE 'libgphoto2-6|libgphoto2-port12'; then
   fail "dpkg-query Depends names a distro libgphoto2 package"
 else
   pass "dpkg-query Depends names neither libgphoto2-6t64 nor libgphoto2-port12t64"
