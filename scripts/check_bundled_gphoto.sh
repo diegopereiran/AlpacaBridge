@@ -6,7 +6,7 @@
 #
 # Each check prints PASS or FAIL with the raw command output; the exit status is
 # non-zero when any check failed. --pid N (rig use) additionally checks that the
-# running server mapped libgphoto2 only from the bundle.
+# running server mapped libgphoto2 only from the bundle (needs sudo).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -167,12 +167,18 @@ fi
 
 # 9. Rig use: the running server maps libgphoto2 only from the bundle.
 if [ -n "${PID}" ]; then
-  maps="$(grep libgphoto2 "/proc/${PID}/maps" 2>&1 | awk '{print $6}' | sort -u)"
-  indent <<< "${maps}"
-  if [ -n "${maps}" ] && ! echo "${maps}" | grep -vF "${GPHOTO_PREFIX}/" | grep -q .; then
-    pass "/proc/${PID}/maps: libgphoto2 mapped only from ${GPHOTO_PREFIX}/"
+  # Reading another user's maps needs root; report that, not a missing mapping.
+  if ! raw="$(cat "/proc/${PID}/maps" 2>&1)"; then
+    indent <<< "${raw}"
+    fail "/proc/${PID}/maps: cannot read it (run this script with sudo for --pid)"
   else
-    fail "/proc/${PID}/maps: no libgphoto2 mapping, or one outside ${GPHOTO_PREFIX}/"
+    maps="$(grep libgphoto2 <<< "${raw}" | awk '{print $6}' | sort -u)"
+    indent <<< "${maps}"
+    if [ -n "${maps}" ] && ! echo "${maps}" | grep -vF "${GPHOTO_PREFIX}/" | grep -q .; then
+      pass "/proc/${PID}/maps: libgphoto2 mapped only from ${GPHOTO_PREFIX}/"
+    else
+      fail "/proc/${PID}/maps: no libgphoto2 mapping, or one outside ${GPHOTO_PREFIX}/"
+    fi
   fi
 fi
 
