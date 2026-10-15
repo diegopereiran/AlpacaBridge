@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-14
+## Updated 2026-10-15
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -39,6 +39,25 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## Camera Drivers
 
+### Altair
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| ALTAIR178M3 (mono, IMX178) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Altair/ALTAIR178M3/) |
+| ALTAIR662M2 (mono, IMX662) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/Altair/ALTAIR662M2/) |
+
+<details>
+<summary><strong>Altair Camera Driver Notes</strong></summary>
+
+- **SDK**: Altair altaircamsdk 60.31589.20260531 (`libaltaircam.so`, shipped in the `.deb` with its udev rule `99-altaircam.rules`), MIT licensed (`license.txt` in the SDK tree). Altair Astro cameras are ToupTek OEM hardware, and the driver is the ToupTek camera driver running over Altair's own SDK, so readout modes, Offset (black level), binning and cooling behave as in the ToupTek notes below.
+- **Connection**: USB. Select vendor **Altair** in the web UI, not ToupTek: the ToupTek SDK does not list Altair cameras (USB vendor id `16d0`), and each camera should be configured under one vendor only.
+- **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and pass counts for that model.
+- **Tested model**: ALTAIR178M3 (uncooled mono, IMX178, 3040x2048, 2.4 micron pixels, firmware 3.5.0.20230826, ST4 guide port) on an OrangePi 3 LTS (Allwinner H6, Armbian trixie), ConformU 4.5.1 run on the board against AlpacaBridge over localhost, 2026-10-05.
+- **Tested model**: ALTAIR662M2 (uncooled mono, IMX662, 1920x1080, 2.9 micron pixels, ST4 guide port) on an arm64 dev VM with a ToupTek GPCMOS01200KPF attached at the same time, ConformU 4.5.1 over localhost, 2026-10-14: each camera enumerated under its own vendor only, and the ToupTek camera passed the same run under the ToupTek vendor.
+- **USB 2 port on the OrangePi 3 LTS**: on that board's USB 3 port the camera loses full frames with no error (the exposure never completes), at every speed level and through the vendor SDK alone; on its USB 2 port it delivered every frame, 0.81 s per full 16-bit frame. The ConformU run above used the USB 2 port. If exposures time out on another SBC, try a USB 2 port before suspecting the driver.
+
+</details>
+
 ### GPhoto
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
@@ -73,7 +92,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>iOptron Camera Driver Notes</strong></summary>
 
-- **Backend**: the iCAM cameras are rebadged Player One cameras (iCAM178M = USB `a0a0:178b`, iCAM462C = `a0a0:462a`, iCAM464C = `a0a0:464a`; the Player One SDK enumerates them by their iCAM names). It is served by the Player One camera driver (Player One Camera SDK v3.10.0) and needs the `ALPACACORE_ENABLE_PLAYERONE` build flag; iOptron publishes no camera SDK.
+- **Backend**: the iCAM cameras are rebadged Player One cameras (iCAM178M = USB `a0a0:178b`, iCAM462C = `a0a0:462a`, iCAM464C = `a0a0:464a`; the Player One SDK enumerates them by their iCAM names). It is served by the Player One camera driver (Player One Camera SDK v3.10.1) and needs the `ALPACACORE_ENABLE_PLAYERONE` build flag; iOptron publishes no camera SDK.
 - **Configuration**: select vendor iOptron, device type Camera, and the Player One SDK camera index. The index is shared with any Player One-branded cameras on the same system.
 - **Behavior**: identical to the Player One camera driver (see Player One Driver Notes below), including dew heater and fan Actions on cooled models.
 - **Validated**: ConformU 4.5.0 on iCAM178M (mono), iCAM462C (color, RGGB) and iCAM464C (color) hardware (Raspberry Pi, Linux arm64, 2026-08-26): 0 errors, 0 issues, all members within timing targets on all three.
@@ -93,7 +112,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>Player One Driver Notes</strong></summary>
 
-- **SDK**: Player One Camera SDK v3.10.0 (build target)
+- **SDK**: Player One Camera SDK v3.10.1 (build target)
 - **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
 - **Tested models**: Ceres 462M (uncooled), Mars-C II (uncooled guide camera, IMX290), and Uranus-C PRO (cooled, IMX585) on Linux arm64.
 - **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
@@ -195,9 +214,9 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>ZWO Driver Notes</strong></summary>
 
-- **SDK**: ZWO ASI Camera SDK Version 1.40 (build target)
+- **SDK**: ZWO ASI Camera SDK Version 1.41 (build target)
 - **Connection**: USB (requires libusb-1.0)
-- **ASI533MC Pro validation**: re-validated with ConformU 4.5.1 on Linux arm64, 2026-10-12: 0 errors, 0 issues, all members within timing targets.
+- **ASI533MC Pro validation**: re-validated with ConformU 4.5.1 on Linux arm64 with ASI Camera SDK 1.41, 2026-10-15: 0 errors, 0 issues, all members within timing targets.
 - **Camera identity**: a saved camera binds by its serial number, not by the SDK's enumeration order, which can change across a reboot. The first start records `serialNumber` and `cameraName` in the entry (`cameraIndex` and `cameraId` stay as hints), so the device number keeps following the same camera. A body whose serial cannot be read binds by `cameraName` and reports a stored `ZWO_UID_...` UniqueID; two serial-less bodies of one model are told apart by `cameraIndex` only. An entry with no `cameraName` (a new entry, or the first start after the upgrade) opens each connected ZWO camera once to read its serial; while another program holds a camera (for example a guiding app on the same host) that open fails, so the entry binds by model name plus `cameraIndex` like a serial-less body and reports a stored `ZWO_UID_...` UniqueID; once the serial can be read at a later start (or when the entry is saved again), it binds by serial and the UniqueID changes to `ZWO_SN_<serial>`; until then the UniqueID reads `ZWO_SN_<serial>` while the camera is connected and the stored `ZWO_UID_...` while it is not. Behaviour with a guider running is not checked on hardware.
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
 - **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and the pass counts for that camera (the run date is readable from the `LastExposureStartTime` lines in the report).
@@ -493,7 +512,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>ZWO Focuser Driver Notes</strong></summary>
 
-- **SDK**: ZWO EAF Focuser SDK Version 1.7.7 (build target)
+- **SDK**: ZWO EAF Focuser SDK Version 1.8.1 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
 - **EAF and EAFN**: the EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) is served by the same driver with the same configuration as the EAF; there is no model selector. `Name` is whatever the EAF SDK reports for the unit; both validated units report `EAF`.
@@ -676,9 +695,12 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | CGX-L | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
+| CGX | USB (direct AUX) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/CGX/) |
 
 <details>
 <summary><strong>Celestron Driver Notes</strong></summary>
+
+#### Hand-controller backend
 
 - **Protocol**: NexStar HC serial protocol with MC passthrough (P-command) for per-axis control.
 - **Connection**: USB/Serial via hand controller.
@@ -690,6 +712,12 @@ This document lists all hardware vendors and device types that are verified to w
 - **Pulse guiding**: Uses native MC_AUX_GUIDE (0x26) hardware command via the autoguider port. The firmware times the pulse internally — no software sleep or encoder math required. Position hold/correction pattern bridges the gap between the low-level firmware command and ASCOM coordinate expectations.
 - **Pier side**: `SideOfPier` reports actual pier side via the HC `p` command (`W` = pierWest, `E` = pierEast).
 - **Fork mounts on a wedge (not hardware-validated)**: with the device's Alignment Mode setting at `equatorial`, a fork model reports `AlignmentMode` Polar and `Tracking=true` selects EQ tracking (mode 2 north, 3 south). This is covered by unit tests on the fake mount only; there is no ConformU run on a wedged fork mount yet, so `SideOfPier` and `DestinationSideOfPier` on a wedge are unchecked. The default (`auto`) keeps the nominal Alt-Az classification for forks.
+
+#### Direct USB backend
+
+- **Validated hardware/scope**: bare northern CGX, both motor controllers firmware **7.17.25**, model **0x1788**, native Linux arm64 (RPi4, Debian 13), 2026-10-14. ConformU **4.5.1.54507**: **0 errors, 0 warnings, 0 issues**, all **98** timing rows passed. [Privacy-scrubbed report](AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt); [build provenance and lab evidence](docs/celestron-cgx-usb-motion.md#run-5-passing-qualification-and-final-software-verification).
+- **Configuration/reference**: select `protocol="cgx-aux"`, serial transport, explicit USB `portPath`, `siteLatitude` and `siteLongitude`; the AUX link is 115200 baud. No HC startup/alignment sequence is required for this backend. Connect does not home or write labels: explicitly FindHome to establish the encoder reference, then Sync as needed. Reference retention is limited to a verified, exclusively owned logical reconnect; it is not persistence across restart or proof against controller resets/HC interference.
+- **Qualification limits**: this pass covers this CGX/firmware at a northern site, not direct-USB CGX-L, southern operation or optical pointing accuracy. Earlier intermittent guide-onset excess remains recorded and is not claimed fixed by this one successful run; native guide-wire behavior was unchanged. Published site and derived Sync coordinates are privacy-rounded, with residuals retained.
 
 </details>
 

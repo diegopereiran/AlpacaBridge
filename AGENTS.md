@@ -150,6 +150,12 @@ vendor-agnostic; do them in the driver from the start.
   double-start race unless the check+spawn+assign runs under one mutex.
 - The destructor joins **every** background thread (connection, exposure, timers)
   before members are destroyed.
+- **Serialize reapers across the whole join.** `AsyncOperation::cancel_all_and_join()`
+  takes its body out of the slot before joining; a second caller can see an empty
+  slot while the first still owns a running worker. A driver-level lifecycle/handoff
+  lock must cover that entire join and prevent teardown from closing its handle.
+  Background bodies must not acquire the lock their joiner holds. Concrete failure:
+  [CGX handoff/disconnect race](docs/failures/0011-cgx-handoff-disconnect-race.md).
 
 **Handles, locks & disconnect — the #1 source of use-after-close bugs**
 - One fixed lock order everywhere: `driver mutex_` → operation lock
@@ -356,12 +362,17 @@ is refused before the GOTO is ever sent.
 
 ### TargetRightAscension and TargetDeclination are independent (all telescope drivers)
 
-ASCOM treats the two target properties as separate: each getter must throw `ValueNotSet`
-until **that property itself** has been written, and ConformU reports the shared-flag
-version as "Read before write should generate an error and didn't" on both. Every driver
-therefore carries `target_ra_set_` **and** `target_dec_set_`, each set only by its own
-setter. One flag for both is a review-blocking regression — it was the original shape in
-all seven drivers and took two passes to remove (#304, then #346).
+ASCOM treats the two target properties as separate: each getter must refuse a read
+until **that property itself** has been written. The current Master Interfaces
+documentation (revision 1.0.27) specifies `InvalidOperation`; this is a documentation
+revision, not a new telescope interface version. The direct CGX backend follows it.
+The existing Celestron NexStar, SynScan, iOptron, OnStep, ZWO, Bisque and SkyWatcher
+backends and their tests still use `ValueNotSet`, a known migration gap not repaired
+by the CGX PR. Do not copy that legacy error into new implementations.
+Every driver therefore carries `target_ra_set_`
+**and** `target_dec_set_`, each set only by its own setter. One flag for both is a
+review-blocking regression — it was the original shape in all seven drivers and took two
+passes to remove (#304, then #346).
 
 Protect each target value and flag with the driver's mutex. The three target-consuming
 operations snapshot both values and flags while holding it, then release it before calling
@@ -371,14 +382,17 @@ The paths that legitimately define both coordinates at once set or clear both: t
 and sync *coordinate* forms, the post-slew position-override and arrival reads, and the
 connect/disconnect resets. A pulse-guide position estimate is internal state, not either
 public target property (SynScan keeps it separately). `SlewToTarget`,
-`SlewToTargetAsync` and `SyncToTarget` require the pair and must check it — Celestron and
-SynScan were both missing that check on the synchronous form, which one shared flag hid,
-since any target write made it pass.
+`SlewToTargetAsync` and `SyncToTarget` require the pair when supported. CGX reports
+`InvalidOperation` for unset targets; the legacy backends retain `ValueNotSet` pending
+migration — Celestron and SynScan were both missing that check on the
+synchronous form, which one shared flag hid, since any target write made it pass.
 
-Hardware-free coverage per driver: read each property before any write, write RA alone and
-check Dec still throws while RA reads back, confirm the three `*ToTarget` calls refuse the
-half-set pair, then write Dec and expect both. A driver whose setters write to the mount
-(iOptron) needs the fake rather than a disconnected instance.
+Hardware-free coverage per driver: while connected, read each property before any write
+and expect the backend's error above; write RA alone and check Dec still throws while RA reads
+back, confirm supported `*ToTarget` calls refuse the half-set pair with the same error,
+then write Dec and expect both. A driver whose setters write to the mount (iOptron) needs
+the fake rather than a disconnected instance. Disconnected getters still return
+`NotConnected` first.
 
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 

@@ -15,8 +15,9 @@
 // vendor_label(), so it keeps "Celestron support not enabled ..." as the arm
 // spelled it.
 //
-// Cross-field rules, in the arm's order: alignment mode (#860), connection
-// type, then the endpoint. The API is refused; a saved config is registered so
+// Cross-field rules: protocol selection (NexStar default or CGX AUX), alignment
+// mode (#860), connection type, endpoint, and the direct backend's required
+// site coordinates. The API is refused; a saved config is registered so
 // it stays listed and editable in the web UI (#380): an unknown connection type
 // is read as "serial", never "auto", so it cannot auto-probe, and an empty
 // endpoint is warned about and kept. An unknown alignmentMode is dropped from
@@ -46,7 +47,26 @@ NormalizeResult normalize_celestron(const DeviceConfig& in, Source source) {
         }
     }
 
+    const std::string protocol = result.config.get(kCelestronProtocol);
     std::string type = in.get(kCelestronConnectionType);
+    if (protocol == "cgx-aux" && type != "serial") {
+        if (from_api) {
+            result.rejection = "Celestron CGX AUX requires Connection Type 'serial' and a USB port path";
+            return result;
+        }
+        result.warnings.push_back("saved cgx-aux protocol requires the serial USB connection; using serial");
+        type = "serial";
+        result.config.set(kCelestronConnectionType.key, type);
+    }
+    if (protocol == "cgx-aux" &&
+        (!in.find(kCelestronSiteLatitude).has_value() || !in.find(kCelestronSiteLongitude).has_value())) {
+        const char* message = "Direct Celestron CGX USB requires SiteLatitude and SiteLongitude";
+        if (from_api) {
+            result.rejection = message;
+            return result;
+        }
+        result.warnings.emplace_back(message);
+    }
     if (type != "" && type != "auto" && type != "serial" && type != "network") {
         if (from_api) {
             result.rejection = "Invalid connection type. Use 'auto', 'serial', or 'network'";

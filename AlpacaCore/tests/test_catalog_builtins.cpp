@@ -1635,8 +1635,8 @@ TEST_CASE("Builtin catalog - OnStep site range is per-field", "[catalog][onstep]
 }
 
 // ---------------------------------------------------------------------------
-// Celestron telescope. Serial, network and auto; the auto-detect factory
-// constructs without a scan (#659), so no port is opened here.
+// Celestron telescope. NexStar serial/network/auto and CGX direct USB; the
+// auto-detect factory constructs without a scan (#659), so no port is opened here.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -1657,9 +1657,9 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the Celestron te
     CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
 
     const std::vector<std::string_view> expected_keys{
-        "connectionType", "mountIndex",        "portPath",         "baudRate",     "host",
-        "tcpPort",        "responseTimeoutMs", "alignmentMode",    "siteLatitude", "siteLongitude",
-        "siteElevation",  "syncTimeOnConnect", "apertureDiameter", "focalLength"};
+        "protocol",      "connectionType", "mountIndex",        "portPath",         "baudRate",
+        "host",          "tcpPort",        "responseTimeoutMs", "alignmentMode",    "siteLatitude",
+        "siteLongitude", "siteElevation",  "syncTimeOnConnect", "apertureDiameter", "focalLength"};
     REQUIRE(v->fields.size() == expected_keys.size());
     for (std::size_t i = 0; i < expected_keys.size(); ++i) {
         CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
@@ -1705,6 +1705,20 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the Celestron tele
     auto network_driver = catalog.create(kCelestronKey, network, 6);
     REQUIRE(network_driver != nullptr);
     CHECK(network_driver->get_device_number() == 6);
+
+    DeviceConfig direct_usb;
+    direct_usb.set("protocol", std::string{"cgx-aux"});
+    direct_usb.set("connectionType", std::string{"serial"});
+    direct_usb.set("portPath", std::string{"/dev/ttyUSB-cgx"});
+    direct_usb.set("siteLatitude", 45.0);
+    direct_usb.set("siteLongitude", -75.0);
+    direct_usb.set("siteElevation", 0.0);
+    direct_usb.set("apertureDiameter", 0.2);
+    direct_usb.set("focalLength", 1.0);
+    auto direct_driver = catalog.create(kCelestronKey, direct_usb, 7);
+    REQUIRE(direct_driver != nullptr);
+    CHECK(direct_driver->get_device_number() == 7);
+    CHECK(direct_driver->get_description() == "Celestron CGX/CGX-L direct USB mount");
 #else
     CHECK_FALSE(v->available);
     try {
@@ -1781,6 +1795,39 @@ TEST_CASE("Builtin catalog - Celestron normalize requires the endpoint from the 
     CHECK_FALSE(catalog.normalize(kCelestronKey, automatic, Source::Api).rejection.has_value());
 }
 
+TEST_CASE("Builtin catalog - Celestron CGX AUX protocol requires explicit serial configuration",
+          "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig direct;
+    direct.set("protocol", std::string{"cgx-aux"});
+    direct.set("connectionType", std::string{"serial"});
+    direct.set("portPath", std::string{"/dev/ttyUSB3"});
+    direct.set("siteLatitude", 45.0);
+    direct.set("siteLongitude", -75.0);
+    CHECK_FALSE(catalog.normalize(kCelestronKey, direct, Source::Api).rejection.has_value());
+
+    DeviceConfig no_site;
+    no_site.set("protocol", std::string{"cgx-aux"});
+    no_site.set("connectionType", std::string{"serial"});
+    no_site.set("portPath", std::string{"/dev/ttyUSB3"});
+    const auto missing_site = catalog.normalize(kCelestronKey, no_site, Source::Api);
+    REQUIRE(missing_site.rejection.has_value());
+    CHECK(*missing_site.rejection == "Direct Celestron CGX USB requires SiteLatitude and SiteLongitude");
+
+    DeviceConfig automatic;
+    automatic.set("protocol", std::string{"cgx-aux"});
+    automatic.set("connectionType", std::string{"auto"});
+    const auto api = catalog.normalize(kCelestronKey, automatic, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(*api.rejection == "Celestron CGX AUX requires Connection Type 'serial' and a USB port path");
+
+    const auto persisted = catalog.normalize(kCelestronKey, automatic, Source::Persisted);
+    CHECK(string_at(persisted.config, "connectionType") == "serial");
+    CHECK_FALSE(persisted.warnings.empty());
+}
+
 TEST_CASE("Builtin catalog - Celestron alignmentMode keeps a known value and drops an unknown one (#860)",
           "[catalog][celestron][unit]") {
     DeviceCatalog catalog;
@@ -1817,6 +1864,39 @@ TEST_CASE("Builtin catalog - Celestron site range is per-field", "[catalog][cele
     CHECK(*api.rejection == "siteLongitude is out of range (min -180) (max 180)");
     config.set("siteLongitude", 180.0);
     CHECK_FALSE(catalog.normalize(kCelestronKey, config, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - Celestron optics and elevation retain setter ranges", "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct RangeCase {
+        const char* key;
+        double invalid;
+        double valid;
+        const char* message;
+    };
+    const RangeCase cases[]{{"siteElevation", -301.0, -300.0, "siteElevation is out of range (min -300) (max 10000)"},
+                            {"siteElevation", 10001.0, 10000.0, "siteElevation is out of range (min -300) (max 10000)"},
+                            {"apertureDiameter", -0.1, 0.0, "apertureDiameter is out of range (min 0)"},
+                            {"focalLength", -0.1, 0.0, "focalLength is out of range (min 0)"}};
+
+    for (const auto& test : cases) {
+        INFO(test.key);
+        DeviceConfig config;
+        config.set("connectionType", std::string{"auto"});
+        config.set(test.key, test.invalid);
+        const auto api = catalog.normalize(kCelestronKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == test.message);
+
+        const auto persisted = catalog.normalize(kCelestronKey, config, Source::Persisted);
+        CHECK(persisted.config.find_value(test.key) == nullptr);
+        CHECK_FALSE(persisted.warnings.empty());
+
+        config.set(test.key, test.valid);
+        CHECK_FALSE(catalog.normalize(kCelestronKey, config, Source::Api).rejection.has_value());
+    }
 }
 
 // ---------------------------------------------------------------------------

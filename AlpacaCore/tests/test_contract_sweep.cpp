@@ -60,8 +60,11 @@
 #include "fake_zwo_sdk.h"
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
+
+#include "fake_celestron_cgx_mount.h"
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
@@ -106,6 +109,9 @@
 #include "fake_qhy_qfocuser.h"
 #include "fake_qhy_sdk.h"
 #include "locked_qhy_sdk.h"
+#endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#include <alpacacore/vendor/altair/altair_camera_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
@@ -530,6 +536,7 @@ struct Tier2Host {
     // handshake at once), so it states why and the source here; the case then asserts only that the first
     // sample after connect() is Connecting or Connected. Never left empty for such a row.
     const char* connecting_unobservable = nullptr;
+    int target_unset_error = err::ValueNotSet;
 };
 
 using Clock = std::chrono::steady_clock;
@@ -657,19 +664,18 @@ Hosted connected_host(const Tier2Host& h) {
     CHECK(hosted.driver->get_last_connect_error() == reason);
 }
 
-// Case 2, telescope rows only. AGENTS.md (TargetRightAscension and TargetDeclination are independent):
-// each getter throws ValueNotSet until that property itself is written. Issue #655 says
-// InvalidOperation; every driver and every per-vendor test uses ValueNotSet (0x402), so that is the rule.
+// Case 2, telescope rows only. New implementations follow Master Interfaces 1.0.27
+// (InvalidOperation); legacy drivers retain ValueNotSet until their separate migration.
 [[maybe_unused]] void case_t2_target_flags(const Tier2Host& h) {
     // Registered over telescope hosts only (kind TEL below); the guard case pins that.
     REQUIRE(h.type == DeviceType::Telescope);
     Hosted hosted = connected_host(h);
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
-    CHECK(thrown_code([&] { (void)t.get_target_right_ascension(); }) == err::ValueNotSet);
-    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == err::ValueNotSet);
+    CHECK(thrown_code([&] { (void)t.get_target_right_ascension(); }) == h.target_unset_error);
+    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == h.target_unset_error);
     t.set_target_right_ascension(5.5);
     CHECK(t.get_target_right_ascension() == 5.5);
-    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == err::ValueNotSet);
+    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == h.target_unset_error);
     t.set_target_declination(20.25);
     CHECK(t.get_target_right_ascension() == 5.5);
     CHECK(t.get_target_declination() == 20.25);
@@ -842,6 +848,35 @@ Tier2Host tier2_host_celestron_telescope() {
             info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
             return cel::create_celestron_telescope(0, info);
         });
+}
+
+Tier2Host tier2_host_celestron_cgx_telescope() {
+    namespace cel = alpacacore::vendor::celestron;
+    auto fake = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
+    const auto make = [fake](int device_number) -> std::unique_ptr<AlpacaDriver> {
+        cel::CelestronCgxConnectionInfo info;
+        info.port_path = fake->slave_path();
+        info.site_latitude_degrees = 45.0;
+        info.site_longitude_degrees = -75.0;
+        return cel::create_celestron_cgx_telescope(device_number, info);
+    };
+    Tier2Host host{
+        "celestron_telescope_cgx",
+        "celestron",
+        "telescope",
+        "fake_celestron_cgx_mount.h",
+        DeviceType::Telescope,
+        "celestron_telescope_cgx",
+        [fake, make](bool) -> Hosted { return {fake, make(0)}; },
+        false,
+        [fake, make]() -> Hosted {
+            fake->corrupt_next_reply_checksum();
+            return {fake, make(0)};
+        },
+        "",
+        "Firmware replies are immediate; Connecting may complete before its first poll (fake protocol timing)",
+        err::InvalidOperation};
+    return host;
 }
 #endif
 
@@ -1223,6 +1258,42 @@ Tier2Host tier2_host_touptek_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ALTAIR
+// Recipe of altair_concurrency_stress.cpp: the touptek_camera host through the
+// Altair factory, over the same fake.
+Tier2Host tier2_host_altair_camera() {
+    Tier2Host h{"altair_camera",
+                "altair",
+                "camera",
+                "fake_touptek_sdk.h",
+                DeviceType::Camera,
+                "altair_camera",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk_hold = std::make_shared<ToupTekSdkHold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera_by_id") std::this_thread::sleep_for(kHold);
+            };
+        }
+        return host_over(sdk_hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::altair::create_altair_camera(0, 0, s.sdk);
+        });
+    };
+    h.failing = []() {
+        auto hold = std::make_shared<ToupTekSdkHold>();
+        hold->fake.throw_from.insert("open_camera_by_id");  // fake_touptek_sdk.h fault injection
+        return host_over(hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::altair::create_altair_camera(0, 0, s.sdk);
+        });
+    };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 Tier2Host tier2_host_playerone_camera() {
     Tier2Host h{"playerone_camera",
@@ -1433,7 +1504,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS2_CELESTRON(X) X(celestron_telescope, TEL)
+#define CS2_CELESTRON(X) X(celestron_telescope, TEL) X(celestron_cgx_telescope, TEL)
 #else
 #define CS2_CELESTRON(X)
 #endif
@@ -1472,6 +1543,11 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_TOUPTEK(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CS2_ALTAIR(X) X(altair_camera, NPR)
+#else
+#define CS2_ALTAIR(X)
+#endif
 #ifdef ALPACACORE_ENABLE_SVBONY
 #define CS2_SVBONY(X) X(svbony_camera, NPR)
 #else
@@ -1502,6 +1578,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_GEMINI(X) \
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
+    CS2_ALTAIR(X) \
     CS2_SVBONY(X) \
     CS2_PLAYERONE(X) \
     CS2_GPHOTO(X) \
@@ -1604,6 +1681,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
     CS2_ENABLED("touptek")
+#endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+    CS2_ENABLED("altair")
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
     CS2_ENABLED("svbony")

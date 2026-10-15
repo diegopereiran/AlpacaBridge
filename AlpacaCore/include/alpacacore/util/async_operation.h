@@ -111,8 +111,9 @@ struct OperationContext::Body {
  * docs/decisions/0006-async-operation-ownership.md): owns one cancellable
  * background body at a time, starts a new body without waiting for the old
  * one, keeps at most kMaxStaleBodies replaced bodies, tells a cancelled body
- * from a superseded one, and keeps the last failure. Every wait goes through
- * the injected TaskClock (decision 0005).
+ * from a superseded one, and keeps the last failure until a successful start
+ * or explicit clear_failure() after joining. Every wait goes through the
+ * injected TaskClock (decision 0005).
  *
  * Rule 10, lock order and calling rules: driver mutex_, then the slot mutex.
  * The slot never runs a body, a log call or a user callback while holding its
@@ -252,6 +253,9 @@ public:
      * bound. The slot never calls detach(). A body blocked in a call with no
      * timeout of its own is the caller's to bound. Afterwards the slot is
      * empty and a later start() works. Rule 10: call without the driver mutex.
+     * The owning driver must serialize this entire call with other reapers and
+     * teardown: a concurrent caller sees an empty slot while this caller still
+     * owns threads being joined (docs/failures/0011-cgx-handoff-disconnect-race.md).
      */
     void cancel_all_and_join() {
         std::vector<std::unique_ptr<OperationContext::Body>> bodies;
@@ -297,6 +301,13 @@ public:
     std::optional<std::string> last_failure() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return last_failure_;
+    }
+
+    /// Clear the retained failure after the owning driver has stopped and
+    /// joined its current work, for example when beginning a new connection.
+    void clear_failure() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_failure_.reset();
     }
 
 private:
