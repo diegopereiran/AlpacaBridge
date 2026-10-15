@@ -6055,19 +6055,11 @@ std::chrono::milliseconds relink_motion_preserve_window() {
 
 bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed, std::chrono::milliseconds tolerance) {
-    const auto system_ms = std::chrono::duration_cast<std::chrono::milliseconds>(system_elapsed);
-    const auto steady_ms = std::chrono::duration_cast<std::chrono::milliseconds>(steady_elapsed);
-    const auto drift = system_ms - steady_ms;
-    return drift > tolerance || drift < -tolerance;
+    return alpacacore::util::HostClock::clock_was_stepped(system_elapsed, steady_elapsed, tolerance);
 }
 
 bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized) {
-    if (!offset_survives) {
-        return false;  // nothing to apply, or the delta no longer describes anything
-    }
-    // A disciplined host already has a better clock than the client's, and
-    // the router refused to step it for exactly that reason.
-    return !host_was_synchronized;
+    return alpacacore::util::HostClock::pointing_uses_client_offset(offset_survives, host_was_synchronized);
 }
 }  // namespace detail
 
