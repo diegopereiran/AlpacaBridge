@@ -695,9 +695,12 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | CGX-L | USB/Serial (hand controller) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/) |
+| CGX | USB (direct AUX) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/CGX/) |
 
 <details>
 <summary><strong>Celestron Driver Notes</strong></summary>
+
+#### Hand-controller backend
 
 - **Protocol**: NexStar HC serial protocol with MC passthrough (P-command) for per-axis control.
 - **Connection**: USB/Serial via hand controller.
@@ -709,6 +712,12 @@ This document lists all hardware vendors and device types that are verified to w
 - **Pulse guiding**: Uses native MC_AUX_GUIDE (0x26) hardware command via the autoguider port. The firmware times the pulse internally — no software sleep or encoder math required. Position hold/correction pattern bridges the gap between the low-level firmware command and ASCOM coordinate expectations.
 - **Pier side**: `SideOfPier` reports actual pier side via the HC `p` command (`W` = pierWest, `E` = pierEast).
 - **Fork mounts on a wedge (not hardware-validated)**: with the device's Alignment Mode setting at `equatorial`, a fork model reports `AlignmentMode` Polar and `Tracking=true` selects EQ tracking (mode 2 north, 3 south). This is covered by unit tests on the fake mount only; there is no ConformU run on a wedged fork mount yet, so `SideOfPier` and `DestinationSideOfPier` on a wedge are unchecked. The default (`auto`) keeps the nominal Alt-Az classification for forks.
+
+#### Direct USB backend
+
+- **Validated hardware/scope**: bare northern CGX, both motor controllers firmware **7.17.25**, model **0x1788**, native Linux arm64 (RPi4, Debian 13), 2026-10-14. ConformU **4.5.1.54507**: **0 errors, 0 warnings, 0 issues**, all **98** timing rows passed. [Privacy-scrubbed report](AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt); [build provenance and lab evidence](docs/celestron-cgx-usb-motion.md#run-5-passing-qualification-and-final-software-verification).
+- **Configuration/reference**: select `protocol="cgx-aux"`, serial transport, explicit USB `portPath`, `siteLatitude` and `siteLongitude`; the AUX link is 115200 baud. No HC startup/alignment sequence is required for this backend. Connect does not home or write labels: explicitly FindHome to establish the encoder reference, then Sync as needed. Reference retention is limited to a verified, exclusively owned logical reconnect; it is not persistence across restart or proof against controller resets/HC interference.
+- **Qualification limits**: this pass covers this CGX/firmware at a northern site, not direct-USB CGX-L, southern operation or optical pointing accuracy. Earlier intermittent guide-onset excess remains recorded and is not claimed fixed by this one successful run; native guide-wire behavior was unchanged. Published site and derived Sync coordinates are privacy-rounded, with residuals retained.
 
 </details>
 

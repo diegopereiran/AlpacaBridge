@@ -90,6 +90,7 @@
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -240,6 +241,9 @@ inline constexpr const char* kSrcAgentsAxis =
     "tertiary not); "
     "the per-vendor disconnected unit tests this sweep replaced (fake/disconnected only, not a hardware run); "
     "Command* passthrough flag and Bisque's absence of it are assumptions read from driver source";
+inline constexpr const char* kSrcCelestronCgx =
+    "protocol document: Celestron AUX MC_MOVE_POS/MC_MOVE_NEG expose fixed rates but not measured degrees/second; "
+    "assumption: MoveAxis stays unavailable until CGX motor rates are hardware-calibrated";
 
 #ifdef ALPACACORE_ENABLE_ZWO
 inline ContractEntry contract_entry_zwo_camera() {
@@ -490,6 +494,20 @@ inline ContractEntry contract_entry_celestron_telescope() {
             return vendor::celestron::create_celestron_telescope(n, conn);
         },
         kSrcAgentsAxis));
+}
+inline ContractEntry contract_entry_celestron_cgx_telescope() {
+    ContractEntry entry = make_entry(
+        "celestron_telescope_cgx", "celestron", "telescope", DeviceType::Telescope,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::celestron::CelestronCgxConnectionInfo info;
+            info.port_path = "/dev/null";
+            info.site_latitude_degrees = 0.0;
+            info.site_longitude_degrees = 0.0;
+            return vendor::celestron::create_celestron_cgx_telescope(n, info);
+        },
+        kSrcCelestronCgx);
+    entry.can_move_axis = {false, false, false};
+    return entry;
 }
 #endif
 
@@ -751,7 +769,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS_CELESTRON(X) X(celestron_telescope)
+#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope)
 #else
 #define CS_CELESTRON(X)
 #endif
@@ -878,6 +896,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "telescope", "fake_mount_server.h"},
     {"zwo", "camera", "fake_zwo_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
+    {"celestron", "telescope", "fake_celestron_cgx_mount.h"},  // direct USB backend
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},

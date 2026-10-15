@@ -14,6 +14,8 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
+#include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #include <alpacacore/version.h>
 
@@ -33,6 +35,7 @@
 
 #ifndef _WIN32
 #include "concurrency_stress.h"
+#include "fake_celestron_cgx_mount.h"
 #include "fake_mount_server.h"
 #endif
 
@@ -94,6 +97,28 @@ TEST_CASE("Celestron Telescope Driver - Device metadata", "[celestron][telescope
     CHECK(driver->get_interface_version() == 4);
     CHECK(driver->get_unique_id() == "Celestron_3");
 }
+
+#ifndef _WIN32
+TEST_CASE("Celestron serial backends - refuse a NexStar open of a CGX AUX port",
+          "[celestron][telescope][protocol][unit]") {
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    alpacacore::vendor::celestron::CelestronCgxProtocol direct;
+    direct.connect_serial(mount.slave_path());
+
+    auto& nexstar = alpacacore::vendor::celestron::CelestronProtocolWrapper::instance();
+    nexstar.disconnect();
+    alpacacore::vendor::celestron::ConnectionInfo info;
+    info.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+    info.port_path = mount.slave_path();
+    try {
+        static_cast<void>(nexstar.connect(info));
+        FAIL("The NexStar backend must not share the direct CGX serial port");
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(error.error_code() == alpacacore::AlpacaError::InvalidOperation);
+    }
+}
+#endif
 
 TEST_CASE("Celestron Telescope Driver - Disconnected Behavior", "[celestron][telescope][unit]") {
     alpacacore::vendor::celestron::ConnectionInfo conn;

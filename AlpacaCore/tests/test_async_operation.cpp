@@ -668,6 +668,8 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
         CHECK(h.op->last_failure() == std::optional<std::string>("disconnect"));
+        h.op->clear_failure();
+        CHECK_FALSE(h.op->last_failure().has_value());
     }
 }
 
