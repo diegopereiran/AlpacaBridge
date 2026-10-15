@@ -354,6 +354,14 @@ def moved_base_self_test():
     import tempfile
     failures = []
     saved = ROOT
+    # Isolated git: no user config, and no GIT_DIR from an enclosing hook
+    # pointing the scratch repo's git at the real repository.
+    git_env = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    stripped = ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+    saved_env = {k: os.environ.get(k) for k in list(git_env) + list(stripped)}
+    os.environ.update(git_env)
+    for name in stripped:
+        os.environ.pop(name, None)
     with tempfile.TemporaryDirectory() as tmp:
         ROOT = tmp
 
@@ -374,6 +382,7 @@ def moved_base_self_test():
             opened = sha()
             git("checkout", "-q", "-b", "pr")
             commit("pr", "test_a.cpp", "Old", "Mine")
+            commit("pr again", "test_c.cpp", "Mine2")
             git("checkout", "-q", "trunk")
             commit("other pr", "test_b.cpp", "Other")
             # refs/pull/N/merge: first parent the moved base tip, second the PR head.
@@ -382,19 +391,25 @@ def moved_base_self_test():
                             "merge", "-q", "--no-ff", "-m", "merge", "pr"], capture_output=True)
             old = gather_new_cases(resolve_base(opened))[0]
             new = gather_new_cases(resolve_base(MERGE_PARENT))[0]
-            if set(old) != {"Mine", "Other"}:
+            if set(old) != {"Mine", "Mine2", "Other"}:
                 failures.append("moved base: old base.sha choice flags the other PR's case")
-            if set(new) != {"Mine"}:
-                failures.append("moved base: merge-parent base flags only this PR's case")
-            # Not a merge commit: falls back to the defaults (main here).
+            if set(new) != {"Mine", "Mine2"}:
+                failures.append("moved base: merge-parent base flags only this PR's cases")
+            # Not a merge commit: falls back to the defaults (main here). The PR has two
+            # commits, so HEAD^1 would drop Mine and a dropped HEAD^2 guard shows.
             git("branch", "main", opened)
             git("checkout", "-q", "-B", "plain", "pr")
-            if set(gather_new_cases(resolve_base(MERGE_PARENT))[0]) != {"Mine"}:
+            if set(gather_new_cases(resolve_base(MERGE_PARENT))[0]) != {"Mine", "Mine2"}:
                 failures.append("merge-parent falls back when HEAD is not a merge commit")
         except Exception as exc:  # noqa: BLE001
             failures.append("moved base scratch repo: %s" % exc)
         finally:
             ROOT = saved
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
     return failures
 
 
