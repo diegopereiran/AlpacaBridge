@@ -698,8 +698,9 @@ TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     mount.jump_axis_degrees(1, 96.0);
     // Each guard poll reads both axes (two 'j' frames); j+5 is the third
-    // poll's first read, so two polls after the jump have been evaluated
-    // and applied.
+    // poll's first read. That is at least one full poll after the jump
+    // evaluated and applied, and two when the snapshot falls on a poll
+    // boundary.
     const int polls = mount.frames_seen('j');
     REQUIRE(mount.wait_for_frames('j', polls + 5, std::chrono::milliseconds(10000)));
     CHECK(driver->get_tracking());
