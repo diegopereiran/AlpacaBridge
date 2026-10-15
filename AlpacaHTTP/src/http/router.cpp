@@ -68,9 +68,6 @@
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_ZWO
-#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 // The ioptron/camera (iCAM) arm only; the playerone pairs are catalog descriptors.
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
@@ -430,8 +427,6 @@ std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     }
     return key;
 }
-
-bool is_zwo_camera_key(const PersistedKey& key) { return key.vendor == "zwo" && key.device_type == "camera"; }
 
 // Throw a parameter-validation failure with an explicit ASCOM error code, so
 // the ErrorNumber on the wire is deterministic rather than inferred from the
@@ -6920,6 +6915,41 @@ nlohmann::json with_object_record_entries(const nlohmann::json& config,
     return out;
 }
 
+// Whether config_from_json can read `value` as the integer an Int selector holds: a
+// JSON integer, or a float with no fractional part, inside the int64 range.
+bool is_readable_integer(const nlohmann::json& value) {
+    if (value.is_number_unsigned()) {
+        return value.get<std::uint64_t>() <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    }
+    if (value.is_number_integer()) return true;
+    if (!value.is_number_float()) return false;
+    const double d = value.get<double>();
+    constexpr double kTwo63 = 9223372036854775808.0;
+    return std::isfinite(d) && d == std::trunc(d) && d >= -kTwo63 && d < kTwo63;
+}
+
+// A stored selector (an enumeration index or device id) that is not an integer
+// config_from_json can read -- "1", true, 1.5 -- is removed from `config` and its
+// key returned, so the entry still registers and stays listed with the selector
+// unset, as it did before the selectors were catalog fields. Used only for a
+// schema with forget_dropped_selectors, whose callers also forget the key in the
+// stored entry.
+std::vector<std::string> drop_unreadable_selectors(nlohmann::json& config,
+                                                   std::span<const alpacacore::catalog::FieldRef> fields) {
+    std::vector<std::string> dropped;
+    if (!config.is_object()) return dropped;
+    for (const auto& f : fields) {
+        if (f.role != alpacacore::catalog::Role::EnumerationIndex && f.role != alpacacore::catalog::Role::DeviceId) {
+            continue;
+        }
+        const auto it = config.find(f.key);
+        if (it == config.end() || it->is_null() || is_readable_integer(*it)) continue;
+        config.erase(it);
+        dropped.emplace_back(f.key);
+    }
+    return dropped;
+}
+
 // Reads siteLatitude/siteLongitude out of a device config and range-checks
 // them (issue #398).
 //
@@ -8272,44 +8302,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     std::string vendor = config_get(config, "vendor", "");
     int device_number = config_get(config, "deviceNumber", -1);
 
-#ifdef ALPACACORE_ENABLE_ZWO
-    const auto read_zwo_selector = [&](const char* field, int& value) {
-        const auto it = config.find(field);
-        if (it == config.end() || it->is_null()) {
-            value = -1;
-            return true;
-        }
-        std::optional<int> parsed;
-        if (it->is_number_unsigned()) {
-            const auto raw = it->get<std::uint64_t>();
-            if (raw <= static_cast<std::uint64_t>(std::numeric_limits<int>::max())) parsed = static_cast<int>(raw);
-        } else if (it->is_number_integer()) {
-            const auto raw = it->get<std::int64_t>();
-            if (raw >= -1 && raw <= std::numeric_limits<int>::max()) parsed = static_cast<int>(raw);
-        } else if (it->is_number_float()) {
-            const double raw = it->get<double>();
-            if (std::isfinite(raw) && raw == std::trunc(raw) && raw >= -1.0 &&
-                raw <= static_cast<double>(std::numeric_limits<int>::max())) {
-                parsed = static_cast<int>(raw);
-            }
-        }
-        if (parsed) {
-            value = *parsed;
-            return true;
-        }
-        if (source == ConfigSource::Api) {
-            error_message = std::string("Invalid value for ") + field + ": expected an integer from -1 to " +
-                            std::to_string(std::numeric_limits<int>::max());
-            return false;
-        }
-        util::log_warning(persisted_device_subject(vendor, device_type_str, device_number) + " has invalid '" + field +
-                          "' (expected an integer from -1 to INT_MAX); dropping it");
-        if (learned_config != nullptr) (*learned_config)[field] = nullptr;
-        value = -1;
-        return true;
-    };
-#endif
-
     if (device_type_str.empty() || vendor.empty() || device_number < 0) {
         error_message = "Missing required fields: deviceType, vendor, and deviceNumber";
         return false;
@@ -8335,9 +8327,16 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
         if (auto view = find_descriptor(catalog_, key)) {
-            const alpacacore::catalog::DeviceConfig typed = catalog_json::config_from_json(
-                with_object_record_entries(without_unknown_alignment_mode(config, view->fields), view->fields),
-                view->fields);
+            nlohmann::json prepared =
+                with_object_record_entries(without_unknown_alignment_mode(config, view->fields), view->fields);
+            if (view->forget_dropped_selectors && source == ConfigSource::Persisted) {
+                for (const std::string& dropped : drop_unreadable_selectors(prepared, view->fields)) {
+                    util::log_warning(persisted_device_subject(vendor, device_type_str, device_number) +
+                                      " has invalid '" + dropped + "' (expected an integer); dropping it");
+                    if (learned_config != nullptr) (*learned_config)[dropped] = nullptr;
+                }
+            }
+            const alpacacore::catalog::DeviceConfig typed = catalog_json::config_from_json(prepared, view->fields);
             const auto result =
                 catalog_.normalize(key, typed,
                                    source == ConfigSource::Api ? alpacacore::catalog::Source::Api
@@ -8359,7 +8358,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                                       "stays unset if it has none. Registered so it stays listed and editable in "
                                       "the web UI.");
                 }
-                if (key.vendor.compare("zwo") == 0 && learned_config != nullptr) {
+                if (view->forget_dropped_selectors && learned_config != nullptr) {
                     const auto normalized = catalog_json::json_from_config(result.config);
                     for (const auto& field : view->fields) {
                         if (field.role != alpacacore::catalog::Role::EnumerationIndex &&
@@ -8379,8 +8378,50 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                                 std::string(view->build_option) + "=ON";
                 return false;
             }
-            auto driver = catalog_.create(key, result.config, device_number);
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(driver)))) {
+            // A factory with a bind hook sees the other stored entries of its key
+            // (copied under the mutex, which is released before the hook runs: it may
+            // enumerate the SDK) and may hand learned config back. Any other factory
+            // gets no peers and learns nothing.
+            std::vector<alpacacore::catalog::PeerEntry> peers;
+            if (catalog_.has_bind(key)) {
+                const std::string wanted_type = to_lower_copy(device_type_str);
+                std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+                for (const auto& other : persisted_devices_) {
+                    const auto other_key = persisted_key(other);
+                    if (!other_key || other_key->vendor != vendor || other_key->device_type != wanted_type) {
+                        continue;
+                    }
+                    try {
+                        nlohmann::json neighbour = with_object_record_entries(other, view->fields);
+                        if (view->forget_dropped_selectors) drop_unreadable_selectors(neighbour, view->fields);
+                        peers.push_back(
+                            {other_key->device_number, catalog_json::config_from_json(neighbour, view->fields)});
+                    } catch (const std::exception& ex) {
+                        // A hand-edited neighbour with a wrong-typed field is not a peer.
+                        util::log_debug("register_device_from_config: ignoring a stored " +
+                                        persisted_device_subject(vendor, device_type_str, other_key->device_number) +
+                                        " as a peer (" + util::escape_for_log(ex.what()) + ")");
+                    }
+                }
+            }
+            auto bound = catalog_.bind(key, result.config, device_number,
+                                       {source == ConfigSource::Api ? alpacacore::catalog::Source::Api
+                                                                    : alpacacore::catalog::Source::Persisted,
+                                        peers});
+            if (bound.rejection) {
+                error_message = *bound.rejection;
+                return false;
+            }
+            if (learned_config != nullptr) {
+                const nlohmann::json learned = catalog_json::json_from_config(bound.learned);
+                for (const auto& [field, value] : learned.items()) {
+                    (*learned_config)[field] = value;
+                }
+                for (const auto& field : bound.erased) {
+                    (*learned_config)[field] = nullptr;
+                }
+            }
+            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(bound.driver)))) {
                 util::log_info("Registered " + vendor_label(*view) + " " + device_type_str);
                 return true;
             }
@@ -8655,190 +8696,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "zwo" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_ZWO
-        int camera_id = -1;
-        int camera_index = -1;
-        if (!read_zwo_selector("cameraId", camera_id) || !read_zwo_selector("cameraIndex", camera_index)) {
-            return false;
-        }
-        std::string configured_serial = config_get(config, "serialNumber", "");
-        std::string configured_name = config_get(config, "cameraName", "");
-        std::string unique_id = config_get(config, "uniqueId", "");
-
-        // The three identity strings reach log lines and the file, so a client
-        // cannot put control bytes (a forged log line) or a non-hex serial in
-        // them. The API refuses; a stored entry loses the bad key and relearns.
-        const auto has_control_bytes = [](const std::string& text) {
-            return std::any_of(text.begin(), text.end(), [](char ch) {
-                const auto byte = static_cast<unsigned char>(ch);
-                return byte < 0x20 || byte == 0x7f;
-            });
-        };
-        const auto is_hex_serial = [](const std::string& text) {
-            return text.size() <= 64 && std::all_of(text.begin(), text.end(), [](char ch) {
-                       return std::isxdigit(static_cast<unsigned char>(ch)) != 0;
-                   });
-        };
-        const auto check_identity_field = [&](const char* field, std::string& value, bool valid) {
-            if (valid) {
-                return true;
-            }
-            if (source == ConfigSource::Api) {
-                error_message = std::string("Invalid value for ") + field;
-                return false;
-            }
-            util::log_warning(std::string("Ignoring invalid ZWO camera ") + field + " in the stored entry");
-            value.clear();
-            return true;
-        };
-        if (!check_identity_field("serialNumber", configured_serial, is_hex_serial(configured_serial)) ||
-            !check_identity_field("cameraName", configured_name, !has_control_bytes(configured_name)) ||
-            !check_identity_field("uniqueId", unique_id, !has_control_bytes(unique_id))) {
-            return false;
-        }
-        const std::string supplied_unique_id = unique_id;
-        const bool unique_id_supplied = !unique_id.empty();
-
-        if (camera_id < 0 && camera_index < 0 && configured_serial.empty() && configured_name.empty() &&
-            source == ConfigSource::Api) {
-            error_message = "ZWO camera requires cameraIndex or cameraId";
-            return false;
-        }
-
-        // Camera identity (#914): the serial, not the enumeration order, says
-        // which physical camera this entry is. The serials other entries bind
-        // are read from the persisted list; a re-configure that does not
-        // resend uniqueId keeps the one already stored for this number.
-        alpacacore::vendor::zwo::ZwoCameraBinding binding;
-        if (camera_id >= 0) {
-            binding.identity.camera_id = camera_id;
-        }
-        if (camera_index >= 0) {
-            binding.identity.camera_index = camera_index;
-        }
-        binding.identity.serial = configured_serial;
-        binding.identity.camera_name = configured_name;
-        bool duplicate_serial = false;
-        bool duplicate_unique_id = false;
-        bool cleared_duplicate_serial = false;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            for (const auto& other : persisted_devices_) {
-                const auto key = persisted_key(other);
-                if (!key || !is_zwo_camera_key(*key)) {
-                    continue;
-                }
-                const auto serial_it = other.find("serialNumber");
-                const bool has_serial = serial_it != other.end() && serial_it->is_string();
-                if (key->device_number == device_number) {
-                    const auto uid_it = other.find("uniqueId");
-                    if (unique_id.empty() && uid_it != other.end() && uid_it->is_string() &&
-                        !has_control_bytes(uid_it->get<std::string>())) {
-                        unique_id = uid_it->get<std::string>();
-                    }
-                } else {
-                    if (has_serial && !serial_it->get<std::string>().empty()) {
-                        binding.claimed_serials.insert(serial_it->get<std::string>());
-                        duplicate_serial = duplicate_serial || serial_it->get<std::string>() == configured_serial;
-                    }
-                    const auto other_uid = other.find("uniqueId");
-                    if (unique_id_supplied && other_uid != other.end() && other_uid->is_string() &&
-                        other_uid->get<std::string>() == unique_id) {
-                        duplicate_unique_id = true;
-                    }
-                }
-            }
-        }
-
-        // One serial or UniqueID names one camera: another entry holding it
-        // would bind the same body twice (or report one UniqueID twice).
-        if (configured_serial.empty()) {
-            duplicate_serial = false;
-        }
-        if (duplicate_serial || duplicate_unique_id) {
-            const char* field = duplicate_serial ? "serialNumber" : "uniqueId";
-            if (source == ConfigSource::Api) {
-                error_message = std::string("Invalid value for ") + field + ": another ZWO camera already uses it";
-                return false;
-            }
-            util::log_warning(std::string("Ignoring duplicate ZWO camera ") + field + " in the stored entry");
-            // Each duplicated field is cleared and relearned on its own.
-            if (duplicate_serial) {
-                configured_serial.clear();
-                binding.identity.serial.clear();
-                cleared_duplicate_serial = true;
-            }
-            if (duplicate_unique_id) {
-                unique_id.clear();
-            }
-        }
-
-        // A camera that is not plugged in yet still registers with the
-        // identity it was configured with; connect reports why it is absent.
-        // Known limit: an entry with only an index/id hint learns whatever
-        // serial sits at that hint. With two saved cameras and only one
-        // plugged in, the first entry can learn the other body's serial.
-        std::string learned_serial = configured_serial;
-        std::string learned_name = configured_name;
-        try {
-            const auto resolved = alpacacore::vendor::zwo::resolve_zwo_camera(
-                binding.identity,
-                alpacacore::vendor::zwo::enumerate_zwo_cameras(alpacacore::vendor::zwo::trim_zwo_name(configured_name)),
-                binding.claimed_serials);
-            if (resolved.camera.has_value()) {
-                const auto& found = resolved.camera.value();
-                binding.identity.camera_id = found.camera_id;
-                binding.identity.camera_index = found.index;
-                if (learned_serial.empty()) {
-                    learned_serial = found.serial;
-                }
-                if (learned_name.empty()) {
-                    learned_name = alpacacore::vendor::zwo::trim_zwo_name(found.name);
-                }
-            }
-        } catch (const std::exception& e) {
-            util::log_warning(std::string("ZWO camera enumeration failed: ") + e.what());
-        }
-        binding.identity.serial = learned_serial;
-        binding.identity.camera_name = learned_name;
-        if (learned_serial.empty() && unique_id.empty()) {
-            unique_id = alpacacore::vendor::zwo::generate_zwo_unique_id();
-        }
-        binding.unique_id = unique_id;
-
-        if (learned_config != nullptr) {
-            if (configured_serial.empty() && !learned_serial.empty()) {
-                (*learned_config)["serialNumber"] = learned_serial;
-            } else if (cleared_duplicate_serial) {
-                // Persist the clear for this entry, so the entry processed
-                // after it no longer sees a duplicate and keeps the serial.
-                (*learned_config)["serialNumber"] = std::string();
-            }
-            if (configured_name.empty() && !learned_name.empty()) {
-                (*learned_config)["cameraName"] = learned_name;
-            }
-            if (!unique_id.empty() && unique_id != supplied_unique_id) {
-                (*learned_config)["uniqueId"] = unique_id;
-            }
-        }
-
-        std::unique_ptr<alpacacore::CameraDriver> camera =
-            alpacacore::vendor::zwo::create_zwo_camera_bound(device_number, binding);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered ZWO camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
-        return false;
-#endif
-    }
-
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -8954,17 +8811,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
                 copy_if_present("host");
                 copy_if_present("tcpPort");
             }
-        }
-    } else if (vendor == "zwo") {
-        // Only the camera is left here (open-astro#999): the other ZWO device
-        // types are catalog-registered and sanitized from their descriptors.
-        copy_if_present("cameraIndex");
-        copy_if_present("cameraId");
-        if (device_type == "camera") {
-            // #914: the identity a camera entry binds by.
-            copy_if_present("serialNumber");
-            copy_if_present("cameraName");
-            copy_if_present("uniqueId");
         }
     }
 

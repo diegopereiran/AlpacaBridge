@@ -10,11 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The ZWO schemas (telescope, EFW filter wheel, EAF focuser, CAA rotator,
+// The ZWO schemas (telescope, camera, EFW filter wheel, EAF focuser, CAA rotator,
 // switch). No vendor header: compiles in every build (including vendors-OFF), so
 // `available` in GET /management/v1/devicecatalog reflects only whether a
 // factory is registered. One switch descriptor serves all four backends and
-// branches on switchType, as the router arm did. The camera is not here yet.
+// branches on switchType, as the router arm did.
 //
 // Telescope rules, in the arm's order: connection type, then the endpoint. The
 // API is refused; a saved config is registered so it stays listed and editable
@@ -43,6 +43,8 @@ void add_schema(DeviceCatalog& catalog, DeviceType type, std::string_view displa
     schema.build_option = kZwoBuildOption;
     schema.fields = fields;
     schema.normalize = std::move(normalize);
+    // The ZWO selectors are catalog fields now: a stored one normalize drops is forgotten in the file.
+    schema.forget_dropped_selectors = true;
     catalog.add(std::move(schema));
 }
 
@@ -88,10 +90,52 @@ NormalizeResult normalize_telescope(const DeviceConfig& in, Source source) {
     return result;
 }
 
+// The camera's selector range, identity strings and selector rule, in the router arm's
+// order. The API refuses an invalid value ("Invalid value for <field>"); a saved config
+// loses it and relearns it at registration, so the camera stays listed.
+NormalizeResult normalize_camera(const DeviceConfig& in, Source source) {
+    NormalizeResult result;
+    result.config = in;
+    // The selectors first, cameraId before cameraIndex, as the arm read them.
+    for (const Field<std::int64_t>* selector : {&kZwoCamId, &kZwoCamIndex}) {
+        const std::optional<std::int64_t> value = in.find(*selector);
+        if (!value || (*value >= kZwoSelectorMin && *value <= kZwoSelectorMax)) continue;
+        if (source == Source::Api) {
+            result.rejection = std::string("Invalid value for ") + selector->key + ": expected an integer from -1 to " +
+                               std::to_string(kZwoSelectorMax);
+            return result;
+        }
+        result.warnings.push_back(std::string(selector->key) + " is outside -1 to " + std::to_string(kZwoSelectorMax));
+        result.config.erase(selector->key);
+    }
+    const struct {
+        const Field<std::string>& field;
+        bool (*valid)(const std::string&);
+        const char* why;
+    } checks[] = {{kZwoCamSerial, zwo_serial_valid, "is not a hexadecimal serial of at most 64 digits"},
+                  {kZwoCamName, zwo_identity_text_valid, "contains control characters"},
+                  {kZwoCamUniqueId, zwo_identity_text_valid, "contains control characters"}};
+    for (const auto& check : checks) {
+        if (check.valid(in.get(check.field))) continue;
+        if (source == Source::Api) {
+            result.rejection = std::string("Invalid value for ") + check.field.key;
+            return result;
+        }
+        result.warnings.push_back(std::string(check.field.key) + " " + check.why);
+        result.config.erase(check.field.key);
+    }
+    if (source == Source::Api && result.config.get(kZwoCamId) < 0 && result.config.get(kZwoCamIndex) < 0 &&
+        result.config.get(kZwoCamSerial).empty() && result.config.get(kZwoCamName).empty()) {
+        result.rejection = "ZWO camera requires cameraIndex or cameraId";
+    }
+    return result;
+}
+
 }  // namespace
 
 void register_zwo_schema(DeviceCatalog& catalog) {
     add_schema(catalog, DeviceType::Telescope, "ZWO AM Mount", zwo_telescope_fields(), normalize_telescope);
+    add_schema(catalog, DeviceType::Camera, "ZWO Camera", zwo_camera_fields(), normalize_camera);
     add_schema(catalog, DeviceType::FilterWheel, "ZWO EFW Filter Wheel", zwo_filterwheel_fields(),
                [](const DeviceConfig& in, Source source) {
                    return refusal_only(
