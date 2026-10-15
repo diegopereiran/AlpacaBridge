@@ -212,7 +212,26 @@ def git(*args, check=True):
     return r.stdout
 
 
+MERGE_PARENT = "merge-parent"
+
+
 def resolve_base(explicit):
+    """Merge-base of HEAD and the first match among `explicit` and the defaults.
+
+    `explicit == "merge-parent"` (the CI job) means HEAD^1 when HEAD is a merge
+    commit: on a pull_request run HEAD is refs/pull/N/merge, built against the
+    CURRENT tip of the base branch, so its first parent is the exact base and a
+    base that moved after the PR opened adds none of the cases other PRs landed
+    (issue #992; pull_request.base.sha is the tip when the PR opened). Anywhere
+    else HEAD has no second parent and the usual defaults apply.
+    """
+    if explicit == MERGE_PARENT:
+        explicit = None
+        if subprocess.run(["git", "-C", ROOT, "rev-parse", "--verify", "-q", "HEAD^2"],
+                          capture_output=True).returncode == 0:
+            r = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD^1"], capture_output=True, text=True)
+            if r.returncode == 0:
+                return r.stdout.strip()
     for ref in ([explicit] if explicit else []) + ["upstream/main", "origin/main", "main"]:
         r = subprocess.run(["git", "-C", ROOT, "merge-base", ref, "HEAD"], capture_output=True, text=True)
         if r.returncode == 0:
@@ -328,6 +347,71 @@ def main(argv):
 
 
 # --- self-test -------------------------------------------------------------
+
+def moved_base_self_test():
+    """Scratch repo: the base branch gains a case after the PR branched (issue #992)."""
+    global ROOT
+    import tempfile
+    failures = []
+    saved = ROOT
+    # Isolated git: no user config, and no GIT_DIR from an enclosing hook
+    # pointing the scratch repo's git at the real repository.
+    git_env = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    stripped = ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+    saved_env = {k: os.environ.get(k) for k in list(git_env) + list(stripped)}
+    os.environ.update(git_env)
+    for name in stripped:
+        os.environ.pop(name, None)
+    with tempfile.TemporaryDirectory() as tmp:
+        ROOT = tmp
+
+        def commit(msg, name, *cases):
+            path = os.path.join(tmp, "AlpacaCore/tests", name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("".join('TEST_CASE("%s", "[x]") {}\n' % c for c in cases))
+            git("add", "-A")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", msg)
+
+        def sha():
+            return git("rev-parse", "HEAD").strip()
+
+        try:
+            git("init", "-q", "-b", "trunk")
+            commit("base", "test_a.cpp", "Old")
+            opened = sha()
+            git("checkout", "-q", "-b", "pr")
+            commit("pr", "test_a.cpp", "Old", "Mine")
+            commit("pr again", "test_c.cpp", "Mine2")
+            git("checkout", "-q", "trunk")
+            commit("other pr", "test_b.cpp", "Other")
+            # refs/pull/N/merge: first parent the moved base tip, second the PR head.
+            git("checkout", "-q", "-B", "merge", "trunk")
+            subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                            "merge", "-q", "--no-ff", "-m", "merge", "pr"], capture_output=True)
+            old = gather_new_cases(resolve_base(opened))[0]
+            new = gather_new_cases(resolve_base(MERGE_PARENT))[0]
+            if set(old) != {"Mine", "Mine2", "Other"}:
+                failures.append("moved base: old base.sha choice flags the other PR's case")
+            if set(new) != {"Mine", "Mine2"}:
+                failures.append("moved base: merge-parent base flags only this PR's cases")
+            # Not a merge commit: falls back to the defaults (main here). The PR has two
+            # commits, so HEAD^1 would drop Mine and a dropped HEAD^2 guard shows.
+            git("branch", "main", opened)
+            git("checkout", "-q", "-B", "plain", "pr")
+            if set(gather_new_cases(resolve_base(MERGE_PARENT))[0]) != {"Mine", "Mine2"}:
+                failures.append("merge-parent falls back when HEAD is not a merge commit")
+        except Exception as exc:  # noqa: BLE001
+            failures.append("moved base scratch repo: %s" % exc)
+        finally:
+            ROOT = saved
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    return failures
+
 
 def self_test():
     failures = []
@@ -456,6 +540,8 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     check("stale line with no new cases", len(errs) == 1 and "Ghost" in errs[0])
     errs = evaluate({"A": set()}, [("A", prod, "x y z")], ["malformed line"], always)
     check("body errors carried", errs == ["malformed line"])
+
+    failures.extend(moved_base_self_test())
 
     if failures:
         for f in failures:
