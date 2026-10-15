@@ -686,11 +686,21 @@ TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped
 
     // Already past the meridian limit when tracking starts.
     mount.jump_axis_degrees(1, 95.0);
+    // Starting tracking seeds the guard's baseline from the driver's cached
+    // position, which stays valid for 2 s after its last read. Without this
+    // the seed can still be the pre-jump position (inside the limit), and
+    // the guard then reads the jump as a crossing and stops tracking.
+    // AbortSlew on the idle mount drops that cache, so the seed re-reads the
+    // axes and sees the position the motion really starts from.
+    driver->abort_slew();
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     mount.jump_axis_degrees(1, 96.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // two 2 s polls
+    // Two 2 s guard polls after the jump, then one more so the second poll's
+    // verdict has been applied: wait on the guard's position reads.
+    const int polls = mount.frames_seen('j');
+    REQUIRE(mount.wait_for_frames('j', polls + 3, std::chrono::milliseconds(10000)));
     CHECK(driver->get_tracking());
     CHECK(mount.axis_running(1));
     driver->set_connected(false);
