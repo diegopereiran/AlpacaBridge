@@ -697,10 +697,11 @@ TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     mount.jump_axis_degrees(1, 96.0);
-    // Two 2 s guard polls after the jump, then one more so the second poll's
-    // verdict has been applied: wait on the guard's position reads.
+    // Each guard poll reads both axes (two 'j' frames); j+5 is the third
+    // poll's first read, so two polls after the jump have been evaluated
+    // and applied.
     const int polls = mount.frames_seen('j');
-    REQUIRE(mount.wait_for_frames('j', polls + 3, std::chrono::milliseconds(10000)));
+    REQUIRE(mount.wait_for_frames('j', polls + 5, std::chrono::milliseconds(10000)));
     CHECK(driver->get_tracking());
     CHECK(mount.axis_running(1));
     driver->set_connected(false);
