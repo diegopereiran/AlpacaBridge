@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-14
+## Updated 2026-10-15
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -99,6 +99,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
 - **Dew Heater / Fan**: Cooled models expose the lens heater and radiator fan two ways — camera custom Actions (`GetHeaterPower`/`SetHeaterPower`/`GetFanPower`/`SetFanPower`, percent) and the **Player One Thermal Switch** device (see Switch Drivers below) for slider control in clients like NINA. Both are runtime-only by design; no setting persists across connects. Note the fan does not auto-vary with temperature — `CoolerOn` turns cooler + fan on and the fan runs at its set power.
 - **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
+- **StopExposure**: not supported (`CanStopExposure = false`); use `AbortExposure`. `POAStopExposure` discards the frame on the camera (checked on the Ceres 462M, issue #1023), so there is no partial image to return. Ceres 462M re-validated with ConformU 4.5.1 on 2026-10-15 with this change: 0 errors, 0 issues, all members within timing targets.
 
 </details>
 
