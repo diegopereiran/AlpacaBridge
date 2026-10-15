@@ -7,7 +7,9 @@
 #
 # Installs <DESTDIR>/usr/lib/alpacabridge/libgphoto2/{include,lib} and
 # <DESTDIR>/usr/lib/udev/rules.d/61-alpacabridge-libgphoto2.rules. Without
-# --destdir it installs into the real prefix (needs root).
+# --destdir it installs into the real prefix (needs root). Without --build-dir
+# it builds in a temporary directory that is removed on exit, so a sudo run
+# leaves no root-owned tree in the checkout.
 #
 # The pins below are the single source of truth: CI, debian/rules and the
 # acceptance script read them through --print-pins. The README beside the
@@ -28,7 +30,7 @@ TARBALL="${REPO_ROOT}/AlpacaCore/external/libgphoto2/libgphoto2-${LIBGPHOTO2_VER
 RULES_NAME=61-alpacabridge-libgphoto2.rules
 
 DESTDIR=""
-BUILD_DIR="${REPO_ROOT}/AlpacaCore/build-bundled-gphoto"
+BUILD_DIR=""
 JOBS="$(nproc)"
 
 die() { echo "build_bundled_gphoto.sh: $*" >&2; exit 1; }
@@ -55,6 +57,10 @@ echo "${LIBGPHOTO2_SHA256}  ${TARBALL}" | sha256sum -c - \
 if [ -n "${DESTDIR}" ]; then
   mkdir -p "${DESTDIR}"
   DESTDIR="$(cd "${DESTDIR}" && pwd)"
+fi
+if [ -z "${BUILD_DIR}" ]; then
+  BUILD_DIR="$(mktemp -d)"
+  trap 'rm -rf "${BUILD_DIR}"' EXIT
 fi
 SRC_DIR="${BUILD_DIR}/libgphoto2-${LIBGPHOTO2_VER}"
 STAGE_PREFIX="${DESTDIR}${GPHOTO_PREFIX}"

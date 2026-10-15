@@ -106,7 +106,7 @@ check_ldd_port "${PTP2}"
 check_rpath "${SERVER}"
 check_rpath "${BUNDLE_LIB}/libgphoto2.so.6"
 
-# 5. udev rules generated from the bundled build.
+# 4. udev rules generated from the bundled build.
 if [ -f "${RULES}" ] \
    && grep -q '\*:060101:\*' "${RULES}" && grep -q 'GROUP="plugdev"' "${RULES}" \
    && head -n 3 "${RULES}" | grep -qF "libgphoto2 ${LIBGPHOTO2_VER}"; then
@@ -116,7 +116,7 @@ else
   head -n 3 "${RULES}" 2>&1 | sed 's/^/    /'
 fi
 
-# 6. The package no longer depends on the distro's libgphoto2.
+# 5. The package no longer depends on the distro's libgphoto2.
 if depends="$(dpkg-query -W -f '${Depends}' alpacabridge 2>&1)"; then dpkg_ok=1; else dpkg_ok=0; fi
 echo "    Depends: ${depends}"
 if [ "${dpkg_ok}" -eq 0 ]; then
@@ -127,7 +127,7 @@ else
   pass "dpkg-query Depends names neither libgphoto2-6t64 nor libgphoto2-port12t64"
 fi
 
-# 7. The bundle directory is not registered with ldconfig.
+# 6. The bundle directory is not registered with ldconfig.
 shopt -s nullglob
 confs=(/etc/ld.so.conf /etc/ld.so.conf.d/*)
 shopt -u nullglob
@@ -139,7 +139,7 @@ else
   pass "no ld.so.conf entry mentions libgphoto2"
 fi
 
-# 8. Rig use: the running server maps libgphoto2 only from the bundle.
+# 7. Rig use: the running server maps libgphoto2 only from the bundle.
 if [ -n "${PID}" ]; then
   maps="$(grep libgphoto2 "/proc/${PID}/maps" 2>&1 | awk '{print $6}' | sort -u)"
   indent <<< "${maps}"
