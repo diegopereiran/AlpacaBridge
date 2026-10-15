@@ -958,8 +958,8 @@ to the dated badge line, so bumping it early would date a release that has not h
 bump size rule: **new driver/feature (an unqualified `### Added` fragment entry) = minor bump;
 fix- or docs-only = patch; breaking change (dropped platform, config-schema break, a
 `### Breaking changes` entry) = major.** The bump is the highest severity across all fragments
-since the last release, and a legacy `## [X.Y.Z] - UNRELEASED` heading still in `CHANGELOG.md` is a
-floor. `/commit` and `/submit-pr` check the fragment's categories.
+since the last release, counting the categories of a legacy `## [X.Y.Z] - UNRELEASED` section still in
+`CHANGELOG.md` as well, and its heading label is a floor. `/commit` and `/submit-pr` check the fragment's categories.
 
 ### Changelog fragments (one file per PR)
 
