@@ -1,5 +1,15 @@
 [
   {
+    "vendor": "altair",
+    "deviceType": "camera",
+    "displayName": "Altair Camera",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_ALTAIR",
+    "fields": [
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+    ]
+  },
+  {
     "vendor": "astroasis",
     "deviceType": "focuser",
     "displayName": "Astroasis Oasis Focuser",
@@ -34,6 +44,7 @@
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_CELESTRON",
     "fields": [
+      {"key": "protocol", "type": "string", "default": "nexstar", "required": false, "secret": false, "role": "Discriminator", "enum": ["nexstar", "cgx-aux"]},
       {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
       {"key": "mountIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"},
       {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
@@ -44,10 +55,10 @@
       {"key": "alignmentMode", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Plain"},
       {"key": "siteLatitude", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": -90.0, "max": 90.0}},
       {"key": "siteLongitude", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": -180.0, "max": 180.0}},
-      {"key": "siteElevation", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"},
+      {"key": "siteElevation", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": -300.0, "max": 10000.0}},
       {"key": "syncTimeOnConnect", "type": "bool", "default": false, "required": false, "secret": false, "role": "Plain"},
-      {"key": "apertureDiameter", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"},
-      {"key": "focalLength", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"}
+      {"key": "apertureDiameter", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": 0.0}},
+      {"key": "focalLength", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": 0.0}}
     ]
   },
   {

@@ -90,6 +90,7 @@
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -101,6 +102,9 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
+#endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#include <alpacacore/vendor/altair/altair_camera_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
@@ -237,6 +241,9 @@ inline constexpr const char* kSrcAgentsAxis =
     "tertiary not); "
     "the per-vendor disconnected unit tests this sweep replaced (fake/disconnected only, not a hardware run); "
     "Command* passthrough flag and Bisque's absence of it are assumptions read from driver source";
+inline constexpr const char* kSrcCelestronCgx =
+    "protocol document: Celestron AUX MC_MOVE_POS/MC_MOVE_NEG expose fixed rates but not measured degrees/second; "
+    "assumption: MoveAxis stays unavailable until CGX motor rates are hardware-calibrated";
 
 #ifdef ALPACACORE_ENABLE_ZWO
 inline ContractEntry contract_entry_zwo_camera() {
@@ -488,6 +495,20 @@ inline ContractEntry contract_entry_celestron_telescope() {
         },
         kSrcAgentsAxis));
 }
+inline ContractEntry contract_entry_celestron_cgx_telescope() {
+    ContractEntry entry = make_entry(
+        "celestron_telescope_cgx", "celestron", "telescope", DeviceType::Telescope,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::celestron::CelestronCgxConnectionInfo info;
+            info.port_path = "/dev/null";
+            info.site_latitude_degrees = 0.0;
+            info.site_longitude_degrees = 0.0;
+            return vendor::celestron::create_celestron_cgx_telescope(n, info);
+        },
+        kSrcCelestronCgx);
+    entry.can_move_axis = {false, false, false};
+    return entry;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -576,6 +597,16 @@ inline ContractEntry contract_entry_gphoto_camera() {
     return make_entry(
         "gphoto_camera", "gphoto", "camera", DeviceType::Camera,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::gphoto::create_gphoto_camera(n, 0); }, kSrcAgents);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ALTAIR
+// Built on the real Altair SDK singleton, disconnected: like touptek_camera,
+// construction enumerates but opens nothing.
+inline ContractEntry contract_entry_altair_camera() {
+    return make_entry(
+        "altair_camera", "altair", "camera", DeviceType::Camera,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::altair::create_altair_camera(n, 0); }, kSrcAgents);
 }
 #endif
 
@@ -738,7 +769,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS_CELESTRON(X) X(celestron_telescope)
+#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope)
 #else
 #define CS_CELESTRON(X)
 #endif
@@ -780,6 +811,11 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #else
 #define CS_TOUPTEK(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CS_ALTAIR(X) X(altair_camera)
+#else
+#define CS_ALTAIR(X)
+#endif
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 #define CS_TOUPTEK_STELLAVITA(X) X(touptek_switch)
 #else
@@ -816,6 +852,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     CS_GPHOTO(X) \
     CS_TOUPTEK(X) \
     CS_TOUPTEK_STELLAVITA(X) \
+    CS_ALTAIR(X) \
     CS_WANDERERASTRO(X) \
     CS_ASTROASIS(X)
 // clang-format on
@@ -859,6 +896,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "telescope", "fake_mount_server.h"},
     {"zwo", "camera", "fake_zwo_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
+    {"celestron", "telescope", "fake_celestron_cgx_mount.h"},  // direct USB backend
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
@@ -871,6 +909,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
+    {"altair", "camera", "fake_touptek_sdk.h"},  // the ToupTek camera driver behind the Altair factory
     {"svbony", "camera", "fake_svbony_sdk.h"},
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},

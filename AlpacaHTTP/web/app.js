@@ -341,6 +341,7 @@ const INDEX_FIELDS = [
     { fieldId: 'qhy-cfw3-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'qhy-focuser-index', vendor: 'qhy', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'altair-camera-index', vendor: 'altair', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'gphoto-camera-index', vendor: 'gphoto', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
@@ -933,21 +934,28 @@ function startEditDevice(device) {
             onstepConnectionTypeEl.dispatchEvent(new Event('change'));
         }
     } else if (vendor === 'celestron') {
+        const protocol = config.protocol || 'nexstar';
+        setFormValue('celestron-protocol', protocol);
         setFormValue('celestron-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
-        const celestronConnectionType = config.connectionType || 'auto';
+        const celestronConnectionType = protocol === 'cgx-aux' ? 'serial' : (config.connectionType || 'auto');
         setFormValue('celestron-connection-type', celestronConnectionType);
         if (celestronConnectionType === 'serial') {
             setFormValue('celestron-port-path', config.portPath);
-            setFormValue('celestron-baud-rate', config.baudRate);
+            if (protocol !== 'cgx-aux') {
+                setFormValue('celestron-baud-rate', config.baudRate);
+            }
         } else {
             setFormValue('celestron-host', config.host);
             setFormValue('celestron-tcp-port', config.tcpPort);
         }
         setFormValue('celestron-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
         setFormValue('celestron-focal-length', opticsMetersToMm(config.focalLength));
-        const celestronConnectionTypeEl = document.getElementById('celestron-connection-type');
-        if (celestronConnectionTypeEl) {
-            celestronConnectionTypeEl.dispatchEvent(new Event('change'));
+        setFormValue('celestron-cgx-site-latitude', config.siteLatitude);
+        setFormValue('celestron-cgx-site-longitude', config.siteLongitude);
+        setFormValue('celestron-cgx-site-elevation', config.siteElevation);
+        const celestronProtocolEl = document.getElementById('celestron-protocol');
+        if (celestronProtocolEl) {
+            celestronProtocolEl.dispatchEvent(new Event('change'));
         }
     } else if (vendor === 'bisque') {
         setFormValue('bisque-host', config.host || 'localhost');
@@ -1043,6 +1051,8 @@ function startEditDevice(device) {
         setFormValue('astroasis-hid-path', config.hidPath);
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
+    } else if (vendor === 'altair') {
+        setFormValue('altair-camera-index', config.cameraIndex);
     } else if (vendor === 'gphoto') {
         setFormValue('gphoto-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek' && deviceType === 'switch') {
@@ -2763,6 +2773,11 @@ function updateVendorOptions() {
         svbonyOption.disabled = !isCamera;
         svbonyOption.hidden = !isCamera;
     }
+    const altairOption = vendorSelect.querySelector('option[value="altair"]');
+    if (altairOption) {
+        altairOption.disabled = !isCamera;
+        altairOption.hidden = !isCamera;
+    }
     const gphotoOption = vendorSelect.querySelector('option[value="gphoto"]');
     if (gphotoOption) {
         gphotoOption.disabled = !isCamera;
@@ -2839,6 +2854,9 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
+    if (!isCamera && vendorSelect.value === 'altair') {
+        vendorSelect.value = '';
+    }
     if (!isCamera && vendorSelect.value === 'gphoto') {
         vendorSelect.value = '';
     }
@@ -2879,6 +2897,7 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('skywatcher-config').style.display = 'block';
     } else if (vendor === 'celestron') {
         document.getElementById('celestron-config').style.display = 'block';
+        updateCelestronConnectionFields();
     } else if (vendor === 'onstep') {
         document.getElementById('onstep-config').style.display = 'block';
     } else if (vendor === 'bisque') {
@@ -2889,6 +2908,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('qhy-config').style.display = 'block';
     } else if (vendor === 'svbony') {
         document.getElementById('svbony-config').style.display = 'block';
+    } else if (vendor === 'altair') {
+        document.getElementById('altair-config').style.display = 'block';
     } else if (vendor === 'gphoto') {
         document.getElementById('gphoto-config').style.display = 'block';
     } else if (vendor === 'touptek') {
@@ -3128,12 +3149,31 @@ if (onstepConnectionType) {
 }
 
 const celestronConnectionType = document.getElementById('celestron-connection-type');
+const celestronProtocol = document.getElementById('celestron-protocol');
+function updateCelestronConnectionFields() {
+    const directUsb = celestronProtocol && celestronProtocol.value === 'cgx-aux';
+    const nexstarOnly = document.getElementById('celestron-nexstar-only');
+    if (nexstarOnly) nexstarOnly.style.display = directUsb ? 'none' : 'block';
+    const cgxSite = document.getElementById('celestron-cgx-site-config');
+    if (cgxSite) cgxSite.style.display = directUsb ? 'block' : 'none';
+    if (directUsb && celestronConnectionType) celestronConnectionType.value = 'serial';
+    const type = directUsb ? 'serial' : (celestronConnectionType ? celestronConnectionType.value : 'auto');
+    document.getElementById('celestron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+    document.getElementById('celestron-network-config').style.display = type === 'network' ? 'block' : 'none';
+    const baudGroup = document.getElementById('celestron-baud-group');
+    if (baudGroup) baudGroup.style.display = directUsb ? 'none' : 'block';
+    const portHelp = document.getElementById('celestron-port-help');
+    if (portHelp) {
+        portHelp.textContent = directUsb
+            ? 'Select the mount USB serial device. The driver uses its fixed 115200-baud AUX protocol; no hand controller is required.'
+            : 'Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.';
+    }
+}
 if (celestronConnectionType) {
-    celestronConnectionType.addEventListener('change', function() {
-        const type = this.value;
-        document.getElementById('celestron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
-        document.getElementById('celestron-network-config').style.display = type === 'network' ? 'block' : 'none';
-    });
+    celestronConnectionType.addEventListener('change', updateCelestronConnectionFields);
+}
+if (celestronProtocol) {
+    celestronProtocol.addEventListener('change', updateCelestronConnectionFields);
 }
 
 const zwoMountConnectionType = document.getElementById('zwo-mount-connection-type');
@@ -3988,14 +4028,31 @@ document.getElementById('device-form').addEventListener('submit', async function
             return;
         }
     } else if (deviceData.vendor === 'celestron') {
-        deviceData.connectionType = formData.get('celestronConnectionType') || 'auto';
+        deviceData.protocol = formData.get('celestronProtocol') || 'nexstar';
+        deviceData.connectionType = deviceData.protocol === 'cgx-aux'
+            ? 'serial'
+            : (formData.get('celestronConnectionType') || 'auto');
         deviceData.alignmentMode = normalizeAlignmentMode(formData.get('celestronAlignmentMode'));
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('celestronPortPath');
-            deviceData.baudRate = parseInt(formData.get('celestronBaudRate')) || 9600;
+            if (deviceData.protocol !== 'cgx-aux') {
+                deviceData.baudRate = parseInt(formData.get('celestronBaudRate')) || 9600;
+            }
         } else if (deviceData.connectionType === 'network') {
             deviceData.host = formData.get('celestronHost');
             deviceData.tcpPort = parseInt(formData.get('celestronTcpPort')) || 2000;
+        }
+        if (deviceData.protocol === 'cgx-aux') {
+            const latitude = readOptionalNumber(formData, 'celestronSiteLatitude');
+            const longitude = readOptionalNumber(formData, 'celestronSiteLongitude');
+            if (latitude === null || longitude === null) {
+                alert('Site latitude and longitude are required for direct CGX USB. Enter both coordinates to identify the hemisphere and calculate pointing.');
+                return;
+            }
+            deviceData.siteLatitude = latitude;
+            deviceData.siteLongitude = longitude;
+            const elevation = readOptionalNumber(formData, 'celestronSiteElevation');
+            if (elevation !== null) deviceData.siteElevation = elevation;
         }
         // "auto" needs no connection fields - port is discovered at startup
 
@@ -4229,6 +4286,9 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'svbony') {
         const svbonyCameraIndex = readOptionalNumber(formData, 'svbonyCameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
+    } else if (deviceData.vendor === 'altair') {
+        const altairCameraIndex = readOptionalNumber(formData, 'altairCameraIndex');
+        deviceData.cameraIndex = altairCameraIndex !== null ? altairCameraIndex : 0;
     } else if (deviceData.vendor === 'gphoto') {
         const gphotoCameraIndex = readOptionalNumber(formData, 'gphotoCameraIndex');
         deviceData.cameraIndex = gphotoCameraIndex !== null ? gphotoCameraIndex : 0;

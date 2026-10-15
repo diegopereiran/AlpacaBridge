@@ -88,6 +88,22 @@ public:
     // seven users through three sites (router, Sky-Watcher, ClientUtcWarning)
     // rather than literals that can drift apart.
     static constexpr std::chrono::milliseconds kClientDisagreementWarn{2000};
+    // A client UTCDate offset no longer describes the host when realtime was
+    // stepped independently of monotonic time. Shared by mount pointing clocks.
+    static bool clock_was_stepped(std::chrono::system_clock::duration system_elapsed,
+                                  std::chrono::steady_clock::duration steady_elapsed,
+                                  std::chrono::milliseconds tolerance = std::chrono::milliseconds(1000)) {
+        const auto system_ms = std::chrono::duration_cast<std::chrono::milliseconds>(system_elapsed);
+        const auto steady_ms = std::chrono::duration_cast<std::chrono::milliseconds>(steady_elapsed);
+        const auto drift = system_ms - steady_ms;
+        return drift > tolerance || drift < -tolerance;
+    }
+
+    // A client offset is a pointing fallback only when the host was not
+    // already disciplined at the UTCDate write.
+    static bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized) {
+        return offset_survives && !host_was_synchronized;
+    }
     // host_booted_from_rtc() re-probes a missing RTC at most this often; a
     // refresh_rtc() that lands sooner returns the cached answer. The server's
     // probe timer (Config::rtc_probe_interval_seconds) must run SLOWER than
