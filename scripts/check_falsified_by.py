@@ -114,9 +114,10 @@ def hand_rolled_cases(diff_text, head_text):
     `head_text` (the file at HEAD), because git may slide an inserted block so
     that the added `    {` is the next existing block's opener (issue #993). So a
     block is judged by its body, not its opener: for each `    {` after `main(` in
-    `head_text`, the block is new only when the first non-blank line after it was
-    added, and that line must then be `// case: <name>` (collected), else it is an error.
-    A block whose first line was not added existed before and is skipped.
+    `head_text`, the block is new only when every non-blank line up to the next
+    `    }` was added, and the first of them must then be
+    `// case: <name>` (collected), else it is an error.
+    A block with any untouched body line existed before and is skipped.
     Scoped blocks in helper functions above `main()` are not cases.
     """
     m = MAIN_RE.search(head_text)
@@ -141,11 +142,17 @@ def hand_rolled_cases(diff_text, head_text):
     for no in range(main_line + 1, len(head) + 1):
         if line(no).rstrip() != "    {":
             continue
-        first = next((k for k in range(no + 1, len(head) + 1) if line(k).strip()), None)
-        # The block is new only when its own first body line is added; a shared opener
-        # (slider placement) leaves that line untouched.
-        if first is None or first not in added_set:
+        body = []
+        for k in range(no + 1, len(head) + 1):
+            if line(k).rstrip() == "    }":
+                break
+            if line(k).strip():
+                body.append(k)
+        # New only when EVERY body line is added: a shared opener (slider placement) or an
+        # edit to the top of an existing block leaves some body line untouched.
+        if not body or not all(k in added_set for k in body):
             continue
+        first = body[0]
         mk = CASE_MARKER_RE.match(line(first))
         if mk:
             names[mk.group("name")] = set()
@@ -514,6 +521,11 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     mid = "int main() {\n    {\n        EXPECT(1);\n        // case: mid\n    }\n        {\n        // case: nest\n        }\n}\n"
     names, errs = hand_rolled_cases("@@ -0,0 +4,1 @@\n+        // case: mid\n@@ -0,0 +7,1 @@\n+        // case: nest\n", mid)
     check("marker not right after a top-level opener is not a case", not names and not errs)
+    edit = "int main() {\n    {\n        Router r(cfg);\n        EXPECT(1);\n    }\n}\n"
+    names, errs = hand_rolled_cases("@@ -3 +3 @@\n-        Router r;\n+        Router r(cfg);\n", edit)
+    check("first line of an existing unmarked block replaced: no names, no error", not names and not errs)
+    names, errs = hand_rolled_cases("@@ -2,0 +3 @@\n+        Router r(cfg);\n", edit)
+    check("line inserted at top of an existing unmarked block: no names, no error", not names and not errs)
     names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        x();\n+    }\n", "void f() {}\n")
     check("file without main has no cases", not names and not errs)
     span = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n        // case: spans main\n    }\n}\n"
