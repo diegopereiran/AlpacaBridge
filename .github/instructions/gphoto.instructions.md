@@ -27,11 +27,18 @@ found and fixed the driver's first real bulb defect -- see the bulb bullet below
 bodies (other Canon/Nikon/Sony models, the SDK's other transports) is still only as validated as
 the notes below say for each.
 
-SDK: **system packages**, not vendored — `libgphoto2-dev` + `libraw-dev` via pkg-config
-(`AlpacaCore/src/vendors/gphoto/CMakeLists.txt`). Unlike every other camera vendor, gphoto has no
-`gphoto/` subdirectory under `AlpacaCore/external/`: libgphoto2 and libraw are open-source and
-already packaged for Debian/Ubuntu, so there's no proprietary SDK to vendor or clean up (Step 4's
-SDK cleanup checklist does not apply here).
+SDK: **libgphoto2 is bundled**, `libraw` is a system package (`libraw-dev` via pkg-config). The
+libgphoto2 2.5.34 source tarball is vendored in `AlpacaCore/external/libgphoto2/` (pins and bump
+procedure in its README); `scripts/build_bundled_gphoto.sh` builds it into the private prefix
+`/usr/lib/alpacabridge/libgphoto2` (library, the default `standard` camlibs, iolibs and the
+generated `61-alpacabridge-libgphoto2.rules`), and `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`
+links that copy through `ALPACACORE_GPHOTO_PREFIX` / `ALPACACORE_GPHOTO_STAGE`. The distro's
+libgphoto2 is never linked or loaded: the executables carry a `DT_RPATH` (not `DT_RUNPATH`) to the
+prefix, and the prefix is never added to `/etc/ld.so.conf.d/`, so other programs on the host keep the
+distro library. `scripts/check_bundled_gphoto.sh` is the acceptance check (CI job `package-deb`;
+on the rig add `--pid` of the service). A dev build runs the script once before CMake. Decision:
+[0012](../../docs/decisions/0012-bundled-libgphoto2.md). Unlike the proprietary camera SDKs there is
+no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not apply.
 
 - **Enumeration is USB-autodetect-by-index, matching the other SDK-enumerated cameras**: no
   serial/network auto-detection was implemented (per the driver-build guide's "SDK-enumerated

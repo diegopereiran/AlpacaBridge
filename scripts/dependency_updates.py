@@ -15,7 +15,7 @@ graph, so there is one inventory. What is checked:
   ``page`` (the highest version a regex matches) or ``github-release`` (the repository's latest
   release), against the recorded ``baseline``;
 - every entry in its ``system_libraries`` list (libraries the build takes from Debian, such as
-  libgphoto2 and LibRaw): the upstream repository's latest release against the version Debian
+  LibRaw): the upstream repository's latest release against the version Debian
   trixie ships.
 
 Other Debian, Ubuntu and docker entries are not checked: apt and the image tag already resolve
