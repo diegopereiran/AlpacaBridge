@@ -114,10 +114,9 @@ def hand_rolled_cases(diff_text, head_text):
     `head_text` (the file at HEAD), because git may slide an inserted block so
     that the added `    {` is the next existing block's opener (issue #993). So a
     block is judged by its body, not its opener: for each `    {` after `main(` in
-    `head_text`, the block is new only when every non-blank line up to the next
-    `    }` was added, and the first of them must then be
-    `// case: <name>` (collected), else it is an error.
-    A block with any untouched body line existed before and is skipped.
+    `head_text`, a first body line that is an added `// case: <name>` is collected;
+    a block whose body lines were ALL added and which lacks that marker is an error.
+    Any other block (an untouched body line, no added marker) existed before and is skipped.
     Scoped blocks in helper functions above `main()` are not cases.
     """
     m = MAIN_RE.search(head_text)
@@ -148,17 +147,18 @@ def hand_rolled_cases(diff_text, head_text):
                 break
             if line(k).strip():
                 body.append(k)
-        # New only when EVERY body line is added: a shared opener (slider placement) or an
-        # edit to the top of an existing block leaves some body line untouched.
-        if not body or not all(k in added_set for k in body):
+        if not body:
             continue
         first = body[0]
         mk = CASE_MARKER_RE.match(line(first))
-        if mk:
+        if mk and first in added_set:
+            # An added marker names a case even when a later body line is unchanged (a split block).
             names[mk.group("name")] = set()
-        else:
-            errors.append("added top-level block in an AlpacaHTTP test has no `// case: <name>` marker "
-                          "on its first line (block at line %d)" % no)
+        elif not mk and all(k in added_set for k in body):
+            # No marker is an error only for a wholly added block: a shared opener (slider
+            # placement) or an edit to the top of an existing block leaves a body line untouched.
+            errors.append("added or rewritten top-level block in an AlpacaHTTP test has no "
+                          "`// case: <name>` marker on its first line (block at line %d)" % no)
     return names, errors
 
 
@@ -526,6 +526,10 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     check("first line of an existing unmarked block replaced: no names, no error", not names and not errs)
     names, errs = hand_rolled_cases("@@ -2,0 +3 @@\n+        Router r(cfg);\n", edit)
     check("line inserted at top of an existing unmarked block: no names, no error", not names and not errs)
+    split = ("int main() {\n    {\n        // case: x\n        EXPECT(1);\n    }\n    {\n"
+             "        // case: y\n        EXPECT(2);\n    }\n}\n")
+    names, errs = hand_rolled_cases("@@ -4,0 +5,3 @@\n+    }\n+    {\n+        // case: y\n", split)
+    check("split block: added marker with a later unchanged body line is collected", set(names) == {"y"} and not errs)
     names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        x();\n+    }\n", "void f() {}\n")
     check("file without main has no cases", not names and not errs)
     span = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n        // case: spans main\n    }\n}\n"
