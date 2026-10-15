@@ -144,7 +144,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
 - **Offset is unsupported** (`PropertyNotImplemented`/`NotImplemented`, unconditionally, no
   `ensure_connected()` gate) — DSLRs have no analog-offset register concept over PTP.
 - **Bulb capture has two mechanisms: the standalone `"bulb"` toggle widget (Nikon) or, on Canon
-  bodies without it, the `eosremoterelease` `Press Full` / `Release Full` pair plus the
+  bodies without it, the `eosremoterelease` press/release pair (`Press Full MF` / `Release` on the bundled libgphoto2 2.5.34, `Press Full` / `Release Full` before it) plus the
   shutter-speed `"bulb"` choice (see the Canon paragraph below).** The toggle path (confirmed present in
   libgphoto2 2.5.31's `ptp2.so` camlib via `strings`, which is the single camlib handling
   Canon/Nikon/Sony PTP — not a per-vendor code branch, so this should generalize across brands):
@@ -178,13 +178,17 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
     body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
     first connect).
   **Canon bodies (no standalone `"bulb"` widget, issue #640): rig-verified on the EOS 250D (M, shutter Bulb) and the EOS 70D (mode dial B), ConformU 4.5.1 arm64, 0 errors, 0 issues.**
-  When the shutter-speed list has a `"bulb"` choice and the `eosremoterelease` widget lists both
-  `Press Full` and `Release Full` (matched by name, never by index), the same
-  `bulb_capture_with_abort` loop runs with `set_choice_value("eosremoterelease", "Press Full")` as
-  the open and `"Release Full"` as the close, so the #569 rules above hold unchanged (events pumped
-  during the hold, release sent on every exit path including a throw, abort closes early, frame
-  waited for by file event). `ExposureMax` is 3600 s only when the `"bulb"` widget exists or both
-  choices were found; a Canon body missing either choice stays at its longest native shutter speed.
+  When the shutter-speed list has a `"bulb"` choice and the `eosremoterelease` widget lists a
+  whole press/release pair (matched by name, never by index), the same
+  `bulb_capture_with_abort` loop runs with the press as the open and the release as the close.
+  libgphoto2 2.5.34 renamed the choices: the pair is `Press Full MF` / `Release` there and
+  `Press Full` / `Release Full` up to 2.5.33, both `remotereleaseon(3, 1)` then
+  `remotereleaseoff(3)`. 2.5.34's own `Release Full` is `remotereleaseoff(2)`, which leaves the
+  half press held, so the driver picks the pair as a unit and never mixes the two spellings. The
+  #569 rules above hold unchanged (events pumped during the hold, release sent on every exit path
+  including a throw, abort closes early, frame waited for by file event). `ExposureMax` is 3600 s
+  only when the `"bulb"` widget exists or a whole pair was found; a Canon body without one stays
+  at its longest native shutter speed.
   **B mode:** with the mode dial on B the shutter-speed list holds only `bulb`, so there is no
   native speed to use and every duration, short ones too, takes the bulb path instead of failing
   with "No shutter speed control exposed by this camera". The shutter-speed widget is not written there: the body owns the shutter and refuses the write ("I/O in progress", EOS 70D), so the press/release pair alone drives the exposure. Bench evidence is in #640 (EOS 250D on M
