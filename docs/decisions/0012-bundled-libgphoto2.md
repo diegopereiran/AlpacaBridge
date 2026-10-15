@@ -23,4 +23,4 @@ The gphoto camera driver links libgphoto2. Debian trixie ships 2.5.31-4, which l
 - The host's own libgphoto2 stays as it is for other programs, patched or not; only AlpacaBridge gets the fixed library.
 - We own updates. `scripts/dependency_updates.py` watches the libgphoto2 tags page against the SDK entry's version, so a new release opens an update issue; the bump procedure is in `AlpacaCore/external/libgphoto2/README.md`. The Debian-library baseline row for libgphoto2 is gone.
 - The package grows by the library and its camlibs, and the `.deb` build compiles them (a few minutes on arm64). The release SBOM cannot match the built files to a tracked file, so `scripts/dependency_snapshot.py` skips that one subtree and still lists the tarball's SDK entry.
-- The gphoto2 command-line tool is not part of this record; it follows in a second change.
+- The gphoto2 command-line tool is not bundled. The driver drives bulb mode through libgphoto2 itself and never runs the CLI, and no user documentation tells users to run it; bench reproduction uses a distro or locally built `gphoto2`.
