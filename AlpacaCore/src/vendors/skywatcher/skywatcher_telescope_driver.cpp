@@ -317,7 +317,8 @@ public:
                               util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
                               util::MotionLimits motion_limits = {},
                               util::TaskClock& clock = util::default_task_clock(),
-                              DecAxisSenseSetting dec_axis_sense_setting = DecAxisSenseSetting::Auto)
+                              DecAxisSenseSetting dec_axis_sense_setting = DecAxisSenseSetting::Auto,
+                              BacklashSettings backlash = {})
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
           connection_info_(connection_info),
@@ -333,7 +334,8 @@ public:
           // only the optionals know, and only here.
           site_latitude_set_(site_latitude_deg.has_value()),
           site_longitude_set_(site_longitude_deg.has_value()),
-          dec_axis_sense_setting_(dec_axis_sense_setting) {
+          dec_axis_sense_setting_(dec_axis_sense_setting),
+          backlash_(backlash) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
         // Decision 0009: the staleness bound and link-lost stamp run on the
@@ -607,6 +609,7 @@ public:
             try {
                 axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
                 axis_params_[1] = protocol.get_axis_parameters(kAxisDec);
+                read_backlash_rates_locked(protocol);
 
                 // Feature inquiry (":q" data 0x000001): bit 0x04 = home index
                 // sensor. Wave 100i reports it on both axes (0x100C); older
@@ -4555,10 +4558,92 @@ private:
         invalidate_position_cache_locked();
     }
 
-    void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg,
-                              double target_dec_axis_deg) {
+    // open-astro#437: ":s" is read once at connect, and only for an axis that
+    // asked for compensation, so a config without backlash sends the same
+    // connect stream as before. A board that rejects ":s" (Wave 100i) or
+    // answers 0 (EQ-AL55i) gives no worm count to derive a speed from: that axis
+    // stays uncompensated, loudly.
+    void read_backlash_rates_locked(SkyWatcherProtocolWrapper& protocol) {
+        backlash_rate_deg_s_[0] = backlash_rate_deg_s_[1] = 0.0;
+        const BacklashSettings::Axis* cfg[2] = {&backlash_.ra, &backlash_.dec};
+        for (int channel = kAxisRa; channel <= kAxisDec; ++channel) {
+            if (!cfg[channel - 1]->active()) {
+                continue;
+            }
+            uint32_t worm = 0;
+            try {
+                worm = protocol.get_steps_per_worm(channel);
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Rejected: handled with the zero case below.
+            }
+            if (worm == 0) {
+                ALPACA_LOG_WARN("SkyWatcher", std::string("Backlash compensation on the ") +
+                                                  (channel == kAxisRa ? "RA" : "Dec") +
+                                                  " axis is off: the board reports no worm step count (':s'), so "
+                                                  "there is no speed to derive (open-astro#437)");
+                continue;
+            }
+            // INDI's way: the speed follows the worm. A sixteenth of a worm turn
+            // per second, held under the slow-mode ceiling so the final leg is
+            // a plain slow GOTO.
+            const double deg_per_s = 360.0 * kBacklashWormTurnsPerSecond * worm /
+                                     static_cast<double>(axis_params_[channel - 1].counts_per_revolution);
+            backlash_rate_deg_s_[channel - 1] = std::min(deg_per_s, kFastModeThresholdDegPerSec);
+        }
+    }
+
+    static constexpr double kBacklashWormTurnsPerSecond = 1.0 / 16.0;
+
+    // open-astro#437: the side each axis finishes every compensated goto
+    // from, as a count direction (+1 increasing). RA: the tracking direction
+    // of the site's hemisphere, so tracking resumes with the gears already
+    // engaged; Dec: increasing counts. Fixed here, in one place: a later
+    // change can make them config without touching the config keys.
+    int backlash_approach_sign_locked(int channel) const {
+        return channel == kAxisRa ? (ra_axis_sign_locked() > 0.0 ? 1 : -1) : 1;
+    }
+
+    // open-astro#437: the final leg a goto owes: its generation, axes and targets.
+    struct FinalApproach {
+        uint64_t generation = 0;
+        bool owed[2]{};
+        double target_deg[2]{};
+    };
+
+    // open-astro#437: the landing wait calls this whenever the board reports the
+    // goto stopped. The final leg goes out once each axis that owes one has
+    // settled (the rule of every landing), and only while its goto is still the
+    // current motion: a newer motion command (AbortSlew, MoveAxis, a pulse, a
+    // newer goto) bumps motion_generation_ and the leg is dropped unsent. True
+    // when it went out. The position register is never written, so an
+    // unfinished goto leaves nothing to undo.
+    bool send_final_approach_locked(std::unique_lock<std::mutex>& lock) {
+        const FinalApproach leg = final_approach_;
+        final_approach_ = {};
+        for (int i = 0; i < 2; ++i) {
+            if (leg.owed[i] && leg.generation == motion_generation_) {
+                wait_axis_stationary_locked(lock, i + 1);
+            }
+        }
+        if ((!leg.owed[0] && !leg.owed[1]) || leg.generation != motion_generation_ || body_stopped()) {
+            return false;
+        }
+        slewing_cached_ = true;  // as before every goto: a failed first poll of the leg must not land it
+        dispatch_goto_locked(lock, leg.target_deg[0], leg.target_deg[1], /*compensate_backlash=*/false, &leg);
+        return true;
+    }
+
+    // `compensate_backlash` is false for the AutoHome hunt: its moves read the
+    // home index against the count frame, and it waits for its own landings
+    // (autohome_wait_axes_stopped), which never send a final leg. A final leg
+    // (open-astro#437) keeps its goto's generation and moves only the axes that
+    // owe one, in a slow GOTO (':G' mode '2', ':I' the step period) at the
+    // derived speed.
+    void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg, double target_dec_axis_deg,
+                              bool compensate_backlash = true, const FinalApproach* final_leg = nullptr) {
         auto& protocol = *protocol_;
-        const uint64_t gen = ++motion_generation_;
+        const uint64_t gen = final_leg ? final_leg->generation : ++motion_generation_;
+        const bool moves[2] = {!final_leg || final_leg->owed[0], !final_leg || final_leg->owed[1]};
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         // A single generation spans BOTH stop-waits and the goto commands
@@ -4570,8 +4655,8 @@ private:
         // generation gate inside the wait ensures a superseded dispatch
         // never emits stops that could clobber the superseding command's
         // fresh motion (round-6 finding).
-        const bool ra_stopped = stop_axis_and_wait_locked(lock, kAxisRa, gen);
-        const bool dec_stopped = stop_axis_and_wait_locked(lock, kAxisDec, gen);
+        const bool ra_stopped = !moves[0] || stop_axis_and_wait_locked(lock, kAxisRa, gen);
+        const bool dec_stopped = !moves[1] || stop_axis_and_wait_locked(lock, kAxisDec, gen);
         if (!ra_stopped || !dec_stopped) {
             throw AlpacaException("Slew superseded before dispatch");
         }
@@ -4586,18 +4671,44 @@ private:
             {kAxisRa, cached_ra_axis_deg_, target_ra_axis_deg},
             {kAxisDec, cached_dec_axis_deg_, target_dec_axis_deg},
         };
+        FinalApproach owes{gen, {false, false}, {target_ra_axis_deg, target_dec_axis_deg}};
         for (const auto& plan : plans) {
-            double delta = plan.target_deg - plan.current_deg;
+            const auto i = static_cast<std::size_t>(plan.channel - 1);
+            if (!moves[i]) {
+                continue;
+            }
+            const uint32_t cpr = axis_params_[i].counts_per_revolution;
+            const double delta = plan.target_deg - plan.current_deg;
+            const uint32_t target = degrees_to_counts(plan.target_deg, cpr);
+            uint32_t first_leg = target;
+            // open-astro#437: a move against the approach side overshoots the
+            // target by the backlash steps; the final leg comes back onto it
+            // from the approach side (send_final_approach_locked(), from the
+            // landing wait). A move of under one count has no direction.
+            const int approach = backlash_approach_sign_locked(plan.channel);
+            if (compensate_backlash && backlash_rate_deg_s_[i] > 0.0 && std::abs(delta) * cpr / 360.0 >= 0.5 &&
+                (delta > 0.0 ? 1 : -1) != approach) {
+                const uint32_t steps = i == 0 ? backlash_.ra.steps : backlash_.dec.steps;
+                first_leg = (approach > 0 ? target - steps : target + steps) & kCountsMask;
+                owes.owed[i] = true;
+            }
             // Motion mode '0' = fast GOTO (the controller manages ramp and the
-            // brake point); direction from the signed move.
-            protocol.set_motion_mode(plan.channel, '0', direction_char(delta));
-            protocol.set_goto_target(
-                plan.channel,
-                degrees_to_counts(plan.target_deg,
-                                  axis_params_[static_cast<std::size_t>(plan.channel - 1)].counts_per_revolution));
+            // brake point), '2' for a final leg; direction from the signed move.
+            protocol.set_motion_mode(plan.channel, final_leg ? '2' : '0', direction_char(delta));
+            if (final_leg) {
+                protocol.set_step_period(plan.channel,
+                                         step_period_for_locked(plan.channel, backlash_rate_deg_s_[i], false));
+            }
+            protocol.set_goto_target(plan.channel, first_leg);
         }
-        protocol.start_motion(kAxisRa);
-        protocol.start_motion(kAxisDec);
+        final_approach_ = owes;  // after a final leg: nothing (it is not compensated)
+        if (owes.owed[0] || owes.owed[1]) {
+            // The landing time of a two-leg goto is no sample of the one-leg
+            // goto overhead the aim-ahead estimate learns (wait_for_slew_complete).
+            last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
+        }
+        if (moves[0]) protocol.start_motion(kAxisRa);
+        if (moves[1]) protocol.start_motion(kAxisDec);
         // open-astro#459: every commanded dec-axis angle passes through here
         // (sky goto, the no-indexer FindHome and Park gotos to home, the
         // AutoHome hunt phases), so this is the one place the branch memory
@@ -5170,7 +5281,8 @@ private:
             up[i] = read_idx(i) == 0;
         }
         refresh_position_cache_locked(true);
-        dispatch_goto_locked(lock, axis_deg(0) + (up[0] ? -5.0 : 5.0), axis_deg(1) + (up[1] ? -5.0 : 5.0));
+        dispatch_goto_locked(lock, axis_deg(0) + (up[0] ? -5.0 : 5.0), axis_deg(1) + (up[1] ? -5.0 : 5.0),
+                             /*compensate_backlash=*/false);
         autohome_wait_axes_stopped(lock);
 
         // Phase 2: if the 5-degree step swept PAST the index (latched), move a
@@ -5185,7 +5297,7 @@ private:
             ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 2: stepping past a latched index");
             refresh_position_cache_locked(true);
             dispatch_goto_locked(lock, axis_deg(0) + (swept[0] ? (up[0] ? -5.0 : 5.0) : 0.0),
-                                 axis_deg(1) + (swept[1] ? (up[1] ? -5.0 : 5.0) : 0.0));
+                                 axis_deg(1) + (swept[1] ? (up[1] ? -5.0 : 5.0) : 0.0), /*compensate_backlash=*/false);
             autohome_wait_axes_stopped(lock);
             for (int i = 0; i < 2; ++i) {
                 if (swept[i]) {
@@ -5270,9 +5382,11 @@ private:
 
         // Phase 5+6: back 10 degrees below the latched mark, then approach it
         // from below and stamp the position registers to the home offset.
-        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]) - 10.0, idx_to_deg(1, home_idx[1]) - 10.0);
+        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]) - 10.0, idx_to_deg(1, home_idx[1]) - 10.0,
+                             /*compensate_backlash=*/false);
         autohome_wait_axes_stopped(lock);
-        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]), idx_to_deg(1, home_idx[1]));
+        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]), idx_to_deg(1, home_idx[1]),
+                             /*compensate_backlash=*/false);
         autohome_wait_axes_stopped(lock);
         proto.set_position(kAxisRa, kHomeCounts);
         proto.set_position(kAxisDec, kHomeCounts);
@@ -5319,7 +5433,7 @@ private:
     }
 
     bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock,
-                                std::optional<uint64_t> expected_generation = std::nullopt) const {
+                                std::optional<uint64_t> expected_generation = std::nullopt) {
         const auto timeout = std::chrono::seconds(180);
         auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
@@ -5347,6 +5461,9 @@ private:
                 if (!saw_slewing && (clock_.now() - start) < start_grace) {
                     sleep_unlocked(std::chrono::milliseconds(200));
                     continue;
+                }
+                if (send_final_approach_locked(lock)) {
+                    continue;  // open-astro#437: land the final leg the same way
                 }
                 break;
             }
@@ -6011,6 +6128,13 @@ private:
     int dec_axis_sense_ = 0;
     // open-astro#582: the configured decAxisSense; fixed at construction.
     const DecAxisSenseSetting dec_axis_sense_setting_;
+    // open-astro#437: the configured goto backlash compensation; fixed at construction.
+    const BacklashSettings backlash_;
+    // Final-leg speed per axis in deg/s, derived at connect from ":s" and ":a";
+    // 0 = this axis is not compensated (off, or the board gave no worm count).
+    double backlash_rate_deg_s_[2]{};
+    // The final leg the last goto owes, if any (see send_final_approach_locked).
+    FinalApproach final_approach_;
     // open-astro#666: live_rate_change_needs_relatch() of the connected board,
     // true when unknown. Atomic because the pulse task's restore reads it
     // without mutex_.
@@ -6310,16 +6434,14 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 }
 }  // namespace detail
 
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
-                                                             std::optional<double> site_latitude_deg,
-                                                             std::optional<double> site_longitude_deg,
-                                                             std::optional<double> site_elevation_m,
-                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-                                                             util::MotionLimits motion_limits, util::TaskClock& clock,
-                                                             DecAxisSenseSetting dec_axis_sense) {
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::unique_ptr<SkyWatcherProtocolWrapper> protocol, util::MotionLimits motion_limits, util::TaskClock& clock,
+    DecAxisSenseSetting dec_axis_sense, BacklashSettings backlash) {
     return std::make_unique<SkyWatcherTelescopeDriver>(
         device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
-        util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock, dec_axis_sense);
+        util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock, dec_axis_sense, backlash);
 }
 
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
@@ -6344,13 +6466,14 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
     std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-    util::MotionLimits motion_limits, util::TaskClock& clock, DecAxisSenseSetting dec_axis_sense) {
+    util::MotionLimits motion_limits, util::TaskClock& clock, DecAxisSenseSetting dec_axis_sense,
+    BacklashSettings backlash) {
     if (!connection_resolver) {
         throw AlpacaException("Sky-Watcher telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<SkyWatcherTelescopeDriver>(
         device_number, ConnectionInfo{}, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
-        std::move(connection_resolver), motion_limits, clock, dec_axis_sense);
+        std::move(connection_resolver), motion_limits, clock, dec_axis_sense, backlash);
 }
 
 ConnectionInfo resolve_skywatcher_auto(int mount_index) {
@@ -6391,16 +6514,14 @@ ConnectionInfo resolve_skywatcher_auto(int mount_index) {
     return conn;
 }
 
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_number, int mount_index,
-                                                                  std::optional<double> site_latitude_deg,
-                                                                  std::optional<double> site_longitude_deg,
-                                                                  std::optional<double> site_elevation_m,
-                                                                  util::MotionLimits motion_limits,
-                                                                  DecAxisSenseSetting dec_axis_sense) {
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
+    int device_number, int mount_index, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m, util::MotionLimits motion_limits,
+    DecAxisSenseSetting dec_axis_sense, BacklashSettings backlash) {
     // The serial scan and UDP discovery run at connect time (#659), not here.
     return create_skywatcher_telescope_deferred(
         device_number, [mount_index] { return resolve_skywatcher_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, {}, motion_limits, util::default_task_clock(), dec_axis_sense);
+        site_longitude_deg, site_elevation_m, {}, motion_limits, util::default_task_clock(), dec_axis_sense, backlash);
 }
 
 }  // namespace alpacacore::vendor::skywatcher
