@@ -4,7 +4,7 @@
 Five rule families, not one:
 
 1. Every vendor (driver, device type) pair needs a `[stress]` TEST_CASE (the
-   ALLOWLIST covers only the drivers that predate this gate, and /driver-build
+   ALLOWLIST is empty now that every pair is registered, and /driver-build
    Step 7b is where a new driver gets its seam and registration).
 2. A `[stress-guard]`-without-`[stress]` case inside a `*_concurrency_stress.cpp`
    file is rejected: that tag is for harness self-tests, and a registration
@@ -75,9 +75,10 @@ DeviceType::CoverCalibrator, so a filename-based guess would be wrong.
 New driver, no stress test yet? Either add the `[stress]` TEST_CASE in a
 `*_concurrency_stress.cpp` file gated behind the vendor's `if(TARGET ...)`
 block (see `test_touptek_concurrency_stress.cpp` for the shape: one factory +
-one operate callback). ALLOWLIST below is only for the drivers that predate
-this gate: it is meant to shrink, not grow, and a new driver has no business
-on it (/driver-build Step 7b says how to build the seam and the registration).
+one operate callback). ALLOWLIST below once held the drivers that predated
+this gate; every one has since been registered, so it is empty. It stays as
+the gate's escape hatch, never grows, and a new driver has no business on it
+(/driver-build Step 7b says how to build the seam and the registration).
 An entry left in place after coverage is added will itself fail the check
 (see below), so there is nothing to remember to clean up by hand.
 """
@@ -305,6 +306,30 @@ def strip_comments(text):
 ALLOWLIST = set()
 
 
+# Vendor *_driver.cpp files that define no driver class of their own: each is
+# a factory that builds another vendor's driver class under its own identity,
+# so it has no get_device_type() override for find_drivers() to read. Each
+# entry states the device type the factory builds and why; the pair still
+# needs its own [stress] registration through that factory. An entry whose
+# file is gone, or now has an override of its own, is a failure below.
+DELEGATING_FACTORIES = {
+    "AlpacaCore/src/vendors/altair/altair_camera_driver.cpp": (
+        "camera",
+        "create_altair_camera() builds the ToupTek camera driver class "
+        "(touptek_camera_driver.cpp) over the Altair SDK with Altair identity strings"),
+}
+
+
+def factory_device_type(path, types):
+    """The device type for a driver file with no get_device_type() override,
+    from DELEGATING_FACTORIES, or None when the file is not a listed factory
+    (or does have an override, which makes its entry stale)."""
+    if types:
+        return None
+    entry = DELEGATING_FACTORIES.get(path)
+    return entry[0] if entry else None
+
+
 # Registration files that do NOT yet wrap their operate callbacks in
 # StressCallGuard (issue #379; the migration itself is #326).
 #
@@ -488,6 +513,7 @@ def find_drivers():
     """({(vendor, device_type): [driver file paths]}, [ambiguous findings])"""
     drivers = {}
     ambiguous = []
+    seen_factories = set()
     for path in tracked_files(VENDORS_PREFIX + "*_driver.cpp"):
         # AlpacaCore/src/vendors/<vendor>/<name>_driver.cpp
         parts = path[len(VENDORS_PREFIX):].split("/")
@@ -502,13 +528,25 @@ def find_drivers():
                 "check's DEVICE_TYPE_OVERRIDE_RE, don't guess" % (path, sorted(types))
             )
             continue
-        if not types:
+        if path in DELEGATING_FACTORIES:
+            seen_factories.add(path)
+            if types:
+                ambiguous.append(
+                    "STALE DELEGATING FACTORY: %s now defines get_device_type() itself; "
+                    "remove its DELEGATING_FACTORIES entry" % path)
+        factory_type = factory_device_type(path, types)
+        if factory_type:
+            device_type = factory_type
+        elif not types:
             print("WARNING: could not determine device type for %s "
                   "(no get_device_type() override matched) -- treating as uncovered" % path)
             device_type = "unknown"
         else:
             device_type = next(iter(types))
         drivers.setdefault((vendor, device_type), []).append(path)
+    for path in sorted(set(DELEGATING_FACTORIES) - seen_factories):
+        ambiguous.append("STALE DELEGATING FACTORY: %s is not a tracked vendor driver file; "
+                         "remove its DELEGATING_FACTORIES entry" % path)
     return drivers, ambiguous
 
 
@@ -764,14 +802,14 @@ def missing_message(vendor, dtype, paths):
 
     A function rather than an inline format so the self-test can pin its
     wording: the message must point at /driver-build Step 7b and must never
-    offer ALLOWLIST as an alternative (that list is for drivers that predate
-    the gate and only shrinks).
+    offer ALLOWLIST as an alternative (that list is empty: every driver that
+    predated the gate is now registered).
     """
     return (
         "MISSING: %s/%s has no [stress] TEST_CASE: %s. Register it in "
         "AlpacaCore/tests/test_%s_concurrency_stress.cpp (/driver-build Step 7b: build "
-        "the seam, then the registration). ALLOWLIST in %s is for drivers that predate "
-        "this gate and must not grow."
+        "the seam, then the registration). ALLOWLIST in %s is empty (every pair is "
+        "registered) and must not grow."
         % (vendor, dtype, ", ".join(paths), vendor, __file__)
     )
 
@@ -841,6 +879,40 @@ def self_test():
     # Rule 1's message must send the author to Step 7b and must never offer
     # the ALLOWLIST as the other way out (the fixture below has no drivers, so
     # main() never emits it there; pin the text through its own function).
+    # A listed delegating factory takes its declared type only while it has no
+    # override of its own; an unlisted file without one stays unknown.
+    listed = next(iter(DELEGATING_FACTORIES))
+    check("delegating factory gets its declared device type",
+          factory_device_type(listed, set()) == DELEGATING_FACTORIES[listed][0])
+    check("delegating factory with its own override is not overridden",
+          factory_device_type(listed, {"focuser"}) is None)
+    check("unlisted file without an override stays unresolved",
+          factory_device_type("AlpacaCore/src/vendors/fakevendor/x_driver.cpp", set()) is None)
+
+    # Both STALE DELEGATING FACTORY paths through find_drivers(): a listed file
+    # that now has its own get_device_type() override, and a listed file that
+    # is no longer tracked. Real globals are swapped back in `finally`.
+    own = "AlpacaCore/src/vendors/fakevendor/own_driver.cpp"
+    gone = "AlpacaCore/src/vendors/fakevendor/gone_driver.cpp"
+    real_tracked, real_types = globals()["tracked_files"], globals()["driver_device_types"]
+    saved_factories = dict(DELEGATING_FACTORIES)
+    try:
+        globals()["tracked_files"] = lambda pattern: [own] if pattern.endswith("_driver.cpp") else []
+        globals()["driver_device_types"] = lambda path: {"camera"}
+        DELEGATING_FACTORIES.clear()
+        DELEGATING_FACTORIES.update({own: ("camera", "self-test"), gone: ("camera", "self-test")})
+        drivers, findings = find_drivers()
+    finally:
+        globals()["tracked_files"], globals()["driver_device_types"] = real_tracked, real_types
+        DELEGATING_FACTORIES.clear()
+        DELEGATING_FACTORIES.update(saved_factories)
+    check("STALE: a listed factory with its own override is a finding",
+          any("STALE DELEGATING FACTORY" in f and own in f and "get_device_type()" in f for f in findings))
+    check("STALE: a listed factory that is not tracked is a finding",
+          any("STALE DELEGATING FACTORY" in f and gone in f and "not a tracked" in f for f in findings))
+    check("STALE: the overriding file still counts under its own device type",
+          drivers.get(("fakevendor", "camera")) == [own])
+
     missing = missing_message("fakevendor", "camera", ["AlpacaCore/src/vendors/fakevendor/x_driver.cpp"])
     check("MISSING message points at /driver-build Step 7b",
           "/driver-build Step 7b" in missing and "test_fakevendor_concurrency_stress.cpp" in missing)
@@ -1207,6 +1279,10 @@ def self_test():
             saved_guard_allowlist = set(GUARD_ALLOWLIST)
             GUARD_ALLOWLIST.clear()
             GUARD_ALLOWLIST.update(guard_allowlist)
+            # Cleared too: the fixture tree holds none of the real vendor
+            # files, so every real entry would report as stale.
+            saved_factories = dict(DELEGATING_FACTORIES)
+            DELEGATING_FACTORIES.clear()
             try:
                 # Always returns (exit_code, printed_output) -- never a bare
                 # int. The earlier shape (an int by default, a tuple only
@@ -1228,6 +1304,8 @@ def self_test():
                 ALLOWLIST.update(saved_allowlist)
                 GUARD_ALLOWLIST.clear()
                 GUARD_ALLOWLIST.update(saved_guard_allowlist)
+                DELEGATING_FACTORIES.clear()
+                DELEGATING_FACTORIES.update(saved_factories)
 
         # Guard-compliant (issue #379): the guard rules are mandatory by
         # default, and this fixture's file is deliberately NOT in

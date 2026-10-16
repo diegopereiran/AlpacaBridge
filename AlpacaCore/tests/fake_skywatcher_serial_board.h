@@ -34,15 +34,22 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "fake_pty_write.h"
+#include "fake_skywatcher_mount.h"
 
 namespace alpacacore::test {
 
 class FakeSkyWatcherSerialBoard {
 public:
-    FakeSkyWatcherSerialBoard() : pty_("FakeSkyWatcherSerialBoard") {
+    // The board answers the geometry and feature inquiries (":a", ":b", ":g",
+    // ":q", ":s") and the version of @p profile, the same FakeMountProfile the
+    // UDP fake takes, so a serial test of an EQM-35 Pro is not served the
+    // Wave 100i's counts or its HOME_INDEXER bit.
+    explicit FakeSkyWatcherSerialBoard(FakeMountProfile profile = FakeMountProfile::wave_100i())
+        : pty_("FakeSkyWatcherSerialBoard"), profile_(std::move(profile)), version_reply_(profile_.version_reply) {
         // The pty pair is owned by pty_ (fake_pty_write.h), constructed
         // before this body runs; a setup failure throws from there with
         // nothing left open (issue #387). Its keep-alive slave is what holds
@@ -150,6 +157,12 @@ public:
         delay_command_ = command;
     }
 
+    /// Steady state, until set back to zero: every reply is held for @p ms
+    /// before it is sent (delay_next_reply() is the one-shot form).
+    /// transactions_served() counts the replies sent, readable from a test.
+    void set_reply_latency(int ms) { latency_ms_.store(ms); }
+    int transactions_served() const { return served_.load(); }
+
     /// open-astro#559: LOSE the next @p times frames of @p command on the
     /// wire -- the board neither applies them nor answers, as a frame that
     /// arrived corrupted (or not at all) over a noisy EQDIR link. The frame
@@ -191,7 +204,7 @@ public:
         reject_j_on_running_ = reject;
     }
 
-    /// The ":e1" payload (default "033A44": Wave 100i, MC 3.58 / code 0x44).
+    /// The ":e1" payload (default: the profile's, "033A44" for the Wave 100i); overrides it.
     void set_version_reply(std::string payload) {
         std::lock_guard<std::mutex> lock(mutex_);
         version_reply_ = std::move(payload);
@@ -222,6 +235,17 @@ public:
     void set_no_readback(bool no_readback) {
         std::lock_guard<std::mutex> lock(mutex_);
         no_readback_ = no_readback;
+    }
+
+    /// Answer ":i" the way an EQM-35 Pro (fw 3.47) does: the stored period
+    /// divided by 16 (truncated), as a signed 24-bit value negative when
+    /// `negative` (the direction). `wrong_value` >= 0 answers that raw value
+    /// instead, to model a readback that fits neither encoding.
+    void set_readback_div16(bool negative, int64_t wrong_value = -1) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        div16_readback_ = true;
+        div16_negative_ = negative;
+        div16_wrong_ = wrong_value;
     }
 
     /// Refuse the next ":i" with "!<code>" once (e.g. "2", Motor not stopped).
@@ -331,11 +355,15 @@ private:
             case 'e':
                 return "=" + version_reply_;
             case 'a':
-                return "=" + u24(4147200);
+                // Same rule as FakeSkyWatcherMount: axis 2 reports cpr_dec when set.
+                return "=" + u24(axis == 2 && profile_.cpr_dec != 0 ? profile_.cpr_dec : profile_.cpr);
             case 'b':
-                return "=" + u24(14000000);
+                return "=" + u24(profile_.timer_freq);
             case 'g':
-                return "=01";
+                return "=" + profile_.high_speed_ratio_reply;
+            case 's':
+                if (!profile_.steps_per_worm) return "!0";
+                return "=" + u24(*profile_.steps_per_worm);
             case 'j':
                 return "=" + u24(counts_[axis - 1]);
             case 'f': {
@@ -346,8 +374,12 @@ private:
                 return std::string("=") + static_cast<char>('0' + c0) + static_cast<char>('0' + c1) +
                        static_cast<char>('0' + c2);
             }
-            case 'q':
-                return "=0C1000";
+            case 'q': {
+                const uint32_t inquiry = parse_u24(data);
+                if (inquiry == 0x000001) return "=" + u24(profile_.features);
+                if (inquiry == 0x000000) return "=" + u24(0);  // indexer word: never armed here
+                return "!0";
+            }
             case 'I':
                 t1_[axis - 1] = parse_u24(data);
                 return "=";
@@ -358,6 +390,11 @@ private:
                     return "!" + code;
                 }
                 if (no_readback_) return "!0";
+                if (div16_readback_) {
+                    if (div16_wrong_ >= 0) return "=" + u24(static_cast<uint32_t>(div16_wrong_));
+                    const uint32_t q = t1_[axis - 1] / 16;
+                    return "=" + u24(div16_negative_ ? (0x1000000u - q) & 0xFFFFFFu : q);
+                }
                 return "=" + u24(t1_[axis - 1]);
             case 'K':
             case 'L':
@@ -437,7 +474,11 @@ private:
                 if (delay > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
                 }
+                if (const int latency_ms = latency_ms_.load(); latency_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
+                }
                 pty_write_bounded(pty_.master_fd(), reply, stop_);
+                served_.fetch_add(1);
                 std::string straggler;
                 int straggler_ms = 0;
                 {
@@ -459,14 +500,17 @@ private:
     // First member: constructed before the worker, destroyed after it has
     // been joined.
     PtyPair pty_;
+    const FakeMountProfile profile_;
     std::thread worker_;
     std::atomic<bool> stop_{false};
+    std::atomic<int> latency_ms_{0};
+    std::atomic<int> served_{0};
     mutable std::mutex mutex_;
     uint32_t counts_[2] = {0x800000, 0x800000};
     uint32_t t1_[2] = {0, 0};
     int delay_ms_ = 0;
     char delay_command_ = 0;
-    std::string version_reply_ = "033A44";
+    std::string version_reply_;  // seeded from profile_.version_reply
     int answer_baud_ = 0;
     int mispair_left_ = 0;
     bool reject_j_on_running_ = false;
@@ -477,6 +521,9 @@ private:
     int straggler_ms_ = 0;
     bool straggler_pending_ = false;
     bool no_readback_ = false;
+    bool div16_readback_ = false;
+    bool div16_negative_ = false;
+    int64_t div16_wrong_ = -1;
     std::string reject_readback_code_;
     // Defaults reproduce the fixed "=101" this fake used to answer for ":f":
     // speed mode, not running, initialized.

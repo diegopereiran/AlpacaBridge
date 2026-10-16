@@ -717,11 +717,15 @@ public:
         if (connected_) {
             disconnect_locked();
         }
+        clear_loss_locked();
+        connect_failure_.clear();
         if (info.type == ConnectionType::Serial && info.port_path.empty()) {
+            connect_failure_ = "no serial port is set";
             ALPACA_LOG_ERROR("SkyWatcher", "Serial connection requested but port_path is empty");
             return false;
         }
         if (info.type == ConnectionType::Network && info.host.empty()) {
+            connect_failure_ = "no host is set";
             ALPACA_LOG_ERROR("SkyWatcher", "Network connection requested but host is empty");
             return false;
         }
@@ -734,9 +738,26 @@ public:
         return ok;
     }
 
+    // Why the last connect() returned false, in words for the operator; empty
+    // after a success. Read by the driver to build the refusal text (#1018).
+    std::string connect_failure() const {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return connect_failure_;
+    }
+
     void disconnect() {
         std::lock_guard<std::mutex> lock(io_mutex_);
         disconnect_locked();
+        clear_loss_locked();
+    }
+
+    // The client's own connect or disconnect settles a loss (decision 0009,
+    // point 5): the kept fault text and the sticky flag go; the lost-at stamp
+    // stays for the relink's outage-length decision.
+    void clear_loss_locked() {
+        link_lost_.store(false);
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        lost_fault_.clear();
     }
 
     // ":i" step-period readback diagnostic: on for each new connection, off
@@ -758,7 +779,13 @@ public:
     // and no exchange holds the link, it is torn down here, so the stale fd
     // stops pinning the old device name.
     bool link_alive() {
-        if (!connected_.load()) {
+        if (!connected_.load() || link_lost_.load()) {
+            return false;
+        }
+        // Decision 0009: a fault that has stood past the staleness bound is a
+        // lost link, on UDP and serial alike.
+        if (fault_stale()) {
+            lose_stale_link();
             return false;
         }
 #ifndef _WIN32
@@ -782,6 +809,7 @@ public:
             // poll, the in-flight exchange's own node check, or a relink all
             // retry the close; nothing is lost, but until one of those runs
             // the stale fd stays open with Connected already reading false.
+            keep_fault_text();
             note_link_lost();
             std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
             if (lock.owns_lock() && connected_.load()) {
@@ -799,20 +827,27 @@ public:
         if (!connected_) {
             throw AlpacaException("Not connected to Sky-Watcher motor controller", AlpacaError::NotConnected);
         }
+        if (link_lost_.load()) {
+            // Lost while an exchange held the lock: finish the close here.
+            disconnect_locked();
+            throw AlpacaException("Not connected to Sky-Watcher motor controller", AlpacaError::NotConnected);
+        }
         // open-astro#505: this is the one place both transports converge, so
         // the consecutive-failure latch lives here and covers serial and UDP
-        // alike (UDP has no other health signal at all — link_alive() reports
-        // the flag as-is there).
+        // alike (link_alive() applies the staleness bound to the latched
+        // fault on both).
         //
         // The latch detects SILENCE, so ONLY a genuine no-reply timeout counts.
         // Any frame from the board — mis-paired, malformed, stale or over-long
         // — proves it is alive and talking, which is exactly the condition this
         // must NOT fire on, so it RESETS the counter and leaves the
         // protocol-level problem to the machinery that already owns it (the
-        // dirty/settle/resync path and send_command's shape check). A write or
-        // socket error is neither: it says nothing about whether the board is
-        // answering, so it is left uncounted rather than read as evidence
-        // either way.
+        // dirty/settle/resync path and send_command's shape check). A serial write
+        // error is neither: it says nothing about whether the board is
+        // answering, so it is left uncounted. A UDP send/receive error is
+        // reachability evidence and counts as a no-reply exchange
+        // (udp_socket_error_locked), except EBADF/ENOTSOCK/ENOTCONN, which
+        // lose the link at once.
         exchange_saw_frame_ = false;
         exchange_timed_out_ = false;
         try {
@@ -868,7 +903,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(health_mutex_);
             const bool was_faulted = link_health_.faulted();
-            latched = link_health_.note_failure(reason, kLinkFaultThreshold);
+            latched = link_health_.note_failure(reason, kLinkFaultThreshold, clock().now());
             failures = link_health_.consecutive_failures();
             if (was_faulted) {
                 return;  // already latched: the per-exchange WARN would repeat forever
@@ -882,10 +917,60 @@ public:
         }
     }
 
+    // After a loss the last fault text stays until the next connect or
+    // disconnect (decision 0009, point 5), so the listing shows why.
     std::string link_fault() {
         std::lock_guard<std::mutex> lock(health_mutex_);
-        return link_health_.fault();
+        return link_health_.faulted() ? link_health_.fault() : lost_fault_;
     }
+
+    void set_task_clock(util::TaskClock& clock) { clock_.store(&clock); }
+
+    // Decision 0009 point 5: a loss keeps the latched fault text for
+    // get_link_fault() until the next connect or disconnect. Call before
+    // note_link_lost() on every loss path.
+    void keep_fault_text() {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        if (link_health_.faulted()) {
+            lost_fault_ = link_health_.fault();
+        }
+    }
+
+    bool fault_stale() {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        return link_health_.fault_stale(clock().now());
+    }
+
+    // Marks the link lost for good: the sticky flag makes every later
+    // link_alive() and exchange() report NotConnected even when an exchange in
+    // flight holds io_mutex_ and the close has to wait for it.
+    void lose_stale_link() {
+        keep_fault_text();
+        note_link_lost();
+        link_lost_.store(true);
+        std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
+        if (lock.owns_lock() && connected_.load()) {
+            const std::string reason = link_fault();
+            ALPACA_LOG_WARN("SkyWatcher", "Motor controller link lost: " + reason + "; link closed");
+            disconnect_locked();
+        }
+    }
+
+    // Finishes the close a loss left pending because an exchange held
+    // io_mutex_ when it was seen (lose_stale_link() only try_locks). Called by
+    // a caller that holds no io_mutex_, such as the status poll on its exit.
+    void finish_lost_close() {
+        std::unique_lock<std::mutex> lock(io_mutex_);
+        if (link_lost_.load() && connected_.load()) {
+            disconnect_locked();
+        }
+    }
+
+    // The driver's own loss evidence (a snapshot frame past the staleness
+    // bound): stamps when the outage began; the first stamp wins.
+    void note_link_lost_at(std::chrono::steady_clock::time_point at) { link_lost_at_.note(at); }
+
+    util::TaskClock& clock() const { return *clock_.load(); }
 
     // open-astro#521: when the link was last LOST (not cleanly disconnected).
     // A relink needs the length of the outage to decide whether motion the
@@ -895,22 +980,12 @@ public:
     // Recorded once per outage: the first detection wins, because later polls
     // would otherwise keep pushing the stamp forward and make every outage
     // look brief.
-    void note_link_lost() {
-        std::int64_t expected = 0;
-        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-        link_lost_at_.compare_exchange_strong(expected, now, std::memory_order_relaxed);
-    }
+    void note_link_lost() { link_lost_at_.note(clock().now()); }
 
     // Read-and-clear: the stamp answers exactly one question, asked once per
     // connect, and leaving it set would make the NEXT connect think it was
     // recovering from this outage.
-    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at() {
-        const std::int64_t at = link_lost_at_.exchange(0, std::memory_order_relaxed);
-        if (at == 0) {
-            return std::nullopt;
-        }
-        return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(at));
-    }
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at() { return link_lost_at_.consume(); }
 
     std::uint64_t recovery_epoch() const { return recovery_epoch_.load(std::memory_order_relaxed); }
 
@@ -934,6 +1009,10 @@ public:
 
 private:
     void disconnect_locked() {
+        // First: link_alive() reads connected_ without io_mutex_, and once
+        // link_path_ is cleared below it has no node to check, so a later
+        // store left Connected reading true mid-close (open-astro#882).
+        connected_ = false;
 #ifndef _WIN32
         if (serial_fd_ >= 0) {
             // open-astro#912: the exclusive flag lives on the tty and survives
@@ -961,7 +1040,35 @@ private:
             std::lock_guard<std::mutex> lock(health_mutex_);
             link_health_.reset();
         }
-        connected_ = false;
+    }
+
+    // Decision 0009 point 2: a socket errno is lost-at-once only when it says
+    // the socket itself is unusable. Every other one (EHOSTUNREACH after a
+    // failed neighbour lookup, ECONNREFUSED while the board's UDP stack
+    // reboots, ENETUNREACH while the interface is down) reports reachability,
+    // which a Wi-Fi drop or a board reboot restores: it counts as a no-reply
+    // exchange for the latch and the staleness bound decides.
+    [[noreturn]] void udp_socket_error_locked(const std::string& what, int err) {
+        if (err == EBADF || err == ENOTSOCK || err == ENOTCONN) {
+            lose_socket_link_locked(what);
+        }
+        exchange_timed_out_ = true;
+        throw AlpacaException(what);
+    }
+
+    // Decision 0009 point 3 for a UDP socket that failed hard (send/receive
+    // error, not a silent timeout): the transport is gone.
+    [[noreturn]] void lose_socket_link_locked(const std::string& what) {
+        if (!connected_) {
+            // The connect probe: a refused connect, not a loss.
+            throw AlpacaException(what);
+        }
+        ALPACA_LOG_WARN("SkyWatcher", what + " on " + info_.host + "; network link closed");
+        keep_fault_text();
+        note_link_lost();
+        link_lost_.store(true);
+        disconnect_locked();
+        throw AlpacaException(what + "; network link to the motor controller lost", AlpacaError::NotConnected);
     }
 
 #ifndef _WIN32
@@ -971,6 +1078,7 @@ private:
     // generic transport error on a link that still claims to be up.
     [[noreturn]] void lose_serial_link_locked(const std::string& what) {
         ALPACA_LOG_WARN("SkyWatcher", what + " on " + info_.port_path + "; serial link closed");
+        keep_fault_text();
         note_link_lost();
         disconnect_locked();
         throw AlpacaException(what + "; serial link to the motor controller lost", AlpacaError::NotConnected);
@@ -1002,12 +1110,14 @@ private:
         if (!alpacacore::util::try_mark_serial_port_open(registry_key)) {
             ALPACA_LOG_ERROR("SkyWatcher",
                              "Port " + registry_key + " is already held open by another connected device");
+            connect_failure_ = "the port is already in use by another connected device";
             return false;
         }
 
         serial_fd_ = open(info.port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
-            ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + util::errno_string(errno));
+            connect_failure_ = util::errno_string(errno);
+            ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + connect_failure_);
             alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
@@ -1019,6 +1129,7 @@ private:
         (void)ioctl(serial_fd_, TIOCEXCL);
         struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
+            connect_failure_ = "the port is not a serial device (" + util::errno_string(errno) + ")";
             close(serial_fd_);
             serial_fd_ = -1;
             alpacacore::util::mark_serial_port_closed(registry_key);
@@ -1042,6 +1153,7 @@ private:
         tty.c_cc[VMIN] = 0;
         tty.c_cc[VTIME] = 1;
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
+            connect_failure_ = "the serial settings were refused (" + util::errno_string(errno) + ")";
             close(serial_fd_);
             serial_fd_ = -1;
             alpacacore::util::mark_serial_port_closed(registry_key);
@@ -1065,6 +1177,7 @@ private:
         // (The other serial vendors keep clear_nonblocking + VTIME; this is a
         // Sky-Watcher-specific hardening for a tty that ignores VTIME.)
         if (!util::set_nonblocking(serial_fd_)) {
+            connect_failure_ = "the port could not be set non-blocking (" + util::errno_string(errno) + ")";
             close(serial_fd_);
             serial_fd_ = -1;
             alpacacore::util::mark_serial_port_closed(registry_key);
@@ -1099,6 +1212,7 @@ private:
 #ifndef _WIN32
         socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (socket_fd_ < 0) {
+            connect_failure_ = "no network socket could be created (" + util::errno_string(errno) + ")";
             return false;
         }
         sockaddr_in addr{};
@@ -1110,6 +1224,7 @@ private:
             hints.ai_socktype = SOCK_DGRAM;
             addrinfo* result = nullptr;
             if (getaddrinfo(info.host.c_str(), nullptr, &hints, &result) != 0 || !result) {
+                connect_failure_ = "the host name could not be resolved";
                 close(socket_fd_);
                 socket_fd_ = -1;
                 return false;
@@ -1120,6 +1235,7 @@ private:
         // connect() the datagram socket so recv() only accepts the mount's
         // replies and send() needs no per-call address.
         if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            connect_failure_ = "the network address is unreachable (" + util::errno_string(errno) + ")";
             close(socket_fd_);
             socket_fd_ = -1;
             return false;
@@ -1129,12 +1245,14 @@ private:
         try {
             std::string reply = exchange_udp(":e1\r", default_timeout(), 6);
             if (reply.empty() || reply[0] != kReplyOk) {
+                connect_failure_ = "the mount did not reply to the handshake";
                 close(socket_fd_);
                 socket_fd_ = -1;
                 return false;
             }
             fw_reply_ = reply;  // known ":e1" answer, used by resync_udp()
         } catch (const std::exception&) {
+            connect_failure_ = "the mount did not reply to the handshake";
             close(socket_fd_);
             socket_fd_ = -1;
             return false;
@@ -1459,7 +1577,7 @@ private:
                     ALPACA_LOG_WARN("SkyWatcher",
                                     "UDP socket went stale (interface address changed); rebuilt and resent");
                 } else {
-                    throw AlpacaException("UDP send failed: " + util::errno_string(errno));
+                    udp_socket_error_locked("UDP send failed: " + util::errno_string(errno), errno);
                 }
             }
             auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -1509,7 +1627,7 @@ private:
                 }
                 if (n < 0) {
                     link_dirty_ = true;
-                    throw AlpacaException("UDP receive failed: " + util::errno_string(errno));
+                    udp_socket_error_locked("UDP receive failed: " + util::errno_string(errno), errno);
                 }
             }
             link_dirty_ = true;
@@ -1650,9 +1768,15 @@ private:
     // power-cycled board answers again with init_done false and its position
     // registers reset, and nothing re-sends ":F" outside connect).
     std::atomic<std::uint64_t> recovery_epoch_{0};
-    // open-astro#521: steady_clock tick of the first detection of the current
-    // outage, 0 when the link has not been lost since the last connect.
-    std::atomic<std::int64_t> link_lost_at_{0};
+    // open-astro#521: task-clock time of the first detection of the current
+    // outage, empty when the link has not been lost since the last connect.
+    util::LinkLostStamp link_lost_at_;
+    // Decision 0009: the link was lost (transport gone, or a fault past the
+    // staleness bound). Sticky until the next connect or disconnect.
+    std::atomic<bool> link_lost_{false};
+    std::string connect_failure_;  // under io_mutex_: why the last connect() failed
+    std::string lost_fault_;  // under health_mutex_: fault text kept after a loss
+    std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
     // open-astro#505: per-exchange evidence, written only under io_mutex_ by
     // the transports. exchange_saw_frame_ means at least one byte/datagram
     // arrived from the board during this exchange (its own reply, a stale one
@@ -1689,10 +1813,13 @@ SkyWatcherProtocolWrapper& SkyWatcherProtocolWrapper::instance() {
 }
 
 bool SkyWatcherProtocolWrapper::connect(const ConnectionInfo& info) { return pimpl_->connect(info); }
+std::string SkyWatcherProtocolWrapper::connect_failure() const { return pimpl_->connect_failure(); }
 
 void SkyWatcherProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 
 bool SkyWatcherProtocolWrapper::is_connected() const { return pimpl_->is_connected(); }
+
+void SkyWatcherProtocolWrapper::set_task_clock(util::TaskClock& clock) { pimpl_->set_task_clock(clock); }
 
 bool SkyWatcherProtocolWrapper::link_alive() { return pimpl_->link_alive(); }
 
@@ -1701,6 +1828,12 @@ std::string SkyWatcherProtocolWrapper::link_fault() { return pimpl_->link_fault(
 bool SkyWatcherProtocolWrapper::link_faulted() { return !pimpl_->link_fault().empty(); }
 
 std::uint64_t SkyWatcherProtocolWrapper::link_recovery_epoch() { return pimpl_->recovery_epoch(); }
+
+void SkyWatcherProtocolWrapper::finish_lost_close() { pimpl_->finish_lost_close(); }
+
+void SkyWatcherProtocolWrapper::note_link_lost_at(std::chrono::steady_clock::time_point at) {
+    pimpl_->note_link_lost_at(at);
+}
 
 std::optional<std::chrono::steady_clock::time_point> SkyWatcherProtocolWrapper::consume_link_lost_at() {
     return pimpl_->consume_link_lost_at();
@@ -1945,7 +2078,15 @@ void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset, bo
         return;
     }
     const uint32_t diff = readback > t1_preset ? readback - t1_preset : t1_preset - readback;
-    if (diff > kReadbackTolerance) {
+    // An EQM-35 Pro (fw 3.47) answers in units of 16 ticks, as a signed 24-bit
+    // value whose sign is the direction (open-astro#1021): accept that decode
+    // too, within one count for the board's truncation. Stateless on purpose:
+    // a raw readback never lands near preset / 16 inside the compared range.
+    const int32_t signed_readback = static_cast<int32_t>(readback << 8) >> 8;
+    const uint32_t magnitude = static_cast<uint32_t>(signed_readback < 0 ? -signed_readback : signed_readback);
+    const uint32_t expected_div16 = t1_preset / 16;
+    const uint32_t div16_diff = magnitude > expected_div16 ? magnitude - expected_div16 : expected_div16 - magnitude;
+    if (diff > kReadbackTolerance && div16_diff > 1) {
         ALPACA_LOG_WARN("SkyWatcher", "Axis " + std::to_string(axis) + " step period readback " +
                                           std::to_string(readback) + " != written " + std::to_string(t1_preset) +
                                           " (diagnostic only; not resent)");

@@ -32,6 +32,11 @@
 
 namespace alpacacore::catalog {
 
+inline constexpr const char* kCelestronProtocols[] = {"nexstar", "cgx-aux"};
+
+inline const Field<std::string> kCelestronProtocol{
+    .key = "protocol", .default_value = "nexstar", .role = Role::Discriminator, .allowed_values = kCelestronProtocols};
+
 // "" and "auto" scan at connect; "serial" and "network" name the endpoint. No
 // allowed_values: the per-field rule would substitute the default "auto" for an
 // unknown saved value, which must be read as "serial" instead (#380), so the
@@ -61,19 +66,20 @@ inline const Field<double> kCelestronSiteLatitude{
     .key = "siteLatitude", .default_value = 0.0, .min = -90.0, .max = 90.0};
 inline const Field<double> kCelestronSiteLongitude{
     .key = "siteLongitude", .default_value = 0.0, .min = -180.0, .max = 180.0};
-inline const Field<double> kCelestronSiteElevation{.key = "siteElevation", .default_value = 0.0};
+inline const Field<double> kCelestronSiteElevation{
+    .key = "siteElevation", .default_value = 0.0, .min = -300.0, .max = 10000.0};
 inline const Field<bool> kCelestronSyncTimeOnConnect{.key = "syncTimeOnConnect", .default_value = false};
 // Applied only when > 0, as the router arm did.
-inline const Field<double> kCelestronApertureDiameter{.key = "apertureDiameter", .default_value = 0.0};
-inline const Field<double> kCelestronFocalLength{.key = "focalLength", .default_value = 0.0};
+inline const Field<double> kCelestronApertureDiameter{.key = "apertureDiameter", .default_value = 0.0, .min = 0.0};
+inline const Field<double> kCelestronFocalLength{.key = "focalLength", .default_value = 0.0, .min = 0.0};
 
 inline const std::vector<FieldRef>& celestron_telescope_fields() {
     static const std::vector<FieldRef> fields{
-        kCelestronConnectionType.ref(),    kCelestronMountIndex.ref(),    kCelestronPortPath.ref(),
-        kCelestronBaudRate.ref(),          kCelestronHost.ref(),          kCelestronTcpPort.ref(),
-        kCelestronResponseTimeoutMs.ref(), kCelestronAlignmentMode.ref(), kCelestronSiteLatitude.ref(),
-        kCelestronSiteLongitude.ref(),     kCelestronSiteElevation.ref(), kCelestronSyncTimeOnConnect.ref(),
-        kCelestronApertureDiameter.ref(),  kCelestronFocalLength.ref()};
+        kCelestronProtocol.ref(),          kCelestronConnectionType.ref(),    kCelestronMountIndex.ref(),
+        kCelestronPortPath.ref(),          kCelestronBaudRate.ref(),          kCelestronHost.ref(),
+        kCelestronTcpPort.ref(),           kCelestronResponseTimeoutMs.ref(), kCelestronAlignmentMode.ref(),
+        kCelestronSiteLatitude.ref(),      kCelestronSiteLongitude.ref(),     kCelestronSiteElevation.ref(),
+        kCelestronSyncTimeOnConnect.ref(), kCelestronApertureDiameter.ref(),  kCelestronFocalLength.ref()};
     return fields;
 }
 

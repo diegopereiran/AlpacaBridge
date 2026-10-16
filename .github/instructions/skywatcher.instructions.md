@@ -176,11 +176,15 @@ datagrams before each send so replies cannot get off-by-one.
   pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone,
   or on 0x09 on the bare `:I`);
   the `RightAscensionRate`/`TrackingRate` setters cannot wait 450 ms inside a property call,
-  so they spawn a one-shot background task (`rate_verify_thread_`, open-astro #248). That
-  task never takes `mutex_`, which is what lets every RA-taking path reap it WITH `mutex_`
-  held (setters, Tracking off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew,
-  disconnect) — a lock-free reap would leave a window for a setter to spawn one between an
-  initiator's reap and its lock, and the resend would land mid-pulse or on a stopped axis.
+  so they start a one-shot body on the `rate_verify_` slot (open-astro #248). Every RA-taking
+  path ends it WITH `mutex_` held through `cancel_rate_verify_locked()` (setters, Tracking
+  off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew; disconnect cancels and joins
+  the slot): `cancel()` never joins, so the body takes `mutex_` for its resend and sends
+  it only while the epoch it was started with (`rate_verify_epoch_`, bumped under `mutex_`
+  by every start and cancel) still matches. A cancel landing between the body's last wait
+  and its resend therefore cannot put `:I`+`:J` into an axis a pulse or a stop now owns.
+  The pulse body's own post-dispatch and post-restore checks resend the same way, gated on
+  its slot context.
 - **EQ-AL55i Pro motor-board firmware release notes** (Sky-Watcher's own changelog, copied
   verbatim; append each new version here). Both versions on record ran on the same mount.
   3.48 lists no motor-control change, so motor behaviour measured on either version is
@@ -266,6 +270,30 @@ datagrams before each send so replies cannot get off-by-one.
 - ConformU 4.5 **physically measures pulse-guide displacement** (Dec moved,
   RA unchanged) -- a driver that freezes reads during the pulse fails with
   "The declination axis did not move".
+- **Getters and `DeviceState` are served from a polled snapshot, never from the board**
+  (open-astro#1011, [decision 0010](../../docs/decisions/0010-snapshot-served-state.md)). One
+  status poll runs for the life of the connection (100 ms start to start, on the task clock) and
+  fills `util::StateSnapshot<PolledFrame>`; position, pier side and hardware Slewing read it, and
+  `DeviceState` stamps `TimeStamp` with the frame's measurement time through
+  `TelescopeDriver::device_state_age()`. A new position or status getter calls
+  `serve_position_locked()` / `served_frame_locked()`, never `refresh_position_cache_locked()`:
+  that is the control-path direct read (goto planning, the stop waits, `get_hardware_slewing_locked(false)`
+  for landing detection) and the limit guard's fallback while the frame is stale (over 200 ms).
+  A model re-anchor must drop the poll in flight (`drop_poll_in_flight_locked()`); anything
+  that changes what the board's registers or motion mean (a sync or other invalidation, the
+  end of a slew) must also mark the status flags not current (`note_model_write_locked()`,
+  `set_slewing_cached_false_locked()`); do not assign `slewing_cached_ = false` directly. No
+  getter re-reads the board to clear that flag any more, so every operation that sets it clears
+  it when it ends, AutoHome and a failed or superseded synchronous slew included: a flag left
+  set keeps the axes busy (rate offsets deferred, the limit guard exempt). An
+  asynchronous initiator (Park, FindHome, `SlewToCoordinatesAsync`, MoveAxis) never waits on a
+  position read: it invalidates with `read_back` false, MoveAxis anchors the model where it
+  changes a rate (`advance_model_anchor_locked()`), and the next poll re-measures. A poll sample
+  older than the model's anchor is never adopted. Past [decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md)'s
+  30 s bound the link is lost (`NotConnected`, `Connected` false); a stale frame younger than
+  that is served. A test that rendezvouses with a task on a `FakeTaskClock` counts the poll as
+  one waiter that is always parked (`kPollerWaiter`), or pauses it with
+  `set_status_poll_paused_for_testing()`.
 - **Slewing must be a STATE FLAG spanning the whole goto + landing refinement**
   (`goto_in_progress_`, same pattern as `parking_`/`homing_`), never a timed
   hold: the 3 s `slew_force_until_` expired during a slow refine iteration
@@ -279,7 +307,8 @@ datagrams before each send so replies cannot get off-by-one.
   asks the board on every poll (`get_hardware_slewing_locked(false)`) instead of waiting out
   an 8 s window, so a short goto lands when the board stops. The one window left is
   `SlewToCoordinatesAsync`'s, covering only the gap before its task sets `goto_in_progress_`;
-  every exit of that task clears it, the early return of a reaped task included.
+  every exit of that body clears it, the early return of a cancelled body included (a
+  superseded body leaves it to the operation that replaced it).
 - **Reap the pulse task at every motion boundary** (slews, park, home,
   sync, abort): ConformU's dual-axis pulse test leaves a live pulse
   timer that otherwise fires its stop/step-period restore into the middle of
@@ -288,9 +317,43 @@ datagrams before each send so replies cannot get off-by-one.
   axis reaps only that axis's pulse (PulseGuide #620, MoveAxis #630; a no-op
   `MoveAxis(axis, 0)` reaps none) and sync stops both axes before `:E`.
   Gate before reaping: a refused slew, MoveAxis or sync cancels nothing.
-- **AbortSlew must cancel the async slew task** (set `slew_task_cancel_`,
-  join later via reap) or the landing refinement re-slews after the abort;
-  every slew entry point reaps first, which also resets the flag.
+- **AbortSlew must cancel the async slew body** (`slew_.cancel()`; the slot joins
+  it when the next body starts or on disconnect) or the landing refinement
+  re-slews after the abort. A cancelled body (AbortSlew, Unpark, disconnect)
+  stops the axes if it may have dispatched; a superseded one never touches them.
+- **Slew, goto, Park and FindHome bodies run in one `util::AsyncOperation` slot
+  (`slew_`); each axis's `MoveAxis(axis, 0)` stop-completion body has its own
+  (`stop_ops_[axis]`) with its own `OperationGeneration`** (decision 0006). Rules:
+  - A start does not wait for the body it replaces, so every initiator CLAIMS the
+    slot under `mutex_` first (`claim_slew_slot_locked()`: bump the slot generation
+    and `motion_generation_`, clear `parking_`/`homing_`), then sets its flags, then
+    calls `start_slew_body()` WITHOUT `mutex_`. A replaced body is Superseded: it
+    checks `owns_slew_state_locked(ctx)` under `mutex_` before touching a flag or
+    the axes. `MoveAxis` bumps `stop_generation_[axis]` under `mutex_` the same way.
+  - The four goto initiators (`SlewToCoordinates[Async]`, `SlewToTarget[Async]`)
+    share one start path, `start_goto()`, which is also where the #436 altitude
+    check runs; Park and FindHome claim the slot themselves and are exempt.
+  - A stop on one axis must not supersede the other axis's stop body, hence one
+    generation per axis (the same-axis refinement near the stop body's tail stays
+    on `motion_generation_`). Test: `SkyWatcher slot - a stop on one axis does not
+    supersede the other axis's stop body`.
+  - Waits inside a body go through `BodyScope`'s thread-local context
+    (`body_sleep()`, `body_stopped()`), so the helpers shared with the synchronous
+    `SlewToCoordinates` (which has no body) behave the same on both.
+  - `last_slew_error_` stays a driver member, not the slot's `last_failure()`:
+    AbortSlew, MoveAxis and a reconnect must clear it without starting a body.
+    Park and FindHome failures persist through `Slewing` (open-astro#631; see
+    [decision 0006](../../docs/decisions/0006-async-operation-ownership.md)).
+  - No body calls `start()` or `cancel_all_and_join()` on its own slot (a park
+    tail that "restarts tracking" through a slot call would join itself or wait out
+    `kStaleReapTimeout`); use `cancel()` or `ctx.stop_reason()`. `start()` and
+    `cancel_all_and_join()` run without `mutex_`; `cancel()` may run with it.
+  - `start()` raises `AlpacaException` when the stale bound does not clear
+    (`InvalidOperation`) or the OS refuses a thread (`DriverException`); both change
+    nothing in the slot, and the initiator rolls its published flags back. When the claim had replaced a
+    body in flight, that body skips its stop, so the refusal also stops both axes
+    and publishes the AbortSlew state (`tracking_` and the tracking restore
+    cleared); a refusal that replaced nothing cancels nothing.
 - Debug technique: a watchdog loop that `pkill`s ConformU at the FIRST logged
   issue preserves the exact journal window and stops the mount from grinding
   through a failed run.
@@ -475,8 +538,10 @@ below was one of them.
   ~0.13 arcsec frozen, stable to +/-0.1 across runs; the case asserts a 2 arcsec floor.
   **And the seam disagrees with the hardware about which is better**: on the loopback fake the
   frozen constants land at about -0.8 arcsec and the measured EMAs at -3 to -13, because the
-  fake has no equivalent of the real MC's ~3 s floor on even a 350-count refinement goto --
-  which is precisely the fact that made the constants wrong on an EQM-35. So the test pins that
+  fake's goto and restart timing is not the real MC's (the EQM-35 measures ~0.26 s for a
+  259-count refinement goto and ~0.2 s landing-to-`:J1`, which is why the Wave 100i constants
+  were wrong there; an earlier "~3 s floor" explanation for the gap was wrong and is dropped,
+  and the loopback fake has not been shown to reproduce the real timing). So the test pins that
   the aim-ahead is driven by something that moves, and says in its own comment that the
   evidence measuring HELPS is the hardware ConformU run, not the fake. **Rule:** when a fake
   cannot reproduce the quantity a change was made for, pin the mechanism and name the real
@@ -497,14 +562,14 @@ below was one of them.
   stays green, the seam models the wrong failure.
 - **Goto aim-ahead constants are rig-specific: measure them.** `kGotoRampSeconds` (2.5 s) and
   `kTrackingResumeSeconds` (0.7 s) were tuned on the Wave 100i. On the EQM-35 the landing-to-`:J1`
-  restart takes ~0.2 s and even a 350-count refinement goto ~3.1 s (the MC's minimum goto time),
-  so 2.5 + 0.7 happened to equal 3.1 + 0.2 for refinements (which is why they landed to 0.6 arcsec)
-  while a 20 deg goto whose estimate ran 1.2 s long read as 6 arcsec off at the deadband check and
-  resumed tracking 1.03 s ahead of the sky (`SyncToCoordinates` "15.4 arc seconds away", exactly
-  1.03 s of RA). Fixing only the restart latency made every refinement land 0.6 s late
-  (`SlewToCoordinates` "10.8 arc seconds away"). Both are now EMAs measured per goto
-  (`goto_overhead_seconds_`, `resume_latency_seconds_`), seeded from the constants so the first
-  goto of a session is unchanged on every mount; the refinement loop remains the safety net.
+  restart takes ~0.2 s and a 259-count refinement goto only ~0.26 s (measured on the rig,
+  open-astro#1025; an earlier ~3.1 s figure for a 350-count goto was wrong). A 20 deg goto whose
+  estimate ran 1.2 s long read as 6 arcsec off at the deadband check and resumed tracking 1.03 s
+  ahead of the sky (`SyncToCoordinates` "15.4 arc seconds away", exactly 1.03 s of RA). Fixing only
+  the restart latency made every refinement land ~0.6 s off (`SlewToCoordinates` "10.8 arc seconds
+  away"). Both are now EMAs measured per goto (`goto_overhead_seconds_`, `resume_latency_seconds_`),
+  seeded from the constants so the first goto of a session is unchanged on every mount; the
+  refinement loop remains the safety net.
 - **Run chrony on the machine running ConformU. A stepped clock is an RA error.** RA = LST - HA
   with LST from the host clock. Lima's host agent steps the guest clock by ~100 ms whenever the
   drift passes its threshold (every 2-3 min at the ~500 ppm a vz guest drifts; no knob in Lima
@@ -618,9 +683,9 @@ then drifts at 1.0x sidereal — the signature of a stationary mount — instead
 This is the dangerous shape: a sequencer that waits for `Slewing` to clear before
 exposing hangs forever, and one that does not wait images on an untracked mount.
 
-**Mechanism.** `move_axis()` uses a SINGLE shared `stop_task_thread_` for both axes.
-When a new stop supersedes a pending one, the old task is cancelled
-(`stop_task_cancel_.store(true)`) and returns early from `task_wait_for()` — before
+**Mechanism.** (As the code stood then.) `move_axis()` used a SINGLE shared stop thread
+for both axes. When a new stop superseded a pending one, the old task was cancelled
+and returned early from its wait — before
 reaching `manual_axis_slewing_[axis] = false` and the restore-tracking tail. Its axis's
 flag is stranded set, and `get_hardware_slewing_locked()` returns true forever because
 it ORs both `manual_axis_slewing_` entries.
@@ -634,9 +699,9 @@ reproduced it reliably.
 flag and restores tracking, because a stop on an axis whose flag is set spawns a fresh
 task that runs to completion.
 
-**Fix (done).** `stop_task_thread_` and `stop_task_cancel_` are now per-axis arrays;
-`reap_stop_task(axis)` and the spawn/retry-join block only ever race with a prior task
-for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
+**Fix (done).** The stop task became per-axis, and is now one `util::AsyncOperation`
+slot per axis (`stop_ops_[axis]`, each with its own generation), so a start only ever
+replaces a prior body for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
 dispatched, Dec stop dispatched while RA's stop task is still mid-ramp) and asserts
 `Slewing` clears promptly. The generation guard
 (`motion_generation_ == stop_task_generation`) is unchanged and still gates the
@@ -662,8 +727,8 @@ command on EITHER axis (see its declaration: "bumped by every motion command"). 
 stop dispatched while RA's stop task is polling bumps the shared counter for a reason
 that has nothing to do with RA, so the RA task's tail reads a mismatch and silently
 skips restoring RA's tracking — even though nothing actually superseded the RA stop
-itself (which is correctly detected via the now-per-axis `stop_task_cancel_[0]`, a
-separate and correctly-scoped check).
+itself (which is correctly detected by the axis's own stop slot, a separate and
+correctly-scoped check).
 
 The codebase already has the right idiom for this elsewhere: the duty-cycle worker
 (`apply_ra_drive_locked`'s burst path, guarding sub-floor rate duty-cycling) computes a
@@ -680,17 +745,15 @@ slewing_cached_ || manual_axis_slewing_[axis] ||
 pulse_axis_active_[channel - 1]`), the exact idiom the duty-cycle worker already uses, and only
 treats a `motion_generation_` mismatch as a real supersession when `same_axis_owner`
 is true. The historical regression this guards against (PR #216 round-5:
-`SetTracking(false)` racing the restore) is covered only for a COMPLETED
-`SetTracking(false)`: that path publishes `tracking_ = false` under the SAME `mutex_`
-this task also holds, so the `tracking_ &&`/`dec_rate_arcsec_per_sec_ != 0.0 &&` guards
-ahead of the generation check see it. They do NOT cover one still IN FLIGHT.
-`set_tracking_locked(false)` bumps `motion_generation_` first, then releases `mutex_`
-inside `stop_axis_and_wait_locked()`'s poll loop, and assigns `tracking_` only after that
-wait returns -- so a restore tail waking inside that window reads `tracking_ == true`,
-restores the drive, and the caller throws `Tracking change superseded by a concurrent
-motion command` with the mount left tracking. That is issue #535, still open; its
-regression case is quarantined `[!mayfail]` in `test_skywatcher_async.cpp` (see #586 /
-#587), so nothing gates this path until #535 lands.
+`SetTracking(false)` racing the restore) has two halves. A COMPLETED `SetTracking(false)`
+publishes `tracking_ = false` under the SAME `mutex_` this task holds. One still IN FLIGHT
+bumps `motion_generation_`, then releases `mutex_` inside `stop_axis_and_wait_locked()` and
+assigns `tracking_` only after the wait returns; the restore tail therefore tests
+`tracking_effectively_on_locked()` (`tracking_ && tracking_off_pending_ == 0`), not bare
+`tracking_`, so it yields instead of making the caller throw `Tracking change superseded by
+a concurrent motion command` with the mount left tracking (issue #535, fixed). Gated by
+`SkyWatcher async - MoveAxis stop restore yields to a newer tracking command` and the
+`[stress]` case `MoveAxis stop racing SetTracking(false)`.
 Extended the regression test from the first bug to assert the RA axis actually resumes
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.
@@ -724,7 +787,7 @@ two, so every existing caller is unchanged. `set_site_latitude()` decides each h
 separately: re-apply the RA drive unless RA is busy, re-apply the Dec offset unless Dec
 is busy, and skip entirely only when both are. A sub-floor RA rate is pre-armed into
 `ra_duty_rate_deg_s_` when RA is busy, the way `set_right_ascension_rate()`'s busy branch
-already does, because the duty worker resumes from that stored rate and no restore path
+already does, because the duty body resumes from that stored rate and no restore path
 re-derives it. Two loopback regressions (`test_skywatcher_async.cpp`) drive the
 declination-pulse and declination-`MoveAxis` variants and were confirmed to fail on the
 pre-fix setter with the RA axis still counting the old way.

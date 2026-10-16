@@ -124,8 +124,9 @@ public:
 
     BisqueTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                           std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-                          std::optional<double> site_elevation_m)
+                          std::optional<double> site_elevation_m, util::TaskClock& clock)
         : AsyncConnectable("Bisque"),
+          clock_(clock),
           device_number_(device_number),
           connection_info_(connection_info),
           site_latitude_(site_latitude_deg.value_or(0.0)),
@@ -245,7 +246,7 @@ public:
             at_home_ = false;
             homing_ = false;
             slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            slew_force_until_ = util::TaskClock::clock::time_point::min();
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             manual_axis_slewing_[0] = false;
@@ -266,7 +267,7 @@ public:
                 cached_ra_hours_ = pos.ra_hours;
                 cached_dec_degrees_ = pos.dec_degrees;
                 equatorial_cache_valid_ = true;
-                last_equatorial_update_ = std::chrono::steady_clock::now();
+                last_equatorial_update_ = clock_.now();
             } catch (...) {
             }
             try {
@@ -274,7 +275,7 @@ public:
                 cached_alt_degrees_ = altaz.altitude_degrees;
                 cached_az_degrees_ = altaz.azimuth_degrees;
                 altaz_cache_valid_ = true;
-                last_altaz_update_ = std::chrono::steady_clock::now();
+                last_altaz_update_ = clock_.now();
             } catch (...) {
             }
 
@@ -652,10 +653,9 @@ public:
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.park();
         // Poll until parked.
-        auto start = std::chrono::steady_clock::now();
+        auto start = clock_.now();
         while (true) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - start).count();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(clock_.now() - start).count();
             if (elapsed > 120) {
                 throw AlpacaException("Park timed out after 120 seconds");
             }
@@ -665,7 +665,7 @@ public:
             }
             // Release lock briefly so other threads can query state.
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            clock_.sleep_for(std::chrono::seconds(1));
             lock.lock();
             // The mount may have been disconnected while the lock was released.
             check_connected();
@@ -788,7 +788,7 @@ public:
 
         protocol.slew_to_ra_dec(ra, dec);
         slewing_cached_ = true;
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        slew_force_until_ = clock_.now() + std::chrono::seconds(8);
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
 
@@ -811,7 +811,7 @@ public:
 
         protocol.slew_to_ra_dec(ra, dec);
         slewing_cached_ = true;
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        slew_force_until_ = clock_.now() + std::chrono::seconds(8);
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
     }
@@ -946,7 +946,7 @@ public:
         pulse_guiding_ = false;
         pulse_guide_error_.clear();
         slewing_cached_ = false;
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         std::thread pulse_thread = std::move(pulse_guide_thread_);
@@ -996,7 +996,7 @@ private:
     }
 
     void refresh_equatorial_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
         }
@@ -1009,7 +1009,7 @@ private:
     }
 
     void refresh_altaz_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
@@ -1023,7 +1023,7 @@ private:
 
     bool get_slewing_locked() const {
         // Within the slew-force window, report as slewing without querying.
-        if (slewing_cached_ && std::chrono::steady_clock::now() < slew_force_until_) {
+        if (slewing_cached_ && clock_.now() < slew_force_until_) {
             return true;
         }
         // Check manual axis motion.
@@ -1033,17 +1033,14 @@ private:
         if (!slewing_cached_) {
             return false;
         }
-        // Poll TheSkyX.
-        try {
-            auto& protocol = BisqueProtocolWrapper::instance();
-            bool complete = protocol.is_slew_complete();
-            if (complete) {
-                slewing_cached_ = false;
-            }
-            return !complete;
-        } catch (...) {
-            return false;
+        // A failed completion poll is not evidence that the slew completed.
+        // Preserve the cached in-progress state and surface the protocol error.
+        auto& protocol = BisqueProtocolWrapper::instance();
+        bool complete = protocol.is_slew_complete();
+        if (complete) {
+            slewing_cached_ = false;
         }
+        return !complete;
     }
 
     bool get_tracking_locked() const {
@@ -1056,40 +1053,62 @@ private:
     }
 
     void wait_for_slew_complete_locked(std::unique_lock<std::mutex>& lock) {
-        auto start = std::chrono::steady_clock::now();
+        // One failed poll is tolerated (a transient TheSkyX hiccup); this many in a
+        // row is a persistent fault and is reported as such, not as a 120 s timeout.
+        constexpr int kMaxConsecutivePollFailures = 3;
+        int consecutive_failures = 0;
+        auto start = clock_.now();
         while (true) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - start).count();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(clock_.now() - start).count();
             if (elapsed > 120) {
                 throw AlpacaException("Slew timed out after 120 seconds");
             }
+            int failure_code = AlpacaError::DriverException;
+            std::string failure_what;
             try {
                 auto& protocol = BisqueProtocolWrapper::instance();
-                if (protocol.is_slew_complete()) {
+                const bool complete = protocol.is_slew_complete();
+                consecutive_failures = 0;
+                if (complete) {
                     slewing_cached_ = false;
                     if (slew_settle_time_seconds_ > 0) {
                         lock.unlock();
-                        std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+                        clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
                         lock.lock();
                         check_connected();
                     }
                     return;
                 }
-            } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
-                // Includes NotConnected from a racing disconnect — keep polling
-                // only while still connected (re-checked below).
+            } catch (const AlpacaException& ex) {
+                // A racing disconnect stays NotConnected.
+                if (ex.error_code() == AlpacaError::NotConnected) {
+                    throw;
+                }
+                failure_code = ex.error_code();
+                failure_what = ex.what();
+                ++consecutive_failures;
+            } catch (const std::exception& ex) {
+                failure_what = ex.what();
+                ++consecutive_failures;
             } catch (...) {
-                // Non-Alpaca exception from a status poll — same policy: keep
-                // polling while still connected (re-checked below).
+                failure_what = "unknown error";
+                ++consecutive_failures;
+            }
+            if (consecutive_failures >= kMaxConsecutivePollFailures) {
+                // slewing_cached_ stays set: a failed poll is not evidence of arrival.
+                throw AlpacaException("Slew completion poll failed " + std::to_string(consecutive_failures) +
+                                          " times in a row: " + failure_what,
+                                      failure_code);
             }
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            clock_.sleep_for(std::chrono::seconds(1));
             lock.lock();
             // The mount may have been disconnected while the lock was released.
             check_connected();
         }
     }
 
+    util::TaskClock& clock_;
     int device_number_;
     ConnectionInfo connection_info_;
     std::mutex transition_mutex_;
@@ -1119,8 +1138,8 @@ private:
     mutable double cached_az_degrees_ = 0.0;
     mutable bool equatorial_cache_valid_ = false;
     mutable bool altaz_cache_valid_ = false;
-    mutable std::chrono::steady_clock::time_point last_equatorial_update_;
-    mutable std::chrono::steady_clock::time_point last_altaz_update_;
+    mutable util::TaskClock::clock::time_point last_equatorial_update_;
+    mutable util::TaskClock::clock::time_point last_altaz_update_;
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
@@ -1131,7 +1150,7 @@ private:
     mutable bool at_home_ = false;
     mutable bool homing_ = false;
     mutable bool slewing_cached_ = false;
-    mutable std::chrono::steady_clock::time_point slew_force_until_;
+    mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     mutable bool pulse_guiding_ = false;
     mutable std::string pulse_guide_error_;
@@ -1144,22 +1163,17 @@ private:
     GuideRate guide_rate_{};
 };
 
-std::unique_ptr<TelescopeDriver> create_bisque_telescope(
-    int device_number,
-    const ConnectionInfo& connection_info) {
-    return create_bisque_telescope_with_site(device_number, connection_info,
-                                             std::nullopt, std::nullopt, std::nullopt);
+std::unique_ptr<TelescopeDriver> create_bisque_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                         util::TaskClock& clock) {
+    return create_bisque_telescope_with_site(device_number, connection_info, std::nullopt, std::nullopt, std::nullopt,
+                                             clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m) {
-    return std::make_unique<BisqueTelescopeDriver>(
-        device_number, connection_info,
-        site_latitude_deg, site_longitude_deg, site_elevation_m);
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m, util::TaskClock& clock) {
+    return std::make_unique<BisqueTelescopeDriver>(device_number, connection_info, site_latitude_deg,
+                                                   site_longitude_deg, site_elevation_m, clock);
 }
 
 } // namespace alpacacore::vendor::bisque

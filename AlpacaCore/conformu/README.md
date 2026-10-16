@@ -19,7 +19,7 @@ Test results are organized by vendor/driver:
 One folder per vendor, one subfolder per tested model. See [SUPPORTED-DRIVERS.md](../../SUPPORTED-DRIVERS.md) for the device type, connection, firmware, and ConformU version behind each report.
 
 - **Astroasis** - Oasis Focuser
-- **Celestron** - CGX-L telescope (NexStar hand controller)
+- **Celestron** - CGX-L telescope (NexStar hand controller); CGX telescope (direct USB AUX, northern firmware 7.17.25; site and latitude-derived Sync coordinates privacy-rounded with residuals preserved)
 - **Gemini** - Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3 (CoverCalibrator); Astro Focuser Pro (Focuser); Power & Data Hubs Advanced 3 (Switch)
 - **iOptron** - HEM27, HAE43, HAE29C, HAE16 telescopes; iCAM178M, iCAM462C, iCAM464C cameras; iEFW-15, iEFW-18 filter wheels; iEAF, iAFS2 focusers; iMate PowerBox switch
 - **OnStep** - Generic OnStep telescope

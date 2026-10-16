@@ -17,6 +17,7 @@
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/hardware_config_refusal.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
@@ -66,45 +67,6 @@
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_SYNSCAN
-#include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_ZWO
-#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
-#include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
-#include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
-#include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
-#include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
-#include <alpacacore/vendor/zwo/zwo_switch_driver.h>
-#include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
-#include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_QHY
-#include <alpacacore/vendor/qhy/qhy_camera_driver.h>
-#include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
-#include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
-#include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_GEMINI
-#include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
-#include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
-#include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_WANDERERASTRO
-#include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
-#include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
-#include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
-#include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-#include <alpacacore/vendor/touptek/touptek_camera_driver.h>
-#include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
-#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
-#include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
-#ifdef ALPACACORE_TOUPTEK_STELLAVITA
-#include <alpacacore/vendor/touptek/touptek_switch_driver.h>
-#endif
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 // The ioptron/camera (iCAM) arm only; the playerone pairs are catalog descriptors.
@@ -466,8 +428,6 @@ std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     return key;
 }
 
-bool is_zwo_camera_key(const PersistedKey& key) { return key.vendor == "zwo" && key.device_type == "camera"; }
-
 // Throw a parameter-validation failure with an explicit ASCOM error code, so
 // the ErrorNumber on the wire is deterministic rather than inferred from the
 // message text. A missing or unparseable parameter is InvalidValue (0x401).
@@ -572,7 +532,8 @@ bool parse_bool_value(const std::string& raw, const std::string& param_name) {
 // The verb masks below mirror the GET/PUT branches of each dispatch_*_method,
 // not AlpacaDeviceAPI_v1.yaml. They include this repo's extensions: PUT on
 // filter wheel names/focusoffsets and rotator targetposition (GET-only in the
-// spec), and switch cancelasync (no path in the spec). Narrowing a mask to
+// spec), and switch cancelasync (no path in the spec; kept only so it answers
+// NotImplemented instead of "Unknown method", #576). Narrowing a mask to
 // match the spec would turn a call that works today into a 400.
 enum : std::uint8_t {
     kVerbGet = 1,
@@ -738,15 +699,18 @@ const std::unordered_map<std::string, unsigned> kRotatorMethods = {
 };
 
 const std::unordered_map<std::string, unsigned> kDomeMethods = {
-    {"abortslew", kVerbPut},     {"altitude", kVerbGet},       {"athome", kVerbGet},
-    {"atpark", kVerbGet},        {"azimuth", kVerbGet},        {"canfindhome", kVerbGet},
-    {"canpark", kVerbGet},       {"cansetaltitude", kVerbGet}, {"cansetazimuth", kVerbGet},
-    {"cansetpark", kVerbGet},    {"cansetshutter", kVerbGet},  {"canslave", kVerbGet},
-    {"canslew", kVerbGet},       {"cansyncazimuth", kVerbGet}, {"closeshutter", kVerbPut},
-    {"findhome", kVerbPut},      {"openshutter", kVerbPut},    {"park", kVerbPut},
-    {"setpark", kVerbPut},       {"shutterstatus", kVerbGet},  {"slaved", kVerbGet | kVerbPut},
-    {"slewing", kVerbGet},       {"slewtoaltitude", kVerbPut}, {"slewtoazimuth", kVerbPut},
-    {"synctoazimuth", kVerbPut},
+    {"abortslew", kVerbPut},      {"altitude", kVerbGet},
+    {"athome", kVerbGet},         {"atpark", kVerbGet},
+    {"azimuth", kVerbGet},        {"canfindhome", kVerbGet},
+    {"canpark", kVerbGet},        {"cansetaltitude", kVerbGet},
+    {"cansetazimuth", kVerbGet},  {"cansetpark", kVerbGet},
+    {"cansetshutter", kVerbGet},  {"canslave", kVerbGet},
+    {"cansyncazimuth", kVerbGet}, {"closeshutter", kVerbPut},
+    {"findhome", kVerbPut},       {"openshutter", kVerbPut},
+    {"park", kVerbPut},           {"setpark", kVerbPut},
+    {"shutterstatus", kVerbGet},  {"slaved", kVerbGet | kVerbPut},
+    {"slewing", kVerbGet},        {"slewtoaltitude", kVerbPut},
+    {"slewtoazimuth", kVerbPut},  {"synctoazimuth", kVerbPut},
 };
 
 const std::unordered_map<std::string, unsigned> kSwitchMethods = {
@@ -784,7 +748,6 @@ const std::unordered_map<std::string, unsigned> kObservingConditionsMethods = {
     {"pressure", kVerbGet},
     {"rainrate", kVerbGet},
     {"refresh", kVerbPut},
-    {"seeing", kVerbGet},
     {"sensordescription", kVerbGet},
     {"skybrightness", kVerbGet},
     {"skyquality", kVerbGet},
@@ -803,8 +766,8 @@ const std::unordered_map<std::string, unsigned> kSafetyMonitorMethods = {
 
 bool is_known_device_type_name(const std::string& type_name) {
     static const std::unordered_set<std::string> kDeviceTypes = {
-        "camera", "telescope", "mount",           "filterwheel",         "focuser",       "rotator",
-        "dome",   "switch",    "covercalibrator", "observingconditions", "safetymonitor",
+        "camera", "telescope",       "filterwheel",         "focuser",       "rotator", "dome",
+        "switch", "covercalibrator", "observingconditions", "safetymonitor",
     };
     return kDeviceTypes.count(type_name) > 0;
 }
@@ -1174,7 +1137,7 @@ bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
 
 void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
     std::string message = context + ": " + alpacahttp::util::escape_for_log(e.what(), 4096);
-    if (is_expected_not_implemented(e) || is_expected_validation_error(e)) {
+    if (is_expected_not_implemented(e) || is_expected_validation_error(e) || e.is_asked_too_early()) {
         alpacahttp::util::log_debug(message);
     } else {
         alpacahttp::util::log_error(message);
@@ -1386,7 +1349,7 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 namespace alpacahttp {
 
 // open-astro#765: configuredevice answers 400 for a refusal that starts with this.
-constexpr const char* kHardwareConfigRefusal = "Hardware config refused: ";
+constexpr const char* kHardwareConfigRefusal = alpacacore::util::kHardwareConfigRefusal;
 
 namespace {
 // Issue #358: a driver that refuses a connect explains why, and the client
@@ -1883,6 +1846,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "configureddevices";
         return match;
     }
+    if (path == "/management/v1/faileddevices" || path == "/management/faileddevices") {
+        match.is_management = true;
+        match.management_endpoint = "faileddevices";
+        return match;
+    }
     if (path == "/management/v1/devicecatalog" || path == "/management/devicecatalog") {
         match.is_management = true;
         match.management_endpoint = "devicecatalog";
@@ -2009,6 +1977,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_build_info(request, server_tx_id);
     } else if (match.management_endpoint == "configureddevices") {
         return handle_configured_devices(request, server_tx_id);
+    } else if (match.management_endpoint == "faileddevices") {
+        return handle_failed_devices(request, server_tx_id);
     } else if (match.management_endpoint == "devicecatalog") {
         return handle_device_catalog(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
@@ -2542,6 +2512,48 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             devices.push_back(device);
         }
 
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = devices;
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error getting configured devices: " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
+Response Router::handle_failed_devices(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for faileddevices endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
+    }
+
+    try {
+        load_persisted_devices();
+
+        std::vector<nlohmann::json> persisted_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            persisted_snapshot = persisted_devices_;
+        }
+        auto capabilities = alpacacore::management::DeviceRegistry::instance().get_all_device_capabilities();
+
+        nlohmann::json devices = nlohmann::json::array();
         for (const auto& entry : persisted_snapshot) {
             const auto pkey = persisted_key(entry);
             std::string ptype = pkey ? pkey->device_type : "";
@@ -2576,12 +2588,9 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         alpaca_response.value = devices;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting configured devices: " + std::string(e.what()));
+        util::log_error("Error getting failed devices: " + std::string(e.what()));
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
-            util::exception_to_error_message(e)
-        );
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
         response.set_body(alpaca_response);
     }
 
@@ -2757,7 +2766,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
 
 alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str) const {
     if (type_str == "camera") return alpacacore::DeviceType::Camera;
-    if (type_str == "telescope" || type_str == "mount") return alpacacore::DeviceType::Telescope;
+    if (type_str == "telescope") return alpacacore::DeviceType::Telescope;
     if (type_str == "filterwheel") return alpacacore::DeviceType::FilterWheel;
     if (type_str == "focuser") return alpacacore::DeviceType::Focuser;
     if (type_str == "rotator") return alpacacore::DeviceType::Rotator;
@@ -5211,16 +5220,12 @@ Response Router::dispatch_switch_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "cancelasync") {
-                int id = parse_int("Id");
-                if (!sw->get_can_async(id)) {
-                    throw alpacacore::AlpacaException(
-                        "Async switch control not supported",
-                        alpacacore::AlpacaError::NotImplemented
-                    );
-                }
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                // The switch driver has no cancel member, so succeeding here
+                // would report a cancel that never happened (#576). The Id is
+                // still validated first: an out-of-range one is InvalidValue.
+                (void)sw->get_can_async(parse_int("Id"));
+                throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
+                                                  alpacacore::AlpacaError::NotImplemented);
             } else if (method_name == "canasync") {
                 int id = parse_int("Id");
                 AlpacaResponse alpaca_response = make_success_response(
@@ -5293,16 +5298,12 @@ Response Router::dispatch_switch_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "cancelasync") {
-                int id = parse_int("Id");
-                if (!sw->get_can_async(id)) {
-                    throw alpacacore::AlpacaException(
-                        "Async switch control not supported",
-                        alpacacore::AlpacaError::NotImplemented
-                    );
-                }
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                // The switch driver has no cancel member, so succeeding here
+                // would report a cancel that never happened (#576). The Id is
+                // still validated first: an out-of-range one is InvalidValue.
+                (void)sw->get_can_async(parse_int("Id"));
+                throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
+                                                  alpacacore::AlpacaError::NotImplemented);
             } else if (method_name == "setasync") {
                 int id = parse_int("Id");
                 bool state = parse_bool("State");
@@ -6022,11 +6023,6 @@ Response Router::dispatch_dome_method(
                     client_tx_id, server_tx_id, dome->get_can_set_shutter());
                 response.set_body(alpaca_response);
                 return response;
-            } else if (method_name == "canslew") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_slew());
-                response.set_body(alpaca_response);
-                return response;
             } else if (method_name == "cansyncazimuth") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, dome->get_can_sync_azimuth());
@@ -6410,11 +6406,6 @@ Response Router::dispatch_observingconditions_method(
             } else if (method_name == "skytemperature") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, observingconditions->get_sky_temperature());
-                response.set_body(alpaca_response);
-                return response;
-            } else if (method_name == "seeing") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_seeing());
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "starfwhm") {
@@ -6916,12 +6907,12 @@ std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
     return std::nullopt;
 }
 
-// #860 for a catalog descriptor with an `alignmentMode` field (Celestron): the
+// #860 for a catalog descriptor with an `alignmentMode` field (Celestron,
+// SynScan): the
 // config without the key when its value is not one of the three known strings,
 // so a wrong-typed or unknown value drops like the deleted arm's did instead
 // of failing the typed read. Other configs come back unchanged. Keyed on the
-// field name, not the vendor, so SynScan picks it up when it moves to the
-// catalog: do not add a second copy.
+// field name, not the vendor: do not add a second copy.
 nlohmann::json without_unknown_alignment_mode(const nlohmann::json& config,
                                               std::span<const alpacacore::catalog::FieldRef> fields) {
     const bool declared = std::any_of(fields.begin(), fields.end(), [](const alpacacore::catalog::FieldRef& f) {
@@ -6933,6 +6924,61 @@ nlohmann::json without_unknown_alignment_mode(const nlohmann::json& config,
     nlohmann::json out = config;
     out.erase("alignmentMode");
     return out;
+}
+
+// A RecordList field (ports[]) is applied positionally, and the deleted ToupTek
+// arm skipped an entry that is not an object ("ports":[null]) instead of refusing
+// it. The typed read refuses a non-object entry, so each one becomes an empty
+// object here: it keeps its position and overrides nothing. Other configs come
+// back unchanged.
+nlohmann::json with_object_record_entries(const nlohmann::json& config,
+                                          std::span<const alpacacore::catalog::FieldRef> fields) {
+    if (!config.is_object()) return config;
+    nlohmann::json out = config;
+    for (const auto& f : fields) {
+        if (f.kind != alpacacore::catalog::FieldRef::Kind::RecordList) continue;
+        const auto it = out.find(f.key);
+        if (it == out.end() || !it->is_array()) continue;
+        for (auto& elem : *it) {
+            if (!elem.is_object()) elem = nlohmann::json::object();
+        }
+    }
+    return out;
+}
+
+// Whether config_from_json can read `value` as the integer an Int selector holds: a
+// JSON integer, or a float with no fractional part, inside the int64 range.
+bool is_readable_integer(const nlohmann::json& value) {
+    if (value.is_number_unsigned()) {
+        return value.get<std::uint64_t>() <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    }
+    if (value.is_number_integer()) return true;
+    if (!value.is_number_float()) return false;
+    const double d = value.get<double>();
+    constexpr double kTwo63 = 9223372036854775808.0;
+    return std::isfinite(d) && d == std::trunc(d) && d >= -kTwo63 && d < kTwo63;
+}
+
+// A stored selector (an enumeration index or device id) that is not an integer
+// config_from_json can read -- "1", true, 1.5 -- is removed from `config` and its
+// key returned, so the entry still registers and stays listed with the selector
+// unset, as it did before the selectors were catalog fields. Used only for a
+// schema with forget_dropped_selectors, whose callers also forget the key in the
+// stored entry.
+std::vector<std::string> drop_unreadable_selectors(nlohmann::json& config,
+                                                   std::span<const alpacacore::catalog::FieldRef> fields) {
+    std::vector<std::string> dropped;
+    if (!config.is_object()) return dropped;
+    for (const auto& f : fields) {
+        if (f.role != alpacacore::catalog::Role::EnumerationIndex && f.role != alpacacore::catalog::Role::DeviceId) {
+            continue;
+        }
+        const auto it = config.find(f.key);
+        if (it == config.end() || it->is_null() || is_readable_integer(*it)) continue;
+        config.erase(it);
+        dropped.emplace_back(f.key);
+    }
+    return dropped;
 }
 
 // Reads siteLatitude/siteLongitude out of a device config and range-checks
@@ -8211,8 +8257,7 @@ std::string persisted_device_subject(const std::string& vendor, const std::strin
 // accepted values are the board's own; anything else is refused before the
 // device is built or saved (configuredevice answers 400 for this prefix).
 bool refuse_hardware_config(std::string& error_message, const std::string& field, const std::string& allowed) {
-    error_message = std::string(kHardwareConfigRefusal) + "'" + field + "' must be " + allowed +
-                    " for this board; the server does not open other chip nodes or GPIO lines";
+    error_message = alpacacore::util::hardware_config_refusal(field, allowed);
     return false;
 }
 
@@ -8248,6 +8293,18 @@ std::string vendor_label(const alpacacore::catalog::DescriptorView& view) {
     const auto space = name.find(' ');
     return space == std::string::npos ? name : name.substr(0, space);
 }
+
+// #508 item 2: connectionType is compared in lower case everywhere, so the
+// config is folded once on the way into registration and into the stored entry
+// (catalog::fold_connection_type_value). An unknown value stays unknown.
+nlohmann::json with_folded_connection_type(const nlohmann::json& config) {
+    if (!config.is_object()) return config;
+    auto it = config.find("connectionType");
+    if (it == config.end() || !it->is_string()) return config;
+    nlohmann::json folded = config;
+    folded["connectionType"] = alpacacore::catalog::fold_connection_type_value(it->get<std::string>());
+    return folded;
+}
 }  // namespace
 
 bool Router::reject_invalid_config(ConfigSource source, const char* reason, const std::string& vendor,
@@ -8282,8 +8339,9 @@ std::string Router::normalize_persisted_connection_type(ConfigSource source, con
     return "serial";
 }
 
-bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message, ConfigSource source,
-                                         nlohmann::json* learned_config) {
+bool Router::register_device_from_config(const nlohmann::json& raw_config, std::string& error_message,
+                                         ConfigSource source, nlohmann::json* learned_config) {
+    const nlohmann::json config = with_folded_connection_type(raw_config);
     std::string device_type_str = config_get(config, "deviceType", "");
     std::string vendor = config_get(config, "vendor", "");
     int device_number = config_get(config, "deviceNumber", -1);
@@ -8313,8 +8371,16 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
         if (auto view = find_descriptor(catalog_, key)) {
-            const alpacacore::catalog::DeviceConfig typed =
-                catalog_json::config_from_json(without_unknown_alignment_mode(config, view->fields), view->fields);
+            nlohmann::json prepared =
+                with_object_record_entries(without_unknown_alignment_mode(config, view->fields), view->fields);
+            if (view->forget_dropped_selectors && source == ConfigSource::Persisted) {
+                for (const std::string& dropped : drop_unreadable_selectors(prepared, view->fields)) {
+                    util::log_warning(persisted_device_subject(vendor, device_type_str, device_number) +
+                                      " has invalid '" + dropped + "' (expected an integer); dropping it");
+                    if (learned_config != nullptr) (*learned_config)[dropped] = nullptr;
+                }
+            }
+            const alpacacore::catalog::DeviceConfig typed = catalog_json::config_from_json(prepared, view->fields);
             const auto result =
                 catalog_.normalize(key, typed,
                                    source == ConfigSource::Api ? alpacacore::catalog::Source::Api
@@ -8336,14 +8402,86 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                                       "stays unset if it has none. Registered so it stays listed and editable in "
                                       "the web UI.");
                 }
+                if (view->forget_dropped_selectors && learned_config != nullptr) {
+                    const auto normalized = catalog_json::json_from_config(result.config);
+                    for (const auto& field : view->fields) {
+                        if (field.role != alpacacore::catalog::Role::EnumerationIndex &&
+                            field.role != alpacacore::catalog::Role::DeviceId) {
+                            continue;
+                        }
+                        const auto original = config.find(field.key);
+                        if (original != config.end() && !original->is_null() &&
+                            normalized.find(field.key) == normalized.end()) {
+                            (*learned_config)[field.key] = nullptr;
+                        }
+                    }
+                }
             }
             if (!view->available) {
                 error_message = vendor_label(*view) + " support not enabled. Rebuild with -D" +
                                 std::string(view->build_option) + "=ON";
                 return false;
             }
-            auto driver = catalog_.create(key, result.config, device_number);
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(driver)))) {
+            // A factory with a bind hook sees the other stored entries of its key
+            // (copied under the mutex, which is released before the hook runs: it may
+            // enumerate the SDK) and may hand learned config back. Any other factory
+            // gets no peers and learns nothing.
+            std::vector<alpacacore::catalog::PeerEntry> peers;
+            if (catalog_.has_bind(key)) {
+                const std::string wanted_type = to_lower_copy(device_type_str);
+                std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+                for (const auto& other : persisted_devices_) {
+                    const auto other_key = persisted_key(other);
+                    if (!other_key || other_key->vendor != vendor || other_key->device_type != wanted_type) {
+                        continue;
+                    }
+                    const std::string subject =
+                        persisted_device_subject(vendor, device_type_str, other_key->device_number);
+                    try {
+                        nlohmann::json neighbour = with_object_record_entries(other, view->fields);
+                        if (view->forget_dropped_selectors) drop_unreadable_selectors(neighbour, view->fields);
+                        // A hand-edited neighbour with a wrong-typed field stays a peer without
+                        // that field, so its other identity fields (a uniqueId) are still claimed.
+                        for (const auto& f : view->fields) {
+                            const auto it = neighbour.find(f.key);
+                            if (it == neighbour.end()) continue;
+                            nlohmann::json single = nlohmann::json::object();
+                            single[f.key] = *it;
+                            try {
+                                (void)catalog_json::config_from_json(single, view->fields);
+                            } catch (const std::exception& ex) {
+                                util::log_debug("register_device_from_config: ignoring field " + std::string(f.key) +
+                                                " of a stored " + subject + " as a peer (" +
+                                                util::escape_for_log(ex.what()) + ")");
+                                neighbour.erase(f.key);
+                            }
+                        }
+                        peers.push_back(
+                            {other_key->device_number, catalog_json::config_from_json(neighbour, view->fields)});
+                    } catch (const std::exception& ex) {
+                        util::log_debug("register_device_from_config: ignoring a stored " + subject + " as a peer (" +
+                                        util::escape_for_log(ex.what()) + ")");
+                    }
+                }
+            }
+            auto bound = catalog_.bind(key, result.config, device_number,
+                                       {source == ConfigSource::Api ? alpacacore::catalog::Source::Api
+                                                                    : alpacacore::catalog::Source::Persisted,
+                                        peers});
+            if (bound.rejection) {
+                error_message = *bound.rejection;
+                return false;
+            }
+            if (learned_config != nullptr) {
+                const nlohmann::json learned = catalog_json::json_from_config(bound.learned);
+                for (const auto& [field, value] : learned.items()) {
+                    (*learned_config)[field] = value;
+                }
+                for (const auto& field : bound.erased) {
+                    (*learned_config)[field] = nullptr;
+                }
+            }
+            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(bound.driver)))) {
                 util::log_info("Registered " + vendor_label(*view) + " " + device_type_str);
                 return true;
             }
@@ -8618,1270 +8756,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "synscan" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_SYNSCAN
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // Issue #380: an unrecognised connectionType on a persisted config is
-        // normalised to "serial" rather than dropping the device, so it stays
-        // listed and editable in the web UI and its connect fails on the port
-        // path instead of auto-probing and attaching to whatever answers. The
-        // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
-                                                        device_type_str, device_number);
-
-        std::string version_value = config_get(config, "synscanVersion", "auto");
-        std::string version_normalized = to_lower_copy(version_value);
-        alpacacore::vendor::synscan::SynScanVersion version = alpacacore::vendor::synscan::SynScanVersion::Auto;
-        if (version_normalized == "v3" || version_normalized == "3") {
-            version = alpacacore::vendor::synscan::SynScanVersion::V3;
-        } else if (version_normalized == "v4" || version_normalized == "4") {
-            version = alpacacore::vendor::synscan::SynScanVersion::V4;
-        }
-        const std::string alignment_mode = known_alignment_mode(config).value_or("auto");
-        alpacacore::vendor::synscan::SynScanAlignmentSetting alignment =
-            alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto;
-        if (alignment_mode == "altaz") {
-            alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::AltAz;
-        } else if (alignment_mode == "equatorial") {
-            alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::Equatorial;
-        }
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-        std::optional<bool> sync_time_on_connect;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-        if (config_has(config, "syncTimeOnConnect")) {
-            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
-        }
-
-        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
-
-        if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config_get(config, "mountIndex", 0);
-            telescope = alpacacore::vendor::synscan::create_synscan_telescope_auto(
-                device_number, mount_index, version, site_latitude, site_longitude, site_elevation,
-                sync_time_on_connect, alignment);
-        } else {
-            alpacacore::vendor::synscan::ConnectionInfo conn_info;
-
-            if (conn_type == "serial") {
-                conn_info.type = alpacacore::vendor::synscan::ConnectionType::Serial;
-                conn_info.port_path = config_get(config, "portPath", "");
-                conn_info.baud_rate = config_get(config, "baudRate", 9600);
-
-                if (conn_info.port_path.empty() &&
-                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
-                                          device_number, error_message)) {
-                    return false;
-                }
-            } else if (conn_type == "network") {
-                conn_info.type = alpacacore::vendor::synscan::ConnectionType::Network;
-                conn_info.host = config_get(config, "host", "");
-                conn_info.tcp_port = config_get(config, "tcpPort", conn_info.tcp_port);
-
-                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
-                                                                    device_type_str, device_number, error_message)) {
-                    return false;
-                }
-            } else {
-                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
-                return false;
-            }
-
-            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-            telescope = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
-                device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
-                alignment);
-        }
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-        if (site_elevation.has_value()) {
-            telescope->set_site_elevation(site_elevation.value());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered SynScan telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "SynScan support not enabled. Rebuild with -DALPACACORE_ENABLE_SYNSCAN=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "zwo" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_ZWO
-        const int camera_id = config_get(config, "cameraId", -1);
-        const int camera_index = config_get(config, "cameraIndex", -1);
-        std::string configured_serial = config_get(config, "serialNumber", "");
-        std::string configured_name = config_get(config, "cameraName", "");
-        std::string unique_id = config_get(config, "uniqueId", "");
-
-        // The three identity strings reach log lines and the file, so a client
-        // cannot put control bytes (a forged log line) or a non-hex serial in
-        // them. The API refuses; a stored entry loses the bad key and relearns.
-        const auto has_control_bytes = [](const std::string& text) {
-            return std::any_of(text.begin(), text.end(), [](char ch) {
-                const auto byte = static_cast<unsigned char>(ch);
-                return byte < 0x20 || byte == 0x7f;
-            });
-        };
-        const auto is_hex_serial = [](const std::string& text) {
-            return text.size() <= 64 && std::all_of(text.begin(), text.end(), [](char ch) {
-                       return std::isxdigit(static_cast<unsigned char>(ch)) != 0;
-                   });
-        };
-        const auto check_identity_field = [&](const char* field, std::string& value, bool valid) {
-            if (valid) {
-                return true;
-            }
-            if (source == ConfigSource::Api) {
-                error_message = std::string("Invalid value for ") + field;
-                return false;
-            }
-            util::log_warning(std::string("Ignoring invalid ZWO camera ") + field + " in the stored entry");
-            value.clear();
-            return true;
-        };
-        if (!check_identity_field("serialNumber", configured_serial, is_hex_serial(configured_serial)) ||
-            !check_identity_field("cameraName", configured_name, !has_control_bytes(configured_name)) ||
-            !check_identity_field("uniqueId", unique_id, !has_control_bytes(unique_id))) {
-            return false;
-        }
-        const std::string supplied_unique_id = unique_id;
-        const bool unique_id_supplied = !unique_id.empty();
-
-        if (camera_id < 0 && camera_index < 0 && configured_serial.empty() && configured_name.empty()) {
-            error_message = "ZWO camera requires cameraIndex or cameraId";
-            return false;
-        }
-
-        // Camera identity (#914): the serial, not the enumeration order, says
-        // which physical camera this entry is. The serials other entries bind
-        // are read from the persisted list; a re-configure that does not
-        // resend uniqueId keeps the one already stored for this number.
-        alpacacore::vendor::zwo::ZwoCameraBinding binding;
-        if (camera_id >= 0) {
-            binding.identity.camera_id = camera_id;
-        }
-        if (camera_index >= 0) {
-            binding.identity.camera_index = camera_index;
-        }
-        binding.identity.serial = configured_serial;
-        binding.identity.camera_name = configured_name;
-        bool duplicate_serial = false;
-        bool duplicate_unique_id = false;
-        bool cleared_duplicate_serial = false;
-        {
-            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-            for (const auto& other : persisted_devices_) {
-                const auto key = persisted_key(other);
-                if (!key || !is_zwo_camera_key(*key)) {
-                    continue;
-                }
-                const auto serial_it = other.find("serialNumber");
-                const bool has_serial = serial_it != other.end() && serial_it->is_string();
-                if (key->device_number == device_number) {
-                    const auto uid_it = other.find("uniqueId");
-                    if (unique_id.empty() && uid_it != other.end() && uid_it->is_string() &&
-                        !has_control_bytes(uid_it->get<std::string>())) {
-                        unique_id = uid_it->get<std::string>();
-                    }
-                } else {
-                    if (has_serial && !serial_it->get<std::string>().empty()) {
-                        binding.claimed_serials.insert(serial_it->get<std::string>());
-                        duplicate_serial = duplicate_serial || serial_it->get<std::string>() == configured_serial;
-                    }
-                    const auto other_uid = other.find("uniqueId");
-                    if (unique_id_supplied && other_uid != other.end() && other_uid->is_string() &&
-                        other_uid->get<std::string>() == unique_id) {
-                        duplicate_unique_id = true;
-                    }
-                }
-            }
-        }
-
-        // One serial or UniqueID names one camera: another entry holding it
-        // would bind the same body twice (or report one UniqueID twice).
-        if (configured_serial.empty()) {
-            duplicate_serial = false;
-        }
-        if (duplicate_serial || duplicate_unique_id) {
-            const char* field = duplicate_serial ? "serialNumber" : "uniqueId";
-            if (source == ConfigSource::Api) {
-                error_message = std::string("Invalid value for ") + field + ": another ZWO camera already uses it";
-                return false;
-            }
-            util::log_warning(std::string("Ignoring duplicate ZWO camera ") + field + " in the stored entry");
-            // Each duplicated field is cleared and relearned on its own.
-            if (duplicate_serial) {
-                configured_serial.clear();
-                binding.identity.serial.clear();
-                cleared_duplicate_serial = true;
-            }
-            if (duplicate_unique_id) {
-                unique_id.clear();
-            }
-        }
-
-        // A camera that is not plugged in yet still registers with the
-        // identity it was configured with; connect reports why it is absent.
-        // Known limit: an entry with only an index/id hint learns whatever
-        // serial sits at that hint. With two saved cameras and only one
-        // plugged in, the first entry can learn the other body's serial.
-        std::string learned_serial = configured_serial;
-        std::string learned_name = configured_name;
-        try {
-            const auto resolved = alpacacore::vendor::zwo::resolve_zwo_camera(
-                binding.identity,
-                alpacacore::vendor::zwo::enumerate_zwo_cameras(alpacacore::vendor::zwo::trim_zwo_name(configured_name)),
-                binding.claimed_serials);
-            if (resolved.camera.has_value()) {
-                const auto& found = resolved.camera.value();
-                binding.identity.camera_id = found.camera_id;
-                binding.identity.camera_index = found.index;
-                if (learned_serial.empty()) {
-                    learned_serial = found.serial;
-                }
-                if (learned_name.empty()) {
-                    learned_name = alpacacore::vendor::zwo::trim_zwo_name(found.name);
-                }
-            }
-        } catch (const std::exception& e) {
-            util::log_warning(std::string("ZWO camera enumeration failed: ") + e.what());
-        }
-        binding.identity.serial = learned_serial;
-        binding.identity.camera_name = learned_name;
-        if (learned_serial.empty() && unique_id.empty()) {
-            unique_id = alpacacore::vendor::zwo::generate_zwo_unique_id();
-        }
-        binding.unique_id = unique_id;
-
-        if (learned_config != nullptr) {
-            if (configured_serial.empty() && !learned_serial.empty()) {
-                (*learned_config)["serialNumber"] = learned_serial;
-            } else if (cleared_duplicate_serial) {
-                // Persist the clear for this entry, so the entry processed
-                // after it no longer sees a duplicate and keeps the serial.
-                (*learned_config)["serialNumber"] = std::string();
-            }
-            if (configured_name.empty() && !learned_name.empty()) {
-                (*learned_config)["cameraName"] = learned_name;
-            }
-            if (!unique_id.empty() && unique_id != supplied_unique_id) {
-                (*learned_config)["uniqueId"] = unique_id;
-            }
-        }
-
-        std::unique_ptr<alpacacore::CameraDriver> camera =
-            alpacacore::vendor::zwo::create_zwo_camera_bound(device_number, binding);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered ZWO camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "zwo" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_ZWO
-        alpacacore::vendor::zwo::ConnectionInfo conn_info;
-        std::string conn_type = config_get(config, "connectionType", "");
-        // Issue #380: an unrecognised connectionType on a persisted config is
-        // normalised to "serial" rather than dropping the device, so it stays
-        // listed and editable in the web UI and its connect fails on the port
-        // path instead of auto-probing and attaching to whatever answers. The
-        // else below still rejects the value when it came from the API.
-        //
-        // NOTE the valid list here, unlike the other five: this branch tests a
-        // bare `conn_type == "auto"` below, not `|| conn_type.empty()`, so an
-        // entry with no connectionType key at all falls to the else. Empty is
-        // therefore NOT valid here and normalises to serial like any other
-        // unrecognised value -- which is what keeps such an entry listed
-        // instead of vanishing from the web UI.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"auto", "serial", "network"}, vendor,
-                                                        device_type_str, device_number);
-
-        if (conn_type == "auto") {
-            // Auto-detect the transport at connect time: probe USB serial ports
-            // and the mount's WiFi access point, connect to whatever ZWO mount
-            // answers. No port/host required.
-            conn_info.type = alpacacore::vendor::zwo::ConnectionType::Auto;
-        } else if (conn_type == "serial") {
-            conn_info.type = alpacacore::vendor::zwo::ConnectionType::Serial;
-            conn_info.port_path = config_get(config, "portPath", "");
-            conn_info.baud_rate = config_get(config, "baudRate", 9600);
-
-            if (conn_info.port_path.empty() && reject_invalid_config(source, "Serial port path is required", vendor,
-                                                                     device_type_str, device_number, error_message)) {
-                return false;
-            }
-        } else if (conn_type == "network") {
-            conn_info.type = alpacacore::vendor::zwo::ConnectionType::Network;
-            conn_info.host = config_get(config, "host", "");
-            conn_info.tcp_port = config_get(config, "tcpPort", 4030);
-
-            if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
-                                                                device_type_str, device_number, error_message)) {
-                return false;
-            }
-        } else {
-            error_message = "Invalid connection type. Use 'serial', 'network', or 'auto'";
-            return false;
-        }
-
-        conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-        std::optional<bool> sync_time_on_connect;
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-        if (config_has(config, "syncTimeOnConnect")) {
-            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
-        }
-        auto telescope = alpacacore::vendor::zwo::create_zwo_telescope_with_site(
-            device_number,
-            conn_info,
-            site_latitude,
-            site_longitude,
-            site_elevation,
-            sync_time_on_connect);
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-        if (site_elevation.has_value()) {
-            telescope->set_site_elevation(site_elevation.value());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered ZWO telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "zwo" && device_type_str == "filterwheel") {
-#ifdef ALPACACORE_ENABLE_ZWO
-        int wheel_id = config_get(config, "filterwheelId", -1);
-        int wheel_index = config_get(config, "filterwheelIndex", -1);
-
-        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
-        if (wheel_id >= 0) {
-            wheel = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(device_number, wheel_id);
-        } else if (wheel_index >= 0) {
-            wheel = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(device_number, wheel_index);
-        } else {
-            error_message = "ZWO filter wheel requires filterwheelIndex or filterwheelId";
-            return false;
-        }
-
-        if (config_has(config, "filterNames")) {
-            const auto& names_value = config.at("filterNames");
-            if (!names_value.is_array()) {
-                error_message = "ZWO filter wheel filterNames must be an array";
-                return false;
-            }
-            for (const auto& name : names_value) {
-                if (!name.is_string()) {
-                    error_message = "ZWO filter wheel filterNames must be an array of strings";
-                    return false;
-                }
-            }
-            wheel->set_names(names_value.get<std::vector<std::string>>());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
-            util::log_info("Registered ZWO EFW filter wheel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "zwo" && device_type_str == "focuser") {
-#ifdef ALPACACORE_ENABLE_ZWO
-        int focuser_id = config_get(config, "focuserId", -1);
-        int focuser_index = config_get(config, "focuserIndex", -1);
-
-        std::unique_ptr<alpacacore::FocuserDriver> focuser;
-        if (focuser_id >= 0) {
-            focuser = alpacacore::vendor::zwo::create_zwo_eaf_focuser(device_number, focuser_id);
-        } else if (focuser_index >= 0) {
-            focuser = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(device_number, focuser_index);
-        } else {
-            error_message = "ZWO EAF focuser requires focuserIndex or focuserId";
-            return false;
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
-            util::log_info("Registered ZWO EAF focuser");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "zwo" && device_type_str == "rotator") {
-#ifdef ALPACACORE_ENABLE_ZWO
-        int rotator_id = config_get(config, "rotatorId", -1);
-        int rotator_index = config_get(config, "rotatorIndex", -1);
-
-        std::unique_ptr<alpacacore::RotatorDriver> rotator;
-        if (rotator_id >= 0) {
-            rotator = alpacacore::vendor::zwo::create_zwo_caa_rotator(device_number, rotator_id);
-        } else if (rotator_index >= 0) {
-            rotator = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(device_number, rotator_index);
-        } else {
-            error_message = "ZWO rotator requires rotatorIndex or rotatorId";
-            return false;
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(rotator)))) {
-            util::log_info("Registered ZWO CAA rotator");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "zwo" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_ZWO
-        std::string switch_type = config_get(config, "switchType", "dewheater");
-        switch_type = to_lower_copy(switch_type);
-        if (switch_type != "dewheater" && switch_type != "asiair" &&
-            switch_type != "asiair-plus-picm4" &&
-            switch_type != "asiair-plus-rk3568") {
-            error_message =
-                "ZWO switchType must be 'dewheater', 'asiair', "
-                "'asiair-plus-picm4', or 'asiair-plus-rk3568'";
-            return false;
-        }
-
-        std::unique_ptr<alpacacore::SwitchDriver> sw;
-
-        if (switch_type == "asiair-plus-rk3568") {
-            auto plus_config = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
-            plus_config.device_path = config_get(config, "devicePath", plus_config.device_path);
-            if (plus_config.device_path != "/dev/pwm-gpio-misc") {
-                return refuse_hardware_config(error_message, "devicePath", "'/dev/pwm-gpio-misc'");
-            }
-            plus_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", plus_config.pwm_frequency_hz);
-            if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
-                std::vector<alpacacore::vendor::zwo::AsiairPlusPortConfig> ports;
-                ports.reserve(config["ports"].size());
-                for (const auto& p : config["ports"]) {
-                    // Skip non-object entries (e.g. "ports":[null]) — value()
-                    // throws nlohmann type_error on a non-object (would 500).
-                    if (!p.is_object()) {
-                        continue;
-                    }
-                    alpacacore::vendor::zwo::AsiairPlusPortConfig pc;
-                    pc.name = p.value("name",
-                                      std::string("Port ") + std::to_string(ports.size() + 1));
-                    pc.pwm_enabled = p.value("pwm", false);
-                    ports.push_back(std::move(pc));
-                }
-                plus_config.ports = std::move(ports);
-            }
-            sw = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(device_number,
-                                                                       plus_config);
-
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-                util::log_info("Registered ZWO ASIAIR Plus (RK3568) switch");
-                return true;
-            }
-
-            error_message = "Failed to register device. Device may already exist.";
-            return false;
-        }
-
-        // ASIAIR Pro (Pi 4) and ASIAIR Plus (Pi CM4) share the same on-board
-        // libgpiod wiring (GPIO 12/13/26/18 on /dev/gpiochip0, BCM2711),
-        // verified against live CM4 hardware. Both route to the same driver
-        // and default config; only the log label differs.
-        if (switch_type == "asiair" || switch_type == "asiair-plus-picm4") {
-            auto asiair_config = alpacacore::vendor::zwo::default_asiair_pro_config();
-            // Same on-board GPIO wiring, two marketing models — label the
-            // device so the CM4 Plus doesn't identify itself as a Pro.
-            if (switch_type == "asiair-plus-picm4") {
-                asiair_config.model_name = "ASIAIR Plus (Pi CM4)";
-            }
-            asiair_config.gpio_chip_path = config_get(config, "gpioChip", asiair_config.gpio_chip_path);
-            if (!gpio_chip_is_board_chip(asiair_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
-                return false;
-            }
-            asiair_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", asiair_config.pwm_frequency_hz);
-            if (config_has(config, "ports") && config["ports"].is_array() && !config["ports"].empty()) {
-                std::vector<alpacacore::vendor::zwo::AsiairPortConfig> ports;
-                ports.reserve(config["ports"].size());
-                std::set<int> seen_gpio_lines;
-                for (const auto& p : config["ports"]) {
-                    // A non-object entry (e.g. "ports":[null]) would make the
-                    // contains()/[] accessors below throw nlohmann type_error.
-                    if (!p.is_object()) {
-                        error_message = "ASIAIR port entry must be a JSON object";
-                        return false;
-                    }
-                    if (!p.contains("gpio") || !p["gpio"].is_number_integer()) {
-                        error_message = "ASIAIR port entry requires integer 'gpio'";
-                        return false;
-                    }
-                    const int gpio_value = p["gpio"].get<int>();
-                    if (gpio_value != 12 && gpio_value != 13 && gpio_value != 26 && gpio_value != 18) {
-                        return refuse_hardware_config(error_message, "ports[].gpio", "one of 12, 13, 26, 18");
-                    }
-                    if (!seen_gpio_lines.insert(gpio_value).second) {
-                        return refuse_hardware_config(error_message, "ports[].gpio",
-                                                      "each of 12, 13, 26, 18 at most once");
-                    }
-                    alpacacore::vendor::zwo::AsiairPortConfig pc;
-                    pc.name = p.value("name", std::string("Port ") + std::to_string(ports.size() + 1));
-                    pc.gpio_line = static_cast<std::uint32_t>(gpio_value);
-                    pc.pwm_enabled = p.value("pwm", false);
-                    ports.push_back(std::move(pc));
-                }
-                asiair_config.ports = std::move(ports);
-            }
-            sw = alpacacore::vendor::zwo::create_zwo_asiair_switch(device_number, asiair_config);
-
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-                util::log_info(switch_type == "asiair-plus-picm4"
-                                   ? "Registered ZWO ASIAIR Plus (Pi CM4) switch"
-                                   : "Registered ZWO ASIAIR Pro switch");
-                return true;
-            }
-
-            error_message = "Failed to register device. Device may already exist.";
-            return false;
-        }
-
-        int camera_id = config_get(config, "cameraId", -1);
-        int camera_index = config_get(config, "cameraIndex", -1);
-
-        if (camera_id >= 0) {
-            sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(device_number, camera_id);
-        } else if (camera_index >= 0) {
-            sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(device_number, camera_index);
-        } else {
-            error_message = "ZWO dew heater switch requires cameraIndex or cameraId";
-            return false;
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-            util::log_info("Registered ZWO dew heater switch");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "qhy" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_QHY
-        std::string camera_id = config_get(config, "cameraId", "");
-        int camera_index = config_get(config, "cameraIndex", -1);
-
-        std::unique_ptr<alpacacore::CameraDriver> camera;
-        if (!camera_id.empty()) {
-            camera = alpacacore::vendor::qhy::create_qhy_camera(device_number, camera_id);
-        } else if (camera_index >= 0) {
-            camera = alpacacore::vendor::qhy::create_qhy_camera_by_index(device_number, camera_index);
-        } else {
-            error_message = "QHY camera requires cameraIndex or cameraId";
-            return false;
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered QHY camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "qhy" && device_type_str == "filterwheel") {
-#ifdef ALPACACORE_ENABLE_QHY
-        // Integrated CFW (e.g. miniCam8M): controlled through the SAME
-        // physical handle as its paired camera (QHYSDKWrapper ref-counts the
-        // shared open), so it is addressed by the same cameraId/cameraIndex
-        // as the camera device rather than a separate wheel enumeration.
-        // wheelType selects the backend: "integrated" (default, and what
-        // every config saved before the CFW3 USB driver existed means) or
-        // "cfw3-usb", a standalone QHYCFW3 on its own CP2102 serial port
-        // with the mode switch in USB mode. The two share filterNames and
-        // the slot UI; nothing else.
-        const std::string wheel_type = config_get(config, "wheelType", "integrated");
-        if (wheel_type != "integrated" && wheel_type != "cfw3-usb") {
-            error_message = "QHY filter wheel wheelType must be \"integrated\" or \"cfw3-usb\"";
-            return false;
-        }
-
-        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
-        if (wheel_type == "cfw3-usb") {
-            const std::string conn_type = config_get(config, "connectionType", "auto");
-            if (conn_type != "auto" && conn_type != "serial") {
-                error_message = "QHY CFW3 connectionType must be \"auto\" or \"serial\"";
-                return false;
-            }
-            const std::string port_path = conn_type == "serial" ? config_get(config, "portPath", "") : std::string();
-            if (conn_type == "serial" && port_path.empty()) {
-                // Do not fall through to the probe: it opens (and DTR-resets)
-                // every CP210x on the box, which is not what "serial port" asked for.
-                error_message = "QHY CFW3 connectionType \"serial\" requires portPath";
-                return false;
-            }
-            if (!port_path.empty()) {
-                wheel = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(device_number, port_path);
-            } else {
-                // "auto": the CP210x probe (each probe resets the device
-                // behind it) runs inside the wheel's connect, not here (#659).
-                const int wheel_index = config_get(config, "filterwheelIndex", 0);
-                if (wheel_index < 0) {
-                    error_message = "QHY CFW3 filterwheelIndex must be 0 or greater";
-                    return false;
-                }
-                wheel = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel_by_index(device_number, wheel_index);
-            }
-        } else {
-            std::string camera_id = config_get(config, "cameraId", "");
-            int camera_index = config_get(config, "cameraIndex", -1);
-            if (!camera_id.empty()) {
-                wheel = alpacacore::vendor::qhy::create_qhy_filterwheel(device_number, camera_id);
-            } else if (camera_index >= 0) {
-                wheel = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(device_number, camera_index);
-            } else {
-                error_message = "QHY filter wheel requires cameraIndex or cameraId";
-                return false;
-            }
-        }
-
-        if (config_has(config, "filterNames")) {
-            const auto& names_value = config.at("filterNames");
-            if (!names_value.is_array()) {
-                error_message = "QHY filter wheel filterNames must be an array";
-                return false;
-            }
-            for (const auto& name : names_value) {
-                if (!name.is_string()) {
-                    error_message = "QHY filter wheel filterNames must be an array of strings";
-                    return false;
-                }
-            }
-            wheel->set_names(names_value.get<std::vector<std::string>>());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
-            util::log_info(wheel_type == "cfw3-usb" ? "Registered QHY CFW3 (USB) filter wheel"
-                                                    : "Registered QHY filter wheel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "qhy" && device_type_str == "focuser") {
-#ifdef ALPACACORE_ENABLE_QHY
-        // Q-Focuser: USB CDC-ACM serial at a fixed 9600 baud, no SDK. The
-        // motion/hold settings are pushed to the firmware at every connect.
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        alpacacore::vendor::qhy::QFocuserSettings settings;
-        settings.max_step = config_get(config, "maxStep", settings.max_step);
-        settings.reverse = config_get(config, "reverse", settings.reverse);
-        settings.speed = config_get(config, "speed", settings.speed);
-        settings.hold_force = config_get(config, "holdForce", settings.hold_force);
-        settings.hold_ihold = config_get(config, "holdIhold", settings.hold_ihold);
-        settings.hold_irun = config_get(config, "holdIrun", settings.hold_irun);
-        settings.temperature_source = config_get(config, "temperatureSource", settings.temperature_source);
-        if (settings.max_step < 1 || settings.max_step > 2000000) {
-            error_message = "QHY Q-Focuser maxStep must be between 1 and 2000000";
-            return false;
-        }
-        if (settings.speed < 1 || settings.speed > 8) {
-            error_message = "QHY Q-Focuser speed must be between 1 (fastest) and 8 (slowest)";
-            return false;
-        }
-        if (settings.hold_ihold < 0 || settings.hold_ihold > 16 || settings.hold_irun < 0 || settings.hold_irun > 30) {
-            error_message = "QHY Q-Focuser holdIhold must be 0-16 and holdIrun 0-30";
-            return false;
-        }
-        if (settings.temperature_source != "external" && settings.temperature_source != "chip") {
-            error_message = "QHY Q-Focuser temperatureSource must be \"external\" or \"chip\"";
-            return false;
-        }
-
-        std::unique_ptr<alpacacore::FocuserDriver> focuser;
-        std::string port_path = conn_type == "serial" ? config_get(config, "portPath", "") : std::string();
-        if (!port_path.empty()) {
-            focuser = alpacacore::vendor::qhy::create_qhy_focuser(device_number, port_path, settings);
-        } else {
-            // "auto", or serial mode with no port given — auto-detect.
-            int focuser_index = config_get(config, "focuserIndex", 0);
-            focuser = alpacacore::vendor::qhy::create_qhy_focuser_by_index(device_number, focuser_index, settings);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
-            util::log_info("Registered QHY Q-Focuser");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "touptek" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto camera = alpacacore::vendor::touptek::create_touptek_camera(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered ToupTek camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "touptek" && device_type_str == "focuser") {
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-        std::unique_ptr<alpacacore::FocuserDriver> focuser;
-        std::string focuser_id = config_get(config, "focuserId", "");
-        if (!focuser_id.empty()) {
-            focuser = alpacacore::vendor::touptek::create_touptek_focuser_by_id(
-                device_number, focuser_id);
-        } else {
-            int focuser_index = config_get(config, "focuserIndex", 0);
-            focuser = alpacacore::vendor::touptek::create_touptek_focuser_by_index(
-                device_number, focuser_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
-            util::log_info("Registered ToupTek AAF focuser");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "touptek" && device_type_str == "filterwheel") {
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-        // Standalone ToupTek AFW (Astro Filter Wheel); AFW-M 5- and 7-slot.
-        // Enumerated by the toupcam SDK; the slot count is read from the wheel
-        // firmware at connect, so no slot count is supplied here.
-        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
-        std::string wheel_id = config_get(config, "filterwheelId", "");
-        if (!wheel_id.empty()) {
-            wheel = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(device_number, wheel_id);
-        } else {
-            int wheel_index = config_get(config, "filterwheelIndex", 0);
-            wheel = alpacacore::vendor::touptek::create_touptek_filterwheel_by_index(device_number, wheel_index);
-        }
-
-        if (config_has(config, "filterNames")) {
-            const auto& names_value = config.at("filterNames");
-            if (!names_value.is_array()) {
-                error_message = "ToupTek filter wheel filterNames must be an array";
-                return false;
-            }
-            for (const auto& name : names_value) {
-                if (!name.is_string()) {
-                    error_message = "ToupTek filter wheel filterNames must be an array of strings";
-                    return false;
-                }
-            }
-            wheel->set_names(names_value.get<std::vector<std::string>>());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
-            util::log_info("Registered ToupTek AFW filter wheel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "touptek" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-        // Two distinct ToupTek switch backends share the (touptek, switch) route:
-        //  - "thermal": a cooled camera's dew heater + fan via the camera SDK
-        //    (shared handle), available on any ToupTek build.
-        //  - "stellavita" (default): the StellaVita PowerBox's 12V GPIO ports,
-        //    only built when libgpiod (>= 2.0) is present.
-        const std::string switch_type = config_get(config, "switchType", "stellavita");
-        if (switch_type == "thermal") {
-            int camera_index = config_get(config, "cameraIndex", 0);
-            auto sw = alpacacore::vendor::touptek::create_touptek_thermal_switch(device_number, camera_index);
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-                util::log_info("Registered ToupTek thermal switch");
-                return true;
-            }
-            error_message = "Failed to register device. Device may already exist.";
-            return false;
-        }
-        // Only "thermal" (handled above) and "stellavita" (below) are valid.
-        // Reject anything else here so a typo'd/unknown switchType (e.g. "Thermal")
-        // can't silently fall through and create a StellaVita PowerBox instead.
-        if (switch_type != "stellavita") {
-            error_message = "Unknown ToupTek switchType '" + switch_type + "' (expected 'thermal' or 'stellavita')";
-            return false;
-        }
-#endif
-#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
-        // StellaVita PowerBox: on-board 12V DC power ports driven over local
-        // GPIO (libgpiod) on the CM4's /dev/gpiochip0 — independent of the
-        // ToupTek camera SDK. Switches 0..3 are the controllable Port 1..4
-        // lines (BCM GPIO 18/10/17/4).
-        auto powerbox_config = alpacacore::vendor::touptek::default_stellavita_config();
-        powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
-        if (!gpio_chip_is_board_chip(powerbox_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
-            return false;
-        }
-        powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
-        // Per-port PWM/name overrides applied positionally onto the fixed
-        // Port 1..4 layout.
-        if (config_has(config, "ports") && config["ports"].is_array()) {
-            const auto& port_overrides = config["ports"];
-            auto& ports = powerbox_config.ports;
-            for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
-                const auto& p = port_overrides[i];
-                // Skip non-object entries (e.g. "ports":[null]) — contains()/value()
-                // throw nlohmann type_error on a non-object, which would 500 the request.
-                if (!p.is_object()) {
-                    continue;
-                }
-                if (p.contains("name")) {
-                    ports[i].name = p.value("name", ports[i].name);
-                }
-                ports[i].pwm_enabled = p.value("pwm", ports[i].pwm_enabled);
-            }
-        }
-
-        auto sw = alpacacore::vendor::touptek::create_touptek_switch(device_number, std::move(powerbox_config));
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-            util::log_info("Registered ToupTek StellaVita switch");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#elif defined(ALPACACORE_ENABLE_TOUPTEK)
-        error_message =
-            "ToupTek StellaVita switch not built. Rebuild on a host with "
-            "libgpiod (>= 2.0) installed (e.g. apt install libgpiod-dev).";
-        return false;
-#else
-        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "gemini" && device_type_str == "focuser") {
-#ifdef ALPACACORE_ENABLE_GEMINI
-        std::string conn_type = config_get(config, "connectionType", "auto");
-
-        std::unique_ptr<alpacacore::FocuserDriver> focuser;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // No port specified with serial mode — fall through to auto-detect
-                int focuser_index = config_get(config, "focuserIndex", 0);
-                focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
-            } else {
-                int baud_rate = config_get(config, "baudRate", 9600);
-                focuser = alpacacore::vendor::gemini::create_gemini_focuser(device_number, port_path, baud_rate);
-            }
-        } else {
-            // "auto" or unset — auto-detect
-            int focuser_index = config_get(config, "focuserIndex", 0);
-            focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
-            util::log_info("Registered Gemini focuser");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "gemini" && device_type_str == "covercalibrator") {
-#ifdef ALPACACORE_ENABLE_GEMINI
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // "lite" (default, back-compat) = Astro Flat Panel Cover Lite (light-only);
-        // "v2" = Astro Automatic FlatPanel v2 (motorized cover);
-        // "pro" = Motorized Flat Panel V3 (INDI "Pro" firmware, motorized cover).
-        std::string model = config_get(config, "flatPanelModel", "lite");
-        bool is_v2 = (model == "v2");
-        bool is_pro = (model == "pro");
-
-        auto make_by_index = [&](int panel_index) {
-            if (is_pro)
-                return alpacacore::vendor::gemini::create_gemini_flatpanel_pro_by_index(device_number, panel_index);
-            if (is_v2)
-                return alpacacore::vendor::gemini::create_gemini_flatpanel_v2_by_index(device_number, panel_index);
-            return alpacacore::vendor::gemini::create_gemini_flatpanel_by_index(device_number, panel_index);
-        };
-        auto make_serial = [&](const std::string& port_path, int baud_rate) {
-            if (is_pro)
-                return alpacacore::vendor::gemini::create_gemini_flatpanel_pro(device_number, port_path, baud_rate);
-            if (is_v2)
-                return alpacacore::vendor::gemini::create_gemini_flatpanel_v2(device_number, port_path, baud_rate);
-            return alpacacore::vendor::gemini::create_gemini_flatpanel(device_number, port_path, baud_rate);
-        };
-
-        std::unique_ptr<alpacacore::CoverCalibratorDriver> panel;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // No port specified with serial mode — fall through to auto-detect
-                panel = make_by_index(config_get(config, "panelIndex", 0));
-            } else {
-                panel = make_serial(port_path, config_get(config, "baudRate", 9600));
-            }
-        } else {
-            // "auto" or unset — auto-detect
-            panel = make_by_index(config_get(config, "panelIndex", 0));
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(panel)))) {
-            util::log_info(is_pro  ? "Registered Gemini Motorized Flat Panel V3"
-                           : is_v2 ? "Registered Gemini Flat Panel v2"
-                                   : "Registered Gemini Flat Panel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "gemini" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_GEMINI
-        // switchType discriminates the vendor's switch backends. Only the
-        // Power & Data Hubs Advanced 3 exists today; the PowerBox Mini 2 is a
-        // candidate second backend under the same vendor/device-type pair.
-        std::string switch_type = config_get(config, "switchType", "pdh-adv3");
-        if (switch_type != "pdh-adv3") {
-            error_message = "Unknown Gemini switchType: " + switch_type + " (supported: pdh-adv3)";
-            return false;
-        }
-
-        std::string conn_type = config_get(config, "connectionType", "auto");
-
-        std::unique_ptr<alpacacore::SwitchDriver> hub;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // Serial mode means an explicit port. Don't silently auto-detect
-                // behind the user's back -- surface a clear validation error.
-                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
-                return false;
-            }
-            int baud_rate = config_get(config, "baudRate", 19200);
-            hub = alpacacore::vendor::gemini::create_gemini_pdh_switch(device_number, port_path, baud_rate);
-        } else {
-            // "auto" or unset -- auto-detect
-            int hub_index = config_get(config, "hubIndex", 0);
-            if (hub_index < 0) {
-                error_message = "hubIndex must be >= 0.";
-                return false;
-            }
-            hub = alpacacore::vendor::gemini::create_gemini_pdh_switch_by_index(device_number, hub_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(hub)))) {
-            util::log_info("Registered Gemini Power & Data Hubs Advanced 3");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "wandererastro" && device_type_str == "covercalibrator") {
-#ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        std::string conn_type = config_get(config, "connectionType", "auto");
-
-        std::unique_ptr<alpacacore::CoverCalibratorDriver> cover;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // Serial mode means an explicit port. Don't silently auto-detect
-                // behind the user's back — surface a clear validation error.
-                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
-                return false;
-            }
-            int baud_rate = config_get(config, "baudRate", 19200);
-            cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(device_number, port_path,
-                                                                                            baud_rate);
-        } else {
-            // "auto" or unset — auto-detect
-            int cover_index = config_get(config, "coverIndex", 0);
-            if (cover_index < 0) {
-                error_message = "coverIndex must be >= 0.";
-                return false;
-            }
-            cover = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator_by_index(device_number,
-                                                                                                     cover_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(cover)))) {
-            util::log_info("Registered WandererAstro CoverCalibrator");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "wandererastro" && device_type_str == "rotator") {
-#ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        std::string conn_type = config_get(config, "connectionType", "auto");
-
-        std::unique_ptr<alpacacore::RotatorDriver> rotator;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // Serial mode means an explicit port. Don't silently auto-detect
-                // behind the user's back — surface a clear validation error.
-                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
-                return false;
-            }
-            int baud_rate = config_get(config, "baudRate", 19200);
-            rotator =
-                alpacacore::vendor::wandererastro::create_wandererastro_rotator(device_number, port_path, baud_rate);
-        } else {
-            // "auto" or unset — auto-detect
-            int rotator_index = config_get(config, "rotatorIndex", 0);
-            if (rotator_index < 0) {
-                error_message = "rotatorIndex must be >= 0.";
-                return false;
-            }
-            rotator =
-                alpacacore::vendor::wandererastro::create_wandererastro_rotator_by_index(device_number, rotator_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(rotator)))) {
-            util::log_info("Registered WandererAstro Rotator");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "wandererastro" && device_type_str == "filterwheel") {
-#ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        std::string conn_type = config_get(config, "connectionType", "auto");
-
-        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // Serial mode means an explicit port. Don't silently auto-detect
-                // behind the user's back — surface a clear validation error.
-                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
-                return false;
-            }
-            int baud_rate = config_get(config, "baudRate", 19200);
-            wheel = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(device_number, port_path,
-                                                                                        baud_rate);
-        } else {
-            // "auto" or unset — auto-detect
-            int wheel_index = config_get(config, "wandererFilterwheelIndex", 0);
-            if (wheel_index < 0) {
-                error_message = "wandererFilterwheelIndex must be >= 0.";
-                return false;
-            }
-            wheel = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel_by_index(device_number,
-                                                                                                 wheel_index);
-        }
-
-        if (config_has(config, "filterNames")) {
-            const auto& names_value = config.at("filterNames");
-            if (!names_value.is_array()) {
-                error_message = "Wanderer filter wheel filterNames must be an array";
-                return false;
-            }
-            for (const auto& name : names_value) {
-                if (!name.is_string()) {
-                    error_message = "Wanderer filter wheel filterNames must be an array of strings";
-                    return false;
-                }
-            }
-            wheel->set_names(names_value.get<std::vector<std::string>>());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
-            util::log_info("Registered WandererAstro filter wheel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "wandererastro" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        // switchType discriminates the vendor's switch backends. Only the
-        // WandererBox Pro V3 exists today; the ETA tilt adjuster is planned as
-        // a second backend under the same vendor/device-type pair.
-        std::string switch_type = config_get(config, "switchType", "wandererbox-pro-v3");
-        if (switch_type != "wandererbox-pro-v3") {
-            error_message = "Unknown WandererAstro switchType: " + switch_type + " (supported: wandererbox-pro-v3)";
-            return false;
-        }
-
-        std::string conn_type = config_get(config, "connectionType", "auto");
-
-        std::unique_ptr<alpacacore::SwitchDriver> box;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // Serial mode means an explicit port. Don't silently auto-detect
-                // behind the user's back — surface a clear validation error.
-                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
-                return false;
-            }
-            int baud_rate = config_get(config, "baudRate", 19200);
-            box =
-                alpacacore::vendor::wandererastro::create_wandererastro_box_switch(device_number, port_path, baud_rate);
-        } else {
-            // "auto" or unset — auto-detect
-            int box_index = config_get(config, "boxIndex", 0);
-            if (box_index < 0) {
-                error_message = "boxIndex must be >= 0.";
-                return false;
-            }
-            box = alpacacore::vendor::wandererastro::create_wandererastro_box_switch_by_index(device_number, box_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(box)))) {
-            util::log_info("Registered WandererAstro WandererBox Pro V3");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "WandererAstro support not enabled. Rebuild with -DALPACACORE_ENABLE_WANDERERASTRO=ON";
-        return false;
-#endif
-    }
-
     error_message = "Vendor/device type combination not yet supported: " + vendor + "/" + device_type_str;
     return false;
 }
@@ -9914,7 +8788,8 @@ nlohmann::json sanitize_fields_json(const nlohmann::json& config,
 }
 }  // namespace
 
-nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) const {
+nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) const {
+    const nlohmann::json config = with_folded_connection_type(raw_config);
     nlohmann::json sanitized = nlohmann::json::object();
 
     auto copy_if_present = [&](const char* key) {
@@ -9997,163 +8872,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
                 copy_if_present("host");
                 copy_if_present("tcpPort");
             }
-        }
-    } else if (vendor == "synscan") {
-        copy_if_present("synscanVersion");
-        if (const auto alignment_mode = known_alignment_mode(config)) {
-            sanitized["alignmentMode"] = *alignment_mode;  // #860; an unknown value drops
-        }
-        copy_if_present("connectionType");
-        copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
-        std::string connection_type = config_get(config, "connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        } else if (connection_type == "network") {
-            copy_if_present("host");
-            copy_if_present("tcpPort");
-        }
-    } else if (vendor == "zwo") {
-        if (device_type == "telescope") {
-            copy_if_present("connectionType");
-            std::string connection_type = config_get(config, "connectionType", "");
-            if (connection_type == "serial") {
-                copy_if_present("portPath");
-                copy_if_present("baudRate");
-            } else if (connection_type == "network") {
-                copy_if_present("host");
-                copy_if_present("tcpPort");
-            }
-        }
-        copy_if_present("cameraIndex");
-        copy_if_present("cameraId");
-        if (device_type == "camera") {
-            // #914: the identity a camera entry binds by.
-            copy_if_present("serialNumber");
-            copy_if_present("cameraName");
-            copy_if_present("uniqueId");
-        }
-        copy_if_present("switchType");
-        // ASIAIR Pro (Pi 4, libgpiod) and ASIAIR Plus (RK3568, pwm_gpio.ko)
-        // both persist per-port configuration. Without these the user's
-        // PWM-mode toggles and channel renames silently revert after save
-        // because sanitize_device_config strips anything not allowlisted.
-        const std::string switch_type = config_get(config, "switchType", "");
-        if (switch_type == "asiair" || switch_type == "asiair-plus-picm4" ||
-            switch_type == "asiair-plus-rk3568") {
-            copy_if_present("pwmFrequencyHz");
-            copy_if_present("ports");
-        }
-        if (switch_type == "asiair" || switch_type == "asiair-plus-picm4") {
-            copy_if_present("gpioChip");
-        }
-        if (switch_type == "asiair-plus-rk3568") {
-            copy_if_present("devicePath");
-        }
-        copy_if_present("filterwheelIndex");
-        copy_if_present("filterwheelId");
-        copy_if_present("filterNames");
-        copy_if_present("focuserIndex");
-        copy_if_present("focuserId");
-        copy_if_present("rotatorIndex");
-        copy_if_present("rotatorId");
-    } else if (vendor == "qhy" && device_type == "focuser") {
-        // Q-Focuser: USB-serial only, fixed baud — no baudRate/network fields.
-        copy_if_present("connectionType");
-        copy_if_present("focuserIndex");
-        copy_if_present("maxStep");
-        copy_if_present("reverse");
-        copy_if_present("speed");
-        copy_if_present("holdForce");
-        copy_if_present("holdIhold");
-        copy_if_present("holdIrun");
-        copy_if_present("temperatureSource");
-        std::string connection_type = config_get(config, "connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-        }
-    } else if (vendor == "qhy" && device_type == "filterwheel") {
-        // Two backends share (qhy, filterwheel): the integrated CFW on a
-        // camera's handle (cameraIndex/cameraId) and the standalone CFW3 on
-        // its own serial port (connectionType/filterwheelIndex/portPath).
-        // wheelType selects; persist the fields each needs, and filterNames
-        // for both or custom names silently revert to "Filter N" after a save.
-        copy_if_present("wheelType");
-        copy_if_present("filterNames");
-        const std::string wheel_type = config_get(config, "wheelType", "integrated");
-        if (wheel_type == "cfw3-usb") {
-            copy_if_present("connectionType");
-            copy_if_present("filterwheelIndex");
-            const std::string connection_type = config_get(config, "connectionType", "");
-            if (connection_type == "serial") {
-                copy_if_present("portPath");
-            }
-        } else {
-            copy_if_present("cameraIndex");
-            copy_if_present("cameraId");
-        }
-    } else if (vendor == "qhy") {
-        copy_if_present("cameraIndex");
-        copy_if_present("cameraId");
-    } else if (vendor == "touptek") {
-        if (device_type == "switch") {
-            // Two switch backends share (touptek, switch): the StellaVita
-            // PowerBox (local GPIO) and the cooled-camera thermal switch (dew
-            // heater + fan). switchType selects; persist the fields each needs.
-            copy_if_present("switchType");
-            const std::string touptek_switch_type = config_get(config, "switchType", "stellavita");
-            if (touptek_switch_type == "thermal") {
-                copy_if_present("cameraIndex");
-            } else {
-                // StellaVita PowerBox: optional chip path plus PWM frequency and
-                // per-port PWM/name overrides so dimmable-port config survives.
-                copy_if_present("gpioChip");
-                copy_if_present("pwmFrequencyHz");
-                copy_if_present("ports");
-            }
-        } else if (device_type == "filterwheel") {
-            // Standalone ToupTek AFW: bind by index or SDK id string, plus the
-            // user's custom filter names. Without these the wheel binding resets
-            // to index 0 and filter names are erased on every save.
-            copy_if_present("filterwheelIndex");
-            copy_if_present("filterwheelId");
-            copy_if_present("filterNames");
-        } else {
-            copy_if_present("cameraIndex");
-            copy_if_present("focuserIndex");
-            copy_if_present("focuserId");
-        }
-    } else if (vendor == "gemini") {
-        copy_if_present("connectionType");
-        copy_if_present("focuserIndex");
-        copy_if_present("panelIndex");
-        copy_if_present(
-            "flatPanelModel");  // "lite" (Cover Lite), "v2" (Automatic FlatPanel v2) or "pro" (Motorized Flat Panel V3)
-        if (device_type == "switch") {
-            copy_if_present("switchType");  // backend selector (pdh-adv3)
-            copy_if_present("hubIndex");    // Power & Data Hub auto-detect index
-        }
-        std::string connection_type = config_get(config, "connectionType", "auto");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        }
-    } else if (vendor == "wandererastro") {
-        copy_if_present("connectionType");
-        copy_if_present("coverIndex");
-        copy_if_present("rotatorIndex");  // WandererRotator Mini auto-detect index
-        if (device_type == "switch") {
-            copy_if_present("switchType");  // backend selector (wandererbox-pro-v3)
-            copy_if_present("boxIndex");    // WandererBox auto-detect index
-        }
-        if (device_type == "filterwheel") {
-            copy_if_present("wandererFilterwheelIndex");  // SFW auto-detect index
-            copy_if_present("filterNames");
-        }
-        std::string connection_type = config_get(config, "connectionType", "auto");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
         }
     }
 
@@ -10410,7 +9128,13 @@ void Router::load_persisted_devices() {
                         const PersistedKey& have = *key;
                         if (have.vendor == wanted.vendor && have.device_type == wanted.device_type &&
                             have.device_number == wanted.device_number) {
-                            saved.update(learned_config);
+                            for (const auto& [field, value] : learned_config.items()) {
+                                if (value.is_null()) {
+                                    saved.erase(field);
+                                } else {
+                                    saved[field] = value;
+                                }
+                            }
                             stored = true;
                             break;
                         }

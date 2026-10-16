@@ -21,6 +21,8 @@
 #                  (no threshold, not a required check; bound 30 min)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
+#   package-deb    build the .deb in debian:trixie, install it, run
+#                  scripts/check_bundled_gphoto.sh (bundled libgphoto2 loader path)
 #   unicode        scan sources for Trojan-Source / invisible Unicode
 #   shellcheck     lint the project's shell scripts
 #   javascript     node --check AND node --test the hand-written web UI JavaScript
@@ -135,7 +137,10 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
+            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -166,6 +171,16 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
       - name: Stage vendor SDK shared libraries
         # Mirrors run_system_setup() in build_and_run.sh: copy the in-tree
         # arm64 vendor .so files onto the loader path so the vendor-ON build
@@ -178,9 +193,9 @@ jobs:
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
             "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
+            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then
@@ -267,7 +282,10 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
+            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -289,6 +307,16 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
       - name: Stage vendor SDK shared libraries
         # Mirrors the build-vendors job: the vendor-ON build links the in-tree
         # arm64 vendor .so files from the loader path.
@@ -299,9 +327,9 @@ jobs:
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
             "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
+            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then
@@ -400,7 +428,10 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
+            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -422,6 +453,16 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
       - name: Stage vendor SDK shared libraries
         # Copied from build-vendors; keep the two lists in step.
         run: |
@@ -431,9 +472,9 @@ jobs:
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
             "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
+            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then
@@ -500,7 +541,7 @@ jobs:
           PY
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage
           path: coverage/
@@ -575,7 +616,10 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
+            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -605,6 +649,16 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
       - name: Generate compile_commands.json (all vendors)
         # AlpacaHTTP pulls AlpacaCore in as a subdirectory, so this single
         # configure+build yields a compile DB covering both source trees and
@@ -618,6 +672,7 @@ jobs:
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DALPACAHTTP_BUILD_TESTS=ON \
+            -DALPACACORE_BUILD_TESTS=ON \
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
 
@@ -652,6 +707,50 @@ jobs:
             exit 1
           fi
           echo "clang-tidy OK"
+
+  package-deb:
+    # Builds the .deb in the target distribution (no libgphoto2-dev installed),
+    # installs it and runs the bundled-libgphoto2 acceptance checks, so a change
+    # that breaks the packaged loader path fails before release.
+    name: package-deb
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    timeout-minutes: 40
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev binutils
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Read from debian/control so the package's Build-Depends stay the one list.
+        run: |
+          set -euo pipefail
+          apt-get build-dep -y ./
+
+      - name: Build the .deb
+        run: |
+          set -euo pipefail
+          scripts/build_deb.sh
+          ls -l ../alpacabridge_*_arm64.deb
+          dpkg-deb --info ../alpacabridge_*_arm64.deb
+
+      - name: Install the .deb
+        # Recommends (NetworkManager, polkit) are not needed to run the checks.
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends ../alpacabridge_*_arm64.deb
+
+      - name: Check the bundled libgphoto2
+        run: scripts/check_bundled_gphoto.sh
 
   unicode:
     name: Unicode scan
@@ -702,6 +801,19 @@ jobs:
         # stale twice, issue #455).
         run: python3 scripts/check_docs_drift.py
 
+      - name: Self-test and check the dependency snapshot inventory
+        # dependency-submission.yml reports debian/control, the CMake fetches
+        # and AlpacaCore/external/ to the dependency graph. --check fails a
+        # directory under AlpacaCore/external/ that
+        # scripts/dependency_sdk_versions.json does not list, so a new SDK
+        # cannot reach the graph unreported. dependency_updates.py (run weekly by
+        # dependency-updates.yml and osv-scan.yml) is self-tested here so a
+        # broken checker fails the PR, not the next scheduled run.
+        run: |
+          python3 scripts/dependency_snapshot.py --self-test
+          python3 scripts/dependency_snapshot.py --check
+          python3 scripts/dependency_updates.py --self-test
+
       - name: Self-test the release-notes extractor
         # release.yml runs this too, but only on a tag push; here a broken
         # heading slug or section extractor fails the PR that caused it
@@ -728,6 +840,11 @@ jobs:
         # pr-body.yml runs it on every PR as well; here a change to it is
         # tested by the PR that makes it, whatever that PR's head is named.
         run: python3 scripts/merge_down.py --self-test
+
+      - name: Self-test the stable-PR issue closer
+        # close-linked-issues.yml runs the script only on a merged stable PR;
+        # here a change to its keyword parser fails the PR that makes it.
+        run: python3 scripts/close_linked_issues.py --self-test
 
   connect-error-hook:
     name: Connect-error hook

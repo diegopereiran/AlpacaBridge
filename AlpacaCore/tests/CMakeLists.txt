@@ -35,6 +35,7 @@ set(TEST_SOURCES
     test_motion_limits.cpp
     test_poll_settle.cpp
     test_rotator_sync_offset_store.cpp
+    test_state_snapshot.cpp
     test_task_clock.cpp
     test_async_operation.cpp
     test_connection_resolver.cpp
@@ -49,6 +50,8 @@ set(TEST_SOURCES
 if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_camera.cpp)
     list(APPEND TEST_SOURCES test_zwo_camera_identity.cpp)
+    list(APPEND TEST_SOURCES test_zwo_camera_catalog.cpp)
+    list(APPEND TEST_SOURCES test_zwo_fake_sdk.cpp)
     list(APPEND TEST_SOURCES test_zwo_focuser.cpp)
     list(APPEND TEST_SOURCES test_zwo_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)
@@ -91,6 +94,8 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_async_park.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_synscan_async_slew_failure.cpp)
+    # Refused operation-slot starts leave the mount stopped and the state consistent.
+    list(APPEND TEST_SOURCES test_synscan_slot.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_synscan_telescope_deferred_connect.cpp)
     # Precise e/z replies decode the upper 24 bits of each field (issue #785).
@@ -100,7 +105,8 @@ endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
         test_skywatcher_async.cpp test_skywatcher_serial.cpp
-        test_skywatcher_pointing.cpp)
+        test_skywatcher_pointing.cpp
+        test_skywatcher_link_loss.cpp test_skywatcher_snapshot.cpp)
     # Altitude floor / meridian limit: goto target check over the fake mount
     # (open-astro#436).
     list(APPEND TEST_SOURCES test_skywatcher_motion_limits.cpp)
@@ -177,7 +183,10 @@ if(TARGET alpacacore_gphoto)
     list(APPEND TEST_SOURCES test_gphoto_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_celestron)
-    list(APPEND TEST_SOURCES test_celestron_telescope.cpp)
+    list(APPEND TEST_SOURCES test_celestron_telescope.cpp test_celestron_cgx_protocol.cpp
+         test_celestron_cgx_geometry.cpp test_celestron_cgx_telescope.cpp
+         test_celestron_cgx_telemetry.cpp
+         test_celestron_cgx_concurrency_stress.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_celestron_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_celestron_async_park.cpp)
@@ -208,6 +217,12 @@ if(TARGET alpacacore_touptek)
     if(ALPACACORE_TOUPTEK_STELLAVITA)
         list(APPEND TEST_SOURCES test_touptek_switch.cpp)
     endif()
+endif()
+if(TARGET alpacacore_altair)
+    # Runs over the ToupTek fake SDK (fake_touptek_sdk.h): the Altair camera is
+    # the ToupTek camera driver behind the same seam.
+    list(APPEND TEST_SOURCES test_altair_camera.cpp)
+    list(APPEND TEST_SOURCES altair_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_playerone)
     list(APPEND TEST_SOURCES test_playerone_camera.cpp)
@@ -276,6 +291,10 @@ endif()
 if(TARGET alpacacore_touptek)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_touptek)
     target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_TOUPTEK)
+endif()
+if(TARGET alpacacore_altair)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_altair)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ALTAIR)
 endif()
 if(TARGET alpacacore_playerone)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_playerone)

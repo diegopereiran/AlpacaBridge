@@ -267,6 +267,9 @@ std::string http_get(const std::string& url, std::chrono::milliseconds timeout) 
     std::string response;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    // The URL is user-set: only http and https, also after a redirect, never file://, ldap:// etc.
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout.count()));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
@@ -463,10 +466,6 @@ public:
         return get_value_or_nan(&SensorSnapshot::sky_temperature_c, "skytemperature");
     }
 
-    double get_seeing() const override {
-        throw AlpacaException("Seeing not implemented", AlpacaError::PropertyNotImplemented);
-    }
-
     double get_star_fwhm() const override {
         throw AlpacaException("StarFWHM not implemented", AlpacaError::PropertyNotImplemented);
     }
@@ -491,6 +490,10 @@ public:
         const std::string key = normalize_property_name(property_name);
         if (!key.empty() && !is_ascom_sensor_name(key)) {
             throw AlpacaException("Unknown sensor property", AlpacaError::InvalidValue);
+        }
+        // Parameter validation precedes the connection check (ASCOM contract).
+        if (!get_connected()) {
+            throw AlpacaException("Device not connected", AlpacaError::NotConnected);
         }
         // supported_properties_ is mutated by the poll thread under data_mutex_;
         // every read must hold the same lock.

@@ -81,8 +81,10 @@ struct LandingOffsetHandset {
     std::atomic<bool> ra_scripted{false};
     std::array<std::atomic<uint32_t>, 4> ra_offset_script{};
     std::array<std::atomic<uint32_t>, 4> commanded_ra{};
+    std::array<std::atomic<uint32_t>, 4> commanded_dec{};
     // The once-a-second RA readback sawtooth (#1030), phased from `sawtooth_epoch`.
     std::atomic<bool> sawtooth{false};
+    std::atomic<int> position_reads{0};  // precise `e` reads served
     std::atomic<Clock::rep> sawtooth_epoch{0};
     // Every other GOTO lands one further second of RA east (#1030).
     std::atomic<bool> reroll{false};
@@ -172,6 +174,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
             case 'K':
                 return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
             case 'e': {
+                st->position_reads.fetch_add(1);
                 uint32_t ra = st->ra_now();
                 if (st->sawtooth.load()) {
                     const auto low = static_cast<uint32_t>(std::lround(st->sawtooth_phase() * kCountsPerSecondOfRa));
@@ -192,6 +195,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 }
                 if (ordinal <= static_cast<int>(st->commanded_ra.size())) {
                     st->commanded_ra[static_cast<std::size_t>(ordinal - 1)].store(ra);
+                    st->commanded_dec[static_cast<std::size_t>(ordinal - 1)].store(dec);
                 }
                 if (st->ra_scripted.load() && ordinal <= static_cast<int>(st->ra_offset_script.size())) {
                     offset += st->ra_offset_script[static_cast<std::size_t>(ordinal - 1)].load();
@@ -369,6 +373,33 @@ TEST_CASE(
     CHECK(dec_error_arcsec(*driver, kTargetDec) < 3.0);
     CHECK(st->goto_count.load() == 1);  // never another GOTO: the handset re-rolls each landing by a second
     CHECK(st->nudge_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - a Dec-only refinement pass leaves the RA aim alone (#1030)",
+          "[synscan][telescope][goto-landing]") {
+    // An Alt-Az mount finishes every landing round with a re-GOTO (no timed moves), so the round's aim decides where
+    // RA ends up: RA inside the tolerance must keep its aim while Dec is corrected.
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->model_id.store(128);
+    st->ra_offset_counts.store(20);       // 1.5" RA, inside the 3" tolerance
+    st->dec_offset_script[0].store(124);  // a systematic 9.6" Dec offset, cancelled by the aim correction
+    st->dec_offset_script[1].store(124);
+    st->dec_scripted.store(true);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_alignment_mode() == alpacacore::AlignmentMode::AltAz);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(kTargetRa, kTargetDec));
+
+    CHECK(st->goto_count.load() == 2);
+    CHECK(st->nudge_starts.load() == 0);
+    // RA was inside its tolerance, so the second GOTO aims at the same RA as the first.
+    CHECK(st->commanded_ra[1].load() == st->commanded_ra[0].load());
+    CHECK(dec_error_arcsec(*driver, kTargetDec) < 3.0);
     driver->set_connected(false);
 }
 
@@ -611,6 +642,47 @@ TEST_CASE("SynScan GOTO landing - a tracking write, a time write and a reconnect
     driver->set_connected(false);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     CHECK(ra_error_at_phase_09(*driver, *st) > kRawPhase09Arcsec);
+    driver->set_connected(false);
+}
+
+// A handset without the sawtooth: the first landing spends the hunt's 1.3 s first-jump budget (6 or 7 reads, the
+// fake handset answers in about 0.2 s), a later one on the same connection reads once (#1107). Returns the reads a
+// landing took.
+int landing_reads(alpacacore::TelescopeDriver& driver, LandingOffsetHandset& st) {
+    const int before = st.position_reads.load();
+    REQUIRE_NOTHROW(driver.slew_to_coordinates(kTargetRa, kTargetDec));
+    return st.position_reads.load() - before;
+}
+
+TEST_CASE("SynScan GOTO landing - a handset without the sawtooth is hunted once per connection (#1107)",
+          "[synscan][telescope][goto-landing]") {
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->ra_offset_counts.store(0);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    constexpr int kHuntReads = 4;
+
+    CHECK(landing_reads(*driver, *st) >= kHuntReads);
+    CHECK(landing_reads(*driver, *st) < kHuntReads);  // skipped
+    CHECK(landing_reads(*driver, *st) < kHuntReads);
+
+    driver->set_tracking(true);  // a tracking write drops the flag
+    CHECK(landing_reads(*driver, *st) >= kHuntReads);
+    CHECK(landing_reads(*driver, *st) < kHuntReads);
+
+    driver->set_utc_date(std::chrono::system_clock::now());  // so does a time write
+    CHECK(landing_reads(*driver, *st) >= kHuntReads);
+    CHECK(landing_reads(*driver, *st) < kHuntReads);
+
+    driver->set_connected(false);  // and a reconnect
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    CHECK(landing_reads(*driver, *st) >= kHuntReads);
+    CHECK(landing_reads(*driver, *st) < kHuntReads);
     driver->set_connected(false);
 }
 
@@ -1063,6 +1135,45 @@ TEST_CASE("SynScan GOTO landing - an Alt-Az mount finishes its landing with re-G
 
     CHECK(st->nudge_starts.load() == 0);
     CHECK(st->goto_count.load() >= 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - the re-GOTO after a far-miss repeat is aimed by the repeat's residual alone (#1120)",
+          "[synscan][telescope][goto-landing]") {
+    // Alt-Az: every landing round is a re-GOTO. GOTO 1 lands 386" off in RA and 77" in Dec (past the RA tolerance, so
+    // the carried RA aim moves too), so GOTO 2 is aimed by those residuals; GOTO 2 then misses 49' in RA, so GOTO 3
+    // repeats the target; GOTO 3 lands 39" off in RA and Dec. GOTO 4 must be the target corrected by that 39" alone,
+    // not by GOTO 1's miss as well, on both axes.
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->model_id.store(128);
+    st->dec_offset_script[0].store(1000);
+    st->dec_offset_script[2].store(500);
+    st->dec_scripted.store(true);
+    st->ra_offset_script[0].store(5000);
+    st->ra_offset_script[1].store(kFarMissCounts);
+    st->ra_offset_script[2].store(500);
+    st->ra_scripted.store(true);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_alignment_mode() == alpacacore::AlignmentMode::AltAz);
+    use_fast_guide_rate(*driver);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(kTargetRa, kTargetDec));
+
+    REQUIRE(st->goto_count.load() >= 4);
+    const auto target_dec = static_cast<int32_t>(st->commanded_dec[0].load());
+    CHECK(st->commanded_ra[2].load() == st->commanded_ra[0].load());  // the repeat aims at the target
+    CHECK(static_cast<int32_t>(st->commanded_dec[2].load()) == target_dec);
+    // GOTO 3 landed 500 counts east of the target in RA too, so GOTO 4 aims about 500 counts west of it. The RA
+    // readback is quantised to the handset's one-second ticks, hence the margin; GOTO 1's 5000 counts, carried over,
+    // would put the aim 5000 counts further west.
+    CHECK(std::abs(static_cast<int32_t>(st->commanded_ra[3].load()) -
+                   (static_cast<int32_t>(st->commanded_ra[0].load()) - 500)) <= 1500);
+    // GOTO 3 landed 500 counts above the target, so GOTO 4 aims 500 counts below it (one count of rounding).
+    CHECK(std::abs(static_cast<int32_t>(st->commanded_dec[3].load()) - (target_dec - 500)) <= 2);
     driver->set_connected(false);
 }
 

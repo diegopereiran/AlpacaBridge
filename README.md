@@ -3,6 +3,7 @@
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
 [![CI](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml/badge.svg)](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml)
+[![Nightly Build](https://github.com/open-astro/AlpacaBridge/actions/workflows/nightly-build.yml/badge.svg)](https://github.com/open-astro/AlpacaBridge/actions/workflows/nightly-build.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Debian%2013%20arm64-orange.svg)](#supported-hardware)
 [![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)
@@ -14,12 +15,12 @@ AlpacaBridge turns a single-board computer into a control server for your entire
 
 Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., APT, CCDciel, Sequence Generator Pro, SharpCap, or [Ara](https://www.openastro.net).
 
-#### [5.0.0~beta4] - 2026-10-16 &middot; [Changelog](CHANGELOG.md)
+#### [4.2.0] - 2026-09-30 &middot; [Changelog](CHANGELOG.md)
 
 ## Why AlpacaBridge
 
 - **Proven, not promised.** Every driver is [validated with ASCOM ConformU](SUPPORTED-DRIVERS.md), on the actual hardware it supports.
-- **82 validated devices. Fifteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, Canon and Nikon DSLRs, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
+- **85 validated devices. Sixteen brands. One server.** Altair, Astroasis, Celestron, Gemini, iOptron, Canon and Nikon DSLRs, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
 - **Plug in and go.** Vendor SDKs and udev rules come bundled. USB and Wi-Fi devices are auto-detected. No port hunting.
 - **Manage it from a browser.** Configure every device from the built-in web UI, from any machine on your network.
 - **Set it and forget it.** Installs from the OpenAstro APT repository, runs as a systemd service, starts on boot, updates with `apt upgrade`.

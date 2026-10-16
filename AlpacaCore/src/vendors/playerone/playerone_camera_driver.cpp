@@ -697,7 +697,7 @@ public:
                 throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
             }
             if (!last_exposure_valid_ || !image_ready_ || !last_image_) {
-                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+                throw AlpacaException::asked_too_early("Image not ready");
             }
             image = last_image_;
         }
@@ -1084,6 +1084,14 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             validate_exposure_request_locked(exposure_us_long);
+            // exposure_active_ stays true from the publish below until the worker has
+            // published a frame or failed (download included), so it covers the readout
+            // too; a failed stop leaves it set with exposure_failure_ latched, which must
+            // stay recoverable by the stop below.
+            if (exposure_active_.load() && exposure_failure_.empty()) {
+                throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
+                                      AlpacaError::InvalidOperation);
+            }
         }
         const std::string exposure_stop_error = stop_exposure_thread();
         if (!exposure_stop_error.empty()) {

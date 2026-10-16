@@ -159,7 +159,7 @@ public:
 
     int open_count{0};
     int close_count{0};
-    std::string gphoto_version{"2.5.31"};
+    std::string gphoto_version{"2.5.34"};
 
     // Canned result returned by capture_and_download / poll_bulb_file_and_download.
     vendor::gphoto::GPhotoCaptureResult capture_result;
@@ -167,6 +167,14 @@ public:
     // Records every set_toggle_value(handle, "bulb", on) call, in order, so
     // bulb-sequence tests can assert true-then-false-then-download ordering.
     std::vector<bool> bulb_toggle_history;
+
+    // Records every set_choice_value(handle, "eosremoterelease", value) call, in order (the Canon press/release
+    // bulb path), so tests can assert press-then-release ordering.
+    std::vector<std::string> remote_release_history;
+
+    // Widgets whose set_choice_value throws "I/O in progress", as a Canon body in mode dial B does for
+    // the shutter-speed widget (it owns the shutter and refuses the write).
+    std::vector<std::string> refuse_choice_writes;
 
     // drain_events() bookkeeping: how many hold slices the driver pumped and
     // their summed budget, so a test can pin that the bulb hold is spent
@@ -250,7 +258,16 @@ public:
     void set_choice_value(int handle, const std::string& name, const std::string& value) override {
         log_and_maybe_throw("set_choice_value");
         auto& cam = camera_for(handle);
+        for (const auto& refused : refuse_choice_writes) {
+            if (refused == name) {
+                throw AlpacaException("Failed to set " + name + " = " + value + ": I/O in progress",
+                                      AlpacaError::DriverException);
+            }
+        }
         cam.choice_value[name] = value;
+        if (name == "eosremoterelease") {
+            remote_release_history.push_back(value);
+        }
     }
 
     bool get_toggle_value(int handle, const std::string& name) override {
