@@ -1053,8 +1053,8 @@ int main() {
                 "Content-Type: application/json\r\nContent-Length: " +
                 std::to_string(cfg_body.size()) + "\r\n\r\n" + cfg_body);
             EXPECT(count_logged("register_device_from_config: device type \"cam\\x0aHTTP GET /forged\" is not "
-                                "catalog-recognized (Unknown device type: cam\\x0aHTTP GET /forged); falling "
-                                "through to the arm chain") == 1);
+                                "catalog-recognized (Unknown device type: cam\\x0aHTTP GET /forged); the device "
+                                "is answered as not supported") == 1);
             EXPECT(!raw_byte_logged('\n'));
         }
 
