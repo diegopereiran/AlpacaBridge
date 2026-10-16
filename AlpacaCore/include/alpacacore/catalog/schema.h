@@ -16,8 +16,8 @@
 //
 // Source policy (#380, PR #353): Source::Api rejects, Source::Persisted warns
 // and normalizes so the device still registers and stays editable. This matches
-// the router's reject_invalid_config() and normalize_persisted_connection_type(),
-// which this replaced.
+// the router's former reject_invalid_config() and
+// normalize_persisted_connection_type(), which this replaced.
 // Persisted normalization per failure class: missing required keeps the value
 // absent; out-of-enum substitutes the field default; out-of-range drops the
 // value to unset.
@@ -161,7 +161,7 @@ struct Schema {
     // Cross-field rules only. Optional. Must return the FULL config in
     // NormalizeResult::config (copy the input, then adjust); the result replaces
     // the config on success. A rejection's config is ignored. A NaN in a ranged
-    // numeric field is out of range, like the router's read_site_coordinates() did.
+    // numeric field is out of range, like the router's former read_site_coordinates() did.
     // Lifetime: display_name, build_option, vendor_label, fields and everything FieldRef points
     // at are borrowed, not copied. They must be static or outlive the catalog.
     std::function<NormalizeResult(const DeviceConfig&, Source)> normalize;

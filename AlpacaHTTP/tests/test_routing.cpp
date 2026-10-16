@@ -5334,8 +5334,8 @@ int main() {
             // sanitize keeps every declared field (ADR 0004: portPath / host
             // survive whatever the connection type), and a saved config's
             // cross-field refusal is logged through the catalog's "config
-            // normalized" wrapper, not reject_invalid_config()'s "will refuse
-            // to connect" text.
+            // normalized" wrapper, not the deleted reject_invalid_config()'s
+            // "will refuse to connect" text.
             bool catalog;
         };
         std::vector<Mount> mounts;
@@ -5398,15 +5398,14 @@ int main() {
                     {warned_serial, "Skipping persisted device"});
             }
 
-            // #508 item 1 (the six mount arms that go through
-            // reject_invalid_config): an empty portPath on serial is rejected
-            // by the API and, from a saved config, WARNED about and registered
-            // anyway. Contrast the arms further down that drop the entry.
-            // open-astro#744 rule 6: for a catalog vendor the saved config is
-            // still registered, but the WARN is the catalog's wrapper
+            // #508 item 1 (every mount, all catalog descriptors now): an empty
+            // portPath on serial is rejected by the API and, from a saved
+            // config, WARNED about and registered anyway. Contrast the entries
+            // further down that drop the entry.
+            // open-astro#744 rule 6: the WARN is the catalog's wrapper
             // ("Persisted <vendor> telescope N config normalized: Serial port
-            // path is required. The saved value is not used: ..."), not
-            // reject_invalid_config()'s "will refuse to connect" text.
+            // path is required. The saved value is not used: ..."), not the
+            // deleted reject_invalid_config()'s "will refuse to connect" text.
             pin("serial with empty portPath (#508 item 1, mount arm)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"serial","portPath":"")", site}), "Serial port path is required", "{}", true,
                 obj({R"("connectionType":"serial","portPath":"")", site}),
@@ -7968,8 +7967,8 @@ int main() {
         remove_device(router, "zzz", "focuser", 9261);
     }
 
-    // open-astro#664 Part C: the router consults the catalog before its arm
-    // chain. "zzz" has no arm, so every outcome below is the catalog path.
+    // open-astro#664 Part C: the router consults the catalog and has no vendor
+    // arm left, so every outcome below is the catalog path.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema_and_factory(router.catalog());
@@ -8026,7 +8025,7 @@ int main() {
         EXPECT(listed_entry(router, "Focuser", 9255).is_null());
 
         // API, out of range: normalize's rejection is the error message, the
-        // outcome reject_invalid_config() produces, and nothing registers.
+        // outcome the deleted reject_invalid_config() produced, and nothing registers.
         const auto rejected = api_attempt(
             router, nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":99})"),
             "Focuser");
@@ -8042,8 +8041,8 @@ int main() {
     }
     {
         // Persisted: the catalog consult's own warning text, one line per
-        // warning -- distinct from reject_invalid_config()'s "will refuse to
-        // connect" wording (that text is false here: normalize() has already
+        // warning -- distinct from the deleted reject_invalid_config()'s "will
+        // refuse to connect" wording (that text is false here: normalize() has already
         // substituted a usable value, so the device is not refusing anything).
         // The device registers anyway with the normalized config (count
         // dropped to its default, mode substituted) while configureddevices

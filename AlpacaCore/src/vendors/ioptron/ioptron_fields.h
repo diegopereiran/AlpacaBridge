@@ -57,7 +57,7 @@ inline const Field<std::int64_t> kIoptronTcpPort{
     .key = "tcpPort", .default_value = 4030, .applies_when = AppliesWhen{"connectionType", "network"}};
 inline const Field<std::int64_t> kIoptronResponseTimeoutMs{.key = "responseTimeoutMs", .default_value = 5000};
 // No min/max on the site fields: normalize words the range refusal itself (the
-// router's read_site_coordinates() text, kept), and an out-of-range saved value
+// text the router's former site check gave, kept), and an out-of-range saved value
 // is dropped there.
 inline const Field<double> kIoptronSiteLatitude{.key = "siteLatitude", .default_value = 0.0};
 inline const Field<double> kIoptronSiteLongitude{.key = "siteLongitude", .default_value = 0.0};
@@ -169,7 +169,7 @@ inline std::optional<std::string> ioptron_switch_refusal([[maybe_unused]] const 
 
 // ---- Telescope normalize ---------------------------------------------------
 
-// The router's read_site_coordinates() wording, kept: "siteLatitude 200 is out of
+// The wording of the router's former site check, kept: "siteLatitude 200 is out of
 // range: must be between -90 and 90 degrees". NaN fails the in-range test too.
 inline std::optional<std::string> ioptron_site_refusal(const Field<double>& field, const DeviceConfig& config,
                                                        double limit) {
