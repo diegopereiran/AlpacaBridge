@@ -39,6 +39,10 @@ jobs:
             echo "::warning::no nightly-build .deb to read: the snapshot leaves out the resolved Depends"
           fi
           ls -l nightly
+          # The nightly uploads its new .deb before it deletes the old one, so a push in between finds
+          # two. Their names carry a YYYYMMDDHHMM stamp: the steps below take the last in sorted order.
+          n=$(find nightly -name '*.deb' | wc -l)
+          if [ "${n}" -gt 1 ]; then echo "::warning::${n} nightly .deb files; using the newest"; fi
 
       # debian/control and ci.yml's apt tools are unpinned (>= or bare names), so report the
       # version apt would install today: debian:trixie (the image release.yml builds the .deb
@@ -46,7 +50,7 @@ jobs:
       - name: Resolve apt candidate versions
         run: |
           shopt -s nullglob; debs=(nightly/*.deb); deb_args=()
-          if [ "${#debs[@]}" -gt 0 ]; then deb_args=(--deb "${debs[0]}"); fi
+          if [ "${#debs[@]}" -gt 0 ]; then deb_args=(--deb "${debs[-1]}"); fi
           mapfile -t deb_pkgs < <(python3 scripts/dependency_snapshot.py --apt-packages debian "${deb_args[@]}")
           docker run --rm -e LC_ALL=C debian:trixie \
             sh -c 'apt-get update -qq >/dev/null && apt-cache policy "$@"' sh "${deb_pkgs[@]}" > debian-policy.txt
@@ -57,7 +61,7 @@ jobs:
       - name: Build snapshot
         run: |
           shopt -s nullglob; debs=(nightly/*.deb); deb_args=()
-          if [ "${#debs[@]}" -gt 0 ]; then deb_args=(--deb "${debs[0]}"); fi
+          if [ "${#debs[@]}" -gt 0 ]; then deb_args=(--deb "${debs[-1]}"); fi
           python3 scripts/dependency_snapshot.py --check
           python3 scripts/dependency_snapshot.py "${deb_args[@]}" --debian-policy debian-policy.txt \
             --ubuntu-policy ubuntu-policy.txt --output snapshot.json

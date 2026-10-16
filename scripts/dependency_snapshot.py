@@ -438,6 +438,18 @@ def installed_packages() -> dict[str, str]:
     return parse_installed(query)
 
 
+def read_deb_fields(path: Path) -> dict[str, str] | None:
+    """A built package's Depends and Recommends (dpkg-deb -f), or None with a warning when it cannot be
+    read, so a truncated nightly download costs the deb manifest rather than the whole snapshot."""
+    try:
+        out = subprocess.run(["dpkg-deb", "-f", str(path), "Depends", "Recommends"],
+                             check=True, capture_output=True, text=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"WARNING: cannot read {path} ({e}); leaving out the resolved Depends", file=sys.stderr)
+        return None
+    return parse_deb_fields(out)
+
+
 def parse_deb_fields(text: str) -> dict[str, str]:
     """Fields of `dpkg-deb -f`, with continuation lines (leading space) folded into their field."""
     out: dict[str, str] = {}
@@ -1018,6 +1030,10 @@ def self_test() -> int:
                                        deb_purl("libusb-1.0-0", None), deb_purl("adduser", None),
                                        deb_purl("network-manager", None), deb_purl("polkitd", None)}, dm
         assert all(x["scope"] == "runtime" and x["relationship"] == "direct" for x in dm["resolved"].values())
+        # A .deb that cannot be read (a truncated download; no dpkg-deb here) is a warning, not a
+        # failure: the snapshot is then submitted without the deb manifest, as with no nightly at all.
+        (r / "broken.deb").write_bytes(b"not an ar archive")
+        assert read_deb_fields(r / "broken.deb") is None
         nodeb = build_snapshot(r, "a" * 40, "refs/heads/main", "1", "2026-01-01T00:00:00Z")
         assert DEB_MANIFEST not in nodeb["manifests"] and nodeb["job"]["correlator"] == "dependency-submission"
         doc = build_spdx(r, deb, "x.deb", "f" * 64, "2026-01-01T00:00:00Z", "https://example.test/sbom")
@@ -1199,10 +1215,7 @@ def main() -> int:
     a = ap.parse_args()
     if a.self_test:
         return self_test()
-    deb = None
-    if a.deb:
-        deb = parse_deb_fields(subprocess.run(["dpkg-deb", "-f", a.deb, "Depends", "Recommends"],
-                                              check=True, capture_output=True, text=True).stdout)
+    deb = read_deb_fields(Path(a.deb)) if a.deb else None
     if a.apt_packages:
         print("\n".join(apt_packages(ROOT, a.apt_packages, deb)))
         return 0
