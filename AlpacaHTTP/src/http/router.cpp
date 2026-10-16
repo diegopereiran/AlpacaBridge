@@ -8199,7 +8199,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
         // Unknown device_type_str: answer not supported.
         util::log_debug("register_device_from_config: device type \"" + util::escape_for_log(device_type_str) +
                         "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
-                        "); falling through to the arm chain");
+                        "); the device is answered as not supported");
     }
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
@@ -8403,7 +8403,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
         // Unknown device_type: only the vendor-agnostic keys below are kept.
         util::log_debug("sanitize_device_config: device type \"" + util::escape_for_log(device_type) +
                         "\" is not catalog-recognized (" + util::escape_for_log(ex.what()) +
-                        "); falling through to the vendor-specific chain");
+                        "); only the vendor-agnostic keys are kept");
     }
 
     copy_if_present("responseTimeoutMs");
