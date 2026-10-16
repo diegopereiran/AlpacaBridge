@@ -5049,11 +5049,13 @@ int main() {
             with_tail(
                 R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":115200,"mountIndex":1,"host":"h")")
                 .c_str(),
-            with_tail(R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":115200,"mountIndex":1)")
+            with_tail(
+                R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":115200,"mountIndex":1,"host":"h")")
                 .c_str());
+        // The catalog sanitize keeps every declared field whatever the connection type (ADR 0004).
         add("ioptron", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2,"portPath":"/dev/x"})",
-            R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2})");
+            R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2,"portPath":"/dev/x"})");
         // #659: the auto arms construct without a scan, so they register here.
         add("ioptron", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
             R"({"connectionType":"auto","mountIndex":1})");
@@ -5340,7 +5342,7 @@ int main() {
         const char* const kSite = R"("siteLatitude":39.7392,"siteLongitude":-104.9903)";
         const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", false});
+        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true});
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
         mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true});
@@ -5472,29 +5474,28 @@ int main() {
             {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        // The router-owned arm still words both the API refusal and the saved
-        // config's WARN through read_site_coordinates(): short numbers in both.
+        // The ioptron schema's normalize words both the API refusal and the saved
+        // config's WARN with the text read_site_coordinates() had: short numbers in both.
         pin("siteLatitude 200 (read_site_coordinates)", "ioptron", "telescope", "Telescope",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":151.215297})",
             "siteLatitude 200 is out of range: must be between -90 and 90 degrees", "{}", true,
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLongitude":151.215297})",
-            {"siteLatitude 200 is out of range: must be between -90 and 90 degrees"}, {"200.000000"});
+            {"config normalized: siteLatitude 200 is out of range: must be between -90 and 90 degrees"},
+            {"200.000000"});
 #endif
 
-        // #508 item 1, the arms that still DROP a saved entry on an empty portPath
-        // instead of registering it with a WARN (only the iOptron filterwheel now): it is rejected by the API and
-        // is NOT registered after a restart. It is still listed, as a
+        // #508 item 1, the factories that still DROP a saved entry on an empty portPath
+        // instead of registering it with a WARN (the iOptron filterwheel): it is rejected by
+        // the API and is NOT registered after a restart. It is still listed, as a
         // "<vendor> (failed to load)" row (LoadError true, lower-case
         // DeviceType), which is how the web UI can show and edit it.
         const std::string kPortRequired = "portPath is required when connectionType is 'serial' (or use 'auto').";
-        const auto drop_pin = [&](const std::string& vendor, const std::string& device_type,
-                                  const std::string& alpaca_type, const std::string& message) {
-            pin("serial with empty portPath is DROPPED (#508 item 1)", vendor, device_type, alpaca_type,
-                R"({"connectionType":"serial","portPath":""})", message, "{}", false, "{}",
-                {"Skipping persisted device: " + message}, {});
-        };
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        drop_pin("ioptron", "filterwheel", "FilterWheel", kPortRequired);
+        // The catalog turns the refusal into a normalize warning for a saved config, and the
+        // factory then throws the same text, so the wheel is dropped as before.
+        pin("serial with empty portPath is DROPPED (#508 item 1)", "ioptron", "filterwheel", "FilterWheel",
+            R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
+            {"config normalized: " + kPortRequired}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
         // The catalog turns the refusal into a normalize warning for a saved config and the
@@ -7484,8 +7485,8 @@ int main() {
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
-    // read_site_coordinates() still words the refusal for the router-owned
-    // vendors: the numbers print in their short form, not std::to_string's
+    // The iOptron schema's normalize words the refusal with the text the router's
+    // read_site_coordinates() had: the numbers print in their short form, not std::to_string's
     // "200.000000" / "-90.000000".
     {
         alpacahttp::Router router;
@@ -7769,7 +7770,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 34);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 39);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7851,6 +7852,25 @@ int main() {
 #else
                 entry["available"] = false;
 #endif
+            }
+            if (entry.value("vendor", "") == "ioptron") {
+                // The iCAM camera is built by the Player One option; the other four follow the
+                // iOptron option (the PowerBox switch is registered without libgpiod too and
+                // refuses with its "not built" text).
+                const std::string type = entry.value("deviceType", "");
+                if (type == "camera") {
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+                    entry["available"] = true;
+#else
+                    entry["available"] = false;
+#endif
+                } else {
+#ifdef ALPACACORE_ENABLE_IOPTRON
+                    entry["available"] = true;
+#else
+                    entry["available"] = false;
+#endif
+                }
             }
             if (entry.value("vendor", "") == "gemini") {
 #ifdef ALPACACORE_ENABLE_GEMINI
