@@ -1137,7 +1137,7 @@ bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
 
 void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
     std::string message = context + ": " + alpacahttp::util::escape_for_log(e.what(), 4096);
-    if (is_expected_not_implemented(e) || is_expected_validation_error(e)) {
+    if (is_expected_not_implemented(e) || is_expected_validation_error(e) || e.is_asked_too_early()) {
         alpacahttp::util::log_debug(message);
     } else {
         alpacahttp::util::log_error(message);
