@@ -5,3 +5,7 @@
 ### Added (tests)
 
 - **OnStep restore-flag cases** (issue #1230): a synchronous GOTO then a foreign slew, a synchronous GOTO that loses tracking, `Tracking = false` during a GOTO, and `AbortSlew` with tracking kept or lost, each followed where it matters by a foreign slew that ends untracked, over the loopback fake mount.
+
+### Added (docs)
+
+- **OnStep: ConformU report for the TeSeek HM-17** (OnStep): `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`, ConformU 4.5.2-rc.1 (build 56111) on the ASIAIR Plus against localhost, 0 errors, 0 issues and no timing findings; site coordinates rounded to the nearest degree. The four PulseGuide North/South issues at HA ±9 that earlier runs showed are gone: ConformU 4.5.2 keeps its test declinations within ±65° (ASCOMInitiative/ConformU#35). `SUPPORTED-DRIVERS.md` gains the row, and the README count goes to 86.
