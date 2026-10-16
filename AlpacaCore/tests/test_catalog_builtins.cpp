@@ -1004,7 +1004,7 @@ TEST_CASE(
     // as "serial" (never "auto", #380: a saved unknown type must not
     // auto-probe) with a warning that keeps the arm's two fragments, which
     // the router wraps as "... config normalized: <warning>. ...".
-    for (const char* type : {"carrier-pigeon", "Network", "SERIAL"}) {
+    for (const char* type : {"carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config = skywatcher_serial_with_site();
         config.set("connectionType", std::string{type});
@@ -1569,7 +1569,7 @@ TEST_CASE("Builtin catalog - OnStep normalize accepts '', auto and serial, and r
     no_site.set("connectionType", std::string{"auto"});
     CHECK_FALSE(catalog.normalize(kOnStepKey, no_site, Source::Api).rejection.has_value());
 
-    for (const char* type : {"network", "carrier-pigeon", "SERIAL"}) {
+    for (const char* type : {"network", "carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
@@ -1748,7 +1748,7 @@ TEST_CASE("Builtin catalog - Celestron normalize accepts '', auto, serial and ne
         CHECK(persisted.warnings.empty());
     }
 
-    for (const char* type : {"carrier-pigeon", "SERIAL"}) {
+    for (const char* type : {"carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
@@ -1999,7 +1999,7 @@ TEST_CASE("Builtin catalog - SynScan normalize accepts '', auto, serial and netw
         CHECK(persisted.warnings.empty());
     }
 
-    for (const char* type : {"carrier-pigeon", "SERIAL"}) {
+    for (const char* type : {"carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
@@ -3009,14 +3009,15 @@ TEST_CASE("Builtin catalog - WandererAstro sanitize keeps the declared fields pe
 }
 
 // ---------------------------------------------------------------------------
-// ZWO telescope, EFW filter wheel, EAF focuser, CAA rotator and the switch
-// (dew heater, ASIAIR Pro / Plus CM4, ASIAIR Plus RK3568). The camera is not a
-// catalog descriptor yet. Every factory constructs without touching the SDK or
-// the bus.
+// ZWO telescope, camera, EFW filter wheel, EAF focuser, CAA rotator and the switch
+// (dew heater, ASIAIR Pro / Plus CM4, ASIAIR Plus RK3568). Every create-based
+// factory constructs without touching the SDK or the bus; the camera binds
+// through its bind hook (test_zwo_camera_catalog.cpp).
 // ---------------------------------------------------------------------------
 
 namespace {
 const DeviceKey kZwoTelescopeKey{"zwo", DeviceType::Telescope};
+const DeviceKey kZwoCameraKey{"zwo", DeviceType::Camera};
 const DeviceKey kZwoWheelKey{"zwo", DeviceType::FilterWheel};
 const DeviceKey kZwoFocuserKey{"zwo", DeviceType::Focuser};
 const DeviceKey kZwoRotatorKey{"zwo", DeviceType::Rotator};
@@ -3040,18 +3041,26 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices 
         for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
         return keys;
     };
-    for (const DeviceKey& key : {kZwoTelescopeKey, kZwoWheelKey, kZwoFocuserKey, kZwoRotatorKey, kZwoSwitchKey}) {
+    for (const DeviceKey& key :
+         {kZwoTelescopeKey, kZwoCameraKey, kZwoWheelKey, kZwoFocuserKey, kZwoRotatorKey, kZwoSwitchKey}) {
         const DescriptorView* v = find_view(views, key);
         REQUIRE(v != nullptr);
         CHECK(v->build_option == "ALPACACORE_ENABLE_ZWO");
         CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+        // A stored selector normalize drops is forgotten in the file (it replaces a router vendor test).
+        CHECK(v->forget_dropped_selectors);
     }
-    // The camera is still a router arm.
-    CHECK(find_view(views, DeviceKey{"zwo", DeviceType::Camera}) == nullptr);
+    // The camera's selectors are its own: unlike the dew heater switch's, they carry no applies_when.
+    CHECK(keys_of(find_view(views, kZwoCameraKey)) ==
+          std::vector<std::string>{"cameraIndex", "cameraId", "serialNumber", "cameraName", "uniqueId"});
+    CHECK_FALSE(find_field(find_view(views, kZwoCameraKey)->fields, "cameraIndex")->applies_when.has_value());
+    CHECK(find_field(find_view(views, kZwoCameraKey)->fields, "cameraIndex")->role == Role::EnumerationIndex);
+    CHECK(find_field(find_view(views, kZwoCameraKey)->fields, "cameraId")->role == Role::DeviceId);
 
     CHECK(keys_of(find_view(views, kZwoWheelKey)) ==
           std::vector<std::string>{"filterwheelIndex", "filterwheelId", "filterNames"});
-    CHECK(keys_of(find_view(views, kZwoFocuserKey)) == std::vector<std::string>{"focuserIndex", "focuserId"});
+    CHECK(keys_of(find_view(views, kZwoFocuserKey)) ==
+          std::vector<std::string>{"focuserIndex", "focuserId", "maxStep"});
     CHECK(keys_of(find_view(views, kZwoRotatorKey)) == std::vector<std::string>{"rotatorIndex", "rotatorId"});
     CHECK(keys_of(find_view(views, kZwoSwitchKey)) == std::vector<std::string>{"switchType", "cameraIndex", "cameraId",
                                                                                "gpioChip", "devicePath",
@@ -3064,11 +3073,45 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices 
                       std::int64_t{4030}));
 }
 
+// open-astro#1152. Falsified by: zwo_fields.h kZwoFocuserMaxStep dropping .min = 1 (maxStep 0 is accepted)
+// or filling a default when the key is absent (the persisted config gains maxStep).
+TEST_CASE("Builtin catalog - the ZWO focuser maxStep is optional and range-checked", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig absent;
+    absent.set("focuserIndex", std::int64_t{0});
+    const auto unset = catalog.normalize(kZwoFocuserKey, absent, Source::Persisted);
+    CHECK(unset.warnings.empty());
+    CHECK_FALSE(unset.config.has("maxStep"));  // absent stays absent: no default is written
+    CHECK_FALSE(catalog.normalize(kZwoFocuserKey, absent, Source::Api).rejection.has_value());
+
+    for (const std::int64_t bad : {std::int64_t{0}, std::int64_t{-5}, std::int64_t{2000001}}) {
+        INFO(bad);
+        DeviceConfig config = absent;
+        config.set("maxStep", bad);
+        const auto api = catalog.normalize(kZwoFocuserKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "maxStep is out of range (min 1) (max 2000000)");
+        const auto persisted = catalog.normalize(kZwoFocuserKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.config.has("maxStep"));  // dropped to unset
+    }
+    for (const std::int64_t good : {std::int64_t{1}, std::int64_t{60000}, std::int64_t{2000000}}) {
+        INFO(good);
+        DeviceConfig config = absent;
+        config.set("maxStep", good);
+        const auto api = catalog.normalize(kZwoFocuserKey, config, Source::Api);
+        CHECK_FALSE(api.rejection.has_value());
+        CHECK(api.config.has("maxStep"));
+    }
+}
+
 TEST_CASE("Builtin catalog - register_builtin_factories makes the ZWO devices available only when built",
           "[catalog][zwo][unit]") {
     const DeviceCatalog catalog = builtin_catalog();
     const auto views = catalog.describe();
-    for (const DeviceKey& key : {kZwoTelescopeKey, kZwoWheelKey, kZwoFocuserKey, kZwoRotatorKey, kZwoSwitchKey}) {
+    for (const DeviceKey& key :
+         {kZwoTelescopeKey, kZwoCameraKey, kZwoWheelKey, kZwoFocuserKey, kZwoRotatorKey, kZwoSwitchKey}) {
         const DescriptorView* v = find_view(views, key);
         REQUIRE(v != nullptr);
 #ifdef ALPACACORE_ENABLE_ZWO
@@ -3153,6 +3196,7 @@ TEST_CASE("Builtin catalog - ZWO normalize keeps the arms' refusals and texts", 
     CHECK(refusal_of(kZwoFocuserKey, DeviceConfig{}) == "ZWO EAF focuser requires focuserIndex or focuserId");
     CHECK(refusal_of(kZwoRotatorKey, DeviceConfig{}) == "ZWO rotator requires rotatorIndex or rotatorId");
     CHECK(refusal_of(kZwoSwitchKey, DeviceConfig{}) == "ZWO dew heater switch requires cameraIndex or cameraId");
+    CHECK(refusal_of(kZwoCameraKey, DeviceConfig{}) == "ZWO camera requires cameraIndex or cameraId");
 
     DeviceConfig index;
     index.set("filterwheelIndex", std::int64_t{0});
@@ -3257,6 +3301,20 @@ TEST_CASE("Builtin catalog - ZWO sanitize keeps the declared fields per device t
     CHECK(kept_wheel.has("filterNames"));
     CHECK_FALSE(kept_wheel.has("focuserIndex"));
 
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    camera.set("cameraId", std::int64_t{7});
+    camera.set("serialNumber", std::string{"0c190e111d020900"});
+    camera.set("cameraName", std::string{"ZWO ASI533MC Pro"});
+    camera.set("uniqueId", std::string{"ZWO_UID_00112233445566ff"});
+    camera.set("switchType", std::string{"asiair"});  // a switch key, not a camera one
+    const DeviceConfig kept_camera = catalog.sanitize(kZwoCameraKey, camera);
+    for (const char* key : {"cameraIndex", "cameraId", "serialNumber", "cameraName", "uniqueId"}) {
+        INFO(key);
+        CHECK(kept_camera.has(key));
+    }
+    CHECK_FALSE(kept_camera.has("switchType"));
+
     DeviceConfig scope;
     scope.set("connectionType", std::string{"network"});
     scope.set("host", std::string{"192.168.4.1"});
@@ -3289,4 +3347,133 @@ TEST_CASE("Builtin catalog - ZWO sanitize keeps the declared fields per device t
     CHECK((*kept_ports)[0].has("gpio"));
     CHECK((*kept_ports)[0].has("pwm"));
     CHECK_FALSE((*kept_ports)[0].has("secretish"));
+}
+
+TEST_CASE("Builtin catalog - ZWO camera identity strings and selector rule", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig by_index;
+    by_index.set("cameraIndex", std::int64_t{1});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, by_index, Source::Api).rejection.has_value());
+    // A serial or a model name alone also names a camera, as the arm allowed.
+    DeviceConfig by_serial;
+    by_serial.set("serialNumber", std::string{"0c190e111d020900"});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, by_serial, Source::Api).rejection.has_value());
+    DeviceConfig by_name;
+    by_name.set("cameraName", std::string{"ZWO ASI533MC Pro"});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, by_name, Source::Api).rejection.has_value());
+    // The sentinel -1 is "not set", so it is not a selector.
+    DeviceConfig sentinel;
+    sentinel.set("cameraIndex", std::int64_t{-1});
+    sentinel.set("cameraId", std::int64_t{-1});
+    CHECK(catalog.normalize(kZwoCameraKey, sentinel, Source::Api).rejection.value_or("") ==
+          "ZWO camera requires cameraIndex or cameraId");
+    // A saved entry without a selector registers anyway, so it stays listed and editable.
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, DeviceConfig{}, Source::Persisted).rejection.has_value());
+
+    struct Bad {
+        const char* field;
+        const char* value;
+    };
+    const Bad bad[] = {{"serialNumber", "not-hex!"},
+                       {"serialNumber", "0c19\nforged"},
+                       {"cameraName", "ZWO\nASI"},
+                       {"cameraName", "ZWO\x7f"},
+                       {"uniqueId", "ZWO_UID_\x01"}};
+    for (const Bad& b : bad) {
+        INFO(b.field << "=" << b.value);
+        DeviceConfig config = by_index;
+        config.set(b.field, std::string{b.value});
+        const auto api = catalog.normalize(kZwoCameraKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == std::string("Invalid value for ") + b.field);
+
+        // A saved entry loses the bad key (to be relearned) and still registers.
+        const auto saved = catalog.normalize(kZwoCameraKey, config, Source::Persisted);
+        CHECK_FALSE(saved.rejection.has_value());
+        CHECK_FALSE(saved.config.has(b.field));
+        CHECK(saved.config.has("cameraIndex"));
+        REQUIRE(saved.warnings.size() == 1);
+        CHECK(saved.warnings.front().find(b.field) == 0);
+    }
+
+    // 64 hex digits are the limit; 65 are refused.
+    DeviceConfig long_serial = by_index;
+    long_serial.set("serialNumber", std::string(64, 'a'));
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, long_serial, Source::Api).rejection.has_value());
+    long_serial.set("serialNumber", std::string(65, 'a'));
+    CHECK(catalog.normalize(kZwoCameraKey, long_serial, Source::Api).rejection.has_value());
+
+    // The selector range is -1 to INT_MAX and keeps the arm's text, cameraId read before cameraIndex.
+    struct Range {
+        const char* field;
+        std::int64_t value;
+    };
+    for (const Range& r : {Range{"cameraIndex", std::int64_t{1} << 32}, Range{"cameraId", -2},
+                           Range{"cameraIndex", std::int64_t{std::numeric_limits<int>::max()} + 1}}) {
+        INFO(r.field << "=" << r.value);
+        DeviceConfig out_of_range;
+        out_of_range.set(r.field, r.value);
+        const auto api = catalog.normalize(kZwoCameraKey, out_of_range, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection ==
+              std::string("Invalid value for ") + r.field + ": expected an integer from -1 to 2147483647");
+        // A saved entry loses the selector and still registers.
+        const auto saved = catalog.normalize(kZwoCameraKey, out_of_range, Source::Persisted);
+        CHECK_FALSE(saved.rejection.has_value());
+        CHECK_FALSE(saved.config.has(r.field));
+        REQUIRE(saved.warnings.size() == 1);
+        CHECK(saved.warnings.front().find(r.field) == 0);
+    }
+    DeviceConfig both_bad;
+    both_bad.set("cameraIndex", std::int64_t{-2});
+    both_bad.set("cameraId", std::int64_t{-2});
+    CHECK(catalog.normalize(kZwoCameraKey, both_bad, Source::Api).rejection.value_or("").find("cameraId") !=
+          std::string::npos);
+    // INT_MAX itself is a valid selector.
+    DeviceConfig max_index;
+    max_index.set("cameraIndex", std::int64_t{std::numeric_limits<int>::max()});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, max_index, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - connectionType is folded to lower case (#508 item 2)", "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const auto folded = [&](const char* given, Source source, const char* extra_key = nullptr,
+                            const char* extra_value = nullptr) {
+        DeviceConfig in;
+        in.set("connectionType", std::string{given});
+        if (extra_key) in.set(extra_key, std::string{extra_value});
+        return catalog.normalize(kSynScanKey, in, source);
+    };
+    const auto stored = [](const NormalizeResult& r) {
+        const ConfigValue* v = r.config.find_value("connectionType");
+        REQUIRE(v != nullptr);
+        return std::get<std::string>(*v);
+    };
+
+    for (const Source source : {Source::Api, Source::Persisted}) {
+        const auto network = folded("Network", source, "host", "192.0.2.60");
+        CHECK_FALSE(network.rejection.has_value());
+        CHECK(network.warnings.empty());
+        CHECK(stored(network) == "network");
+
+        const auto serial = folded("SERIAL", source, "portPath", "/dev/ttyUSB9");
+        CHECK_FALSE(serial.rejection.has_value());
+        CHECK(serial.warnings.empty());
+        CHECK(stored(serial) == "serial");
+
+        const auto autod = folded("Auto", source);
+        CHECK_FALSE(autod.rejection.has_value());
+        CHECK(autod.warnings.empty());
+        CHECK(stored(autod) == "auto");
+    }
+
+    // The folded form still gets its endpoint rule, and an unknown value is still unknown.
+    const auto no_host = folded("Network", Source::Api);
+    REQUIRE(no_host.rejection.has_value());
+    CHECK(*no_host.rejection == "Host IP address is required");
+    CHECK(folded("Carrier-Pigeon", Source::Api).rejection.has_value());
 }

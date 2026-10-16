@@ -1661,19 +1661,7 @@ TEST_CASE("SkyWatcher async - superseded dispatch neither strands nor clobbers t
     driver->set_connected(false);
 }
 
-// QUARANTINED (issue #586): tagged [!mayfail] so it still runs and reports
-// but cannot fail the gate. It exposes a REAL driver defect, not a flaky
-// test -- issue #535: an in-flight SetTracking(false) is invisible to the
-// MoveAxis(0) restore task, so the client's call throws and the mount is
-// left tracking. Measured at 02346b6f on arm64 Debian 13: 10 failures in
-// 30 standalone runs, 5 in 30 under load -- but 0 in three full
-// `ctest -j 4` suite runs, so a filtered or sharded invocation is what
-// hits it. Those figures are for the DEFAULT build type (9/30 on a
-// re-measure); a CMAKE_BUILD_TYPE=Debug build saw 0/30, so reproduce at
-// the default type before concluding anything about #535.
-// REMOVE THIS TAG when #535 is fixed.
-TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking command",
-          "[skywatcher][async][!mayfail]") {
+TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking command", "[skywatcher][async]") {
     // PR #216 round-5 finding: the MoveAxis(0) background restore-tracking
     // task must not re-start tracking that a concurrent SetTracking(false)
     // stopped while the task was polling the deceleration.
@@ -1694,6 +1682,51 @@ TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking c
 
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(10000)));
     clock.advance(std::chrono::milliseconds(1500));  // mount motion only: a restore would have started by now
+    REQUIRE_FALSE(driver->get_tracking());
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 5000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - MoveAxis stop restore tail running inside an in-flight SetTracking(false)",
+          "[skywatcher][async]") {
+    // Issue #535, interleaved by hand. The mount's braking ramp ends at 800 ms
+    // (a second stop does not extend it). The restore task polls on 50 ms
+    // multiples; SetTracking(false) starts at 225 ms, so its polls fall on
+    // 25 ms offsets and it is parked, mutex released, when the restore task
+    // sees the axis stopped at 800 ms. The restore tail runs inside that window.
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(0, 2.0); }, std::chrono::milliseconds(5000)));
+    driver->move_axis(0, 0.0);
+    REQUIRE(advance_through(clock, std::chrono::milliseconds(225), std::chrono::milliseconds(25)));
+
+    std::atomic<bool> finished{false};
+    std::string thrown;
+    std::thread caller([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const std::exception& e) {
+            thrown = e.what();
+        }
+        finished = true;
+    });
+    // Step only once the caller is parked beside the restore task and the
+    // poller, so its polls keep the 25 ms offset from the restore task's.
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));
+    bool stepped = true;
+    for (int steps = 0; steps < 80 && !finished.load() && stepped; ++steps) {
+        stepped = step_clock(clock, std::chrono::milliseconds(25));
+    }
+    const bool done = wait_until([&] { return finished.load(); }, 2000);
+    caller.join();
+    REQUIRE(done);
+    CHECK(thrown.empty());
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(10000)));
+    elapse(clock, std::chrono::milliseconds(1500));
     REQUIRE_FALSE(driver->get_tracking());
     REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 5000));
     driver->set_connected(false);
@@ -3475,9 +3508,9 @@ TEST_CASE("SkyWatcher async - a rate check past its last wait does not resend af
     // the second read has been answered, so ":f" is the transaction in flight.
     const int served_before = mount.transactions_served();
     mount.set_reply_latency(std::chrono::milliseconds(150));
-    // A watcher stops tracking the instant the second read is answered, on
-    // real time: the clock-driving loop below reacts too slowly to land inside
-    // the held ":f" read.
+    // A watcher stops tracking as soon as the second read is counted (the fake
+    // counts a reply just before it sends it), on real time: the clock-driving loop below reacts too slowly to land
+    // inside the held ":f" read.
     std::atomic<bool> stopped{false};
     std::thread watcher([&] {
         const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -4268,9 +4301,10 @@ TEST_CASE("SkyWatcher async - the goto aim-ahead is measured, not the seeded con
     //
     // What this case does NOT claim is that the measured estimate lands the
     // mount BETTER. On this fake it does not: frozen residuals run about
-    // -0.8 arcsec and measured ones about -3 to -13, because the fake has no
-    // equivalent of the real MC's ~3 s floor on even a 350-count goto, which
-    // is the whole reason the constants were wrong on an EQM-35. The evidence
+    // -0.8 arcsec and measured ones about -3 to -13, because the fake's goto
+    // and restart timing is not the real MC's (the EQM-35 measures ~0.26 s for
+    // a 259-count goto, see kGotoRampSeconds); the gap is not shown to be a
+    // missing floor, and the constants were wrong on an EQM-35. The evidence
     // that measuring helps is the hardware ConformU run in this PR
     // ("SlewToCoordinates 10.8 arc seconds away" -> clean), not this file.
     // Pinned here: that the aim-ahead is driven by something that moves.
@@ -4982,13 +5016,12 @@ TEST_CASE("FakeSkyWatcherMount - a steady reply latency is paid by every transac
     const int before = mount.transactions_served();
     mount.set_reply_latency(std::chrono::milliseconds(40));
     const auto slow = timed_reads(5);
-    // The count follows the send, so the last reply can reach the client first.
-    CHECK(wait_until([&] { return mount.transactions_served() - before == 5; }, 2000));
+    CHECK(mount.transactions_served() - before == 5);
     CHECK(slow >= std::chrono::milliseconds(5 * 40));
 
     mount.set_reply_latency(std::chrono::milliseconds(0));
     const auto fast = timed_reads(5);
-    CHECK(wait_until([&] { return mount.transactions_served() - before == 10; }, 2000));
+    CHECK(mount.transactions_served() - before == 10);
     CHECK(fast < std::chrono::milliseconds(5 * 40));
     proto.disconnect();
 }

@@ -42,6 +42,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -200,12 +201,20 @@ nlohmann::json listed_config(alpacahttp::Router& router, const std::string& devi
     return entry.is_null() ? nlohmann::json() : entry.value("Config", nlohmann::json());
 }
 
-// The "<vendor> (failed to load)" row configureddevices lists for a persisted
-// entry that did not register (LoadError true, lower-case DeviceType).
+// The "<vendor> (failed to load)" row GET /management/v1/faileddevices lists
+// for a persisted entry that did not register (LoadError true, lower-case
+// DeviceType). configureddevices never lists it (open-astro#576).
 nlohmann::json listed_failed_entry(alpacahttp::Router& router, const std::string& lower_type, int device_number) {
-    const auto entry = listed_entry(router, lower_type, device_number);
-    if (!entry.is_null() && entry.value("LoadError", false)) {
-        return entry;
+    const auto listed =
+        nlohmann::json::parse(route_request(router, "GET", "/management/v1/faileddevices").body(), nullptr, false);
+    if (listed.is_discarded() || !listed.contains("Value") || !listed["Value"].is_array()) {
+        return nlohmann::json();
+    }
+    for (const auto& entry : listed["Value"]) {
+        if (entry.value("LoadError", false) && entry.value("DeviceType", "") == lower_type &&
+            entry.value("DeviceNumber", -1) == device_number) {
+            return entry;
+        }
     }
     return nlohmann::json();
 }
@@ -232,7 +241,7 @@ ApiAttempt api_attempt(alpacahttp::Router& router, const nlohmann::json& posted,
 struct PersistedAttempt {
     bool listed = false;          // REGISTERED: listed under its Alpaca type name, no LoadError
     nlohmann::json config;        // Config of the registered device
-    bool failed_listed = false;   // not registered, but listed as "<vendor> (failed to load)"
+    bool failed_listed = false;   // not registered, but listed by faileddevices as "<vendor> (failed to load)"
     nlohmann::json failed_entry;  // that row (DeviceType lower-case, LoadError true, sanitized Config)
     std::string name;             // DeviceName of the registered device (what the factory was handed)
     std::vector<std::string> warnings;
@@ -1193,9 +1202,9 @@ int main() {
     EXPECT(request.path() == "/api/v1/camera/0/canconnect");
 
     // Test query parameters
-    test_request = "GET /api/v1/mount/0/slewto?RightAscension=1.5&Declination=-20.3 HTTP/1.1\r\n\r\n";
+    test_request = "PUT /api/v1/telescope/0/slewtocoordinates?RightAscension=1.5&Declination=-20.3 HTTP/1.1\r\n\r\n";
     EXPECT(request.parse(test_request));
-    EXPECT(request.path() == "/api/v1/mount/0/slewto");
+    EXPECT(request.path() == "/api/v1/telescope/0/slewtocoordinates");
     EXPECT(request.has_query_param("RightAscension"));
     EXPECT(request.has_query_param("Declination"));
 
@@ -2517,6 +2526,9 @@ int main() {
                 route_request(router, "POST", "/management/v1/configuredevice", body.dump()).body());
             EXPECT(result.value("ErrorNumber", 0) == 0x401);
             EXPECT(result.value("ErrorMessage", std::string()).find(field) != std::string::npos);
+            // The camera keeps the arm's text for an out-of-range selector.
+            EXPECT(result.value("ErrorMessage", std::string()) ==
+                   std::string("Invalid value for ") + field + ": expected an integer from -1 to 2147483647");
         }
         for (const auto& [field, value, other_field] :
              {std::tuple{"cameraIndex", 0.0, "cameraId"}, std::tuple{"cameraId", 7.0, "cameraIndex"}}) {
@@ -2667,6 +2679,41 @@ int main() {
                 remove_device(second_startup, "zwo", selector.device_type, device_number++);
             }
         }
+    }
+    {
+        // case: zwo persisted selectors that are not integers are dropped and the entry still loads
+        // The arm dropped a stored "1" or true or 1.5 and registered the camera; the typed read
+        // refuses the wrong type, so the router drops the key first and forgets it in the file.
+        struct BadSelector {
+            const char* device_type;
+            const char* listed_type;
+            const char* field;
+        };
+        constexpr BadSelector selectors[]{{"camera", "Camera", "cameraIndex"},
+                                          {"camera", "Camera", "cameraId"},
+                                          {"filterwheel", "FilterWheel", "filterwheelIndex"},
+                                          {"focuser", "Focuser", "focuserId"},
+                                          {"rotator", "Rotator", "rotatorIndex"},
+                                          {"switch", "Switch", "cameraId"}};
+        int device_number = 9680;
+        for (const auto& selector : selectors) {
+            for (const nlohmann::json& bad : {nlohmann::json("1"), nlohmann::json(true), nlohmann::json(1.5)}) {
+                nlohmann::json entry = {
+                    {"vendor", "zwo"}, {"deviceType", selector.device_type}, {"deviceNumber", device_number++}};
+                entry[selector.field] = bad;
+                const auto persisted = persisted_attempt(entry, selector.listed_type);
+                EXPECT(persisted.listed);
+                EXPECT(!persisted.config.contains(selector.field));
+                EXPECT(any_warning_contains(persisted.warnings, selector.field));
+            }
+        }
+        // An API request with such a selector is still refused.
+        const nlohmann::json api_body = {
+            {"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", device_number}, {"cameraIndex", "1"}};
+        const auto refused = nlohmann::json::parse(
+            route_request(router, "POST", "/management/v1/configuredevice", api_body.dump()).body());
+        EXPECT(refused.value("ErrorNumber", 0) == 0x401);
+        EXPECT(refused.value("ErrorMessage", std::string()).find("cameraIndex") != std::string::npos);
     }
     {
         // case: zwo camera identity keys round trip and refuse control bytes (#914)
@@ -2872,6 +2919,96 @@ int main() {
         // are not stored and differ on the second load) or clearing only the serial of a pair.
         // Falsified by: making the Persisted arm of check_identity_field or the duplicate block return
         // false (the entry would be skipped and not listed).
+    }
+    {
+        // case: zwo camera stored entry with one wrong-typed field still claims its uniqueId
+        // A hand-edited numeric serialNumber fails that entry's own load, but must not hide
+        // its uniqueId from the duplicate check: the API refuses a second camera reusing it.
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        {
+            std::ofstream out(file, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9716},
+                                           {"cameraIndex", 0},
+                                           {"serialNumber", 5},
+                                           {"uniqueId", "ZWO_UID_00112233445566aa"}}})
+                       .dump();
+        }
+        alpacahttp::Router stored;
+        EXPECT(listed_entry(stored, "Camera", 9716).is_null());
+        const nlohmann::json body = {{"vendor", "zwo"},
+                                     {"deviceType", "camera"},
+                                     {"deviceNumber", 9717},
+                                     {"cameraIndex", 1},
+                                     {"uniqueId", "ZWO_UID_00112233445566aa"}};
+        const auto reply =
+            nlohmann::json::parse(route_request(stored, "POST", "/management/v1/configuredevice", body.dump()).body());
+        EXPECT(reply.value("ErrorNumber", 0) != 0);
+        EXPECT(reply.value("ErrorMessage", std::string()).find("uniqueId") != std::string::npos);
+        EXPECT(listed_entry(stored, "Camera", 9717).is_null());
+        // Falsified by: skipping the whole stored entry as a peer when one of its fields has the
+        // wrong JSON type (its uniqueId is then not claimed and the reuse is accepted).
+    }
+    {
+        // case: zwo camera stored entries sharing only a uniqueId clear the duplicate in the file
+        // Two stored cameras with their own serials and one uniqueId: the first start clears the
+        // first entry's copy in the file (as for a shared serial), the second keeps it, and the
+        // next start finds no duplicate.
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        {
+            std::ofstream out(file, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9718},
+                                           {"cameraIndex", 0},
+                                           {"serialNumber", "0c190e111d020901"},
+                                           {"uniqueId", "ZWO_UID_00112233445566bb"}},
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9719},
+                                           {"cameraIndex", 1},
+                                           {"serialNumber", "0c190e111d020902"},
+                                           {"uniqueId", "ZWO_UID_00112233445566bb"}}})
+                       .dump();
+        }
+        const auto stored_unique_ids = [&] {
+            std::ifstream in(file);
+            std::map<int, std::string> ids;
+            for (const auto& entry : nlohmann::json::parse(in)) {
+                ids[entry.value("deviceNumber", -1)] = entry.value("uniqueId", std::string());
+            }
+            return ids;
+        };
+        {
+            alpacahttp::Router stored;
+            // A camera with a serial reports ZWO_SN_<serial>; the stored uniqueId is only its fallback.
+            EXPECT(listed_entry(stored, "Camera", 9718).value("UniqueID", std::string()) == "ZWO_SN_0c190e111d020901");
+            EXPECT(listed_entry(stored, "Camera", 9719).value("UniqueID", std::string()) == "ZWO_SN_0c190e111d020902");
+            EXPECT(listed_config(stored, "Camera", 9718).value("uniqueId", std::string()).empty());
+            EXPECT(listed_config(stored, "Camera", 9719).value("uniqueId", std::string()) ==
+                   "ZWO_UID_00112233445566bb");
+            const auto ids = stored_unique_ids();
+            EXPECT(ids.at(9718).empty());
+            EXPECT(ids.at(9719) == "ZWO_UID_00112233445566bb");
+        }
+        {
+            // The next start finds no duplicate: the file is unchanged.
+            alpacahttp::Router again;
+            EXPECT(listed_config(again, "Camera", 9719).value("uniqueId", std::string()) == "ZWO_UID_00112233445566bb");
+            const auto ids = stored_unique_ids();
+            EXPECT(ids.at(9718).empty());
+            EXPECT(ids.at(9719) == "ZWO_UID_00112233445566bb");
+            for (const int number : {9718, 9719}) {
+                remove_device(again, "zwo", "camera", number);
+            }
+        }
+        // Falsified by: writing back only a cleared serial, not a cleared uniqueId (both entries
+        // keep the shared id in the file and the duplicate is found again on every start).
     }
     {
         // zwo / filterwheel
@@ -4138,10 +4275,18 @@ int main() {
         alpacahttp::Router startup_router;
         const auto listed = nlohmann::json::parse(
             route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        // The unregistrable 9655 row is served by faileddevices (#576); the
+        // float-numbered skywatcher entry is registered (configureddevices) on
+        // a build with that vendor and a failed row on one without it.
+        const auto failed_listed = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/faileddevices").body(), nullptr, false);
         bool listed_lowercase = false;
         bool float_listed = false;
-        if (!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array()) {
-            for (const auto& entry : listed["Value"]) {
+        for (const auto* source : {&listed, &failed_listed}) {
+            if (source->is_discarded() || !source->contains("Value") || !(*source)["Value"].is_array()) {
+                continue;
+            }
+            for (const auto& entry : (*source)["Value"]) {
                 if (entry.value("DeviceNumber", -1) == 9655) {
                     listed_lowercase = entry.value("DeviceType", "") == "telescope";
                 }
@@ -4730,6 +4875,9 @@ int main() {
             R"({"filterwheelIndex":1,"filterwheelId":5,"filterNames":["L","R","G","B","Ha"]})");
         add("zwo", "focuser", "Focuser", "", R"({"focuserIndex":1,"focuserId":3})",
             R"({"focuserIndex":1,"focuserId":3})");
+        // open-astro#1152: maxStep survives the save; left out it stays absent (no default is filled in).
+        add("zwo", "focuser", "Focuser", "maxStep", R"({"focuserIndex":1,"maxStep":40000})",
+            R"({"focuserIndex":1,"maxStep":40000})");
         add("zwo", "rotator", "Rotator", "", R"({"rotatorIndex":1,"rotatorId":2})",
             R"({"rotatorIndex":1,"rotatorId":2})");
         add("zwo", "switch", "Switch", "dewheater", R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})",
@@ -5167,16 +5315,24 @@ int main() {
                           : obj({R"("connectionType":"carrier-pigeon")", site}),
                 {"has connectionType \"carrier-pigeon\"", warned_serial}, {"Skipping persisted device"});
 
-            // #508 item 2: connectionType is not case-folded. "Network" is
-            // rejected by the API; a saved one is read as "serial" (WARN), the
-            // host is not kept (sanitize tests == "network"), and the entry
-            // keeps the raw "Network".
-            pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
-                obj({R"("connectionType":"Network","host":"192.168.1.60")", site}), m.bad_type_message, "{}", true,
-                // OnStep has no host field, so the catalog drops it as sanitize did.
-                (m.catalog && vendor != "onstep") ? obj({R"("connectionType":"Network","host":"192.168.1.60")", site})
-                                                  : obj({R"("connectionType":"Network")", site}),
-                {"has connectionType \"Network\"", warned_serial}, {"Skipping persisted device"});
+            // #508 item 2: connectionType is folded to lower case once, on the
+            // way into registration and into the stored entry, so "Network"
+            // behaves exactly as "network" from the API and from a saved file:
+            // registered as a network mount, host kept, no fallback WARN, and
+            // configureddevices lists the folded "network". OnStep has no
+            // network type, so there the folded value is refused (API) or
+            // read as "serial" (saved), naming the folded value.
+            if (vendor == "onstep") {
+                pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
+                    obj({R"("connectionType":"Network")", site}), m.bad_type_message, "{}", true,
+                    obj({R"("connectionType":"network")", site}), {"has connectionType \"network\"", warned_serial},
+                    {"Skipping persisted device"});
+            } else {
+                const std::string network = obj({R"("connectionType":"network","host":"192.0.2.60")", site});
+                pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
+                    obj({R"("connectionType":"Network","host":"192.0.2.60")", site}), "", network, true, network, {},
+                    {warned_serial, "Skipping persisted device"});
+            }
 
             // #508 item 1 (the six mount arms that go through
             // reject_invalid_config): an empty portPath on serial is rejected
@@ -7189,8 +7345,26 @@ int main() {
             "Telescope");
         EXPECT(!fractional.ok);
         EXPECT(fractional.message.find("baudRate") != std::string::npos);
-        EXPECT(fractional.message.find("wrong type") != std::string::npos);
+        EXPECT(fractional.message == "Device config field 'baudRate' must be a whole number (got 9600.5)");
         EXPECT(listed_entry(router, "Telescope", 9259).is_null());
+
+        const auto boolean =
+            api_attempt(router,
+                        nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                              R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":true,)"
+                                              R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+                        "Telescope");
+        EXPECT(!boolean.ok);
+        EXPECT(boolean.message == "Device config field 'baudRate' must be a whole number (got true)");
+
+        const auto text = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                  R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":"9600",)"
+                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+            "Telescope");
+        EXPECT(!text.ok);
+        EXPECT(text.message == "Device config field 'baudRate' has the wrong type (got string)");
 
         const auto whole = api_attempt(
             router,
@@ -7479,7 +7653,7 @@ int main() {
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Altair, Astroasis
     // and the Bisque, Celestron, Gemini, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
-    // ToupTek, WandererAstro, WeeWX and ZWO (non-camera) descriptors plus the "zzz" test descriptor, schema only, so
+    // ToupTek, WandererAstro, WeeWX and ZWO descriptors plus the "zzz" test descriptor, schema only, so
     // its `available` is false.
     {
         alpacahttp::Router router;
@@ -7490,7 +7664,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 33);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 34);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7636,6 +7810,37 @@ int main() {
         EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
         const auto post = route_request(router, "POST", "/management/v1/devicecatalog", "{}");
         EXPECT(post.status_code() == 405);
+    }
+
+    {
+        // case: router hands a catalog bind hook the stored peers and merges what it learns
+        alpacahttp::Router router;
+        alpacahttp::test_catalog::add_schema_and_bind_factory(router.catalog());
+        const auto configure = [&](int number, int count) {
+            return api_attempt(router,
+                               nlohmann::json{{"vendor", "zzz"},
+                                              {"deviceType", "focuser"},
+                                              {"deviceNumber", number},
+                                              {"count", count},
+                                              {"ratio", 3.0}},
+                               "Focuser");
+        };
+        // First entry: nothing stored yet, so no peers; the hook's learned host is
+        // stored and its erased ratio is dropped from the saved entry.
+        const auto first = configure(9260, 2);
+        EXPECT(first.ok);
+        EXPECT(first.config.value("host", std::string()) == "peers=0");
+        EXPECT(!first.config.contains("ratio"));
+        // Second entry: the stored first entry is a peer (count 2 already used).
+        const auto clash = configure(9261, 2);
+        EXPECT(!clash.ok);
+        EXPECT(clash.message == "Invalid value for count: another zzz focuser already uses it");
+        EXPECT(listed_entry(router, "Focuser", 9261).is_null());
+        const auto second = configure(9261, 3);
+        EXPECT(second.ok);
+        EXPECT(second.config.value("host", std::string()) == "peers=1");
+        remove_device(router, "zzz", "focuser", 9260);
+        remove_device(router, "zzz", "focuser", 9261);
     }
 
     // open-astro#664 Part C: the router consults the catalog before its arm
@@ -8538,6 +8743,22 @@ int main() {
     }
 #endif
 
+#ifndef ALPACACORE_ENABLE_ZWO
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        // case: zwo camera vendors-OFF refusal text
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"zwo","deviceType":"camera","deviceNumber":9266,"cameraIndex":0})"),
+            "Camera");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Camera", 9266).is_null());
+    }
+#endif
+
 #ifndef ALPACACORE_ENABLE_GPHOTO
     // With the vendor built out, the catalog path reports the deleted arm's text.
     {
@@ -8647,6 +8868,98 @@ int main() {
         }
     }
 #endif
+
+    {
+        // case: failed-to-load entries are served by faileddevices, not configureddevices (#576)
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        {
+            std::ofstream out(std::filesystem::path("config") / "registered_devices.json", std::ios::trunc);
+            out << R"([{"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":9577}])";
+        }
+        alpacahttp::Router router;
+        const auto configured = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        EXPECT(!configured.is_discarded() && configured.value("ErrorNumber", -1) == 0);
+        for (const auto& row : configured["Value"]) {
+            EXPECT(!row.value("LoadError", false));
+            EXPECT(row.value("UniqueID", "x") != "");
+            EXPECT(row.value("Vendor", "") != "nosuchvendor");
+        }
+        for (const std::string path : {"/management/v1/faileddevices", "/management/faileddevices"}) {
+            const auto failed = nlohmann::json::parse(route_request(router, "GET", path).body(), nullptr, false);
+            EXPECT(!failed.is_discarded() && failed.value("ErrorNumber", -1) == 0);
+            EXPECT(failed["Value"].is_array() && failed["Value"].size() == 1);
+            const auto& row = failed["Value"][0];
+            EXPECT(row.value("LoadError", false));
+            EXPECT(row.value("DeviceName", "") == "nosuchvendor (failed to load)");
+            EXPECT(row.value("DeviceType", "") == "focuser");
+            EXPECT(row.value("DeviceNumber", -1) == 9577);
+            EXPECT(row.value("UniqueID", "x").empty());
+            EXPECT(row["Config"].value("vendor", "") == "nosuchvendor");
+        }
+        EXPECT(route_request(router, "PUT", "/management/v1/faileddevices", "{}").status_code() == 405);
+    }
+    {
+        // case: routes outside the Alpaca schema are rejected (#576)
+        constexpr int kSchemaDevice = 9576;
+        class AsyncSwitchStub final : public route_table_stubs::SwitchStub {
+        public:
+            using SwitchStub::SwitchStub;
+            int get_max_switch() const override { return 1; }
+            bool get_can_async(int id) const override {
+                if (id < 0 || id >= get_max_switch()) {
+                    throw alpacacore::AlpacaException("Switch id out of range", alpacacore::AlpacaError::InvalidValue);
+                }
+                return true;
+            }
+        };
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::DomeStub>(kSchemaDevice)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::ObservingConditionsStub>(kSchemaDevice)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::TelescopeStub>(kSchemaDevice)));
+        EXPECT(registry.register_device(std::make_shared<AsyncSwitchStub>(kSchemaDevice)));
+        alpacahttp::Router router;
+        const std::string n = std::to_string(kSchemaDevice);
+        auto body_of = [&](const std::string& verb, const std::string& path) {
+            const auto response = route_request(router, verb, path, verb == "PUT" ? "ClientID=1" : "");
+            return std::make_pair(response.status_code(), nlohmann::json::parse(response.body()));
+        };
+
+        for (const std::string path :
+             {"/api/v1/dome/" + n + "/canslew", "/api/v1/observingconditions/" + n + "/seeing"}) {
+            const auto [status, json] = body_of("GET", path);
+            EXPECT(status == 400);
+            EXPECT(json.value("ErrorMessage", "").rfind("Unknown method: ", 0) == 0);
+        }
+
+        // The "mount" alias of telescope is gone; the real path still works.
+        {
+            const auto [status, json] = body_of("GET", "/api/v1/mount/" + n + "/connected");
+            EXPECT(status == 400);
+            EXPECT(json.value("ErrorMessage", "") == "Unknown device type: mount");
+            const auto [real_status, real_json] = body_of("GET", "/api/v1/telescope/" + n + "/connected");
+            EXPECT(real_status == 200);
+            EXPECT(real_json.value("ErrorNumber", -1) == 0);
+        }
+
+        // A switch has no cancel member: both verbs answer NotImplemented even
+        // when the switch is async-capable, never a success that cancelled nothing.
+        for (const std::string verb : {"GET", "PUT"}) {
+            const auto [status, json] = body_of(verb, "/api/v1/switch/" + n + "/cancelasync?Id=0");
+            EXPECT(status == 200);
+            EXPECT(json.value("ErrorNumber", -1) == 0x400);
+            // An out-of-range Id is still InvalidValue (ConformU checks it).
+            const auto [bad_status, bad_json] = body_of(verb, "/api/v1/switch/" + n + "/cancelasync?Id=-1");
+            EXPECT(bad_status == 200);
+            EXPECT(bad_json.value("ErrorNumber", -1) == 0x401);
+        }
+
+        registry.unregister_device(alpacacore::DeviceType::Dome, kSchemaDevice);
+        registry.unregister_device(alpacacore::DeviceType::ObservingConditions, kSchemaDevice);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, kSchemaDevice);
+        registry.unregister_device(alpacacore::DeviceType::Switch, kSchemaDevice);
+    }
 
     std::cout << "All routing tests passed!\n";
     return 0;
