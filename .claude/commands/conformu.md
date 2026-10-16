@@ -198,17 +198,32 @@ fails it near the pole ([ConformU#35](https://github.com/ASCOMInitiative/Conform
 Neither is a GitHub release yet, so `releases/latest` still resolves to the broken 4.5.0.
 
 So, while that remains true, if the installed version is MISSING, outdated, **4.5.0 or 4.5.1**,
-install the maintainer's beta (no confirmation needed -- this is part of the standard rig setup):
+install the standard build from the project's mirror (no confirmation needed -- this is part of the
+standard rig setup). The install stops before unpacking if the checksum does not match:
 
 ```bash
-ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
+ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSfL -o cu.tar.xz 'https://github.com/open-astro/AlpacaBridge/releases/download/tools/conformu-4.5.2-rc.1/conformu.linux-arm64.tar.xz' && echo '01446893eaf054c956e29591e681674c2c126af76fa1fed0abe13b6323825014  cu.tar.xz' | sha256sum -c - && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
-That URL is unpinned and unsigned: the same name can serve a different build later. Check the version
-line it prints against the standard build, `4.5.2.56111, Build time:` (4.5.2-rc.1, served from
-that URL since 2026-10-16) -- a different build is not automatically wrong, but note it in the log
-and say so in the PR rather than labelling the run "4.5.2" and moving on. Reports made with
+The printed version line must start `4.5.2.56111, Build time:` (4.5.2-rc.1). Reports made with
 `4.5.1.54507` stay valid: 4.5.2-rc.1 changes only the Telescope PulseGuide target selection.
+
+**Why a mirror.** The maintainer's beta download,
+`https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz`, carries no version in its
+name, and each new beta replaces the file: 4.5.1.54507 is no longer downloadable there. The
+`tools/conformu-<version>` pre-releases on open-astro/AlpacaBridge keep each build the project
+adopted, with its sha256 and the upstream commit it was built from (ConformU is GPL-3.0, so the
+release notes name the corresponding source). Never install from the ASCOM beta URL for a run;
+a `conformu-beta-build` dependency-update issue says a newer beta is there.
+
+**Adopting a newer beta** (a maintainer decision, as in open-astro/AlpacaBridge#1244): download it
+from the beta URL while it is current, read its version, and check it on one camera and one
+telescope run. Then publish it as a new pre-release, `tools/conformu-<version>`, with the tarball,
+its `.sha256`, the upstream commit and a GPL source note, created with `--prerelease --latest=false`
+so the repository's Latest release does not change. Then update the URL, the sha256 and the build
+line above, the `conformu-beta-build` baseline in `scripts/dependency_sdk_versions.json`, and the
+version AGENTS.md names. Old `tools/` releases stay, so an older report can be re-run with its
+build.
 
 **Once 4.5.2 or later is a real GitHub release, delete everything above from "Read this before" and
 go back to the ordinary release asset**, which is the only correct path at that point:
