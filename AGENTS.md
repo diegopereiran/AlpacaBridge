@@ -231,7 +231,8 @@ vendor-agnostic; do them in the driver from the start.
   otherwise throws `NotConnected` when disconnected (no early-return that skips it).
 
 **Config round-trip (silent data loss on save)**
-- Every persisted field allowlisted per device type in `sanitize_device_config`, every
+- Every persisted field declared per device type in the vendor's catalog schema
+  (`<vendor>_fields.h`; `sanitize_device_config` drops undeclared keys), every
   non-ZWO form field `name` vendor-prefixed — the full rules live in ONE place:
   [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors).
   The round-trip test (Required Test Case #9) is the automated catch.
@@ -923,15 +924,19 @@ vendor that ignores either ships a silently broken form:
   host) have no index and belong in neither place.
 - **Declare EVERY persisted field in the vendor's catalog schema, per device type (`sanitize_device_config` in `router.cpp` keeps exactly the declared fields)**
   (bit us three times: ZWO ASIAIR PWM ports, ToupTek `switchType`, ToupTek AFW filter fields).
-  `sanitize_device_config` is a strict allowlist — anything not explicitly `copy_if_present`-ed
-  is silently dropped on save, so the config round-trips lossily and the setting reverts (a
-  filter-wheel binding resets to index 0, custom filter names vanish, PWM toggles revert). When
-  you add a config field that a driver reads in its registration branch, you MUST also add a
-  matching `copy_if_present` in that vendor's `sanitize_device_config` branch. If a vendor
-  serves multiple device types through one branch (ToupTek: camera/focuser/filterwheel/switch),
-  split on `device_type` so each type keeps its own fields — don't let a shared `else` copy only
-  the camera/focuser fields. Cross-check the driver's `config.value(...)` / `config.contains(...)`
-  reads in the registration function against the sanitizer branch; they must list the same keys.
+  `sanitize_device_config` is a strict allowlist. It keeps the vendor-agnostic keys it names
+  (`vendor`, `deviceType`, `deviceNumber`, the site and timing keys) and, for everything else,
+  exactly the fields the device's catalog descriptor declares in
+  `AlpacaCore/src/vendors/<vendor>/<vendor>_fields.h` (`sanitize_fields_json`; a `Secret` field
+  is never written). An undeclared key is silently dropped on save, so the config round-trips
+  lossily and the setting reverts (a filter-wheel binding resets to index 0, custom filter names
+  vanish, PWM toggles revert). When the factory in `<vendor>_catalog.cpp` reads a new config key,
+  you MUST declare that field in `<vendor>_fields.h` for every device type that reads it: the
+  descriptor is per (vendor, device type), so a field declared only for the camera is dropped
+  from the focuser's saved config. Cross-check the keys each factory reads against its
+  descriptor's field list; they must match. There is no vendor branch in
+  `sanitize_device_config` and no registration arm to edit any more (the last, iOptron, moved
+  in #1228).
 
 ## Debian Packaging
 
