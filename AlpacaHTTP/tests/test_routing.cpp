@@ -8034,7 +8034,7 @@ int main() {
         EXPECT(rejected.message.find("count is out of range") != std::string::npos);
         EXPECT(listed_entry(router, "Focuser", 9255).is_null());
 
-        // A key with no schema falls through to the arm chain unchanged.
+        // A key with no schema is refused as not yet supported.
         const auto unknown = api_attempt(
             router, nlohmann::json::parse(R"({"vendor":"yyy","deviceType":"focuser","deviceNumber":9255})"), "Focuser");
         EXPECT(!unknown.ok);

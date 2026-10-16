@@ -78,9 +78,8 @@ public:
     using CatalogExtension = std::function<void(alpacacore::catalog::DeviceCatalog&)>;
     explicit Router(const CatalogExtension& extend_catalog);
 
-    // The catalog this router consults before its arm chain
-    // (register_device_from_config()) and serves at GET
-    // /management/v1/devicecatalog. Non-const: tests add descriptors to it
+    // The catalog register_device_from_config() and sanitize_device_config()
+    // consult, also served at GET /management/v1/devicecatalog. Non-const: tests add descriptors to it
     // directly via alpacahttp::test_catalog helpers.
     alpacacore::catalog::DeviceCatalog& catalog() { return catalog_; }
 
