@@ -192,22 +192,25 @@ returning each distinct response type is charged ~0.13-0.22 s "OUTSIDE FAST RESP
 matter whose driver answers (Camera: `CameraState`, `CameraXSize`, `SensorType`; Telescope:
 `AlignmentMode`, `EquatorialSystem`, `SideOfPier`). That is a ConformU bug, not a driver regression
 ([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)), and a warm re-run only hides
-it. 4.5.1 fixes it but is not a GitHub release yet, so `releases/latest` still resolves to the broken
-4.5.0.
+it. 4.5.1 fixed it, and the current standard is **4.5.2-rc.1**, which also keeps the Telescope
+PulseGuide test declinations within ±65° so a mount that reports refracted coordinates no longer
+fails it near the pole ([ConformU#35](https://github.com/ASCOMInitiative/ConformU/issues/35)).
+Neither is a GitHub release yet, so `releases/latest` still resolves to the broken 4.5.0.
 
-So, while that remains true, if the installed version is MISSING, outdated, **or 4.5.0**, install the
-maintainer's fixed 4.5.1 beta (no confirmation needed -- this is part of the standard rig setup):
+So, while that remains true, if the installed version is MISSING, outdated, **4.5.0 or 4.5.1**,
+install the maintainer's beta (no confirmation needed -- this is part of the standard rig setup):
 
 ```bash
 ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
 That URL is unpinned and unsigned: the same name can serve a different build later. Check the version
-line it prints against the build the current reports were produced with, `4.5.1.54507, Build time:
-Thu 27 August 2026 11:40:17` -- a different build is not automatically wrong, but note it in the log
-and say so in the PR rather than labelling the run "4.5.1" and moving on.
+line it prints against the standard build, `4.5.2.56111, Build time:` (4.5.2-rc.1, served from
+that URL since 2026-10-16) -- a different build is not automatically wrong, but note it in the log
+and say so in the PR rather than labelling the run "4.5.2" and moving on. Reports made with
+`4.5.1.54507` stay valid: 4.5.2-rc.1 changes only the Telescope PulseGuide target selection.
 
-**Once 4.5.1 or later is a real GitHub release, delete everything above from "Read this before" and
+**Once 4.5.2 or later is a real GitHub release, delete everything above from "Read this before" and
 go back to the ordinary release asset**, which is the only correct path at that point:
 
 ```bash
