@@ -778,7 +778,7 @@ TEST_CASE("QHY Camera Driver - positive short SDK frame is zero-padded to reques
     auto fake = make_fake();
     fake.frame_width = 2;
     fake.frame_height = 2;
-    fake.frame_bytes = {0, 1, 0, 2, 0, 3, 0, 4};
+    fake.frame_bytes = {1, 0, 2, 0, 3, 0, 4, 0};  // little-endian uint16, as the SDK delivers
     fake.read_directly = true;
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
@@ -793,6 +793,31 @@ TEST_CASE("QHY Camera Driver - positive short SDK frame is zero-padded to reques
     CHECK(image.height == 3);
     CHECK(image.rank == 2);
     CHECK(image.data == std::vector<std::int32_t>{1, 2, 0, 0, 3, 4, 0, 0, 0, 0, 0, 0});
+    driver->set_connected(false);
+}
+
+// The SDK writes native little-endian uint16 samples; the driver once read them
+// high byte first, which swapped every pixel of a real QHY5III585M frame into
+// noise (ringed stars, nothing for a star detector to find). Values above 255
+// make the two byte orders distinguishable -- {1,0} reads as 1 either way only
+// when the high byte is zero, so this case uses a full 16-bit spread.
+TEST_CASE("QHY Camera Driver - 16-bit samples are read little-endian (low byte first)", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_width = 2;
+    fake.frame_height = 2;
+    fake.frame_bytes = {0x34, 0x12, 0xFF, 0xFF, 0x00, 0x80, 0x01, 0x00};
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    const auto image = driver->get_image_array();
+    CHECK(image.width == 2);
+    CHECK(image.height == 2);
+    CHECK(image.data == std::vector<std::int32_t>{0x1234, 65535, 32768, 1});
     driver->set_connected(false);
 }
 
