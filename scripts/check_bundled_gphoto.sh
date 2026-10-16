@@ -130,16 +130,22 @@ fi
 # 5b. The bundle is built without libxml2 (--with-libxml-2.0=no): it only served the
 #     experimental Olympus E-series XML-wrapped mode and the Wi-Fi-only lumix camlib,
 #     neither reachable through USB autodetect, and it carried an unfixed Critical CVE.
-if [ "${dpkg_ok}" -eq 1 ] && echo "${depends}" | grep -qE '(^|[ ,])libxml2([ (,]|$)'; then
+# (-N) also matches a soname-versioned package name such as libxml2-16.
+if [ "${dpkg_ok}" -eq 1 ] && echo "${depends}" | grep -qE '(^|[ ,])libxml2(-[0-9a-z]+)?([ (,]|$)'; then
   fail "dpkg-query Depends names libxml2"
 elif [ "${dpkg_ok}" -eq 1 ]; then
   pass "dpkg-query Depends does not name libxml2"
 fi
 xml_hits=""
+scanned=0
 while IFS= read -r so; do
+  scanned=$((scanned + 1))
   if ldd "${so}" 2>&1 | grep -q 'libxml2\.so'; then xml_hits+="${so}"$'\n'; fi
 done < <(find "${BUNDLE_LIB}" -name '*.so*' -type f 2>/dev/null)
-if [ -n "${xml_hits}" ]; then
+if [ "${scanned}" -eq 0 ]; then
+  # A missing bundle or a wrong prefix would otherwise pass this check having read nothing.
+  fail "ldd: no shared library found under ${BUNDLE_LIB} to check for libxml2"
+elif [ -n "${xml_hits}" ]; then
   indent <<< "${xml_hits%$'\n'}"
   fail "ldd: a bundled library or camlib links libxml2"
 else
