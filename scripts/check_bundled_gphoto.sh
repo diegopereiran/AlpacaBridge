@@ -130,8 +130,8 @@ fi
 # 5b. The bundle is built without libxml2 (--with-libxml-2.0=no): it only served the
 #     experimental Olympus E-series XML-wrapped mode and the Wi-Fi-only lumix camlib,
 #     neither reachable through USB autodetect, and it carried an unfixed Critical CVE.
-# (-N) also matches a soname-versioned package name such as libxml2-16.
-if [ "${dpkg_ok}" -eq 1 ] && echo "${depends}" | grep -qE '(^|[ ,])libxml2(-[0-9a-z]+)?([ (,]|$)'; then
+# (-N) also matches a soname-versioned package name such as libxml2-16, not libxml2-utils or libxml2-dev.
+if [ "${dpkg_ok}" -eq 1 ] && echo "${depends}" | grep -qE '(^|[ ,])libxml2(-[0-9]+)?([ (,]|$)'; then
   fail "dpkg-query Depends names libxml2"
 elif [ "${dpkg_ok}" -eq 1 ]; then
   pass "dpkg-query Depends does not name libxml2"
