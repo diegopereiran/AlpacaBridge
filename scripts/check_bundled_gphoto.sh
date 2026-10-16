@@ -127,6 +127,25 @@ else
   pass "dpkg-query Depends names neither libgphoto2-6t64 nor libgphoto2-port12t64"
 fi
 
+# 5b. The bundle is built without libxml2 (--with-libxml-2.0=no): it only served the
+#     experimental Olympus E-series XML-wrapped mode and the Wi-Fi-only lumix camlib,
+#     neither reachable through USB autodetect, and it carried an unfixed Critical CVE.
+if [ "${dpkg_ok}" -eq 1 ] && echo "${depends}" | grep -qE '(^|[ ,])libxml2([ (,]|$)'; then
+  fail "dpkg-query Depends names libxml2"
+elif [ "${dpkg_ok}" -eq 1 ]; then
+  pass "dpkg-query Depends does not name libxml2"
+fi
+xml_hits=""
+while IFS= read -r so; do
+  if ldd "${so}" 2>&1 | grep -q 'libxml2\.so'; then xml_hits+="${so}"$'\n'; fi
+done < <(find "${BUNDLE_LIB}" -name '*.so*' -type f 2>/dev/null)
+if [ -n "${xml_hits}" ]; then
+  indent <<< "${xml_hits%$'\n'}"
+  fail "ldd: a bundled library or camlib links libxml2"
+else
+  pass "ldd: no bundled library or camlib links libxml2"
+fi
+
 # 6. The bundle directory is not registered with ldconfig.
 shopt -s nullglob
 confs=(/etc/ld.so.conf /etc/ld.so.conf.d/*)
