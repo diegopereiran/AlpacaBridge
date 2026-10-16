@@ -4634,12 +4634,10 @@ int main() {
                            {"siteLatitude", 39.7392},
                            {"siteLongitude", -104.9903}});
 #ifdef ALPACACORE_ENABLE_ZWO
-        // Review finding: the ZWO branch tests a bare `conn_type == "auto"`,
-        // not `|| conn_type.empty()`, so an entry with no connectionType key
-        // falls to its else and used to be dropped regardless of source -- the
-        // one branch a blanket "empty is always valid" rule in the helper
-        // would have left unfixed. The off-UI path: hand-edited, or written by
-        // a non-web-UI client, since the form always sets the field.
+        // An entry with no connectionType key: the off-UI path (hand-edited,
+        // or written by a non-web-UI client, since the form always sets the
+        // field). ZWO reads it as auto like the other mount arms (#508 item 3),
+        // so it registers and logs no connectionType WARN.
         entries.push_back({{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9644}});
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -4758,7 +4756,7 @@ int main() {
         bool warned_bisque_host = false;
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        bool warned_zwo_empty = false;
+        bool warned_zwo_empty = false;  // must stay false: empty is auto (#508 item 3)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
         bool warned_onstep_network = false;
@@ -4772,9 +4770,7 @@ int main() {
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
             // Match the normalisation line's own distinctive wording, not a
-            // bare "serial": the sibling port-path WARN only fails to match
-            // that because it capitalises "Serial", which is a coincidence of
-            // wording rather than something this case should rest on.
+            // bare "serial". ZWO must NOT emit it for an empty type.
             if (w.find("telescope 9644") != std::string::npos && w.find("has connectionType") != std::string::npos) {
                 warned_zwo_empty = true;
             }
@@ -4790,7 +4786,7 @@ int main() {
         EXPECT(warned_bisque_host);
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        EXPECT(warned_zwo_empty);
+        EXPECT(!warned_zwo_empty);
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
         EXPECT(warned_onstep_network);
@@ -5280,7 +5276,8 @@ int main() {
         // web UI. And the current, inconsistent behaviour behind
         // open-astro/AlpacaBridge#508, pinned AS IT IS TODAY. Each #508 case
         // below is commented with the item it pins and is expected to flip,
-        // deliberately, when that item's fix lands.
+        // deliberately, when that item's fix lands. (Item 3, an empty
+        // connectionType, is resolved: it is "auto" for every mount.)
         // -----------------------------------------------------------------
         struct Pin {
             std::string label;
@@ -5330,7 +5327,6 @@ int main() {
             const char* vendor;
             const char* bad_type_message;  // the arm's own literal, they differ
             const char* site;              // mandatory from the API for this vendor (#274)
-            bool empty_type_is_auto;       // zwo is the odd one out (#508 item 3)
             // open-astro#744: registered through the device catalog rather than
             // a router arm. Two observable differences, pinned per case below:
             // sanitize keeps every declared field (ADR 0004: portPath / host
@@ -5344,22 +5340,22 @@ int main() {
         const char* const kSite = R"("siteLatitude":39.7392,"siteLongitude":-104.9903)";
         const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true, false});
+        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", false});
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true, true});
+        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true});
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
-        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true, true});
+        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true});
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true, true});
+        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true, true});
+        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false, true});
+        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", true});
 #endif
         for (const auto& m : mounts) {
             const std::string site = m.site;
@@ -5417,15 +5413,21 @@ int main() {
                 m.catalog ? std::vector<std::string>{"Skipping persisted device", "will refuse to connect"}
                           : std::vector<std::string>{"Skipping persisted device"});
 
-            // #508 item 3: an empty connectionType. zwo treats "" as
-            // unrecognised: the API rejects it, a saved one is normalised to
-            // "serial" (WARN) and stays listed. The five arms that treat ""
-            // as "auto" are pinned by the probe cases below.
-            if (!m.empty_type_is_auto) {
-                pin("empty connectionType is NOT auto (#508 item 3)", vendor, "telescope", "Telescope",
-                    obj({R"("connectionType":"")", site}), m.bad_type_message, "{}", true,
-                    obj({R"("connectionType":"")", site}), {"has connectionType \"\"", warned_serial},
-                    {"Skipping persisted device"});
+            // #508 item 3: an empty connectionType is "auto" for every mount,
+            // zwo included. Its normalize reads "" as auto for both sources, so
+            // the API accepts it and a saved one registers with no WARN.
+            // zwo only here: the other five arms are pinned by the probe cases.
+            if (vendor == "zwo") {  // the other five: probe cases below
+                // Both sources list the entry as posted or saved: the router stores the
+                // sanitized request (only learned selectors merge back), never the
+                // normalized config, so "auto" applies at registration and the listed
+                // value stays "" (or absent).
+                pin("empty connectionType is auto (#508 item 3)", vendor, "telescope", "Telescope",
+                    obj({R"("connectionType":"")", site}), "", obj({R"("connectionType":"")", site}), true,
+                    obj({R"("connectionType":"")", site}), {},
+                    {"not one this driver knows", warned_serial, "Skipping persisted device"});
+                pin("absent connectionType is auto (#508 item 3)", vendor, "telescope", "Telescope", obj({site}), "",
+                    "{}", true, "{}", {}, {"not one this driver knows", warned_serial, "Skipping persisted device"});
             }
         }
 
