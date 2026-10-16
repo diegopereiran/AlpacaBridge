@@ -5927,6 +5927,36 @@ int main() {
         EXPECT(at_64k_request.body().size() == 65536);
     }
 
+    {
+        // case: Telescope DeviceState UTCDate matches the UTCDate endpoint
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9802);
+        EXPECT(registry.register_device(scope));
+        scope->set_connected(true);
+        alpacahttp::Router clock_router;
+        const std::string base = "/api/v1/telescope/9802";
+        for (const auto ms : {0, 123, 999}) {
+            const std::string fraction = ms == 0 ? "000" : ms == 123 ? "123" : "999";
+            scope->set_utc_date(std::chrono::system_clock::from_time_t(978307200) + std::chrono::milliseconds{ms});
+            const auto utc = nlohmann::json::parse(route_request(clock_router, "GET", base + "/utcdate").body());
+            const auto state = nlohmann::json::parse(route_request(clock_router, "GET", base + "/devicestate").body());
+            EXPECT(utc.at("ErrorNumber") == 0);
+            EXPECT(state.at("ErrorNumber") == 0);
+            EXPECT(state.at("Value").is_array());
+            int utc_entries = 0;
+            for (const auto& entry : state.at("Value")) {
+                if (entry.at("Name") == "UTCDate") {
+                    ++utc_entries;
+                    EXPECT(entry.at("Value").is_string());
+                    EXPECT(entry.at("Value") == utc.at("Value"));
+                    EXPECT(entry.at("Value") == "2001-01-01T00:00:00." + fraction + "Z");
+                }
+            }
+            EXPECT(utc_entries == 1);
+        }
+        EXPECT(registry.unregister_device(alpacacore::DeviceType::Telescope, 9802));
+    }
+
     // Host-clock wiring (issue #302). The decision logic inside HostClock is
     // covered by its own unit tests; what had no coverage was the router's
     // use of it, which is what carries the #289 feature. With the syscalls
