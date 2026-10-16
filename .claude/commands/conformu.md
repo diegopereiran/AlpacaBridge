@@ -178,12 +178,12 @@ ssh astro@<host> '~/conformu/conformu --version 2>/dev/null | tail -1 || echo MI
 gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name
 ```
 
-(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0, which step 2g replaces regardless of whether the upstream lookup succeeded.)
+(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0 or 4.5.1, which step 2g replaces regardless of whether the upstream lookup succeeded.)
 
 Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix, then `printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1` — installed is current only if it equals that maximum.
 
 **Read this before running any install command.** On arm64 -- which is every rig this project
-supports (AGENTS.md "Target Architecture") -- an installed **4.5.0 counts as outdated no matter what
+supports (AGENTS.md "Target Architecture") -- an installed **4.5.0 or 4.5.1 counts as outdated no matter what
 `releases/latest` says**, and `releases/latest` itself is *not* the place to install from today.
 
 The official `conformu.linux-arm64.tar.xz` 4.5.0 asset was published without `PublishReadyToRun`, so
