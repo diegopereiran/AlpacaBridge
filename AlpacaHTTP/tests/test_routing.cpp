@@ -7458,6 +7458,13 @@ int main() {
                    route_request(router, "POST", "/management/v1/removedevice", remove_body.dump()).body())
                    .value("ErrorNumber", -1) == 0);
 #endif
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        EXPECT(refused({{"vendor", "touptek"},
+                        {"deviceType", "switch"},
+                        {"deviceNumber", 9661},
+                        {"switchType", "thermal"},
+                        {"cameraIndex", -2}}));
+#endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
         EXPECT(refused({{"vendor", "playerone"},
                         {"deviceType", "switch"},

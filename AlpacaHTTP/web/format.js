@@ -563,6 +563,10 @@ function thermalCameraHint(cameras, value, controls, listError, saved, taken) {
             return 'No attached camera reports a ' + controls + '. Plug the camera in, then press Refresh.';
         }
         const index = thermalSavedIndex(saved);
+        if (saved && !saved.serialNumber && index === null && Number(saved.cameraId) >= 0) {
+            return 'This switch was saved with camera ID ' + saved.cameraId + ' by an older version. ' +
+                'Choose the camera this ' + controls + ' is on.';
+        }
         if (saved && !saved.serialNumber && (index === null || index === THERMAL_AUTO_INDEX)) {
             return 'This switch was saved as Auto. Choose the camera this ' + controls + ' is on.';
         }

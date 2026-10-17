@@ -76,6 +76,12 @@ test('editing a switch saved as Auto or on a camera without the heater asks agai
     assert.strictEqual(thermalCameraOptions([MINI, PRO], auto, 'dew heater', '', []).selected, '');
     assert.strictEqual(thermalCameraHint([MINI, PRO], '', 'dew heater', '', auto, []),
                        'This switch was saved as Auto. Choose the camera this dew heater is on.');
+    // A legacy dew heater saved by cameraId alone is not Auto, and asks again too.
+    const legacy = { cameraId: 4 };
+    assert.strictEqual(thermalCameraOptions([MINI, PRO], legacy, 'dew heater', '', []).selected, '');
+    assert.strictEqual(thermalCameraHint([MINI, PRO], '', 'dew heater', '', legacy, []),
+                       'This switch was saved with camera ID 4 by an older version. ' +
+                       'Choose the camera this dew heater is on.');
     const onMini = { cameraIndex: 0 };
     assert.strictEqual(thermalCameraOptions([MINI, PRO], onMini, 'dew heater', '', []).selected, '');
     assert.strictEqual(thermalCameraHint([MINI, PRO], '', 'dew heater', '', onMini, []),

@@ -772,7 +772,8 @@ function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
         // A new form (null) or the edited device's config. A listing already in
         // flight renders against it when it lands.
         reset(config) {
-            saved = config ? { cameraIndex: config.cameraIndex, serialNumber: config.serialNumber } : null;
+            saved = config ? { cameraIndex: config.cameraIndex, serialNumber: config.serialNumber,
+                               cameraId: config.cameraId } : null;
             if (select) {
                 select.value = '';
             }
@@ -4281,6 +4282,9 @@ document.getElementById('device-form').addEventListener('submit', async function
                     return;
                 }
                 Object.assign(deviceData, dewCamera);
+                // The pick replaces a legacy cameraId binding: the server binds a
+                // cameraId with no serial by that id and ignores the index.
+                delete deviceData.cameraId;
             }
         }
         if (normalizedType === 'filterwheel') {

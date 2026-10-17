@@ -9576,6 +9576,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         const std::string switch_type = config_get(config, "switchType", "stellavita");
         if (switch_type == "thermal") {
             int camera_index = config_get(config, "cameraIndex", 0);
+            if (camera_index < alpacacore::util::kAutoThermalCamera &&
+                reject_invalid_config(source, "cameraIndex must be -1 (Auto) or a camera index", vendor,
+                                      device_type_str, device_number, error_message)) {
+                return false;
+            }
+            camera_index = std::max(camera_index, alpacacore::util::kAutoThermalCamera);
             auto sw = alpacacore::vendor::touptek::create_touptek_thermal_switch(device_number, camera_index);
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
                 util::log_info("Registered ToupTek thermal switch");
