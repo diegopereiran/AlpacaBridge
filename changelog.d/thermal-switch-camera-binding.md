@@ -4,6 +4,8 @@
 
 ### Fixed
 - **Thermal switch connect refusals name the camera to pick** (AlpacaCore): a switch bound to a camera without the controls now says which camera that is and which attached camera has them, for example "Camera index 0 is the ZWO ASI290MM Mini, which has no dew heater. Pick ZWO ASI2600MM Pro (index 1) in this switch's settings.", instead of "Dew heater not supported" or "Camera has no dew heater or fan (uncooled model?)". The text reaches clients such as NINA and Ara, and the web UI's `LastConnectError`. Error codes are unchanged.
+- **ZWO Dew Heater connect no longer leaks a camera open when `ASIInitCamera` fails** (AlpacaCore): `init_camera` ran outside the cleanup that closes the camera, so a failed init left the ref-counted open behind and the next connect never balanced it. The init is now inside that cleanup, a throwing close no longer hides the original error, and a failed open also clears the resolved camera.
+- **ToupTek thermal switch refuses a `cameraIndex` below -1 when saved** (AlpacaHTTP), as the ZWO and Player One switches do, instead of failing only at connect. A stored entry with one loads as Auto.
 
 ### Added (tests)
 - **Thermal camera choice, ToupTek and Player One binding cases, the endpoint, round trips and the web picker**: pure cases for the shared choice and refusal text; ToupTek and Player One fake-SDK cases for Auto, a pinned camera without controls, two heater cameras, serial binding and the listing's opens; `thermalcameras` routing cases and Auto/serial round-trip rows for all three switches; `node --test` cases for the picker model. `FakePlayerOneSDK` gains extra enumerated cameras and ref-counted opens per camera, as the real wrapper counts them.

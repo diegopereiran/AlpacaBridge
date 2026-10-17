@@ -196,14 +196,27 @@ public:
         if (connected) {
             std::vector<ZwoDewHeaterCamera> listing;
             int resolved_id = resolve_camera_id_locked(listing);
-            sdk.open_camera(resolved_id);
-            sdk.init_camera(resolved_id);
             try {
+                sdk.open_camera(resolved_id);
+            } catch (...) {
+                if (!camera_bound_by_id_only()) {
+                    camera_id_.reset();
+                }
+                throw;
+            }
+            // Guard everything after the open, init included: the ZWO open is
+            // ref-counted, so an open left unclosed by a throw is never balanced.
+            try {
+                sdk.init_camera(resolved_id);
                 refresh_camera_name_locked(resolved_id);
                 load_dew_caps_locked(resolved_id, listing);
                 serial_number_ = sdk.get_serial_number(resolved_id);
             } catch (...) {
-                sdk.close_camera(resolved_id);
+                try {
+                    sdk.close_camera(resolved_id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("ZWO", "close_camera after failed dew heater connect: " + std::string(e.what()));
+                }
                 if (!camera_bound_by_id_only()) {
                     camera_id_.reset();
                 }
