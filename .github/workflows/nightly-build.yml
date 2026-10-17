@@ -5,10 +5,12 @@
 # beta carries it. They are unsupported and never reach apt.openastro.net.
 #
 # Version: <next>~nightly<YYYYMMDDHHMM>.g<sha7>, written to the workspace
-# VERSION only (never committed). <next> is the version the next release will
-# take (scripts/changelog_fragments.py --bump), so dpkg sorts a nightly above
-# every beta of that version and below the release itself: a tester moves
-# beta -> nightly -> release without a downgrade.
+# VERSION only (never committed). <next> is the release main's code will ship
+# in (scripts/nightly_version.py): the changelog_fragments.py --bump result, but
+# never below X.(Y+1).0 once a stable/X.Y branch or a vX.Y.Z[-beta.N] tag exists,
+# because that line is built from its stable branch, not from main. dpkg then
+# sorts a nightly above every release and beta of the stable line and below
+# <next> itself: a tester moves beta -> nightly -> release without a downgrade.
 #
 # The `nightly-build` tag is moved to the built commit and the release's assets are
 # replaced. The tag does not match release.yml's v* filters, so it publishes
@@ -110,12 +112,20 @@ jobs:
 
       - name: Stamp the nightly version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          next="$(python3 scripts/changelog_fragments.py --bump)"
+          bump="$(python3 scripts/changelog_fragments.py --bump)"
+          # Stable branches and release tags: main is past every line they name.
+          # One call per assignment: set -e sees only the last command of a $(...).
+          stable="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/stable/" --jq '.[].ref')"
+          tags="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref')"
+          next="$(printf '%s\n%s\n' "${stable}" "${tags}" | python3 scripts/nightly_version.py --bump "${bump}")"
+          echo "Fragments propose ${bump}; main's next release is ${next}"
           version="${next}~nightly$(date -u +%Y%m%d%H%M).g${GITHUB_SHA::7}"
           # Guard the ordering the header promises: above any beta of <next>,
-          # below <next> itself.
+          # below <next> itself (nightly_version.py --self-test pins the rest).
           dpkg --compare-versions "${version}" gt "${next}~beta999"
           dpkg --compare-versions "${version}" lt "${next}"
           echo "${version}" > VERSION

@@ -952,6 +952,11 @@ jobs:
         # the PR that caused it instead of the first beta tag.
         run: python3 scripts/release_tag.py --self-test
 
+      - name: Self-test the nightly version
+        # nightly-build.yml runs it only on main once a night; here a change to
+        # it is tested by the PR that makes it.
+        run: python3 scripts/nightly_version.py --self-test
+
       - name: Self-test the merge-down exemption
         # pr-body.yml runs it on every PR as well; here a change to it is
         # tested by the PR that makes it, whatever that PR's head is named.
