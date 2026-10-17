@@ -3266,8 +3266,6 @@ private:
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable util::TaskClock::clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
-    mutable int side_of_pier_cached_ = -1;
-    mutable bool side_of_pier_valid_ = false;
     std::string mount_firmware_version_;
     // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so the
     // get_device_firmware() poll never blocks on the coarse connect lock.
