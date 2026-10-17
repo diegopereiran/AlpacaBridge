@@ -1888,6 +1888,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "devicecatalog";
         return match;
     }
+    if (path == "/management/v1/thermalcameras" || path == "/management/thermalcameras") {
+        match.is_management = true;
+        match.management_endpoint = "thermalcameras";
+        return match;
+    }
     if (path == "/management/v1/configuredevice" || path == "/management/configuredevice") {
         match.is_management = true;
         match.management_endpoint = "configuredevice";
@@ -2011,6 +2016,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_configured_devices(request, server_tx_id);
     } else if (match.management_endpoint == "devicecatalog") {
         return handle_device_catalog(request, server_tx_id);
+    } else if (match.management_endpoint == "thermalcameras") {
+        return handle_thermal_cameras(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
         return handle_configure_device(request, server_tx_id);
     } else if (match.management_endpoint == "removedevice") {
@@ -6693,6 +6700,58 @@ Response Router::handle_device_catalog(const Request& request, std::uint32_t ser
     return response;
 }
 
+// The cameras a vendor's camera-attached thermal switch can bind to, for the web
+// UI's camera picker: GET /management/v1/thermalcameras?vendor=zwo. The lister
+// (registered in the catalog when the vendor is built) may open cameras through
+// the vendor's ref-counted wrapper to read their controls and serial.
+Response Router::handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for thermalcameras endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
+    }
+
+    const std::string vendor = request.get_query_param("vendor");
+    try {
+        const auto cameras = catalog_.list_thermal_cameras(vendor);
+        if (!cameras.has_value()) {
+            AlpacaResponse alpaca_response = make_error_response(
+                client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                "No thermal switch camera listing for vendor '" + util::escape_for_log(vendor) + "' in this build");
+            response.set_body(alpaca_response);
+            return response;
+        }
+        nlohmann::json list = nlohmann::json::array();
+        for (const auto& camera : *cameras) {
+            list.push_back({{"Index", camera.index},
+                            {"Name", camera.name},
+                            {"Serial", camera.serial},
+                            {"HasThermal", camera.has_thermal}});
+        }
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = std::move(list);
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error listing thermal switch cameras: " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
 Response Router::handle_static_file(const Request& request) {
     Response response;
     std::string file_path = request.path();
@@ -9210,16 +9269,35 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
             return false;
         }
 
+        // cameraIndex -1 (or absent) is Auto: the one attached camera with a
+        // dew heater. serialNumber, when set, binds that camera whatever its
+        // index. A bare cameraId is the legacy binding and keeps working.
         int camera_id = config_get(config, "cameraId", -1);
-        int camera_index = config_get(config, "cameraIndex", -1);
-
-        if (camera_id >= 0) {
+        int camera_index = config_get(config, "cameraIndex", alpacacore::util::kAutoThermalCamera);
+        std::string camera_serial = config_get(config, "serialNumber", "");
+        const bool hex_serial = camera_serial.size() <= 64 &&
+                                std::all_of(camera_serial.begin(), camera_serial.end(),
+                                            [](char ch) { return std::isxdigit(static_cast<unsigned char>(ch)) != 0; });
+        if (!hex_serial) {
+            if (source == ConfigSource::Api) {
+                error_message = "Invalid value for serialNumber";
+                return false;
+            }
+            util::log_warning("Ignoring invalid ZWO dew heater serialNumber in the stored entry");
+            camera_serial.clear();
+        }
+        if (camera_id >= 0 && camera_serial.empty()) {
+            // The index is not read on this path, as before Auto existed.
             sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(device_number, camera_id);
-        } else if (camera_index >= 0) {
-            sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(device_number, camera_index);
         } else {
-            error_message = "ZWO dew heater switch requires cameraIndex or cameraId";
-            return false;
+            if (camera_index < alpacacore::util::kAutoThermalCamera &&
+                reject_invalid_config(source, "cameraIndex must be -1 (Auto) or a camera index", vendor,
+                                      device_type_str, device_number, error_message)) {
+                return false;
+            }
+            camera_index = std::max(camera_index, alpacacore::util::kAutoThermalCamera);
+            sw = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(device_number, camera_index,
+                                                                                camera_serial);
         }
 
         if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
@@ -9498,6 +9576,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         const std::string switch_type = config_get(config, "switchType", "stellavita");
         if (switch_type == "thermal") {
             int camera_index = config_get(config, "cameraIndex", 0);
+            if (camera_index < alpacacore::util::kAutoThermalCamera &&
+                reject_invalid_config(source, "cameraIndex must be -1 (Auto) or a camera index", vendor,
+                                      device_type_str, device_number, error_message)) {
+                return false;
+            }
+            camera_index = std::max(camera_index, alpacacore::util::kAutoThermalCamera);
             auto sw = alpacacore::vendor::touptek::create_touptek_thermal_switch(device_number, camera_index);
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
                 util::log_info("Registered ToupTek thermal switch");
@@ -10027,9 +10111,12 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         }
         copy_if_present("cameraIndex");
         copy_if_present("cameraId");
-        if (device_type == "camera") {
-            // #914: the identity a camera entry binds by.
+        if (device_type == "camera" || device_type == "switch") {
+            // #914: the identity a camera entry binds by; a dew heater binds
+            // its camera by the same serial.
             copy_if_present("serialNumber");
+        }
+        if (device_type == "camera") {
             copy_if_present("cameraName");
             copy_if_present("uniqueId");
         }

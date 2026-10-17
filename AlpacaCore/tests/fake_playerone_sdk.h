@@ -29,8 +29,10 @@
 
 namespace alpacacore::test {
 
-// KNOWN PARITY GAPS: one fake camera only (no shared open refcount or hot-plug
-// enumeration); ordinary image-ready is immediate; set_image_size/start/bin
+// KNOWN PARITY GAPS: one fully modelled camera. add_listed_camera() adds more
+// that enumerate, open (ref-counted per id, like the wrapper's usage_ count),
+// probe their own caps and answer heater/fan reads, but cannot expose; no
+// hot-plug enumeration; ordinary image-ready is immediate; set_image_size/start/bin
 // model the state changes but not additional model-specific SDK alignment.
 // hold_image_data intentionally ignores the SDK timeout to model a late return
 // and is always released by explicit test release or stop_exposure(). The SDK
@@ -76,33 +78,47 @@ public:
     std::string get_sdk_version() override { return "fake-playerone-sdk"; }
     std::vector<CameraInfo> enumerate_cameras() override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return no_cameras_ ? std::vector<CameraInfo>{} : std::vector<CameraInfo>{camera_};
+        if (no_cameras_) return {};
+        std::vector<CameraInfo> cameras{camera_};
+        for (const auto& listed : listed_) cameras.push_back(listed.info);
+        for (std::size_t i = 0; i < cameras.size(); ++i) cameras[i].index = static_cast<int>(i);
+        return cameras;
     }
-    void open_camera(int) override {
+    void open_camera(int camera_id) override {
         std::this_thread::sleep_for(open_delay_);
         std::lock_guard<std::mutex> lock(mutex_);
-        opened_ = true;
+        if (auto* listed = find_listed_locked(camera_id)) {
+            ++listed->open_refs;
+        } else {
+            ++open_refs_;
+        }
         open_count_.fetch_add(1);
     }
-    void init_camera(int) override {
+    void init_camera(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (init_failure_) throw std::runtime_error("scripted init failure");
-        if (!opened_) throw std::runtime_error("init on a closed fake camera");
+        require_open_locked("init_camera", camera_id);
     }
-    void close_camera(int) override {
+    void close_camera(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (downloads_in_flight_ != 0) close_during_download_.store(true);
-        opened_ = false;
+        if (auto* listed = find_listed_locked(camera_id)) {
+            if (listed->open_refs > 0) --listed->open_refs;
+        } else {
+            if (downloads_in_flight_ != 0) close_during_download_.store(true);
+            if (open_refs_ > 0) --open_refs_;
+        }
         close_count_.fetch_add(1);
     }
-    CameraInfo get_camera_properties_by_id(int) override {
+    CameraInfo get_camera_properties_by_id(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        require_open_locked("get_camera_properties_by_id");
+        require_open_locked("get_camera_properties_by_id", camera_id);
+        if (auto* listed = find_listed_locked(camera_id)) return listed->info;
         return camera_;
     }
-    ConfigCaps probe_config_caps(int) override {
+    ConfigCaps probe_config_caps(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        require_open_locked("probe_config_caps");
+        require_open_locked("probe_config_caps", camera_id);
+        if (auto* listed = find_listed_locked(camera_id)) return listed->caps;
         return caps_;
     }
 
@@ -310,23 +326,23 @@ public:
         require_open_locked("get_egain");
         return 1.0;
     }
-    int get_heater_power_percent(int) override {
+    int get_heater_power_percent(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        require_open_locked("get_heater_power_percent");
+        require_open_locked("get_heater_power_percent", camera_id);
         return 0;
     }
-    void set_heater_power_percent(int, int) override {
+    void set_heater_power_percent(int camera_id, int) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        require_open_locked("set_heater_power_percent");
+        require_open_locked("set_heater_power_percent", camera_id);
     }
-    int get_fan_power_percent(int) override {
+    int get_fan_power_percent(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        require_open_locked("get_fan_power_percent");
+        require_open_locked("get_fan_power_percent", camera_id);
         return 0;
     }
-    void set_fan_power_percent(int, int) override {
+    void set_fan_power_percent(int camera_id, int) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        require_open_locked("set_fan_power_percent");
+        require_open_locked("set_fan_power_percent", camera_id);
     }
 
     void set_returned_size(int width, int height) {
@@ -358,6 +374,31 @@ public:
         caps_.has_target_temp = available;
         caps_.target_temp_min = -50;
         caps_.target_temp_max = 20;
+    }
+    // The heater and fan the default camera reports (POA_HEATER_POWER, POA_FAN_POWER).
+    void set_thermal_controls(bool heater, bool fan) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        camera_.has_cooler = camera_.has_cooler || heater || fan;
+        caps_.has_heater_power = heater;
+        caps_.heater_power_writable = heater;
+        caps_.heater_power_max = heater ? 100 : 0;
+        caps_.has_fan_power = fan;
+        caps_.fan_power_writable = fan;
+        caps_.fan_power_max = fan ? 100 : 0;
+    }
+    // A further camera, enumerated after the default one. Its camera_id must
+    // differ from the default camera's (17).
+    void add_listed_camera(CameraInfo info, ConfigCaps caps) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        listed_.push_back({std::move(info), caps, 0});
+    }
+    // Opens not yet balanced by a close, for the camera with this id.
+    int open_refs(int camera_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& listed : listed_) {
+            if (listed.info.camera_id == camera_id) return listed.open_refs;
+        }
+        return camera_id == camera_.camera_id ? open_refs_ : 0;
     }
     void set_no_cameras(bool no_cameras) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -408,7 +449,7 @@ public:
     bool operation_after_close() const { return operation_after_close_.load(); }
     bool opened() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return opened_;
+        return open_refs_ > 0;
     }
     int image_size_set_count() const { return image_size_set_count_.load(); }
     std::pair<int, int> last_set_image_size() const {
@@ -417,8 +458,29 @@ public:
     }
 
 private:
-    void require_open_locked(const char* operation) {
-        if (!opened_) {
+    struct ListedCamera {
+        CameraInfo info;
+        ConfigCaps caps;
+        int open_refs{0};
+    };
+
+    ListedCamera* find_listed_locked(int camera_id) {
+        for (auto& listed : listed_) {
+            if (listed.info.camera_id == camera_id) return &listed;
+        }
+        return nullptr;
+    }
+
+    // Without an id: the default camera, which every exposure call means.
+    void require_open_locked(const char* operation, std::optional<int> camera_id = std::nullopt) {
+        if (camera_id.has_value()) {
+            if (const auto* listed = find_listed_locked(*camera_id)) {
+                if (listed->open_refs > 0) return;
+                operation_after_close_.store(true);
+                throw std::runtime_error(std::string(operation) + " on a closed fake camera");
+            }
+        }
+        if (open_refs_ <= 0) {
             operation_after_close_.store(true);
             throw std::runtime_error(std::string(operation) + " on a closed fake camera");
         }
@@ -429,7 +491,8 @@ private:
     CameraInfo camera_{};
     ConfigCaps caps_{};
     std::condition_variable download_cv_;
-    bool opened_{false};
+    int open_refs_{0};
+    std::vector<ListedCamera> listed_;
     bool init_failure_{false};
     bool download_failure_{false};
     bool hold_image_data_{false};

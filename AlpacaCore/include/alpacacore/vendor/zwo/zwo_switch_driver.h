@@ -13,7 +13,11 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/thermal_camera_choice.h>
+
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace alpacacore::vendor::zwo {
 
@@ -29,8 +33,22 @@ std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, in
  * @brief Create a ZWO dew heater switch device using a camera index.
  *
  * @param device_number Alpaca device number
- * @param camera_index ZWO SDK camera index (0-based)
+ * @param camera_index ZWO SDK camera index (0-based), or util::kAutoThermalCamera
+ *        for the one attached camera that has an anti-dew heater
+ * @param camera_serial When not empty, the switch binds only the camera with
+ *        this serial and the index is ignored, so a USB reorder cannot move it
  */
-std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index);
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
+                                                                    const std::string& camera_serial = {});
+
+/**
+ * @brief Every attached ZWO camera for a dew heater's camera picker: SDK slot,
+ * model, serial, and whether it has an anti-dew heater.
+ *
+ * Opens each camera through the ref-counted SDK wrapper (a camera already open
+ * in this process stays open) because ASIGetControlCaps and
+ * ASIGetSerialNumber need an open camera.
+ */
+std::vector<util::ThermalCameraCandidate> list_zwo_dew_heater_cameras();
 
 } // namespace alpacacore::vendor::zwo
