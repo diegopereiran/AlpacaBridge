@@ -147,7 +147,8 @@ TEST_CASE("SynScan snapshot - getters and DeviceState make no handset transactio
         CHECK(timed(read) < kGetterBudget);
     }
     CHECK(st->transactions.load() == before);
-    // DeviceState drops a getter that throws, so a read that quietly failed would still be fast: name what must be in it.
+    // DeviceState drops a getter that throws, so a read that quietly failed would still be fast: name what must be in
+    // it.
     for (const char* name : {"RightAscension", "Declination", "Slewing", "Tracking", "TimeStamp"}) {
         CAPTURE(name);
         CHECK(has_entry(*driver, name));
