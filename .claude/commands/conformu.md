@@ -107,11 +107,11 @@ If `ErrorNumber` is non-zero (e.g. NotConnected because hardware is unplugged), 
 
 ### 2c2. SynScan telescope only: the handset answers more than the echo
 
-A SynScan connect only gates on one echo, so a handset that answers that and then goes silent comes up `Connected=true` with every query timing out (issue #881). Read a position value through the driver twice, 3 s apart: the driver serves a position read in the last 2 s from its cache (`kPositionCacheTtl`) without asking the handset, so only the second read is sure to reach it:
+A SynScan connect only gates on one echo, so a handset that answers that and then goes silent comes up `Connected=true` with every query timing out (issue #881). Read a position value through the driver twice, 30 s apart: the driver serves position from a frame its status poll refreshes every second (`kStatusPollPeriod`, issue #1247) and refuses it once the poll has failed three times in a row, so a silent handset shows as the second read failing:
 
 ```bash
 curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=1"
-sleep 3
+sleep 30
 curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=2"
 ```
 

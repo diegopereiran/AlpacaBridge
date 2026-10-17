@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "concurrency_stress.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
 
@@ -49,6 +50,7 @@ struct Handset {
     std::atomic<int> transactions{0};
     std::atomic<int> latency_ms{0};
     std::atomic<bool> mute{false};
+    std::atomic<bool> slewing{false};
     std::atomic<int> tracking_mode{1};
 };
 
@@ -67,7 +69,7 @@ std::string reply(Handset& st, const std::string& chunk) {
         case 'z':
             return "8A4FDA00,0D527400#";
         case 'L':
-            return "0#";
+            return st.slewing.load() ? "1#" : "0#";
         case 'm':  // mount model: an EQ mount
             return std::string(1, '\x32') + "#";
         case 'p':
@@ -132,6 +134,12 @@ TEST_CASE("SynScan snapshot - getters and DeviceState make no handset transactio
         {"Slewing", [&] { (void)driver->get_slewing(); }},
         {"Tracking", [&] { (void)driver->get_tracking(); }},
         {"SideOfPier", [&] { (void)driver->get_side_of_pier(); }},
+        {"UTCDate", [&] { (void)driver->get_utc_date(); }},
+        {"SiderealTime", [&] { (void)driver->get_sidereal_time(); }},
+        {"AtPark", [&] { (void)driver->get_at_park(); }},
+        {"AtHome", [&] { (void)driver->get_at_home(); }},
+        {"IsPulseGuiding", [&] { (void)driver->get_is_pulse_guiding(); }},
+        {"TrackingRate", [&] { (void)driver->get_tracking_rate(); }},
         {"DeviceState", [&] { (void)driver->get_device_state(); }},
     };
     for (const auto& [name, read] : reads) {
@@ -139,6 +147,11 @@ TEST_CASE("SynScan snapshot - getters and DeviceState make no handset transactio
         CHECK(timed(read) < kGetterBudget);
     }
     CHECK(st->transactions.load() == before);
+    // DeviceState drops a getter that throws, so a read that quietly failed would still be fast: name what must be in it.
+    for (const char* name : {"RightAscension", "Declination", "Slewing", "Tracking", "TimeStamp"}) {
+        CAPTURE(name);
+        CHECK(has_entry(*driver, name));
+    }
     driver->set_connected(false);
 }
 
@@ -170,6 +183,60 @@ TEST_CASE("SynScan snapshot - a setter's value is read back at once and a stale 
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan snapshot - a sync, a slew start and a clock write are read back at once",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+
+    // The fake handset keeps answering 08h42m RA / -67 deg Dec. The pulse-guide position override holds the synced
+    // value for 10 s of task clock; past it the frame is what answers, so it must carry the synced position too.
+    const auto past_override = seconds(11);
+    driver->sync_to_coordinates(3.5, 12.25);
+    clock.advance(past_override);
+    CHECK(std::abs(driver->get_right_ascension() - 3.5) < 1e-9);
+    CHECK(std::abs(driver->get_declination() - 12.25) < 1e-9);
+
+    // A poll that sampled before the sync publishes after it: the sync wins.
+    std::atomic<bool> once{false};
+    sc::set_status_poll_after_sample_hook_for_testing(*driver, [&] {
+        if (!once.exchange(true)) driver->sync_to_coordinates(6.0, -20.0);
+    });
+    sc::poll_status_now_for_testing(*driver);
+    clock.advance(past_override);
+    CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-9);
+    CHECK(std::abs(driver->get_declination() - (-20.0)) < 1e-9);
+    sc::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
+
+    // The next poll reads the handset (Dec only: the precise RA read is corrected against the last known RA).
+    sc::poll_status_now_for_testing(*driver);
+    CHECK(std::abs(driver->get_declination() - (-67.490537)) < 1e-5);
+
+    // A clock write is read back, not re-read from the handset.
+    const auto when = std::chrono::system_clock::now() + seconds(3600);
+    driver->set_utc_date(when);
+    CHECK(std::abs(std::chrono::duration<double>(driver->get_utc_date() - when).count()) < 5.0);
+
+    // A slew start flips Slewing at once, though the handset still answers "not slewing".
+    CHECK_FALSE(driver->get_slewing());
+    driver->slew_to_coordinates_async(2.0, 30.0);
+    CHECK(driver->get_slewing());
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_slewing());
+
+    // A stop is read back at once: the frame still says the handset was slewing at the last poll.
+    st->slewing = true;
+    sc::poll_status_now_for_testing(*driver);
+    CHECK(driver->get_slewing());
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 TEST_CASE("SynScan snapshot - past the staleness bound DeviceState is empty with no TimeStamp",
           "[synscan][telescope][snapshot]") {
     FakeTaskClock clock;
@@ -198,6 +265,24 @@ TEST_CASE("SynScan snapshot - past the staleness bound DeviceState is empty with
         CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
     }
     st->mute = false;
+
+    // Decision 0009 point 4: Connected=true against a lost link relinks, on both entry points; it is not the
+    // idempotent no-op.
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(std::abs(driver->get_right_ascension() - 8.711749) < 1e-5);
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) sc::poll_status_now_for_testing(*driver);
+    clock.advance(alpacacore::util::kLinkStalenessBound + seconds(1));
+    sc::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_connected());
+    st->mute = false;
+    driver->connect();  // the async route
+    CHECK(alpacacore::test::settle_connected(*driver, true, seconds(10)));
+    CHECK(driver->get_connected());
+    CHECK(std::abs(driver->get_right_ascension() - 8.711749) < 1e-5);
+    driver->set_connected(false);
 }
 
 #endif
