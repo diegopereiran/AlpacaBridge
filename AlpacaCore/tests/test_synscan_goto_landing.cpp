@@ -366,7 +366,10 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::u
         std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
 }
 
+// The getters serve the polled frame (decision 0010), so a case that reads the RA at a chosen sawtooth phase takes
+// one frame at that phase first.
 double ra_error_arcsec(alpacacore::TelescopeDriver& driver, double target_hours) {
+    alpacacore::vendor::synscan::poll_status_now_for_testing(driver);
     return std::abs(driver.get_right_ascension() - target_hours) * 15.0 * 3600.0;
 }
 
@@ -743,6 +746,9 @@ TEST_CASE("SynScan GOTO landing - a handset without the sawtooth is hunted once 
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     use_fast_guide_rate(*driver);
+    // landing_reads() counts the hunt's reads: the status poll (one `e` per virtual second, through the reconnect
+    // below too) would add about a dozen to a skipped landing.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     constexpr int kHuntReads = 4;
 
     CHECK(landing_reads(clock, *driver, *st) >= kHuntReads);
@@ -1088,6 +1094,92 @@ struct LongGoto {
 
 }  // namespace
 
+// A status tick held inside its sample (after its exchanges, before its publish) while an async GOTO lands: the
+// landing hunt waits for such a tick so its reads do not queue behind it, and that wait must stay bounded.
+struct HuntBehindHeldTick {
+    alpacacore::test::FakeTaskClock clock;
+    std::shared_ptr<LandingOffsetHandset> st = std::make_shared<LandingOffsetHandset>();
+    alpacacore::test::FakeMountServer server{responder(st)};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    std::promise<void> release;
+    std::shared_future<void> released = release.get_future().share();
+    std::atomic<bool> entered{false};
+    std::thread tick;
+    // Releases and joins the held tick on every exit, a REQUIRE that throws out of the constructor included.
+    struct Joiner {
+        std::promise<void>& release;
+        std::thread& tick;
+        ~Joiner() {
+            try {
+                release.set_value();
+            } catch (const std::future_error&) {  // NOLINT(bugprone-empty-catch): already released
+            }
+            if (tick.joinable()) tick.join();
+        }
+    } joiner{release, tick};
+
+    HuntBehindHeldTick() {
+        st->attach(clock);
+        REQUIRE(server.ok());
+        driver = make_driver(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        namespace sc = alpacacore::vendor::synscan;
+        sc::set_status_poll_paused_for_testing(*driver, true);  // only the held tick below samples
+        sc::set_status_poll_after_sample_hook_for_testing(*driver, [this] {
+            entered = true;
+            (void)released.wait_for(std::chrono::seconds(10));
+        });
+        tick = std::thread([this] { (void)sc::poll_status_now_for_testing(*driver); });
+        const auto deadline = Clock::now() + std::chrono::seconds(5);
+        while (!entered.load() && Clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        REQUIRE(entered.load());
+        const auto started = clock.now();
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+        // The slew loop reports Slewing through the driver's 8 s start window whatever the handset says, waiting on
+        // this clock between re-reads; the landing hunt waits on the wall clock, and the paused status poll waits on
+        // neither, so nothing waits on this clock once the task has reached the hunt.
+        // step_virtual() waits for a woken task to park again, which a task spinning in the hunt never does, so
+        // the clock is advanced by hand across the end of the window and the slew loop's last 250 ms re-read.
+        while (clock.now() - started < std::chrono::milliseconds(7900)) {
+            step_virtual(clock);
+        }
+        while (clock.now() - started < std::chrono::milliseconds(8600)) {
+            clock.advance(kVirtualStep);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const bool in_hunt = clock.waiter_count() == 0;
+        REQUIRE(in_hunt);
+    }
+
+    ~HuntBehindHeldTick() { driver->set_connected(false); }
+};
+
+TEST_CASE("SynScan GOTO landing - the hunt reads past a held status tick once its wait bound runs out (#1247)",
+          "[synscan][telescope][goto-landing]") {
+    HuntBehindHeldTick h;
+    // The slew-end measurement is already read; the next precise read is the hunt's. The tick stays held for 10 s,
+    // and past the 1.5 s bound the hunt reads anyway.
+    const int before = h.st->position_reads.load();
+    const auto until = Clock::now() + std::chrono::seconds(3);
+    while (h.st->position_reads.load() == before && Clock::now() < until) {
+        h.clock.advance(kVirtualStep);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(h.st->position_reads.load() > before);
+}
+
+TEST_CASE("SynScan GOTO landing - a new slew while the hunt waits on a held status tick starts at once (#1247)",
+          "[synscan][telescope][goto-landing]") {
+    HuntBehindHeldTick h;
+    // The new initiator cancels and reaps the landing task; the cancel must end the hunt's wait, not the bound.
+    const auto t0 = Clock::now();
+    REQUIRE_NOTHROW(h.driver->slew_to_coordinates_async(kTargetRa + 0.5, kTargetDec));
+    CHECK(Clock::now() - t0 < std::chrono::milliseconds(1000));  // under the 1.5 s bound
+}
+
 TEST_CASE("SynScan GOTO landing - Disconnect during an async GOTO returns at once (#880)",
           "[synscan][telescope][goto-landing]") {
     LongGoto g;
@@ -1162,6 +1254,9 @@ TEST_CASE("SynScan PulseGuide - a west RA pulse lowers RA and an east one raises
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The case measures the motor over virtual seconds; a status poll tick sharing the wrapper with the pulse's stop
+    // would add real-time jitter to that count.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     driver->set_tracking(true);
     driver->set_guide_rate(alpacacore::GuideRate{7.5 / 3600.0, 7.5 / 3600.0});
     const double expected_counts = 7.5 * kCountsPerArcsec;  // 1 s at 7.5"/s
@@ -1368,6 +1463,58 @@ TEST_CASE("SynScan GOTO landing - the RA landing move converges in either hemisp
     CHECK(true_ra_error_arcsec(*st, kTargetRa) < 3.0);
     CHECK(warns.warns.load() == 0);
     CHECK(st->goto_count.load() == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - the hunt waits for a poll tick that is inside its exchanges",
+          "[synscan][telescope][goto-landing]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    // A tick parks after its exchanges with its sampling flag still up, as a slow link leaves it.
+    std::atomic<bool> in_sample{false};
+    std::atomic<bool> release{false};
+    alpacacore::vendor::synscan::set_status_poll_after_sample_hook_for_testing(*driver, [&] {
+        in_sample.store(true);
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    std::thread tick([&] { alpacacore::vendor::synscan::poll_status_now_for_testing(*driver); });
+    const auto real_deadline = Clock::now() + std::chrono::seconds(10);
+    while (!in_sample.load() && Clock::now() < real_deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    REQUIRE(in_sample.load());
+
+    std::atomic<bool> done{false};
+    std::thread slew([&] {
+        try {
+            driver->slew_to_coordinates(kTargetRa, kTargetDec);
+        } catch (...) {
+        }
+        done.store(true);
+    });
+    // The GOTO ends and the hunt asks for the line: virtual time steps through the whole GOTO and the landing, for
+    // up to 5 s of real time. The slew cannot finish while the tick holds the line (without the wait it ends first).
+    const auto hold_until = Clock::now() + std::chrono::seconds(5);
+    while (!done.load() && Clock::now() < hold_until) step_virtual(clock);
+    CHECK_FALSE(done.load());
+
+    release.store(true);
+    tick.join();
+    const auto finish_deadline = Clock::now() + std::chrono::seconds(60);
+    while (!done.load() && Clock::now() < finish_deadline) step_virtual(clock);
+    CHECK(done.load());
+    while (!done.load()) {
+        clock.advance(std::chrono::hours(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    slew.join();
+    alpacacore::vendor::synscan::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }
 

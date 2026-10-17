@@ -20,6 +20,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/park_slew.h>
+#include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
@@ -47,8 +48,38 @@ namespace alpacacore::vendor::synscan {
 namespace {
 
 constexpr double kHoursToDegrees = 15.0;
-constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
+// Decision 0010, SynScan adoption. A poll body samples the handset every kStatusPollPeriod (start to start; ticks
+// missed behind a slow link are skipped, never made up): the slewing flag (L) and the equatorial pair (e) on every
+// tick, the slower-moving fields (alt/az, pier side, tracking mode) on every kSlowPollEvery-th. Sky-Watcher's 100 ms
+// period is unsafe on this link: a hand-controller round trip measured ~140 ms (open-astro#617: 0.56 s for four
+// reads), so a frame costs 2-5 of them and 100 ms would keep the serial line busy and starve the control path.
+// Alt/az, pier side and tracking mode move only with a motion the driver commands (and the control path publishes a
+// full frame when that motion ends) or with a keypad press, so a slow cadence loses nothing a client can see.
+// kSnapshotMaxAge is the FRESHNESS bound: a frame older than it reads `stale` and is still served. It is not the
+// bound at which a getter refuses: that is the link-loss policy of decision 0009 (util::kLinkStalenessBound).
+constexpr auto kStatusPollPeriod = std::chrono::milliseconds(1000);
+constexpr int kSlowPollEvery = 4;
+constexpr auto kSnapshotMaxAge = std::chrono::milliseconds(3000);
+static_assert(kSnapshotMaxAge >= 2 * kStatusPollPeriod, "two poll periods, or a healthy link reads stale");
+static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must undercut the link-loss bound");
+
+// One polled frame of operational state (decision 0010). Small and copyable: the snapshot copies it under its mutex.
+struct PolledFrame {
+    double ra_hours = 0.0;
+    double dec_degrees = 0.0;
+    bool equatorial_known = false;
+    double az_degrees = 0.0;
+    double alt_degrees = 0.0;
+    bool altaz_known = false;
+    bool slewing = false;
+    int side_of_pier = -1;    // ASCOM value, -1 (pierUnknown) when the handset's state maps to neither side
+    bool pier_known = false;  // the handset has answered 'p' at least once
+    int tracking_mode = -1;   // handset 'T' mode, -1 unknown
+};
 constexpr int kPositionLinkFailureThreshold = 3;
+// How long the landing hunt waits for a status tick already sampling (open-astro#1247): a healthy tick is 2-5
+// exchanges, about 0.3-0.7 s at the ~140 ms round trip of open-astro#617.
+constexpr auto kPollSampleWaitBound = std::chrono::milliseconds(1500);
 // Consecutive failed Park slew-status queries tolerated before the Park fails (open-astro#1122).
 constexpr int kParkPollFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
@@ -263,9 +294,10 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        // Cancel + join the background slew/pulse task threads before any
-        // member they touch is destroyed. Must run WITHOUT mutex_ held (the
-        // task threads take mutex_).
+        // Cancel + join the status poll and the background slew/pulse task
+        // threads before any member they touch is destroyed. Must run WITHOUT
+        // mutex_ held (the task threads take mutex_).
+        stop_status_poller();
         cancel_async_tasks();
         if (connected_) {
             try {
@@ -338,7 +370,7 @@ public:
     // async_connectable.h. Stated as the rule rather than as a count: a bare
     // number in a comment has nothing tying it to the code it describes, and
     // every new driver invalidates it silently (open-astro#381).
-    bool get_connected() const override { return connected_.load(); }
+    bool get_connected() const override { return connected_.load() && !link_lost_.load(); }
 
     // Reads only the published copy under its own narrow mutex, never the coarse
     // mutex_ that set_connected() holds across the connect, so a configureddevices
@@ -360,15 +392,22 @@ public:
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> ilock(initiator_mutex_, std::defer_lock);
-        if (!connected) {
+        // Decision 0009 point 4: a lost link is relinked only by the client's Connected=true, which tears the dead
+        // session down (slew bodies included) and connects afresh.
+        const bool relink = connected && connected_.load() && link_lost_.load();
+        if (!connected || relink) {
             ilock.lock();
-            // Cancel + join the background slew/pulse task threads BEFORE
-            // taking mutex_: the task threads take mutex_, so joining under
-            // the lock would deadlock, and leaving them running across the
-            // protocol disconnect would race the shared wrapper.
+            // Cancel + join the status poll and the background slew/pulse task
+            // threads BEFORE taking mutex_: the task threads take mutex_, so
+            // joining under the lock would deadlock, and leaving them running
+            // across the protocol disconnect would race the shared wrapper.
+            stop_status_poller();
             cancel_async_tasks();
         }
         std::unique_lock<std::mutex> lock(mutex_);
+        if (relink) {
+            teardown_session_locked();
+        }
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -420,6 +459,7 @@ public:
                     }
                 },
                 "SynScan");
+            link_lost_ = false;
             connected_ = true;
             mount_firmware_version_ = "";
             mount_model_id_ = -1;
@@ -432,7 +472,7 @@ public:
             parking_ = false;
             at_home_ = false;
             clear_pulse_guiding_locked();
-            slewing_cached_ = false;
+            set_slewing_locked(false);
             refining_generation_ = 0;
             last_slew_error_.clear();
             slew_force_until_ = util::TaskClock::clock::time_point::min();
@@ -441,8 +481,7 @@ public:
             guide_position_valid_ = false;
             last_utc_valid_ = false;
             client_disagreement_warned_ = false;
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
+            snapshot_.reset();
             position_link_health_.reset();
             publish_link_fault_locked();
             last_site_info_attempt_ = util::TaskClock::clock::time_point::min();
@@ -484,25 +523,9 @@ public:
             if (sync_time_on_connect_) {
                 sync_mount_time_locked();
             }
-            // Warm caches so first property reads stay within Conform fast-time targets.
-            try {
-                auto raw = protocol.get_ra_dec_raw(use_precise_commands_);
-                int bits = use_precise_commands_ ? 24 : 16;
-                cached_ra_hours_ = decode_ra_hours(raw.first, bits);
-                cached_dec_degrees_ = decode_angle(raw.second, bits);
-                equatorial_cache_valid_ = true;
-                last_equatorial_update_ = clock_.now();
-            } catch (...) {
-            }
-            try {
-                auto raw = protocol.get_alt_az_raw(use_precise_commands_);
-                int bits = use_precise_commands_ ? 24 : 16;
-                cached_az_degrees_ = wrap_degrees(decode_angle(raw.first, bits));
-                cached_alt_degrees_ = decode_angle(raw.second, bits);
-                altaz_cache_valid_ = true;
-                last_altaz_update_ = clock_.now();
-            } catch (...) {
-            }
+            // Seed the snapshot so the first property reads are served from memory, status flags included.
+            seed_snapshot_locked();
+            ensure_utc_cached_locked();
             try {
                 LocationInfo info = protocol.get_location();
                 site_latitude_cached_ = info.latitude_degrees;
@@ -511,29 +534,11 @@ public:
             } catch (...) {
             }
         } else {
-            protocol.disconnect();
-            connected_ = false;
-            {
-                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_.clear();
-            }
-            target_ra_set_ = false;
-            target_dec_set_ = false;
-            parked_ = false;
-            parking_ = false;
-            at_home_ = false;
-            clear_pulse_guiding_locked();
-            slewing_cached_ = false;
-            refining_generation_ = 0;
-            last_slew_error_.clear();
-            slew_force_until_ = util::TaskClock::clock::time_point::min();
-            position_override_until_ = util::TaskClock::clock::time_point::min();
-            invalidate_readback_tick_locked();
-            guide_position_valid_ = false;
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
-            position_link_health_.reset();
-            publish_link_fault_locked();
+            teardown_session_locked();
+        }
+        if (connected) {
+            lock.unlock();  // the poll slot starts without mutex_ held (AsyncOperation rule 10)
+            start_status_poller();
         }
     }
 
@@ -594,8 +599,7 @@ public:
     double get_altitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        refresh_altaz_cache_locked();
-        return cached_alt_degrees_;
+        return served_altaz_locked().second;
     }
 
     double get_aperture_diameter() const override {
@@ -634,8 +638,7 @@ public:
     double get_azimuth() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        refresh_altaz_cache_locked();
-        return cached_az_degrees_;
+        return served_altaz_locked().first;
     }
 
     bool get_can_find_home() const override {
@@ -721,8 +724,7 @@ public:
             !get_slewing_locked()) {
             return std::clamp(guide_position_dec_degrees_, -90.0, 90.0);
         }
-        refresh_equatorial_cache_locked();
-        return std::clamp(cached_dec_degrees_, -90.0, 90.0);
+        return std::clamp(served_equatorial_locked().second, -90.0, 90.0);
     }
 
     double get_declination_rate() const override {
@@ -737,7 +739,12 @@ public:
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        return get_tracking_locked();
+        const int mode = served_frame_locked().value.tracking_mode;
+        if (mode < 0) {
+            throw AlpacaException("SynScan tracking state is not known yet: the handset has not answered a status poll",
+                                  AlpacaError::DriverException);
+        }
+        return mode != 0;
     }
 
     void set_tracking(bool tracking) override {
@@ -759,10 +766,10 @@ public:
             // handset applies its own site; 3 is not "EQ south" as it is on a Celestron.
             const int mode = alignment == AlignmentMode::AltAz ? 1 : 2;
             protocol.set_tracking_mode(mode);
-            tracking_mode_cached_ = mode;
+            set_tracking_mode_cached_locked(mode);
         } else {
             protocol.set_tracking_mode(0);
-            tracking_mode_cached_ = 0;
+            set_tracking_mode_cached_locked(0);
         }
         tracking_mode_valid_ = true;
         invalidate_readback_tick_locked();
@@ -806,8 +813,7 @@ public:
             !get_slewing_locked()) {
             return guide_position_ra_hours_;
         }
-        refresh_equatorial_cache_locked();
-        return cached_ra_hours_;
+        return served_equatorial_locked().first;
     }
 
     double get_right_ascension_rate() const override {
@@ -822,16 +828,12 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        try {
-            char side = SynScanProtocolWrapper::instance().get_pointing_state();
-            side_of_pier_cached_ = map_pointing_state_to_side(side);
-            side_of_pier_valid_ = side_of_pier_cached_ >= 0;
-        } catch (...) {
-            if (!side_of_pier_valid_) {
-                throw;
-            }
+        const auto frame = served_frame_locked().value;
+        if (!frame.pier_known) {
+            throw AlpacaException("SynScan pier side is not known yet: the handset has not reported its pointing state",
+                                  AlpacaError::DriverException);
         }
-        return side_of_pier_cached_;
+        return frame.side_of_pier;
     }
 
     void set_side_of_pier(int side) override {
@@ -847,7 +849,7 @@ public:
             ensure_site_info_cached_locked();
         }
         if (!site_info_valid_) {
-            return side_of_pier_valid_ ? side_of_pier_cached_ : -1;
+            return served_frame_locked().value.side_of_pier;  // the same link checks as every other frame read
         }
         double lst_hours = compute_local_sidereal_time_hours(std::chrono::system_clock::now(),
                                                             site_longitude_cached_);
@@ -880,9 +882,7 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-        }
+        // No handset read here: the poll retries an unread site (decision 0010), so DeviceState costs no transaction.
         return compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
     }
 
@@ -1008,27 +1008,7 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!last_utc_valid_) {
-            try {
-                TimeInfo info = SynScanProtocolWrapper::instance().get_time();
-                timezone_offset_minutes_ = info.timezone_offset_minutes;
-                timezone_offset_valid_ = true;
-                dst_observed_ = info.dst_enabled;
-
-                using namespace std::chrono;
-                int year = 2000 + info.year;
-                sys_days date = sys_days{std::chrono::year{year} /
-                                         std::chrono::month{static_cast<unsigned>(info.month)} /
-                                         std::chrono::day{static_cast<unsigned>(info.day)}};
-                auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
-                int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
-                last_utc_set_ = local_time - minutes{total_offset};
-            } catch (...) {
-                last_utc_set_ = std::chrono::system_clock::now();
-            }
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
-        }
+        ensure_utc_cached_locked();
         return current_utc_time_locked();
     }
 
@@ -1154,7 +1134,7 @@ public:
             prev_override = position_override_until_;
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
-            slewing_cached_ = true;
+            set_slewing_locked(true);
             park_poll_failures_ = 0;
             slew_force_until_ = clock_.now() + std::chrono::seconds(8);
             position_override_until_ = util::TaskClock::clock::time_point::min();
@@ -1187,16 +1167,15 @@ public:
                 hooks.poll_slewing = [this] { return poll_hardware_slewing_locked(true); };
                 hooks.stop_tracking = [this] {
                     SynScanProtocolWrapper::instance().set_tracking_mode(0);
-                    tracking_mode_cached_ = 0;
+                    set_tracking_mode_cached_locked(0);
                     tracking_mode_valid_ = true;
                     invalidate_readback_tick_locked();
                 };
                 hooks.fail = [this, &ctx](const std::string& message) { fail_park_locked(message, ctx); };
                 hooks.complete = [this] {
-                    slewing_cached_ = false;
+                    set_slewing_locked(false);
                     slew_force_until_ = util::TaskClock::clock::time_point::min();
-                    equatorial_cache_valid_ = false;
-                    altaz_cache_valid_ = false;
+                    publish_measurement_locked();
                     guide_position_valid_ = false;
                     // AtPark and Slewing flip in the same locked step.
                     parked_ = true;
@@ -1207,7 +1186,7 @@ public:
             displaced,
             [&] {
                 parking_ = false;
-                slewing_cached_ = prev_slewing;
+                set_slewing_locked(prev_slewing);
                 at_home_ = prev_at_home;
                 manual_axis_slewing_[0] = prev_manual[0];
                 manual_axis_slewing_[1] = prev_manual[1];
@@ -1235,7 +1214,7 @@ public:
         parking_ = false;
         last_slew_error_ = message;
         if (stop_error.empty()) {
-            slewing_cached_ = false;
+            set_slewing_locked(false);
         } else {
             last_slew_error_ += "; stopping after failure failed: " + stop_error + "; the mount may still be moving";
             ALPACA_LOG_ERROR("SynScan",
@@ -1280,7 +1259,7 @@ public:
             check_not_parked_locked("PulseGuide");
             // open-astro#775: ITelescopeV4 raises InvalidOperation for a
             // PulseGuide while a slew is in progress.
-            if (get_slewing_locked()) {
+            if (get_slewing_locked(true)) {
                 throw AlpacaException("PulseGuide is not allowed while the mount is slewing",
                                       AlpacaError::InvalidOperation);
             }
@@ -1309,9 +1288,9 @@ public:
 
             // Initialize the guide-position estimate from mount position when its override expires.
             if (!guide_position_valid_ || now >= position_override_until_) {
-                refresh_equatorial_cache_locked();
-                guide_position_ra_hours_ = cached_ra_hours_;
-                guide_position_dec_degrees_ = cached_dec_degrees_;
+                const auto equatorial = served_equatorial_locked();
+                guide_position_ra_hours_ = equatorial.first;
+                guide_position_dec_degrees_ = equatorial.second;
                 guide_position_valid_ = true;
             }
 
@@ -1338,8 +1317,7 @@ public:
             pulse_guiding_active_[static_cast<std::size_t>(axis)] = true;
             pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
                 now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
+            drop_poll_in_flight_locked();
         }
 
         // Each axis has its own slot; cancelling above happened before the new
@@ -1540,15 +1518,14 @@ public:
             dec_raw = encode_angle(dec, bits);
             precise = use_precise_commands_;
 
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
+            drop_poll_in_flight_locked();
             prev_slewing = slewing_cached_;
             prev_at_home = at_home_;
             prev_guide_valid = guide_position_valid_;
             prev_manual[0] = manual_axis_slewing_[0];
             prev_manual[1] = manual_axis_slewing_[1];
             prev_override = position_override_until_;
-            slewing_cached_ = true;
+            set_slewing_locked(true);
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that retries a rejected goto must not be told the OLD goto
             // failed.
@@ -1583,7 +1560,7 @@ public:
                         refine_goto_landing_locked(lock, ra, dec, owner_generation, &ctx);
                     }
                 } catch (const std::exception& ex) {
-                    slewing_cached_ = false;
+                    set_slewing_locked(false);
                     slew_force_until_ = util::TaskClock::clock::time_point::min();
                     position_override_until_ = util::TaskClock::clock::time_point::min();
                     // open-astro#575: a reap by a newer initiator is not a failure -- that
@@ -1596,7 +1573,7 @@ public:
                     }
                     ALPACA_LOG_WARN("SynScan", std::string("Async slew dispatch failed: ") + ex.what());
                 } catch (...) {
-                    slewing_cached_ = false;
+                    set_slewing_locked(false);
                     slew_force_until_ = util::TaskClock::clock::time_point::min();
                     position_override_until_ = util::TaskClock::clock::time_point::min();
                     if (ctx.stop_reason() == util::StopReason::None) {
@@ -1607,7 +1584,7 @@ public:
             },
             displaced,
             [&] {
-                slewing_cached_ = prev_slewing;
+                set_slewing_locked(prev_slewing);
                 at_home_ = prev_at_home;
                 manual_axis_slewing_[0] = prev_manual[0];
                 manual_axis_slewing_[1] = prev_manual[1];
@@ -1670,6 +1647,12 @@ public:
         guide_position_dec_degrees_ = dec;
         guide_position_valid_ = true;
         position_override_until_ = clock_.now() + std::chrono::seconds(10);
+        // Write-through: the poll in flight sampled before the sync and is dropped.
+        snapshot_.write([ra, dec](PolledFrame& frame) {
+            frame.ra_hours = ra;
+            frame.dec_degrees = dec;
+            frame.equatorial_known = true;
+        });
     }
 
     void sync_to_target() override {
@@ -1702,7 +1685,7 @@ public:
                 parking_ = false;
                 stop_error = stop_park_slew_locked();
                 if (stop_error.empty()) {
-                    slewing_cached_ = false;
+                    set_slewing_locked(false);
                 }
                 slew_force_until_ = util::TaskClock::clock::time_point::min();
                 position_override_until_ = util::TaskClock::clock::time_point::min();
@@ -1772,7 +1755,7 @@ public:
             protocol.set_tracking_mode(tracking_mode_cached_);
         }
         last_slew_error_.clear();
-        slewing_cached_ = false;
+        set_slewing_locked(false);
         slew_force_until_ = util::TaskClock::clock::time_point::min();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         pulse_guiding_active_[static_cast<std::size_t>(axis)] = false;
@@ -1840,7 +1823,7 @@ public:
                 }
                 parking_ = false;  // an aborted park never reaches AtPark
                 bump_motion_generation();
-                slewing_cached_ = false;
+                set_slewing_locked(false);
                 clear_pulse_guiding_locked();
                 // open-astro#575: AbortSlew is a valid clearing command for a stored
                 // slew failure -- the client acted on the error, so the next Slewing
@@ -1899,8 +1882,63 @@ private:
         return -1;
     }
 
+    // Reads the handset clock once per session (the connect seeds it), so UTCDate in DeviceState costs no transaction.
+    void ensure_utc_cached_locked() const {
+        if (!last_utc_valid_) {
+            try {
+                TimeInfo info = SynScanProtocolWrapper::instance().get_time();
+                timezone_offset_minutes_ = info.timezone_offset_minutes;
+                timezone_offset_valid_ = true;
+                dst_observed_ = info.dst_enabled;
+
+                using namespace std::chrono;
+                int year = 2000 + info.year;
+                sys_days date =
+                    sys_days{std::chrono::year{year} / std::chrono::month{static_cast<unsigned>(info.month)} /
+                             std::chrono::day{static_cast<unsigned>(info.day)}};
+                auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
+                int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
+                last_utc_set_ = local_time - minutes{total_offset};
+            } catch (...) {
+                last_utc_set_ = std::chrono::system_clock::now();
+            }
+            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+            last_utc_valid_ = true;
+        }
+    }
+
+    // The disconnect body, also the first half of a relink. Caller holds mutex_.
+    void teardown_session_locked() {
+        auto& protocol = SynScanProtocolWrapper::instance();
+        protocol.disconnect();
+        connected_ = false;
+        {
+            std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+            firmware_cache_.clear();
+        }
+        target_ra_set_ = false;
+        target_dec_set_ = false;
+        parked_ = false;
+        parking_ = false;
+        at_home_ = false;
+        clear_pulse_guiding_locked();
+        set_slewing_locked(false);
+        refining_generation_ = 0;
+        last_slew_error_.clear();
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
+        invalidate_readback_tick_locked();
+        guide_position_valid_ = false;
+        manual_axis_slewing_[0] = false;
+        manual_axis_slewing_[1] = false;
+        position_link_health_.reset();
+        publish_link_fault_locked();
+        snapshot_.reset();
+        link_lost_ = false;
+    }
+
     void check_connected() const {
-        if (!connected_) {
+        if (!connected_ || link_lost_.load()) {
             throw AlpacaException("Not connected to SynScan mount", AlpacaError::NotConnected);
         }
     }
@@ -1912,6 +1950,10 @@ private:
 
     // Cancel and join every slot. Must be called WITHOUT mutex_ held (the
     // bodies take mutex_).
+    // Cancels and joins the motion slots only. The status poll is not one of them: it runs for the life of the
+    // connection, and a GOTO or Park that joined it would leave every read frozen at the slew-end frame, the
+    // link-fault latch and the site retry stopped, and the landing hunt waiting for a tick that never comes. Only the
+    // lifecycle paths (disconnect, relink, the destructor) stop it, through stop_status_poller().
     void cancel_async_tasks() {
         slew_.cancel_all_and_join();
         pulse_ops_[0].cancel_all_and_join();
@@ -1947,7 +1989,7 @@ private:
     void stop_after_refused_start_locked() {
         const std::string stop_error = stop_park_slew_locked();
         if (stop_error.empty()) {
-            slewing_cached_ = false;
+            set_slewing_locked(false);
         } else {
             ALPACA_LOG_ERROR("SynScan",
                              "stop after refused slew start failed: " + stop_error + "; the mount may still be moving");
@@ -1969,6 +2011,40 @@ public:
     void set_pulse_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         pulse_ops_[0].set_spawn_for_testing(spawn);
         pulse_ops_[1].set_spawn_for_testing(std::move(spawn));
+    }
+
+    // Stops (true: the poll body is joined, so it parks no waiter on a fake task clock) or resumes (false) the status
+    // poll. A case that scripts the handset's replies or counts virtual seconds pauses it so the poll does not
+    // consume them.
+    void set_status_poll_paused_for_testing(bool paused) {
+        status_poll_paused_for_testing_ = paused;
+        if (paused) {
+            status_poll_.cancel_all_and_join();
+        } else {
+            start_status_poller();
+        }
+    }
+
+    // One full tick on the calling thread, paused or not: a case that fixes the handset's state and the clock
+    // reads exactly one frame. False when the connection is gone.
+    bool poll_status_now_for_testing() { return poll_status_once(nullptr, 0); }
+
+    // Stands in for the readback-tick hunt: takes (true) or drops (false) the hold under mutex_, as the hunt does.
+    void hold_status_poll_for_testing(bool hold) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        poll_hold_ += hold ? 1 : -1;
+    }
+
+    // Called after a poll's first hold check, before its locked second one, with no lock held.
+    void set_status_poll_before_sample_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        status_poll_before_sample_hook_ = std::move(hook);
+    }
+
+    // Called between a poll's sample and its publish, with no lock held.
+    void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        status_poll_after_sample_hook_ = std::move(hook);
     }
 
 private:
@@ -2031,6 +2107,26 @@ private:
         return corrected;
     }
 
+    struct PollHold {
+        explicit PollHold(std::atomic<int>& count) : count_(count) { ++count_; }
+        ~PollHold() { --count_; }
+        PollHold(const PollHold&) = delete;
+        PollHold& operator=(const PollHold&) = delete;
+
+    private:
+        std::atomic<int>& count_;
+    };
+
+    struct SamplingFlag {
+        explicit SamplingFlag(std::atomic<bool>& flag) : flag_(flag) {}
+        ~SamplingFlag() { flag_ = false; }
+        SamplingFlag(const SamplingFlag&) = delete;
+        SamplingFlag& operator=(const SamplingFlag&) = delete;
+
+    private:
+        std::atomic<bool>& flag_;
+    };
+
     struct TickHunt {
         bool found = false;
         util::TaskClock::clock::time_point tick;
@@ -2046,6 +2142,22 @@ private:
                                        util::OperationContext* ctx) const {
         using clock = util::TaskClock::clock;
         auto& protocol = SynScanProtocolWrapper::instance();
+        // The hunt reads at a 50 ms cadence tuned on the rig; the poll skips its ticks while it runs (bounded).
+        const PollHold hold(poll_hold_);
+        // A tick already inside its exchanges queues the hunt's reads behind it on the wrapper mutex and widens the
+        // bracket around the tick: let it finish (mutex_ is dropped so its publish can run). No new tick starts. The
+        // wait is bounded: a tick on a silent link can take several response timeouts, and past the bound the hunt
+        // reads anyway, queued behind it. A superseding command or a stop ends the wait at once.
+        const auto wait_until = std::chrono::steady_clock::now() + kPollSampleWaitBound;
+        while (poll_sampling_.load() && std::chrono::steady_clock::now() < wait_until) {
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            lock.lock();
+            if (motion_generation_ != owner_generation ||
+                (ctx != nullptr && ctx->stop_reason() != util::StopReason::None)) {
+                return TickHunt{};
+            }
+        }
         const auto start = clock_.now();
         TickHunt hunt;
         if (readback_tick_absent_) {
@@ -2222,27 +2334,200 @@ private:
         return keep && motion_generation_ == owner_generation;
     }
 
-    void refresh_equatorial_cache_locked() const {
-        auto now = clock_.now();
-        if (!position_link_health_.faulted() && equatorial_cache_valid_ &&
-            (now - last_equatorial_update_) < kPositionCacheTtl) {
+    // ── Snapshot-served state (decision 0010, SynScan adoption) ──────────────
+
+    // One handset sample, taken without mutex_ (the protocol wrapper serialises each exchange). The slewing flag is
+    // read BEFORE the position, so a frame that says "not slewing" carries a position measured after the stop. The
+    // slow fields are optional: a handset that does not answer one keeps the last value.
+    struct RawSample {
+        bool slewing = false;
+        std::pair<uint32_t, uint32_t> equatorial{};
+        util::TaskClock::clock::time_point read_at{};
+        std::optional<std::pair<uint32_t, uint32_t>> altaz;
+        std::optional<char> pier;
+        std::optional<int> tracking_mode;
+    };
+
+    // Throws what the protocol throws for the slewing flag or the equatorial pair.
+    RawSample sample_raw(bool precise, bool full) const {
+        auto& protocol = SynScanProtocolWrapper::instance();
+        RawSample raw;
+        raw.slewing = protocol.is_goto_in_progress();
+        raw.equatorial = protocol.get_ra_dec_raw(precise);
+        raw.read_at = clock_.now();
+        if (full) {
+            try {
+                raw.altaz = protocol.get_alt_az_raw(precise);
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+            }
+            try {
+                raw.pier = protocol.get_pointing_state();
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+            }
+            try {
+                raw.tracking_mode = protocol.get_tracking_mode();
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+            }
+        }
+        return raw;
+    }
+
+    // The frame a sample makes, over the previous one (a slow field the sample lacks keeps its value). Caller holds
+    // mutex_: the RA correction reads the readback tick.
+    PolledFrame decode_sample_locked(const RawSample& raw, bool precise, const PolledFrame& previous) const {
+        PolledFrame frame = previous;
+        const int bits = precise ? 24 : 16;
+        frame.slewing = raw.slewing;
+        double ra = decode_ra_hours(raw.equatorial.first, bits);
+        if (precise) {
+            ra = corrected_ra_hours_locked(ra, raw.read_at);
+        }
+        frame.ra_hours = ra;
+        frame.dec_degrees = decode_angle(raw.equatorial.second, bits);
+        frame.equatorial_known = true;
+        if (raw.altaz) {
+            frame.az_degrees = wrap_degrees(decode_angle(raw.altaz->first, bits));
+            frame.alt_degrees = decode_angle(raw.altaz->second, bits);
+            frame.altaz_known = true;
+        }
+        if (raw.pier) {
+            frame.side_of_pier = map_pointing_state_to_side(*raw.pier);  // -1 (pierUnknown) is an answer too
+            frame.pier_known = true;
+        }
+        if (raw.tracking_mode) {
+            frame.tracking_mode = *raw.tracking_mode;
+        }
+        return frame;
+    }
+
+    // The frame a getter serves, or the refusal that applies: a lost link (NotConnected), a latched fault
+    // (DriverException "communications compromised", Connected stays true, decision 0009 point 1), no frame yet.
+    // A frame past kSnapshotMaxAge is served as it is: stale is not lost.
+    util::StateSnapshot<PolledFrame>::Reading served_frame_locked() const {
+        check_connected();
+        if (position_link_health_.faulted()) {
+            throw_position_link_fault_locked();
+        }
+        auto reading = snapshot_.read();
+        if (!reading) {
+            throw AlpacaException(
+                "SynScan mount state is not available yet: the first status poll has not been answered",
+                AlpacaError::DriverException);
+        }
+        return *reading;
+    }
+
+    std::pair<double, double> served_equatorial_locked() const {
+        const auto frame = served_frame_locked();
+        if (!frame.value.equatorial_known) {
+            throw AlpacaException("SynScan mount position is not available: the last read failed",
+                                  AlpacaError::DriverException);
+        }
+        return {frame.value.ra_hours, frame.value.dec_degrees};
+    }
+
+    // {azimuth, altitude}
+    std::pair<double, double> served_altaz_locked() const {
+        const auto frame = served_frame_locked();
+        if (!frame.value.altaz_known) {
+            throw AlpacaException("SynScan mount alt/az is not available: the last read failed",
+                                  AlpacaError::DriverException);
+        }
+        return {frame.value.az_degrees, frame.value.alt_degrees};
+    }
+
+    // The age of the state DeviceState serves: how long ago the poll measured it, on the task clock. Takes only the
+    // snapshot's own mutex.
+    std::optional<std::chrono::nanoseconds> device_state_age() const override {
+        const auto reading = snapshot_.read();
+        if (!reading) {
+            return std::nullopt;
+        }
+        return clock_.now() - reading->measured_at;
+    }
+
+    // A write that changed what the handset's position means (a slew start, a landing round): drops the poll in
+    // flight so its older sample cannot overwrite what the control path knows. The next poll publishes.
+    void drop_poll_in_flight_locked() const {
+        snapshot_.write([](PolledFrame&) {});
+    }
+
+    // The slewing flag the control path just decided (a slew started or ended, an abort), written through so the
+    // next read sees it before the next poll runs.
+    // The tracking mode the control path just commanded, written through as set_slewing_locked() is.
+    void set_tracking_mode_cached_locked(int mode) const {
+        tracking_mode_cached_ = mode;
+        snapshot_.write([mode](PolledFrame& frame) { frame.tracking_mode = mode; });
+    }
+
+    void set_slewing_locked(bool slewing) const {
+        slewing_cached_ = slewing;
+        snapshot_.write([slewing](PolledFrame& frame) { frame.slewing = slewing; });
+    }
+
+    // A re-read of the handset's slewing flag (the slew-complete and Park loops, every 250 ms). Writes only a change:
+    // every write drops the poll tick in flight, so a same-value write on each re-read would drop nearly every tick
+    // of a GOTO and freeze the position. A control-path decision (a start, an end, an abort) goes through
+    // set_slewing_locked() and always drops the tick, which sampled before what the driver now knows. The poll
+    // publishes under mutex_, which the caller holds, so the held value cannot move between the read and the write.
+    void note_slewing_read_locked(bool slewing) const {
+        const auto held = snapshot_.read();
+        if (held && held->value.slewing == slewing) {
+            slewing_cached_ = slewing;
             return;
         }
+        set_slewing_locked(slewing);
+    }
+
+    // Where the control path ends a motion (slew landed, park complete): reads the handset now and publishes a full
+    // frame, so Slewing false is never served beside a mid-motion position. A failed read leaves the position
+    // unknown, which the getters refuse until the next poll answers.
+    void publish_measurement_locked() const {
+        const auto token = snapshot_.begin_poll();
+        try {
+            const RawSample raw = sample_raw(use_precise_commands_, true);
+            const auto previous = snapshot_.read();
+            snapshot_.publish(
+                token, decode_sample_locked(raw, use_precise_commands_, previous ? previous->value : PolledFrame{}));
+            drop_poll_in_flight_locked();  // a poll that sampled before this read must not replace it
+            note_position_reply_locked();
+        } catch (const std::exception& e) {
+            snapshot_.write([](PolledFrame& frame) {
+                frame.equatorial_known = false;
+                frame.altaz_known = false;
+            });
+            note_position_failure_locked(e);
+        }
+    }
+
+    // The first frame, at the end of a connect with mutex_ held, so the getters have an answer, status flags
+    // included, the moment Connect returns (ConformU's first reads are held to its fast-response target). A handset
+    // that does not answer leaves a frame with nothing known.
+    void seed_snapshot_locked() {
+        const auto token = snapshot_.begin_poll();
+        PolledFrame frame;
+        try {
+            frame = decode_sample_locked(sample_raw(use_precise_commands_, true), use_precise_commands_, frame);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the poll fills it in
+        }
+        snapshot_.publish(token, frame);
+    }
+
+    // Control path: one direct read of the equatorial pair, for an operation that needs the mount's position now
+    // (SetPark). {RA hours, Dec degrees}.
+    std::pair<double, double> measure_equatorial_locked() const {
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
         try {
             auto raw = protocol.get_ra_dec_raw(use_precise_commands_);
             const auto read_at = clock_.now();
-            cached_ra_hours_ = decode_ra_hours(raw.first, bits);
+            double ra = decode_ra_hours(raw.first, bits);
             if (use_precise_commands_) {
-                cached_ra_hours_ = corrected_ra_hours_locked(cached_ra_hours_, read_at);
+                ra = corrected_ra_hours_locked(ra, read_at);
             }
-            cached_dec_degrees_ = decode_angle(raw.second, bits);
-            equatorial_cache_valid_ = true;
-            last_equatorial_update_ = now;
             note_position_reply_locked();
+            return {ra, decode_angle(raw.second, bits)};
         } catch (const std::exception& e) {
-            equatorial_cache_valid_ = false;
             note_position_failure_locked(e);
             if (position_link_health_.faulted()) {
                 throw_position_link_fault_locked();
@@ -2251,27 +2536,157 @@ private:
         }
     }
 
-    void refresh_altaz_cache_locked() const {
-        auto now = clock_.now();
-        if (!position_link_health_.faulted() && altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
-            return;
-        }
+    // {azimuth, altitude}, as measure_equatorial_locked().
+    std::pair<double, double> measure_altaz_locked() const {
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
         try {
             auto raw = protocol.get_alt_az_raw(use_precise_commands_);
-            cached_az_degrees_ = wrap_degrees(decode_angle(raw.first, bits));
-            cached_alt_degrees_ = decode_angle(raw.second, bits);
-            altaz_cache_valid_ = true;
-            last_altaz_update_ = now;
             note_position_reply_locked();
+            return {wrap_degrees(decode_angle(raw.first, bits)), decode_angle(raw.second, bits)};
         } catch (const std::exception& e) {
-            altaz_cache_valid_ = false;
             note_position_failure_locked(e);
             if (position_link_health_.faulted()) {
                 throw_position_link_fault_locked();
             }
             throw;
+        }
+    }
+
+    // Test seam: called between a poll's sample and its publish, with no lock held, so a case can land a client
+    // write in that window.
+    void run_status_poll_after_sample_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = status_poll_after_sample_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    // Test seam: called after a poll's first hold check, before it takes mutex_, with no lock held, so a case can
+    // start the hunt's hold in the window the second check closes.
+    void run_status_poll_before_sample_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = status_poll_before_sample_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    // One poll tick. The exchanges run WITHOUT mutex_, so a getter never waits behind a slow link and the snapshot
+    // mutex is never held across I/O; the frame is decoded and published under mutex_. Returns false when the
+    // connection is gone or lost and the poll body should end.
+    // `ctx` is null for the test seam's direct tick, which also ignores the pause.
+    bool poll_status_once(util::OperationContext* ctx, int tick) {
+        const auto stopped = [ctx] { return ctx != nullptr && ctx->stop_reason() != util::StopReason::None; };
+        if ((ctx != nullptr && status_poll_paused_for_testing_.load()) || poll_hold_.load() > 0) {
+            return true;  // paused, or the readback-tick hunt owns the line
+        }
+        run_status_poll_before_sample_hook();
+        bool precise = false;
+        bool read_site = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || link_lost_.load() || stopped()) {
+                return false;
+            }
+            // The hunt takes its hold under mutex_, so this check and poll_sampling_ below cannot straddle it: either
+            // the hunt sees the sample in flight and waits for it, or this tick sees the hold and skips.
+            if (poll_hold_.load() > 0) {
+                return true;
+            }
+            precise = use_precise_commands_;
+            // The unread site (a connect that could not reach `w`) is retried here, not in a getter, and like the
+            // sample below its exchange runs without mutex_, so a getter never waits on a handset that ignores `w`.
+            read_site = !site_info_valid_ && tick % kSlowPollEvery == 0 && site_read_due_locked();
+            poll_sampling_ = true;
+        }
+        const SamplingFlag sampling(poll_sampling_);  // cleared on every exit, a throw included
+        if (read_site) {
+            std::optional<LocationInfo> site;
+            try {
+                site = SynScanProtocolWrapper::instance().get_location();
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSiteInfoRetryDelay
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || stopped()) {
+                return false;
+            }
+            if (site) {
+                apply_site_info_locked(*site);
+            }
+        }
+        const auto token = snapshot_.begin_poll();
+        RawSample raw;
+        try {
+            raw = sample_raw(precise, tick % kSlowPollEvery == 0);
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || stopped()) {
+                return false;
+            }
+            note_position_failure_locked(e);
+            return !declare_link_lost_if_stale_locked();
+        }
+        run_status_poll_after_sample_hook();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_ || stopped()) {
+            return false;
+        }
+        const auto previous = snapshot_.read();
+        snapshot_.publish(token, decode_sample_locked(raw, precise, previous ? previous->value : PolledFrame{}));
+        note_position_reply_locked();  // a dropped frame (a write landed since the sample) was still a reply
+        return true;
+    }
+
+    // Decision 0009 point 2(b): a fault that has stood past the bound is a LOST link. Connected reads false, the
+    // getters and setters throw NotConnected, DeviceState is empty, the transport is closed; only the client's
+    // Connected=true relinks. Caller holds mutex_. True when the link was just declared lost.
+    bool declare_link_lost_if_stale_locked() {
+        if (!position_link_health_.fault_stale(clock_.now())) {
+            return false;
+        }
+        ALPACA_LOG_ERROR(
+            "SynScan",
+            "Link to the hand controller lost after " +
+                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
+                " s without a reply; reconnect to resume (" + position_link_health_.fault() + ")");
+        link_lost_ = true;
+        SynScanProtocolWrapper::instance().disconnect();
+        return true;
+    }
+
+    void run_status_poller(util::OperationContext& ctx) {
+        for (int tick = 0;; ++tick) {
+            const auto started = clock_.now();
+            if (!poll_status_once(&ctx, tick)) {
+                return;
+            }
+            // Start to start: wait for the next tick, skipping any a slow poll ran over (no catch-up).
+            const auto spent = clock_.now() - started;
+            const auto ticks = spent / kStatusPollPeriod + 1;
+            if (!ctx.wait_for(ticks * kStatusPollPeriod - spent)) {
+                return;
+            }
+        }
+    }
+
+    // Call without mutex_ held: the poll body takes mutex_. The lifecycle paths' half of the rule on
+    // cancel_async_tasks().
+    void stop_status_poller() { status_poll_.cancel_all_and_join(); }
+
+    // Call without mutex_ held (AsyncOperation rule 10), after a connect.
+    void start_status_poller() {
+        try {
+            status_poll_.start([this](util::OperationContext& ctx) { run_status_poller(ctx); });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_ERROR("SynScan", std::string("Status poll did not start: ") + e.what());
         }
     }
 
@@ -2290,7 +2705,7 @@ private:
     }
 
     void note_position_failure_locked(const std::exception& e) const {
-        if (auto fault = position_link_health_.note_failure(e.what(), kPositionLinkFailureThreshold)) {
+        if (auto fault = position_link_health_.note_failure(e.what(), kPositionLinkFailureThreshold, clock_.now())) {
             ALPACA_LOG_ERROR("SynScan", "Position link faulted: " + *fault);
         } else {
             ALPACA_LOG_WARN("SynScan", "Position read failed (" +
@@ -2305,7 +2720,8 @@ private:
                               AlpacaError::DriverException);
     }
 
-    bool get_slewing_locked() const {
+    // `fresh` asks the handset for the end of the answer (the PulseGuide gate), not the polled frame.
+    bool get_slewing_locked(bool fresh = false) const {
         // A park in flight reports Slewing until the park task flips AtPark
         // (same locked step) — never Slewing false with AtPark false.
         if (parking_) {
@@ -2314,9 +2730,17 @@ private:
         if (refining_generation_ != 0 && refining_generation_ == motion_generation_) {
             return true;  // a GOTO whose landing is still being refined (open-astro#880)
         }
-        return poll_hardware_slewing_locked();
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+            return true;
+        }
+        if (clock_.now() < slew_force_until_) {
+            return true;
+        }
+        return fresh ? poll_hardware_slewing_locked() : served_frame_locked().value.slewing;
     }
 
+    // Control path only: asks the handset now (the Park and landing loops are what detect a GOTO's end). The
+    // getters serve the frame instead.
     bool poll_hardware_slewing_locked(bool propagate_error = false) const {
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
@@ -2326,7 +2750,7 @@ private:
         }
         bool was_slewing = slewing_cached_;
         try {
-            slewing_cached_ = SynScanProtocolWrapper::instance().is_goto_in_progress();
+            note_slewing_read_locked(SynScanProtocolWrapper::instance().is_goto_in_progress());
             if (propagate_error) {
                 park_poll_failures_ = 0;
             }
@@ -2355,9 +2779,8 @@ private:
             // Keep last known state if polling times out.
         }
         if (was_slewing && !slewing_cached_) {
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
-            guide_position_valid_ = false;
+            guide_position_valid_ =
+                false;  // the position getters serve the frame; the control path publishes at the end
         }
         return slewing_cached_;
     }
@@ -2408,32 +2831,43 @@ private:
     }
 
     void ensure_site_info_cached_locked() const {
-        if (!connected_) {
+        if (!site_read_due_locked()) {
             return;
         }
-        auto now = clock_.now();
-        if (!site_info_valid_ && last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
-            (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
-            return;
-        }
-        last_site_info_attempt_ = now;
         try {
-            LocationInfo info = SynScanProtocolWrapper::instance().get_location();
-            site_latitude_cached_ = info.latitude_degrees;
-            site_longitude_cached_ = info.longitude_degrees;
-            site_info_valid_ = true;
+            apply_site_info_locked(SynScanProtocolWrapper::instance().get_location());
         } catch (...) {
             site_info_valid_ = false;
         }
     }
 
+    // True when a `w` read should run now (connected, and an unread site past its retry delay); stamps the attempt.
+    bool site_read_due_locked() const {
+        if (!connected_) {
+            return false;
+        }
+        auto now = clock_.now();
+        if (!site_info_valid_ && last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
+            (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
+            return false;
+        }
+        last_site_info_attempt_ = now;
+        return true;
+    }
+
+    void apply_site_info_locked(const LocationInfo& info) const {
+        site_latitude_cached_ = info.latitude_degrees;
+        site_longitude_cached_ = info.longitude_degrees;
+        site_info_valid_ = true;
+    }
+
     // Saves the current RA/Dec as the park target, as main did for every mount.
     void store_legacy_park_position_locked() {
-        refresh_equatorial_cache_locked();
+        const auto equatorial = measure_equatorial_locked();
         park_alignment_mode_ = AlignmentMode::GermanPolar;
         park_ra_uses_hour_angle_ = false;
-        park_ra_hours_ = cached_ra_hours_;
-        park_dec_degrees_ = cached_dec_degrees_;
+        park_ra_hours_ = equatorial.first;
+        park_dec_degrees_ = equatorial.second;
         park_position_set_ = true;
     }
 
@@ -2448,9 +2882,9 @@ private:
             return;
         }
         if (park_alignment_mode_ == AlignmentMode::AltAz) {
-            refresh_altaz_cache_locked();
-            park_azimuth_degrees_ = cached_az_degrees_;
-            park_altitude_degrees_ = cached_alt_degrees_;
+            const auto altaz = measure_altaz_locked();
+            park_azimuth_degrees_ = altaz.first;
+            park_altitude_degrees_ = altaz.second;
             park_ra_uses_hour_angle_ = false;
         } else {
             if (!site_info_valid_) {
@@ -2462,12 +2896,12 @@ private:
                 store_legacy_park_position_locked();
                 return;
             }
-            refresh_equatorial_cache_locked();
+            const auto equatorial = measure_equatorial_locked();
             const double lst =
                 compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
-            park_hour_angle_hours_ = shortest_ra_delta_hours(lst, cached_ra_hours_);
-            park_ra_hours_ = cached_ra_hours_;
-            park_dec_degrees_ = cached_dec_degrees_;
+            park_hour_angle_hours_ = shortest_ra_delta_hours(lst, equatorial.first);
+            park_ra_hours_ = equatorial.first;
+            park_dec_degrees_ = equatorial.second;
             park_ra_uses_hour_angle_ = true;
         }
         park_position_set_ = true;
@@ -2489,9 +2923,8 @@ private:
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t ra_raw = encode_ra_raw(ra, bits);
         uint32_t dec_raw = encode_angle(dec, bits);
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
-        slewing_cached_ = true;
+        drop_poll_in_flight_locked();
+        set_slewing_locked(true);
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that retries a rejected goto (even via the blocking
         // SlewToCoordinates) must not be told the OLD goto failed.
@@ -2515,9 +2948,8 @@ private:
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t az_raw = encode_angle(azimuth, bits);
         uint32_t alt_raw = encode_angle(altitude, bits);
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
-        slewing_cached_ = true;
+        drop_poll_in_flight_locked();
+        set_slewing_locked(true);
         last_slew_error_.clear();
         slew_force_until_ = clock_.now() + std::chrono::seconds(8);
         position_override_until_ = util::TaskClock::clock::time_point::min();
@@ -2576,10 +3008,9 @@ private:
             }
             sleep_unlocked(std::chrono::milliseconds(250));
         }
-        slewing_cached_ = false;
+        set_slewing_locked(false);
         slew_force_until_ = util::TaskClock::clock::time_point::min();
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
+        publish_measurement_locked();
         guide_position_valid_ = false;
         position_override_until_ = util::TaskClock::clock::time_point::min();
         if (apply_settle && slew_settle_time_seconds_ > 0) {
@@ -2638,6 +3069,25 @@ private:
         if (!use_precise_commands_) {
             return true;
         }
+        // The rounds move the mount after the slew-end frame was published: publish where the landing ended, unless
+        // a newer motion owns the axes (its own end publishes).
+        bool finished = false;
+        try {
+            finished = refine_goto_landing_rounds_locked(lock, ra, dec, owner_generation, ctx);
+        } catch (...) {
+            if (motion_generation_ == owner_generation && connected_) {
+                publish_measurement_locked();
+            }
+            throw;
+        }
+        if (motion_generation_ == owner_generation && connected_) {
+            publish_measurement_locked();
+        }
+        return finished;
+    }
+
+    bool refine_goto_landing_rounds_locked(std::unique_lock<std::mutex>& lock, double ra, double dec,
+                                           uint64_t owner_generation, util::OperationContext* ctx) {
         auto& protocol = SynScanProtocolWrapper::instance();
         const double nudge_reach_arcsec = kNudgeMaxSeconds * std::min(guide_rate_.ra, guide_rate_.dec) * 3600.0;
         const bool timed_finish = equatorial_geometry_locked();
@@ -2686,10 +3136,9 @@ private:
                 far_miss_repeated = true;
                 aim_ra = ra;
                 aim_dec = dec;
-                equatorial_cache_valid_ = false;
-                altaz_cache_valid_ = false;
+                drop_poll_in_flight_locked();
                 guide_position_valid_ = false;
-                slewing_cached_ = true;
+                set_slewing_locked(true);
                 slew_force_until_ = clock_.now() + kRefineStartForce;
                 protocol.goto_ra_dec_raw(encode_ra_raw(ra, 24), encode_angle(dec, 24), true);
                 if (!wait_for_slew_complete(lock, owner_generation, false, ctx)) {
@@ -2704,8 +3153,7 @@ private:
                                                " refinement passes");
                 return true;
             }
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
+            drop_poll_in_flight_locked();
             guide_position_valid_ = false;
             if (!timed_finish ||
                 (!regoto_done && (ra_error_arcsec > nudge_reach_arcsec || dec_error_arcsec > nudge_reach_arcsec))) {
@@ -2718,7 +3166,7 @@ private:
                     aim_ra = std::fmod(aim_ra + ra_error_hours + 24.0, 24.0);
                 }
                 aim_dec = std::clamp(aim_dec + dec_error_degrees, -90.0, 90.0);
-                slewing_cached_ = true;
+                set_slewing_locked(true);
                 slew_force_until_ = clock_.now() + kRefineStartForce;
                 protocol.goto_ra_dec_raw(encode_ra_raw(aim_ra, 24), encode_angle(aim_dec, 24), true);
                 if (!wait_for_slew_complete(lock, owner_generation, false, ctx)) {
@@ -2811,17 +3259,19 @@ private:
     double aperture_diameter_m_;
     double aperture_area_m2_;
     double focal_length_m_;
-    mutable double cached_ra_hours_ = 0.0;
-    mutable double cached_dec_degrees_ = 0.0;
-    mutable double cached_alt_degrees_ = 0.0;
-    mutable double cached_az_degrees_ = 0.0;
-    mutable bool equatorial_cache_valid_ = false;
-    mutable bool altaz_cache_valid_ = false;
     mutable util::PolledLinkHealth position_link_health_;
     mutable std::mutex link_fault_mutex_;
     mutable std::string link_fault_text_;
-    mutable util::TaskClock::clock::time_point last_equatorial_update_;
-    mutable util::TaskClock::clock::time_point last_altaz_update_;
+    // The polled frame the getters serve (decision 0010). Declared after clock_ below; one publisher (the poll
+    // body, plus the control path at the end of a motion), any number of readers.
+    std::atomic<bool> link_lost_{false};     // decision 0009: set by the poll body, read lock-free by get_connected()
+    mutable std::atomic<int> poll_hold_{0};  // >0 while the readback-tick hunt owns the line: the poll skips its ticks
+    std::atomic<bool> status_poll_paused_for_testing_{false};
+    mutable std::mutex status_poll_hook_mutex_;
+    std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> status_poll_before_sample_hook_;
+    // A poll tick is inside its exchanges (set under mutex_ with the hold check).
+    std::atomic<bool> poll_sampling_{false};
     // open-astro#1030: the handset's once-a-second RA readback tick, anchored after the last GOTO. Valid until the
     // deadline; a tracking-mode or time write and connect/disconnect invalidate it.
     mutable util::TaskClock::clock::time_point readback_tick_;
@@ -2859,7 +3309,7 @@ private:
     mutable bool target_dec_set_ = false;
     mutable bool parked_;
     mutable bool at_home_;
-    mutable bool slewing_cached_ = false;
+    mutable bool slewing_cached_ = false;  // the control path's own copy; the frame carries the served one
     mutable int park_poll_failures_ = 0;  // consecutive failed Park status polls, under mutex_
     // motion_generation_ of the GOTO whose landing refinement is under way; 0 when none (open-astro#880).
     mutable uint64_t refining_generation_ = 0;
@@ -2873,8 +3323,6 @@ private:
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable util::TaskClock::clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
-    mutable int side_of_pier_cached_ = -1;
-    mutable bool side_of_pier_valid_ = false;
     std::string mount_firmware_version_;
     // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so the
     // get_device_firmware() poll never blocks on the coarse connect lock.
@@ -2923,6 +3371,9 @@ private:
     // generation, so a pulse on one axis never supersedes the other's.
     util::OperationGeneration slew_generation_;
     util::AsyncOperation slew_{"SynScan slew", slew_generation_, clock_};
+    mutable util::StateSnapshot<PolledFrame> snapshot_{clock_, kSnapshotMaxAge};
+    util::OperationGeneration poll_generation_;
+    util::AsyncOperation status_poll_{"SynScan status poll", poll_generation_, clock_};
     util::OperationGeneration pulse_generation_[2];
     util::AsyncOperation pulse_ops_[2] = {{"SynScan pulse guide (RA)", pulse_generation_[0], clock_},
                                           {"SynScan pulse guide (Dec)", pulse_generation_[1], clock_}};
@@ -2955,6 +3406,37 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_pulse_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_status_poll_paused_for_testing(paused);
+    }
+}
+
+bool poll_status_now_for_testing(TelescopeDriver& driver) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        return synscan->poll_status_now_for_testing();
+    }
+    return false;
+}
+
+void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void hold_status_poll_for_testing(TelescopeDriver& driver, bool hold) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->hold_status_poll_for_testing(hold);
+    }
+}
+
+void set_status_poll_before_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_status_poll_before_sample_hook_for_testing(std::move(hook));
     }
 }
 
