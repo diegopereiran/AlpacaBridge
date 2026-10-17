@@ -53,10 +53,14 @@ commit. A nightly is unreleased, unvalidated code for trying a merged fix before
 it is never published to apt. Install it the way a beta is installed by hand above: download the
 `.deb` and its `.sha256` from the `nightly-build` release, check the sum, `sudo apt install ./<file>`.
 
-Its version is `<next>~nightly<YYYYMMDDHHMM>.g<sha7>`, where `<next>` is what
-`changelog_fragments.py --bump` prints on `main`, so `5.0.0~beta2 < 5.0.0~nightly202610120317.gabc1234 < 5.0.0`:
-apt upgrades a nightly to the release when it ships. It also sorts above every beta of that
-version, so apt offers a tester on a nightly no later beta; install the next one by hand. A maintainer can force a build with
+Its version is `<next>~nightly<YYYYMMDDHHMM>.g<sha7>`, where `<next>` is the release `main`'s code
+will ship in (`scripts/nightly_version.py`): what `changelog_fragments.py --bump` prints on `main`, but
+never below `X.(Y+1).0` once a `stable/X.Y` branch or a `vX.Y.Z[-beta.N]` tag exists, since that line
+is built from its stable branch and `main` is already past it. With `stable/5.0` cut, that gives
+`5.0.0~beta4 < 5.0.0 < 5.1.0~nightly202610170317.gabc1234 < 5.1.0`: a nightly is never named after, or
+sorted below, a stable release that lacks its code, and apt upgrades it to the release `main` ships in.
+It also sorts above every beta of the stable line, so apt offers a tester on a nightly no beta of it;
+install one by hand. A maintainer can force a build with
 `gh workflow run nightly-build.yml --repo open-astro/AlpacaBridge -f force=true`.
 
 ## Branch model

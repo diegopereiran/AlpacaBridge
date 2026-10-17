@@ -45,6 +45,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 struct FakeSynScanState {
+    std::atomic<int> tracking_mode{1};  // the handset's `T` mode: the status poll reads it back
     // The GOTO timer reads the driver's task clock (a FakeTaskClock in the park
     // cases), so a park runs in virtual time like the driver's own waits.
     alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
@@ -141,12 +142,15 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'M':  // cancel goto
                 st->goto_seen.store(false);
                 return "#";
-            case 't':  // tracking mode read: sidereal tracking on (open-astro#775 slew gate)
-                return std::string(1, '\x01') + "#";
+            case 't':  // tracking mode read: sidereal tracking on until a `T` says otherwise (open-astro#775 slew gate)
+                return std::string(1, static_cast<char>(st->tracking_mode.load())) + "#";
             case 'T':
                 if (st->reject_tracking_stop.load() && chunk.size() > 1 && chunk[1] == 0) {
                     st->tracking_stop_attempts.fetch_add(1);
                     return "";
+                }
+                if (chunk.size() > 1) {
+                    st->tracking_mode.store(chunk[1]);
                 }
                 return "#";
             case 'P':  // tracking mode write / passthrough
@@ -523,6 +527,9 @@ TEST_CASE("SynScan async - Park fails after three consecutive dropped status rep
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The dropped-reply count below is the park body's own status polls: the status poll's `L` reads would consume
+    // drops too.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     driver->park();
     REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
     st->drop_slew_status.store(1000);

@@ -79,6 +79,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -95,10 +96,36 @@ jobs:
           cmake --version
           g++ --version
 
+      - name: Restore the compiler cache
+        # ccache keyed per job, because each job compiles with its own flags. Only
+        # a push to main or stable/** saves it (the save step below), so a pull
+        # request reuses its base branch's cache and never writes one. The
+        # directory is ccache's default, outside the build tree run_all_tests.sh
+        # deletes on entry.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-build-test-${{ github.sha }}
+          restore-keys: ccache-build-test-
+
       - name: Build + run tests (vendor-neutral core)
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
         run: ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-build-test-${{ github.sha }}
 
       - name: Check the beta VERSION split
         # Pins the ~betaN split both CMakeLists share
@@ -130,6 +157,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -206,10 +234,32 @@ jobs:
           done
           sudo ldconfig
 
+      - name: Restore the compiler cache
+        # Keyed per job; see the build-test job.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-build-vendors-${{ github.sha }}
+          restore-keys: ccache-build-vendors-
+
       - name: Build + run tests (all vendors)
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
         run: ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-build-vendors-${{ github.sha }}
 
   sanitizers:
     name: Sanitizers (ASan + UBSan, arm64)
@@ -230,6 +280,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -241,18 +292,40 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
+      - name: Restore the compiler cache
+        # Keyed per job; see the build-test job.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-sanitizers-${{ github.sha }}
+          restore-keys: ccache-sanitizers-
+
       - name: Build + run tests with sanitizers (vendor-neutral)
         # CMake seeds CMAKE_CXX_FLAGS / linker flags from CXXFLAGS / LDFLAGS on
         # a fresh configure, and run_all_tests.sh wipes its build tree first, so these
         # instrument the whole tree. -fno-sanitize-recover makes any detected
         # UB a hard test failure rather than a logged warning.
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
           CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
           LDFLAGS: "-fsanitize=address,undefined"
           ASAN_OPTIONS: "abort_on_error=1:detect_leaks=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-sanitizers-${{ github.sha }}
 
   sanitizers-tsan:
     name: Sanitizers (TSan concurrency stress, arm64)
@@ -274,6 +347,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -339,6 +413,14 @@ jobs:
           done
           sudo ldconfig
 
+      - name: Restore the compiler cache
+        # Keyed per job; see the build-test job.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-sanitizers-tsan-${{ github.sha }}
+          restore-keys: ccache-sanitizers-tsan-
+
       - name: Build AlpacaCore tests with TSan and run the concurrency stress suite
         # The [stress] tests (issue #101) hammer connect()/disconnect()/
         # set_connected() and operational calls from many threads — the #1
@@ -351,6 +433,9 @@ jobs:
         # mutes the uninstrumented proprietary vendor blobs, whose internals
         # we can neither see nor fix.
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
           TSAN_OPTIONS: "halt_on_error=1 second_deadlock_stack=1 suppressions=${{ github.workspace }}/scripts/tsan_suppressions.txt"
         run: |
           set -euo pipefail
@@ -398,6 +483,17 @@ jobs:
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-guard-run.log
 
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-sanitizers-tsan-${{ github.sha }}
+
   coverage:
     # Informational only: no --fail-under threshold and not a required check.
     # A separate job so instrumentation adds no time to build-test or
@@ -419,6 +515,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -483,16 +580,38 @@ jobs:
           done
           sudo ldconfig
 
+      - name: Restore the compiler cache
+        # Keyed per job; see the build-test job.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-coverage-${{ github.sha }}
+          restore-keys: ccache-coverage-
+
       - name: Build + run tests with coverage (all vendors)
         # Same seeding as the sanitizers job: CMake takes CXXFLAGS / LDFLAGS
         # on a fresh configure and run_all_tests.sh wipes its build tree first.
         # -fprofile-update=atomic because the [stress] cases are
         # multi-threaded and plain counter updates would race.
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
           CXXFLAGS: "--coverage -O0 -g -fprofile-update=atomic"
           LDFLAGS: "--coverage"
         run: ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-coverage-${{ github.sha }}
 
       - name: Generate coverage report
         # One gcovr call per component plus a combined total, over the one
@@ -832,6 +951,11 @@ jobs:
         # a broken tag/VERSION mapping (scripts/release_tag_cases.txt) fails
         # the PR that caused it instead of the first beta tag.
         run: python3 scripts/release_tag.py --self-test
+
+      - name: Self-test the nightly version
+        # nightly-build.yml runs it only on main once a night; here a change to
+        # it is tested by the PR that makes it.
+        run: python3 scripts/nightly_version.py --self-test
 
       - name: Self-test the merge-down exemption
         # pr-body.yml runs it on every PR as well; here a change to it is
