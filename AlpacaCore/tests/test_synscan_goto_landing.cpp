@@ -1377,4 +1377,56 @@ TEST_CASE("SynScan GOTO landing - the RA landing move converges in either hemisp
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan GOTO landing - the hunt waits for a poll tick that is inside its exchanges",
+          "[synscan][telescope][goto-landing]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    // A tick parks after its exchanges with its sampling flag still up, as a slow link leaves it.
+    std::atomic<bool> in_sample{false};
+    std::atomic<bool> release{false};
+    alpacacore::vendor::synscan::set_status_poll_after_sample_hook_for_testing(*driver, [&] {
+        in_sample.store(true);
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    std::thread tick([&] { alpacacore::vendor::synscan::poll_status_now_for_testing(*driver); });
+    const auto real_deadline = Clock::now() + std::chrono::seconds(10);
+    while (!in_sample.load() && Clock::now() < real_deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    REQUIRE(in_sample.load());
+
+    std::atomic<bool> done{false};
+    std::thread slew([&] {
+        try {
+            driver->slew_to_coordinates(kTargetRa, kTargetDec);
+        } catch (...) {
+        }
+        done.store(true);
+    });
+    // The GOTO ends and the hunt asks for the line: virtual time steps through the whole GOTO and the landing, for
+    // up to 5 s of real time. The slew cannot finish while the tick holds the line (without the wait it ends first).
+    const auto hold_until = Clock::now() + std::chrono::seconds(5);
+    while (!done.load() && Clock::now() < hold_until) step_virtual(clock);
+    CHECK_FALSE(done.load());
+
+    release.store(true);
+    tick.join();
+    const auto finish_deadline = Clock::now() + std::chrono::seconds(60);
+    while (!done.load() && Clock::now() < finish_deadline) step_virtual(clock);
+    CHECK(done.load());
+    while (!done.load()) {
+        clock.advance(std::chrono::hours(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    slew.join();
+    alpacacore::vendor::synscan::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
+    driver->set_connected(false);
+}
+
 #endif  // !_WIN32
