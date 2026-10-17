@@ -714,8 +714,8 @@ TEST_CASE("SynScan PulseGuide - SlewToCoordinates reaps the pulse and clears IsP
 // The mode a stop restores is the one the handset held when the motion started, not the one cached at connect: a
 // keypad change in between must not be undone by AbortSlew, MoveAxis(0) or the end of an RA pulse.
 namespace {
-std::unique_ptr<alpacacore::TelescopeDriver> connect_with_stale_tracking(
-    const std::shared_ptr<FakeSynScanState>& st, alpacacore::test::FakeMountServer& server) {
+std::unique_ptr<alpacacore::TelescopeDriver> connect_with_stale_tracking(const std::shared_ptr<FakeSynScanState>& st,
+                                                                         alpacacore::test::FakeMountServer& server) {
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
