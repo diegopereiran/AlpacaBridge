@@ -1330,6 +1330,9 @@ public:
             check_connected();
             check_not_parked_locked("PulseGuide");
             auto& protocol = SynScanProtocolWrapper::instance();
+            if (axis == 0) {
+                refresh_tracking_mode_locked();  // the pulse end restores this mode
+            }
             const double guide_rate = axis == 1 ? guide_rate_.dec : guide_rate_.ra;
             // RA: West (direction_sign +1) lowers RA, East raises it.
             double slew_rate_deg_per_sec =
@@ -1483,6 +1486,7 @@ public:
             check_not_parked_locked("SlewToCoordinates");
             validate_ra_dec(ra, dec, "SlewToCoordinates");
             // open-astro#775: same Tracking precondition as the async forms.
+            refresh_tracking_mode_locked();
             if (!get_tracking_locked()) {
                 throw AlpacaException("SlewToCoordinates requires Tracking to be true", AlpacaError::InvalidOperation);
             }
@@ -1519,6 +1523,7 @@ public:
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             // open-astro#775: ITelescopeV4 raises InvalidOperation when a slew
             // is requested with Tracking false.
+            refresh_tracking_mode_locked();
             if (!get_tracking_locked()) {
                 throw AlpacaException("SlewToCoordinatesAsync requires Tracking to be true",
                                       AlpacaError::InvalidOperation);
@@ -1751,6 +1756,18 @@ public:
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
+        if (axis == 0) {
+            // Before manual_axis_slewing_ changes; the stop restores this mode. A failed read keeps the cache on a
+            // stop, which must still be sent; a start has moved nothing yet, so it can throw.
+            if (moving) {
+                refresh_tracking_mode_locked();
+            } else {
+                try {
+                    refresh_tracking_mode_locked();
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                }
+            }
+        }
         manual_axis_slewing_[axis] = moving;
         if (moving) {
             parked_ = false;
@@ -1814,6 +1831,12 @@ public:
                 // The wrapper serializes transactions, so a GOTO already in flight
                 // must finish (or time out) before these stops can reach the mount.
                 auto& protocol = SynScanProtocolWrapper::instance();
+                // With nothing running, the cache may predate a keypad change: read the handset's mode first. A
+                // failed read keeps the cache, since the stops below must still be sent.
+                try {
+                    refresh_tracking_mode_locked();
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                }
                 // Try every stop on its own, so one lost command cannot skip the others (#781).
                 std::string stop_error;
                 const auto try_stop = [&stop_error](const std::function<void()>& stop) {
@@ -2305,8 +2328,10 @@ private:
         return poll_hardware_slewing_locked();
     }
 
-    bool poll_hardware_slewing_locked() const {
-        if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+    // ignore_dec_jog: a Dec-only MoveAxis does not touch the RA motor or tracking, so ra_motion_active_locked()
+    // leaves it out.
+    bool poll_hardware_slewing_locked(bool ignore_dec_jog = false) const {
+        if (manual_axis_slewing_[0] || (manual_axis_slewing_[1] && !ignore_dec_jog)) {
             return true;
         }
         if (std::chrono::steady_clock::now() < slew_force_until_) {
@@ -2324,6 +2349,29 @@ private:
             guide_position_valid_ = false;
         }
         return slewing_cached_;
+    }
+
+    // True while a motion that owns the RA motor or the tracking state is running. The RA motor stop turns
+    // handset tracking off, so the handset's mode is not read while one runs (open-astro#1259). The pulse flag
+    // clears only when IsPulseGuiding is read, so a pulse counts as running until its end time, and the slew state
+    // is polled, never taken from the cache. A Dec-only jog is not an RA motion.
+    bool ra_motion_active_locked() const {
+        const bool pulsing = pulse_guiding_active_[0] && std::chrono::steady_clock::now() < pulse_guide_end_time_[0];
+        if (pulsing || parking_ || (refining_generation_ != 0 && refining_generation_ == motion_generation_)) {
+            return true;
+        }
+        return poll_hardware_slewing_locked(true);
+    }
+
+    // Reads the handset's tracking mode into the cache before a command starts a motion or checks Tracking, so a
+    // stop restores the mode the handset held at the start and not the one cached at connect: the keypad can change
+    // it in between. A motion that starts while another RA motion runs keeps the mode the first one captured.
+    void refresh_tracking_mode_locked() const {
+        if (tracking_mode_valid_ && ra_motion_active_locked()) {
+            return;
+        }
+        tracking_mode_cached_ = SynScanProtocolWrapper::instance().get_tracking_mode();
+        tracking_mode_valid_ = true;
     }
 
     bool get_tracking_locked() const {
