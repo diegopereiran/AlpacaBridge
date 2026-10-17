@@ -33,7 +33,13 @@
 // A mount on a FakeTaskClock moves ONLY while one of these helpers runs, so
 // every wait in such a case goes through pump_until() or follow_wall_clock(),
 // never a plain real-time poll: a pulse or a MoveAxis would otherwise stand
-// still while the driver's wall-clock timer runs out.
+// still while the driver's wall-clock timer runs out. That includes a teardown
+// stop on a mount with a stop ramp.
+//
+// These helpers assume the driver is on the wall clock. A case that also puts
+// the driver on the clock steps time after the driver's waiters park on it
+// instead (step_until() in test_skywatcher_backlash.cpp, run_clock_until() in
+// test_skywatcher_async.cpp).
 
 #include <chrono>
 #include <functional>

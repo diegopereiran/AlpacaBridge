@@ -4234,6 +4234,9 @@ TEST_CASE("SkyWatcher async - the rate check recovers on a mount that decelerate
     CHECK_FALSE(gave_up.load());
     REQUIRE(mount.axis_running(1));
 
+    // Nothing pumps the fake clock from here on, so a ramped ":K" would never
+    // finish its virtual ramp and the teardown stop-wait would time out.
+    mount.set_stop_ramp_ms(0);
     driver->set_tracking(false);
     driver->set_connected(false);
 }

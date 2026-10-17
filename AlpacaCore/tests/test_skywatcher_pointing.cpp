@@ -228,7 +228,6 @@ void check_landing(const LandedFrame& f, double latitude, double target_ra, doub
 // ── Fake-clock helpers (open-astro#715) ─────────────────────────────────────
 //
 // The goto-jump pumping lives in skywatcher_fake_clock.h (open-astro#1221).
-using alpacacore::test::skywatcher_clock::follow_wall_clock;
 using alpacacore::test::skywatcher_clock::pump_until;
 
 LandedFrame land_on_fake_clock(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
