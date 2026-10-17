@@ -6,7 +6,7 @@ applyTo: "AlpacaCore/src/vendors/gphoto/**,AlpacaCore/include/alpacacore/vendor/
 
 Devices: Camera.
 
-**STATUS: ConformU-validated against real bodies: Nikon D5300, D3200 and D3300, and Canon EOS 4000D, 70D and 250D.** Originally built
+**STATUS: ConformU-validated against real bodies: Nikon D5300, D3200 and D3300, and Canon EOS 4000D, 70D, 250D and 600D.** Originally built
 from libgphoto2/libraw API documentation and source reading, plus the reference indi-gphoto
 driver (`indilib/indi-3rdparty`) for protocol shape, with no physical DSLR available in the
 session that added it (issue #241). A later session with hardware access ran `/deploy-test` +
@@ -132,7 +132,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   since libgphoto2 reports whichever name matches the camera's actual USB product ID). A model not
   in the table — every fixed-lens compact/camcorder libgphoto2 also supports, or a body released
   after the table was last updated — still reports `0.0` (ASCOM "unknown") rather than a guess.
-  Nikon D5300 confirmed against ConformU: 3.91 microns; Nikon D3200: 3.86 microns; Nikon D3300: 3.92 microns; Canon EOS 4000D: 4.3 microns; Canon EOS 70D: 4.1 microns; Canon EOS 250D: 3.72 microns.
+  Nikon D5300 confirmed against ConformU: 3.91 microns; Nikon D3200: 3.86 microns; Nikon D3300: 3.92 microns; Canon EOS 4000D: 4.3 microns; Canon EOS 70D: 4.1 microns; Canon EOS 250D: 3.72 microns; Canon EOS 600D: 4.3 microns.
 - **ISO is a discrete `Gains()` list, not a continuous register** — deliberate departure from
   every other camera driver here (ZWO/QHY/SVBONY/PlayerOne/ToupTek all throw
   `PropertyNotImplemented` for `get_gains()` and treat `Gain` as a raw numeric register). A DSLR's
