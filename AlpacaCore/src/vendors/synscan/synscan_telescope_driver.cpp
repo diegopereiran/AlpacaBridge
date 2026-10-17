@@ -2451,6 +2451,20 @@ private:
         snapshot_.write([slewing](PolledFrame& frame) { frame.slewing = slewing; });
     }
 
+    // A re-read of the handset's slewing flag (the slew-complete and Park loops, every 250 ms). Writes only a change:
+    // every write drops the poll tick in flight, so a same-value write on each re-read would drop nearly every tick
+    // of a GOTO and freeze the position. A control-path decision (a start, an end, an abort) goes through
+    // set_slewing_locked() and always drops the tick, which sampled before what the driver now knows. The poll
+    // publishes under mutex_, which the caller holds, so the held value cannot move between the read and the write.
+    void note_slewing_read_locked(bool slewing) const {
+        const auto held = snapshot_.read();
+        if (held && held->value.slewing == slewing) {
+            slewing_cached_ = slewing;
+            return;
+        }
+        set_slewing_locked(slewing);
+    }
+
     // Where the control path ends a motion (slew landed, park complete): reads the handset now and publishes a full
     // frame, so Slewing false is never served beside a mid-motion position. A failed read leaves the position
     // unknown, which the getters refuse until the next poll answers.
@@ -2704,7 +2718,7 @@ private:
         }
         bool was_slewing = slewing_cached_;
         try {
-            set_slewing_locked(SynScanProtocolWrapper::instance().is_goto_in_progress());
+            note_slewing_read_locked(SynScanProtocolWrapper::instance().is_goto_in_progress());
             if (propagate_error) {
                 park_poll_failures_ = 0;
             }

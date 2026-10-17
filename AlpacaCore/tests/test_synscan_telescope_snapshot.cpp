@@ -385,6 +385,41 @@ TEST_CASE("SynScan snapshot - a tick that passed its first hold check makes no e
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan snapshot - a slewing re-read that finds no change does not drop the poll's frame",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    st->slewing = true;
+    sc::poll_status_now_for_testing(*driver);  // the frame says: slewing
+    REQUIRE(driver->get_slewing());
+
+    // A slew loop or the Park hook re-reads L every 250 ms while the poll samples. Here the PulseGuide gate makes
+    // that read between the tick's sample and its publish, and finds the slew still running: no change to the
+    // frame, so the tick's measurement must still publish. Before the fix every such read dropped it, and during a
+    // GOTO the position stayed at its pre-slew value.
+    clock.advance(seconds(5));
+    std::atomic<bool> once{false};
+    sc::set_status_poll_after_sample_hook_for_testing(*driver, [&] {
+        if (once.exchange(true)) return;
+        try {
+            driver->pulse_guide(2, 500);
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): refused mid-slew, as intended
+        }
+    });
+    sc::poll_status_now_for_testing(*driver);
+    sc::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
+    REQUIRE(once.load());
+    const auto stamp = parse_timestamp(time_stamp_of(*driver));
+    CHECK(std::chrono::duration<double>(std::chrono::system_clock::now() - stamp).count() < 1.0);
+    st->slewing = false;
+    driver->set_connected(false);
+}
+
 TEST_CASE("SynScan snapshot - PulseGuide refuses while the handset slews even when the frame is older",
           "[synscan][telescope][snapshot]") {
     FakeTaskClock clock;
