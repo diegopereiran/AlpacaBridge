@@ -842,3 +842,24 @@ TEST_CASE("SynScan stops - restore the mode the handset held when the motion sta
         driver->set_connected(false);
     }
 }
+
+TEST_CASE("SynScan AbortSlew - a finished RA pulse no longer counts as running when the keypad changes tracking",
+          "[synscan][telescope][pulseguiding][tracking]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_tracking());
+    driver->pulse_guide(2, 100);
+    // No getter is read while waiting: only IsPulseGuiding clears the driver's pulse flag, and the pulse's end
+    // time (duration plus completion delay) has passed by now.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    st->tracking_mode = 0;
+    const int writes_before = st->command_count('T');
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(st->command_count('T') == writes_before);
+    CHECK(st->tracking_mode.load() == 0);
+    driver->set_connected(false);
+}

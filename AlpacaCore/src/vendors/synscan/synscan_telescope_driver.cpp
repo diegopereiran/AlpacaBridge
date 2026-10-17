@@ -2350,9 +2350,12 @@ private:
     }
 
     // True while a motion that owns the RA motor or the tracking state is running. The RA motor stop turns
-    // handset tracking off, so the handset's mode is not read while one runs (open-astro#1259).
+    // handset tracking off, so the handset's mode is not read while one runs (open-astro#1259). The pulse flag
+    // clears only when IsPulseGuiding is read, so a pulse counts as running until its end time, and the slew state
+    // is polled, never taken from the cache.
     bool ra_motion_active_locked() const {
-        return manual_axis_slewing_[0] || pulse_guiding_active_[0] || slewing_cached_ || parking_;
+        const bool pulsing = pulse_guiding_active_[0] && std::chrono::steady_clock::now() < pulse_guide_end_time_[0];
+        return pulsing || get_slewing_locked();
     }
 
     // Reads the handset's tracking mode into the cache before a command starts a motion or checks Tracking, so a
