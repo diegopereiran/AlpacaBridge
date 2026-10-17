@@ -294,9 +294,10 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        // Cancel + join the background slew/pulse task threads before any
-        // member they touch is destroyed. Must run WITHOUT mutex_ held (the
-        // task threads take mutex_).
+        // Cancel + join the status poll and the background slew/pulse task
+        // threads before any member they touch is destroyed. Must run WITHOUT
+        // mutex_ held (the task threads take mutex_).
+        stop_status_poller();
         cancel_async_tasks();
         if (connected_) {
             try {
@@ -396,10 +397,11 @@ public:
         const bool relink = connected && connected_.load() && link_lost_.load();
         if (!connected || relink) {
             ilock.lock();
-            // Cancel + join the background slew/pulse task threads BEFORE
-            // taking mutex_: the task threads take mutex_, so joining under
-            // the lock would deadlock, and leaving them running across the
-            // protocol disconnect would race the shared wrapper.
+            // Cancel + join the status poll and the background slew/pulse task
+            // threads BEFORE taking mutex_: the task threads take mutex_, so
+            // joining under the lock would deadlock, and leaving them running
+            // across the protocol disconnect would race the shared wrapper.
+            stop_status_poller();
             cancel_async_tasks();
         }
         std::unique_lock<std::mutex> lock(mutex_);
@@ -1948,8 +1950,11 @@ private:
 
     // Cancel and join every slot. Must be called WITHOUT mutex_ held (the
     // bodies take mutex_).
+    // Cancels and joins the motion slots only. The status poll is not one of them: it runs for the life of the
+    // connection, and a GOTO or Park that joined it would leave every read frozen at the slew-end frame, the
+    // link-fault latch and the site retry stopped, and the landing hunt waiting for a tick that never comes. Only the
+    // lifecycle paths (disconnect, relink, the destructor) stop it, through stop_status_poller().
     void cancel_async_tasks() {
-        status_poll_.cancel_all_and_join();
         slew_.cancel_all_and_join();
         pulse_ops_[0].cancel_all_and_join();
         pulse_ops_[1].cancel_all_and_join();
@@ -2671,6 +2676,10 @@ private:
             }
         }
     }
+
+    // Call without mutex_ held: the poll body takes mutex_. The lifecycle paths' half of the rule on
+    // cancel_async_tasks().
+    void stop_status_poller() { status_poll_.cancel_all_and_join(); }
 
     // Call without mutex_ held (AsyncOperation rule 10), after a connect.
     void start_status_poller() {

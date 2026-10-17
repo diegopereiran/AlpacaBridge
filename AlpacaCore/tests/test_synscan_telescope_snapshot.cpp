@@ -24,7 +24,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <functional>
 #include <memory>
@@ -72,7 +74,16 @@ struct Handset {
     std::atomic<char> pier{'E'};       // 0 = the handset does not answer 'p'
     std::atomic<int> w_latency_ms{0};  // a handset slow on `w` (site) only, answering it unparseably
     std::atomic<bool> w_entered{false};
+    std::atomic<uint32_t> ra_counts{0x5CECE2};  // the position `e` answers (24-bit); a GOTO (`r`) lands on its aim
+    std::atomic<uint32_t> dec_counts{0xD001B9};
 };
+
+std::string position_reply(const Handset& st) {
+    char out[32];
+    std::snprintf(out, sizeof(out), "%06X00,%06X00#", st.ra_counts.load() & 0xFFFFFFu,
+                  st.dec_counts.load() & 0xFFFFFFu);
+    return out;
+}
 
 std::string reply(Handset& st, const std::string& chunk) {
     st.transactions.fetch_add(1);
@@ -85,7 +96,12 @@ std::string reply(Handset& st, const std::string& chunk) {
         case 'V':
             return "042A00#";
         case 'e':
-            return "5CECE200,D001B900#";
+            return position_reply(st);
+        case 'r':  // "r" + 6 hex + "00" + "," + 6 hex + "00": the handset lands exactly on the aim
+            if (chunk.size() < 18) return "";
+            st.ra_counts.store(static_cast<uint32_t>(std::strtoul(chunk.substr(1, 6).c_str(), nullptr, 16)));
+            st.dec_counts.store(static_cast<uint32_t>(std::strtoul(chunk.substr(10, 6).c_str(), nullptr, 16)));
+            return "#";
         case 'z':
             return "8A4FDA00,0D527400#";
         case 'L':
@@ -525,6 +541,71 @@ TEST_CASE("SynScan snapshot - PulseGuide refuses while the handset slews even wh
     } catch (const alpacacore::AlpacaException& e) {
         CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
     }
+    driver->set_connected(false);
+}
+
+// A GOTO cancels and joins the slew slot before it starts. The status poll must outlive that: a poll joined by the
+// first GOTO of a session and never restarted freezes every read at the slew-end frame, stops the link-fault latch
+// and the site retry, and leaves the landing hunt waiting for a tick that never comes.
+TEST_CASE("SynScan snapshot - the status poll keeps ticking after an async and a sync GOTO",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, milliseconds(2000)));  // the poll is parked on the task clock
+
+    // The slew body waits on the task clock (the 2 s start grace, the landing hunt): step it until Slewing drops,
+    // then let the slew-end publish and the thread finish (no transaction for 300 ms of wall time).
+    const auto wait_slew_end = [&](const std::atomic<bool>& caller_done) {
+        const auto deadline = std::chrono::steady_clock::now() + seconds(10);
+        while ((driver->get_slewing() || !caller_done.load()) && std::chrono::steady_clock::now() < deadline) {
+            clock.advance(milliseconds(250));
+            std::this_thread::sleep_for(milliseconds(10));
+        }
+        if (driver->get_slewing() || !caller_done.load()) return false;
+        int seen = st->transactions.load();
+        auto quiet_since = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - quiet_since < milliseconds(300)) {
+            std::this_thread::sleep_for(milliseconds(10));
+            const int now = st->transactions.load();
+            if (now != seen) {
+                seen = now;
+                quiet_since = std::chrono::steady_clock::now();
+            }
+            if (std::chrono::steady_clock::now() > deadline) return false;
+        }
+        return true;
+    };
+    const auto poll_ticks_once = [&] {
+        const int before = st->transactions.load();
+        clock.advance(seconds(1));
+        const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+        while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(milliseconds(10));
+        }
+        return st->transactions.load() > before;
+    };
+
+    std::atomic<bool> returned{true};
+    driver->slew_to_coordinates_async(2.0, 30.0);  // the handset lands on the aim: the body ends after the hunt
+    REQUIRE(wait_slew_end(returned));
+    CHECK(clock.wait_for_waiters(1, milliseconds(3000)));  // the poll is parked again, not joined for good
+    CHECK(poll_ticks_once());
+
+    // The sync form blocks its caller on the task clock: run it on a thread and step the clock from here.
+    returned = false;
+    std::thread sync_slew([&] {
+        driver->slew_to_coordinates(3.0, 20.0);
+        returned = true;
+    });
+    const bool sync_ended = wait_slew_end(returned);
+    sync_slew.join();
+    REQUIRE(sync_ended);
+    CHECK(clock.wait_for_waiters(1, milliseconds(3000)));
+    CHECK(poll_ticks_once());
     driver->set_connected(false);
 }
 

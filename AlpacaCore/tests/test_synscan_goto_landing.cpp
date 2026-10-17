@@ -746,6 +746,9 @@ TEST_CASE("SynScan GOTO landing - a handset without the sawtooth is hunted once 
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     use_fast_guide_rate(*driver);
+    // landing_reads() counts the hunt's reads: the status poll (one `e` per virtual second, through the reconnect
+    // below too) would add about a dozen to a skipped landing.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     constexpr int kHuntReads = 4;
 
     CHECK(landing_reads(clock, *driver, *st) >= kHuntReads);

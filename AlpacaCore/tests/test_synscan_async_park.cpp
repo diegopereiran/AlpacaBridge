@@ -527,6 +527,9 @@ TEST_CASE("SynScan async - Park fails after three consecutive dropped status rep
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The dropped-reply count below is the park body's own status polls: the status poll's `L` reads would consume
+    // drops too.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     driver->park();
     REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
     st->drop_slew_status.store(1000);
