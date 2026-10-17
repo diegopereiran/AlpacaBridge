@@ -24,11 +24,14 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
 #include <functional>
 #include <memory>
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -109,6 +112,26 @@ bool has_entry(const alpacacore::TelescopeDriver& driver, const std::string& nam
         if (entry.name == name) return true;
     }
     return false;
+}
+
+std::string time_stamp_of(const alpacacore::TelescopeDriver& driver) {
+    for (const auto& entry : driver.get_device_state()) {
+        if (entry.name == "TimeStamp") return std::get<std::string>(entry.value);
+    }
+    return {};
+}
+
+std::chrono::system_clock::time_point parse_timestamp(const std::string& text) {
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
+    REQUIRE(std::sscanf(text.c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h, &mi, &s, &ms) == 7);
+    std::tm tm{};
+    tm.tm_year = y - 1900;
+    tm.tm_mon = mo - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = h;
+    tm.tm_min = mi;
+    tm.tm_sec = s;
+    return std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
 }
 
 }  // namespace
@@ -235,6 +258,31 @@ TEST_CASE("SynScan snapshot - a sync, a slew start and a clock write are read ba
     CHECK(driver->get_slewing());
     driver->abort_slew();
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan snapshot - DeviceState TimeStamp is when the poll measured, not when it was asked",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+
+    auto stamp = parse_timestamp(time_stamp_of(*driver));
+    CHECK(std::abs(std::chrono::duration<double>(std::chrono::system_clock::now() - stamp).count()) < 1.0);
+
+    // The poll stops while the task clock moves on 5 s (inside the 30 s bound, no fault latched): the stamp keeps
+    // the age of the frame.
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    clock.advance(seconds(5));
+    REQUIRE(driver->get_connected());
+    stamp = parse_timestamp(time_stamp_of(*driver));
+    const double age = std::chrono::duration<double>(std::chrono::system_clock::now() - stamp).count();
+    CHECK(age > 4.5);
+    CHECK(age < 5.5);
+    sc::set_status_poll_paused_for_testing(*driver, false);
     driver->set_connected(false);
 }
 
