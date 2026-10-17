@@ -49,6 +49,7 @@
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
+#include "skywatcher_fake_clock.h"
 
 namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeMountProfile;
@@ -122,42 +123,18 @@ Frames axis_two(const Frames& all) { return axis_frames(all, 2); }
 bool is_final_leg(const std::string& f) { return f.rfind(":G", 0) == 0 && f[3] == '2'; }
 bool has_final_leg(const Frames& frames) { return std::any_of(frames.begin(), frames.end(), is_final_leg); }
 
-// The fake integrates motion against a FakeTaskClock (the driver stays on the
-// wall clock): while an axis runs a GOTO, jump virtual time so it lands at once;
-// otherwise let it follow wall time. The rendezvous is the board's next frame.
-// Under util::kLinkStalenessBound (30 s) per jump.
+// Goto-jump pumping: skywatcher_fake_clock.h (open-astro#715, one home since #1221).
+using alpacacore::test::skywatcher_clock::follow_wall_clock;
+using alpacacore::test::skywatcher_clock::pump_until;
+
 void pump_until_landed(FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-    auto last = std::chrono::steady_clock::now();
-    while (driver.get_slewing()) {
-        REQUIRE(std::chrono::steady_clock::now() < deadline);
-        if (mount.axis_in_goto(1) || mount.axis_in_goto(2)) {
-            clock.advance(std::chrono::seconds(20));
-        }
-        mount.wait_for_frames(0, mount.frames_seen() + 1, std::chrono::milliseconds(50));
-        const auto t = std::chrono::steady_clock::now();
-        clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(t - last));
-        last = t;
-    }
+    REQUIRE(pump_until(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(60)));
 }
 
 void land(FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount, double ra,
           double dec) {
     driver.slew_to_coordinates_async(ra, dec);
     pump_until_landed(clock, driver, mount);
-}
-
-// Lets the fake's virtual time follow wall time for `d` (tracking, a pulse).
-void follow_wall_clock(FakeTaskClock& clock, std::chrono::milliseconds d,
-                       const std::function<bool()>& until = nullptr) {
-    const auto start = std::chrono::steady_clock::now();
-    auto last = start;
-    while (std::chrono::steady_clock::now() - start < d && !(until && until())) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        const auto t = std::chrono::steady_clock::now();
-        clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(t - last));
-        last = t;
-    }
 }
 
 bool wait_for(const std::function<bool()>& done, std::chrono::seconds bound = std::chrono::seconds(20)) {
@@ -170,6 +147,46 @@ bool wait_for(const std::function<bool()>& done, std::chrono::seconds bound = st
 }
 
 double counts_deg(uint32_t counts, const FakeMountProfile& profile) { return counts * 360.0 / profile.cpr; }
+
+// For a driver on the fake's own clock (open-astro#1221): steps virtual time
+// 250 ms at a time until pred() holds, each step once the driver's task (a
+// slew body or a pulse) and its status poll are both parked on the clock, so
+// the landing settle, the hold for the sky, the post-slew rate check and a
+// pulse's hold all pass in virtual time. False when `limit` of clock time
+// passes first, or when no task parks within 2 s of real time and pred() has
+// not turned true meanwhile.
+bool step_until(FakeTaskClock& clock, const std::function<bool()>& pred,
+                std::chrono::seconds limit = std::chrono::seconds(60)) {
+    constexpr std::size_t kParked = 2;
+    constexpr std::chrono::milliseconds kStep{250};
+    constexpr std::chrono::milliseconds kRendezvous{2000};
+    for (std::chrono::milliseconds t{0}; t < limit; t += kStep) {
+        // A parked task, or pred() turning true while the woken one reacts.
+        const auto give_up = std::chrono::steady_clock::now() + kRendezvous;
+        while (!clock.wait_for_waiters(kParked, std::chrono::milliseconds(20))) {
+            if (pred()) return true;
+            if (std::chrono::steady_clock::now() >= give_up) return pred();
+        }
+        if (pred()) return true;
+        clock.advance(kStep);
+        if (!clock.wait_for_woken_settled(kRendezvous)) return pred();
+    }
+    return pred();
+}
+
+// A sky goto with the driver on the fake's own clock, stepped until Slewing
+// clears.
+void land_stepped(FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, double ra, double dec) {
+    driver.slew_to_coordinates_async(ra, dec);
+    REQUIRE(step_until(clock, [&] { return !driver.get_slewing(); }));
+}
+
+// Moves virtual time by `d` in one step for a driver on the fake's clock with
+// no task running, and lets the status poll it wakes settle.
+void jump_idle(FakeTaskClock& clock, std::chrono::milliseconds d) {
+    clock.advance(d);
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::milliseconds(2000)));
+}
 
 // A fake mount on a fake clock and a driver connected to it, on the wall clock
 // or, with `shared_clock`, on the fake's own. Disconnects at the end.
@@ -243,14 +260,14 @@ struct Run {
 };
 
 Run run(const FakeMountProfile& profile, const sw::BacklashSettings& backlash, const std::vector<double>& decs) {
-    Rig rig(backlash, profile);
+    Rig rig(backlash, profile, kSouth, /*shared_clock=*/true);
     auto& [clock, mount, driver] = rig;
     const double ra = driver->get_sidereal_time();
     Run result;
     for (const double dec : decs) {
         mount.clear_motion_log();
         const double before = mount.axis_degrees(2);
-        land(clock, *driver, mount, ra, dec);
+        land_stepped(clock, *driver, ra, dec);
         result.dec_frames.push_back(axis_two(mount.motion_log()));
         result.dec_moves.push_back(mount.axis_degrees(2) - before);
     }
@@ -264,8 +281,8 @@ Run run(const FakeMountProfile& profile, const sw::BacklashSettings& backlash, c
 // the moves after the first runs against the approach side and one follows it.
 const std::vector<double> kBackAndForth{-80.0, -79.0, -79.5, -79.0};
 
-// A slew is real time on the loopback fake, so each distinct (board, settings)
-// run is made once and shared by the cases that read it.
+// Each distinct (board, settings) run is made once and shared by the cases
+// that read it.
 Run cached_run(const std::string& name, const FakeMountProfile& profile, const sw::BacklashSettings& backlash) {
     static std::map<std::string, Run> runs;
     auto it = runs.find(name);
@@ -502,19 +519,18 @@ TEST_CASE("SkyWatcher backlash - RA landings with tracking on stay within one ge
     const auto profile = FakeMountProfile::eqm35_pro();
     const double gap_deg = counts_deg(kGap, profile);
     const auto landings = [&](const sw::BacklashSettings& backlash) {
-        Rig rig(backlash, profile);
+        Rig rig(backlash, profile, kSouth, /*shared_clock=*/true);
         auto& [clock, mount, driver] = rig;
         mount.set_gear_gap(1, kGap);
         driver->set_tracking(true);
-        follow_wall_clock(clock, std::chrono::milliseconds(100));
-        clock.advance(std::chrono::seconds(5));  // tracking takes up the gap
+        jump_idle(clock, std::chrono::seconds(5));  // tracking takes up the gap
         const double lst = driver->get_sidereal_time();
         std::vector<double> errors;  // register minus shaft at each landing
         for (int cycle = 0; cycle < 3; ++cycle) {
             for (const double hours : {0.5, 1.0}) {
-                land(clock, *driver, mount, std::fmod(lst + hours, 24.0), -80.0);
+                land_stepped(clock, *driver, std::fmod(lst + hours, 24.0), -80.0);
                 errors.push_back(mount.axis_degrees(1) - mount.shaft_degrees(1));
-                clock.advance(std::chrono::seconds(5));  // let tracking run past the gap
+                jump_idle(clock, std::chrono::seconds(5));  // let tracking run past the gap
             }
         }
         return errors;
@@ -532,7 +548,7 @@ TEST_CASE("SkyWatcher backlash - Dec landings after guide pulses stay within one
     const auto profile = FakeMountProfile::eqm35_pro();
     const double gap_deg = counts_deg(kGap, profile);
     const auto landings = [&](const sw::BacklashSettings& backlash, double* pulse_moved_shaft) {
-        Rig rig(backlash, profile);
+        Rig rig(backlash, profile, kSouth, /*shared_clock=*/true);
         auto& [clock, mount, driver] = rig;
         mount.set_gear_gap(2, kGap);
         const double ra = driver->get_sidereal_time();
@@ -540,21 +556,21 @@ TEST_CASE("SkyWatcher backlash - Dec landings after guide pulses stay within one
             const double before = mount.axis_degrees(2);
             const double shaft_before = mount.shaft_degrees(2);
             driver->pulse_guide(direction, 1500);
-            follow_wall_clock(clock, std::chrono::seconds(10), [&] { return !driver->get_is_pulse_guiding(); });
+            REQUIRE(step_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::seconds(10)));
             *pulse_moved_shaft = std::max(*pulse_moved_shaft, std::abs(mount.shaft_degrees(2) - shaft_before));
             return mount.axis_degrees(2) - before;
         };
-        land(clock, *driver, mount, ra, -80.0);
+        land_stepped(clock, *driver, ra, -80.0);
         const double north_way = pulse(0) > 0.0 ? 1.0 : -1.0;  // register direction of a north pulse
         std::vector<double> errors;
         double from = mount.axis_degrees(2);
-        land(clock, *driver, mount, ra, -79.0);
+        land_stepped(clock, *driver, ra, -79.0);
         const double up_way = mount.axis_degrees(2) > from ? 1.0 : -1.0;  // register direction of a higher Dec
         for (int cycle = 0; cycle < 3; ++cycle) {
             for (const double dec : {-79.5, -79.0}) {
                 const double goto_way = dec > -79.25 ? up_way : -up_way;
                 pulse(north_way == goto_way ? 1 : 0);  // the pulse ends opposite to the goto
-                land(clock, *driver, mount, ra, dec);
+                land_stepped(clock, *driver, ra, dec);
                 errors.push_back(mount.axis_degrees(2) - mount.shaft_degrees(2));
             }
         }
