@@ -55,6 +55,7 @@ struct Handset {
     std::atomic<bool> mute{false};
     std::atomic<bool> slewing{false};
     std::atomic<int> tracking_mode{1};
+    std::atomic<char> pier{'E'};  // 0 = the handset does not answer 'p'
 };
 
 std::string reply(Handset& st, const std::string& chunk) {
@@ -76,7 +77,7 @@ std::string reply(Handset& st, const std::string& chunk) {
         case 'm':  // mount model: an EQ mount
             return std::string(1, '\x32') + "#";
         case 'p':
-            return "E#";
+            return st.pier.load() == 0 ? std::string("#") : std::string(1, st.pier.load()) + "#";
         case 't':
             return std::string(1, static_cast<char>(st.tracking_mode.load())) + "#";
         case 'T':
@@ -331,6 +332,31 @@ TEST_CASE("SynScan snapshot - past the staleness bound DeviceState is empty with
     CHECK(alpacacore::test::settle_connected(*driver, true, seconds(10)));
     CHECK(driver->get_connected());
     CHECK(std::abs(driver->get_right_ascension() - 8.711749) < 1e-5);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan snapshot - a pointing state that is neither E nor W reads as pierUnknown, not an error",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    st->pier = 'X';
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, milliseconds(2000)));
+
+    const int before = st->transactions.load();
+    CHECK(driver->get_side_of_pier() == -1);
+    bool found = false;
+    for (const auto& entry : driver->get_device_state()) {
+        if (entry.name == "SideOfPier") {
+            found = true;
+            CHECK(std::get<int>(entry.value) == -1);
+        }
+    }
+    CHECK(found);
+    CHECK(st->transactions.load() == before);
     driver->set_connected(false);
 }
 

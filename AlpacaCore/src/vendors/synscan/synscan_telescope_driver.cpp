@@ -72,7 +72,8 @@ struct PolledFrame {
     double alt_degrees = 0.0;
     bool altaz_known = false;
     bool slewing = false;
-    int side_of_pier = -1;   // ASCOM value, -1 unknown
+    int side_of_pier = -1;    // ASCOM value, -1 (pierUnknown) when the handset's state maps to neither side
+    bool pier_known = false;  // the handset has answered 'p' at least once
     int tracking_mode = -1;  // handset 'T' mode, -1 unknown
 };
 constexpr int kPositionLinkFailureThreshold = 3;
@@ -822,12 +823,12 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        const int side = served_frame_locked().value.side_of_pier;
-        if (side < 0) {
+        const auto frame = served_frame_locked().value;
+        if (!frame.pier_known) {
             throw AlpacaException("SynScan pier side is not known yet: the handset has not reported its pointing state",
                                   AlpacaError::DriverException);
         }
-        return side;
+        return frame.side_of_pier;
     }
 
     void set_side_of_pier(int side) override {
@@ -2347,10 +2348,8 @@ private:
             frame.altaz_known = true;
         }
         if (raw.pier) {
-            const int side = map_pointing_state_to_side(*raw.pier);
-            if (side >= 0) {
-                frame.side_of_pier = side;
-            }
+            frame.side_of_pier = map_pointing_state_to_side(*raw.pier);  // -1 (pierUnknown) is an answer too
+            frame.pier_known = true;
         }
         if (raw.tracking_mode) {
             frame.tracking_mode = *raw.tracking_mode;
