@@ -107,15 +107,15 @@ If `ErrorNumber` is non-zero (e.g. NotConnected because hardware is unplugged), 
 
 ### 2c2. SynScan telescope only: the handset answers more than the echo
 
-A SynScan connect only gates on one echo, so a handset that answers that and then goes silent comes up `Connected=true` with every query timing out (issue #881). Read a position value through the driver twice, 5 s apart: the driver serves position from a frame its status poll refreshes every second (`kStatusPollPeriod`, issue #1247) and refuses it once the poll has failed three times in a row, so a silent handset shows as the second read failing. Keep the gap short: a fault that stands for 30 s (`util::kLinkStalenessBound`) turns into a lost link, and the read then answers `NotConnected` instead:
+A SynScan connect only gates on one echo, so a handset that answers that and then goes silent comes up `Connected=true` with every query timing out (issue #881). Read a position value through the driver twice, 25 s apart. The driver serves position from a frame its status poll refreshes every second (`kStatusPollPeriod`, issue #1247), so a read answers from memory and a silent handset shows only once the poll has failed three times in a row (`kPositionLinkFailureThreshold`). Each failed tick spends the whole response timeout (`responseTimeoutMs`, default 5000 ms) before it fails, so the fault latches about 3 x (timeout + 1 s), roughly 18 s, after the handset goes quiet; a shorter gap returns the old frame with `ErrorNumber: 0` and passes a stuck handset. Keep the gap under the latch time plus 30 s (`util::kLinkStalenessBound`, counted from the latch): past it the fault turns into a lost link and the read answers `NotConnected` instead. With a non-default `responseTimeoutMs`, use a gap a few seconds above 3 x (timeout + 1 s):
 
 ```bash
 curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=1"
-sleep 5
+sleep 25
 curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=2"
 ```
 
-Expect `ErrorNumber: 0` from both, each within about a second. A timeout, `Timeout waiting for SynScan response`, `communications compromised`, or `Not connected to SynScan mount` (the fault outlived the 30 s bound) means the handset is stuck, not unplugged:
+Expect `ErrorNumber: 0` from both, each within about a second. A timeout, `Timeout waiting for SynScan response`, `communications compromised`, `SynScan mount position is not available` (the handset was already silent when the connect seeded the first frame), or `Not connected to SynScan mount` (the fault outlived the 30 s bound) means the handset is stuck, not unplugged:
 
 > "The SynScan handset is not answering. Disconnect the device (web UI, or `curl -X PUT http://<host>:<port>/api/v1/telescope/<n>/connected -d 'Connected=false&ClientID=1&ClientTransactionID=3'`), unplug the handset's USB from the SBC, power-cycle the mount, bring the handset to its main screen, wait 30 s, plug the USB back in, then reconnect and re-run `/conformu`."
 
