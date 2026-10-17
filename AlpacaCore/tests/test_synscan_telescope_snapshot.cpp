@@ -28,6 +28,7 @@
 #include <ctime>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -47,7 +48,20 @@ using std::chrono::milliseconds;
 using std::chrono::seconds;
 
 constexpr auto kLatency = milliseconds(100);
+// A getter that reached the handset would pay kLatency, so the budget only has to sit below it. Sanitized builds
+// run several times slower on a loaded runner and get more room; the transaction count is the strict check.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define ALPACACORE_TESTS_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+#define ALPACACORE_TESTS_SANITIZED 1
+#endif
+#endif
+#if defined(ALPACACORE_TESTS_SANITIZED)
+constexpr auto kGetterBudget = milliseconds(60);
+#else
 constexpr auto kGetterBudget = milliseconds(20);
+#endif
 
 struct Handset {
     std::atomic<int> transactions{0};
@@ -56,6 +70,8 @@ struct Handset {
     std::atomic<bool> slewing{false};
     std::atomic<int> tracking_mode{1};
     std::atomic<char> pier{'E'};  // 0 = the handset does not answer 'p'
+    std::atomic<int> w_latency_ms{0};  // a handset slow on `w` (site) only, answering it unparseably
+    std::atomic<bool> w_entered{false};
 };
 
 std::string reply(Handset& st, const std::string& chunk) {
@@ -83,6 +99,12 @@ std::string reply(Handset& st, const std::string& chunk) {
         case 'T':
             if (chunk.size() > 1) st.tracking_mode.store(chunk[1]);
             return "#";
+        case 'w':
+            if (st.w_latency_ms.load() > 0) {
+                st.w_entered.store(true);
+                std::this_thread::sleep_for(milliseconds(st.w_latency_ms.load()));
+            }
+            return "#";
         default:
             return "#";
     }
@@ -97,6 +119,20 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(alpacacore::test::
     info.response_timeout_ms = 300;
     auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
                                                          false, sc::SynScanAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    return driver;
+}
+
+// No configured site: with a `w` the handset cannot answer, the driver has no site to compute from.
+std::unique_ptr<alpacacore::TelescopeDriver> connected_driver_without_site(alpacacore::test::FakeMountServer& server,
+                                                                           FakeTaskClock& clock, int timeout_ms) {
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = timeout_ms;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, std::nullopt, std::nullopt,
+                                                         std::nullopt, false, sc::SynScanAlignmentSetting::Auto, clock);
     driver->set_connected(true);
     return driver;
 }
@@ -417,6 +453,56 @@ TEST_CASE("SynScan snapshot - a slewing re-read that finds no change does not dr
     const auto stamp = parse_timestamp(time_stamp_of(*driver));
     CHECK(std::chrono::duration<double>(std::chrono::system_clock::now() - stamp).count() < 1.0);
     st->slewing = false;
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan snapshot - a getter does not wait while the poll retries an unread site",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    // An unparseable `w`: the site stays unread and the poll's slow tick retries it. The timeout is above the 400 ms
+    // `w` stall below, so the late reply is not left on the wire.
+    auto driver = connected_driver_without_site(server, clock, 1000);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    clock.advance(seconds(3));  // past the site retry delay
+
+    st->w_latency_ms = 400;
+    std::thread tick([&] { (void)sc::poll_status_now_for_testing(*driver); });
+    const auto entered_by = std::chrono::steady_clock::now() + seconds(5);
+    while (!st->w_entered.load() && std::chrono::steady_clock::now() < entered_by) {
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    REQUIRE(st->w_entered.load());
+    CHECK(timed([&] { (void)driver->get_slewing(); }) < milliseconds(200));  // the `w` exchange takes 400 ms
+    tick.join();
+    st->w_latency_ms = 0;
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan snapshot - DestinationSideOfPier with no site refuses a faulted link like the other reads",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver_without_site(server, clock, 300);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    CHECK(driver->get_destination_side_of_pier(6.0, 10.0) == 1);  // the frame's handset E: pierWest
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) sc::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    try {
+        (void)driver->get_destination_side_of_pier(6.0, 10.0);
+        FAIL("a faulted link must refuse DestinationSideOfPier");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    st->mute = false;
     driver->set_connected(false);
 }
 

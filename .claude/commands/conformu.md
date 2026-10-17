@@ -111,6 +111,7 @@ A SynScan connect only gates on one echo, so a handset that answers that and the
 
 ```bash
 curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=1"
+# gap: 3 x (responseTimeoutMs + 1 s) plus a few s, under that plus 30 s; 25 s at the default 5000 ms
 sleep 25
 curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=2"
 ```

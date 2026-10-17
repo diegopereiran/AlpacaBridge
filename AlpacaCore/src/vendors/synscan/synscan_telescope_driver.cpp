@@ -77,6 +77,9 @@ struct PolledFrame {
     int tracking_mode = -1;   // handset 'T' mode, -1 unknown
 };
 constexpr int kPositionLinkFailureThreshold = 3;
+// How long the landing hunt waits for a status tick already sampling (open-astro#1247): a healthy tick is 2-5
+// exchanges, about 0.3-0.7 s at the ~140 ms round trip of open-astro#617.
+constexpr auto kPollSampleWaitBound = std::chrono::milliseconds(1500);
 // Consecutive failed Park slew-status queries tolerated before the Park fails (open-astro#1122).
 constexpr int kParkPollFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
@@ -844,8 +847,7 @@ public:
             ensure_site_info_cached_locked();
         }
         if (!site_info_valid_) {
-            const auto reading = snapshot_.read();
-            return reading ? reading->value.side_of_pier : -1;
+            return served_frame_locked().value.side_of_pier;  // the same link checks as every other frame read
         }
         double lst_hours = compute_local_sidereal_time_hours(std::chrono::system_clock::now(),
                                                             site_longitude_cached_);
@@ -2138,11 +2140,18 @@ private:
         // The hunt reads at a 50 ms cadence tuned on the rig; the poll skips its ticks while it runs (bounded).
         const PollHold hold(poll_hold_);
         // A tick already inside its exchanges queues the hunt's reads behind it on the wrapper mutex and widens the
-        // bracket around the tick: let it finish (mutex_ is dropped so its publish can run). No new tick starts.
-        while (poll_sampling_.load()) {
+        // bracket around the tick: let it finish (mutex_ is dropped so its publish can run). No new tick starts. The
+        // wait is bounded: a tick on a silent link can take several response timeouts, and past the bound the hunt
+        // reads anyway, queued behind it. A superseding command or a stop ends the wait at once.
+        const auto wait_until = std::chrono::steady_clock::now() + kPollSampleWaitBound;
+        while (poll_sampling_.load() && std::chrono::steady_clock::now() < wait_until) {
             lock.unlock();
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             lock.lock();
+            if (motion_generation_ != owner_generation ||
+                (ctx != nullptr && ctx->stop_reason() != util::StopReason::None)) {
+                return TickHunt{};
+            }
         }
         const auto start = clock_.now();
         TickHunt hunt;
@@ -2576,6 +2585,7 @@ private:
         }
         run_status_poll_before_sample_hook();
         bool precise = false;
+        bool read_site = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_ || link_lost_.load() || stopped()) {
@@ -2587,13 +2597,26 @@ private:
                 return true;
             }
             precise = use_precise_commands_;
-            // The unread site (a connect that could not reach `w`) is retried here, not in a getter.
-            if (!site_info_valid_ && tick % kSlowPollEvery == 0) {
-                ensure_site_info_cached_locked();
-            }
+            // The unread site (a connect that could not reach `w`) is retried here, not in a getter, and like the
+            // sample below its exchange runs without mutex_, so a getter never waits on a handset that ignores `w`.
+            read_site = !site_info_valid_ && tick % kSlowPollEvery == 0 && site_read_due_locked();
             poll_sampling_ = true;
         }
         const SamplingFlag sampling(poll_sampling_);  // cleared on every exit, a throw included
+        if (read_site) {
+            std::optional<LocationInfo> site;
+            try {
+                site = SynScanProtocolWrapper::instance().get_location();
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSiteInfoRetryDelay
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || stopped()) {
+                return false;
+            }
+            if (site) {
+                apply_site_info_locked(*site);
+            }
+        }
         const auto token = snapshot_.begin_poll();
         RawSample raw;
         try {
@@ -2799,23 +2822,34 @@ private:
     }
 
     void ensure_site_info_cached_locked() const {
-        if (!connected_) {
+        if (!site_read_due_locked()) {
             return;
+        }
+        try {
+            apply_site_info_locked(SynScanProtocolWrapper::instance().get_location());
+        } catch (...) {
+            site_info_valid_ = false;
+        }
+    }
+
+    // True when a `w` read should run now (connected, and an unread site past its retry delay); stamps the attempt.
+    bool site_read_due_locked() const {
+        if (!connected_) {
+            return false;
         }
         auto now = clock_.now();
         if (!site_info_valid_ && last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
-            return;
+            return false;
         }
         last_site_info_attempt_ = now;
-        try {
-            LocationInfo info = SynScanProtocolWrapper::instance().get_location();
-            site_latitude_cached_ = info.latitude_degrees;
-            site_longitude_cached_ = info.longitude_degrees;
-            site_info_valid_ = true;
-        } catch (...) {
-            site_info_valid_ = false;
-        }
+        return true;
+    }
+
+    void apply_site_info_locked(const LocationInfo& info) const {
+        site_latitude_cached_ = info.latitude_degrees;
+        site_longitude_cached_ = info.longitude_degrees;
+        site_info_valid_ = true;
     }
 
     // Saves the current RA/Dec as the park target, as main did for every mount.
