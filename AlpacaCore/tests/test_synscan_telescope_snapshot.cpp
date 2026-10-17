@@ -69,7 +69,7 @@ struct Handset {
     std::atomic<bool> mute{false};
     std::atomic<bool> slewing{false};
     std::atomic<int> tracking_mode{1};
-    std::atomic<char> pier{'E'};  // 0 = the handset does not answer 'p'
+    std::atomic<char> pier{'E'};       // 0 = the handset does not answer 'p'
     std::atomic<int> w_latency_ms{0};  // a handset slow on `w` (site) only, answering it unparseably
     std::atomic<bool> w_entered{false};
 };
