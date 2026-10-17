@@ -74,7 +74,7 @@ struct PolledFrame {
     bool slewing = false;
     int side_of_pier = -1;    // ASCOM value, -1 (pierUnknown) when the handset's state maps to neither side
     bool pier_known = false;  // the handset has answered 'p' at least once
-    int tracking_mode = -1;  // handset 'T' mode, -1 unknown
+    int tracking_mode = -1;   // handset 'T' mode, -1 unknown
 };
 constexpr int kPositionLinkFailureThreshold = 3;
 // Consecutive failed Park slew-status queries tolerated before the Park fails (open-astro#1122).
