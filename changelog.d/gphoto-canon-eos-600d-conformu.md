@@ -1,2 +1,2 @@
-### Added
-- **GPhoto: Canon EOS 600D ConformU report** (AlpacaCore, issue #1077): a user's ConformU 4.5.2-rc.1 run on a Raspberry Pi 5 with AlpacaBridge 4.2.0 over USB reports 0 errors, 0 issues and no timing violations (5202x3464, MaxADU 13584, 4.3 micron pixels, `ExposureMax` 30 s). The 600D joins the GPhoto validated table; its bulb result on a 5.1.0 nightly (`ExposureMax` 3600 s, 40 s frames from NINA) is user-reported only, with no log attached.
+### Changed
+- **Canon EOS 600D ConformU validation** (AlpacaCore, issue #1077): add a user's Linux arm64 USB report from a Raspberry Pi 5 running AlpacaBridge 4.2.0; ConformU 4.5.2-rc.1 passed with 0 errors, 0 issues and 0 timing violations (5202x3464, MaxADU 13584, 4.3 micron pixels, `ExposureMax` 30 s). The user's bulb result on a 5.1.0 nightly (`ExposureMax` 3600 s, 40 s frames from NINA) has no log attached and is recorded as user-reported.
