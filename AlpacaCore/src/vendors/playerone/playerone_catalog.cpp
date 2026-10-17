@@ -47,9 +47,12 @@ void register_playerone_factory(DeviceCatalog& catalog) {
     sw.key = DeviceKey{"playerone", DeviceType::Switch};
     sw.create = [](const DeviceConfig& config, int device_number) -> std::unique_ptr<AlpacaDriver> {
         return vendor::playerone::create_playerone_switch(device_number,
-                                                          static_cast<int>(config.get(kPlayerOneCameraIndex)));
+                                                          static_cast<int>(config.get(kPlayerOneSwitchCameraIndex)),
+                                                          config.get(kPlayerOneSwitchSerial));
     };
     catalog.add(std::move(sw));
+
+    catalog.add_thermal_camera_lister("playerone", [] { return vendor::playerone::list_playerone_thermal_cameras(); });
 }
 
 }  // namespace alpacacore::catalog

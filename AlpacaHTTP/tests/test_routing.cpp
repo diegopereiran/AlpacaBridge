@@ -16,6 +16,7 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
@@ -4517,6 +4518,12 @@ int main() {
             R"({"rotatorIndex":1,"rotatorId":2})");
         add("zwo", "switch", "Switch", "dewheater", R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})",
             R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})");
+        // Auto (-1) and a camera bound by serial, as the camera picker saves them.
+        add("zwo", "switch", "Switch", "dewheater auto", R"({"switchType":"dewheater","cameraIndex":-1})",
+            R"({"switchType":"dewheater","cameraIndex":-1})");
+        add("zwo", "switch", "Switch", "dewheater serial",
+            R"({"switchType":"dewheater","cameraIndex":1,"serialNumber":"2e18870f28000900"})",
+            R"({"switchType":"dewheater","cameraIndex":1,"serialNumber":"2e18870f28000900"})");
         // ports/pwmFrequencyHz survive for the three ASIAIR variants; gpioChip
         // only for the libgpiod two, devicePath only for the RK3568.
         add("zwo", "switch", "Switch", "asiair",
@@ -4587,6 +4594,8 @@ int main() {
             R"({"filterwheelIndex":1,"filterwheelId":"AFW-1","filterNames":["L","R","G","B","Ha"]})");
         add("touptek", "switch", "Switch", "thermal", R"({"switchType":"thermal","cameraIndex":2,"gpioChip":"/dev/x"})",
             R"({"switchType":"thermal","cameraIndex":2})");
+        add("touptek", "switch", "Switch", "thermal auto", R"({"switchType":"thermal","cameraIndex":-1})",
+            R"({"switchType":"thermal","cameraIndex":-1})");
 #ifdef ALPACACORE_TOUPTEK_STELLAVITA
         add("touptek", "switch", "Switch", "stellavita",
             R"({"switchType":"stellavita","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":100,"cameraIndex":2,)"
@@ -4603,6 +4612,8 @@ int main() {
             R"({"filterwheelIndex":1,"filterNames":["L","R","G"]})");
         // playerone switch (the thermal dew heater/fan) had no roundtrip_config() case before #647.
         add("playerone", "switch", "Switch", "", R"({"cameraIndex":2,"switchType":"x"})", R"({"cameraIndex":2})");
+        add("playerone", "switch", "Switch", "auto + serial", R"({"cameraIndex":-1,"serialNumber":"POA0123456"})",
+            R"({"cameraIndex":-1,"serialNumber":"POA0123456"})");
         // iOptron iCAM is a rebadged Player One camera, routed to that SDK.
         add("ioptron", "camera", "Camera", "", R"({"cameraIndex":2,"connectionType":"serial"})",
             R"({"cameraIndex":2})");
@@ -7341,6 +7352,121 @@ int main() {
         EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
         const auto post = route_request(router, "POST", "/management/v1/devicecatalog", "{}");
         EXPECT(post.status_code() == 405);
+    }
+
+    // GET /management/v1/thermalcameras?vendor=<v> serves the catalog's camera
+    // lister for a thermal switch's camera picker, in the management envelope.
+    {
+        // case: thermalcameras serves the vendor's camera listing from the catalog
+        alpacahttp::Router router;
+        int lister_calls = 0;
+        router.catalog().add_thermal_camera_lister("zzz", [&lister_calls] {
+            ++lister_calls;
+            alpacacore::util::ThermalCameraCandidate mini;
+            mini.index = 0;
+            mini.name = "ZWO ASI290MM Mini";
+            mini.serial = "2d0bd20224000900";
+            alpacacore::util::ThermalCameraCandidate pro;
+            pro.index = 1;
+            pro.name = "ZWO ASI2600MM Pro";
+            pro.serial = "2e18870f28000900";
+            pro.has_thermal = true;
+            return std::vector<alpacacore::util::ThermalCameraCandidate>{mini, pro};
+        });
+        const auto response =
+            route_request(router, "GET", "/management/v1/thermalcameras?vendor=zzz&ClientTransactionID=31");
+        EXPECT(response.status_code() == 200);
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded());
+        EXPECT(json.value("ErrorNumber", -1) == 0);
+        EXPECT(json.value("ClientTransactionID", 0) == 31);
+        EXPECT(lister_calls == 1);
+        EXPECT(json.contains("Value") && json["Value"].is_array() && json["Value"].size() == 2);
+        if (json.contains("Value") && json["Value"].size() == 2) {
+            const auto& first = json["Value"][0];
+            EXPECT(first.value("Index", -1) == 0);
+            EXPECT(first.value("Name", "") == "ZWO ASI290MM Mini");
+            EXPECT(first.value("Serial", "") == "2d0bd20224000900");
+            EXPECT(first.value("HasThermal", true) == false);
+            const auto& second = json["Value"][1];
+            EXPECT(second.value("Index", -1) == 1);
+            EXPECT(second.value("Name", "") == "ZWO ASI2600MM Pro");
+            EXPECT(second.value("HasThermal", false) == true);
+        }
+    }
+    {
+        // case: thermalcameras refuses a vendor with no lister and any verb but GET
+        alpacahttp::Router router;
+        router.catalog().add_thermal_camera_lister(
+            "zzz", [] { return std::vector<alpacacore::util::ThermalCameraCandidate>{}; });
+        const auto unknown = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/thermalcameras?vendor=nope").body(), nullptr, false);
+        EXPECT(!unknown.is_discarded() && unknown.value("ErrorNumber", 0) == 0x401);
+        const auto missing =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/thermalcameras").body(), nullptr, false);
+        EXPECT(!missing.is_discarded() && missing.value("ErrorNumber", 0) == 0x401);
+        const auto empty = nlohmann::json::parse(
+            route_request(router, "GET", "/management/thermalcameras?vendor=zzz").body(), nullptr, false);
+        EXPECT(!empty.is_discarded() && empty.value("ErrorNumber", -1) == 0 && empty["Value"].empty());
+        const auto put = route_request(router, "PUT", "/management/v1/thermalcameras", "vendor=zzz");
+        EXPECT(put.status_code() == 405);
+        const auto put_json = nlohmann::json::parse(put.body(), nullptr, false);
+        EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
+    }
+    {
+        // case: thermalcameras reports a throwing lister as an Alpaca error
+        alpacahttp::Router router;
+        router.catalog().add_thermal_camera_lister(
+            "zzz", []() -> std::vector<alpacacore::util::ThermalCameraCandidate> {
+                throw alpacacore::AlpacaException("SDK listing failed", alpacacore::AlpacaError::DriverException);
+            });
+        const auto response = route_request(router, "GET", "/management/v1/thermalcameras?vendor=zzz");
+        EXPECT(response.status_code() == 200);
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        EXPECT(json.value("ErrorMessage", "").find("SDK listing failed") != std::string::npos);
+    }
+
+    {
+        // case: thermal switch camera bindings refuse a bad serial or an index below Auto
+        alpacahttp::Router router;
+        const auto refused = [&router](nlohmann::json body) {
+            const auto json = nlohmann::json::parse(
+                route_request(router, "POST", "/management/v1/configuredevice", body.dump()).body(), nullptr, false);
+            return !json.is_discarded() && json.value("ErrorNumber", 0) != 0;
+        };
+#ifdef ALPACACORE_ENABLE_ZWO
+        EXPECT(refused({{"vendor", "zwo"},
+                        {"deviceType", "switch"},
+                        {"deviceNumber", 9601},
+                        {"switchType", "dewheater"},
+                        {"cameraIndex", 1},
+                        {"serialNumber", "not-hex"}}));
+        EXPECT(refused({{"vendor", "zwo"},
+                        {"deviceType", "switch"},
+                        {"deviceNumber", 9602},
+                        {"switchType", "dewheater"},
+                        {"cameraIndex", -2}}));
+        // No index at all is Auto on the API path, and registers. A run that
+        // aborted before the removal below left 9603 in the persisted file, so
+        // clear it first or every later run fails here.
+        nlohmann::json remove_body = {{"vendor", "zwo"}, {"deviceType", "switch"}, {"deviceNumber", 9603}};
+        route_request(router, "POST", "/management/v1/removedevice", remove_body.dump());
+        EXPECT(!refused(
+            {{"vendor", "zwo"}, {"deviceType", "switch"}, {"deviceNumber", 9603}, {"switchType", "dewheater"}}));
+        EXPECT(nlohmann::json::parse(
+                   route_request(router, "POST", "/management/v1/removedevice", remove_body.dump()).body())
+                   .value("ErrorNumber", -1) == 0);
+#endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+        EXPECT(refused({{"vendor", "playerone"},
+                        {"deviceType", "switch"},
+                        {"deviceNumber", 9604},
+                        {"cameraIndex", 0},
+                        {"serialNumber", "POA\nforged"}}));
+        EXPECT(
+            refused({{"vendor", "playerone"}, {"deviceType", "switch"}, {"deviceNumber", 9605}, {"cameraIndex", -2}}));
+#endif
     }
 
     // open-astro#664 Part C: the router consults the catalog before its arm

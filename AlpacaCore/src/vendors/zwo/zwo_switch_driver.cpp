@@ -13,6 +13,8 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/thermal_camera_choice.h>
+#include <alpacacore/vendor/zwo/zwo_camera_identity.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/version.h>
@@ -30,6 +32,66 @@ namespace {
 
 constexpr int kDewHeaterSwitchId = 0;
 
+constexpr util::ThermalSwitchLabels kDewHeaterLabels{"ZWO", "dew heater"};
+
+/// One attached camera as the dew heater sees it: what the picker shows, and
+/// the SDK camera id that opens it.
+struct ZwoDewHeaterCamera {
+    util::ThermalCameraCandidate candidate;
+    int camera_id{};
+};
+
+/// Every readable camera, each opened through the ref-counted wrapper (a camera
+/// the camera driver holds stays open) to read its controls and serial. A
+/// camera that will not open is listed without a heater or serial.
+// TODO: confirm on hardware that ASIGetControlCaps and ASIGetSerialNumber on a
+// camera the camera driver is exposing leave the frame intact; the web UI's
+// picker can list cameras mid-session.
+std::vector<ZwoDewHeaterCamera> list_dew_heater_cameras(std::vector<ZwoUnreadableSlot>* unreadable) {
+    auto& sdk = ZWOSDKWrapper::instance();
+    std::vector<ZwoDewHeaterCamera> result;
+    for (const auto& info : sdk.enumerate_cameras(unreadable)) {
+        ZwoDewHeaterCamera camera;
+        camera.camera_id = info.camera_id;
+        camera.candidate.index = info.slot_index;
+        camera.candidate.name = trim_zwo_name(info.name);
+        try {
+            sdk.open_camera(info.camera_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "Dew heater listing could not open " + camera.candidate.name + ": " + e.what());
+            result.push_back(std::move(camera));
+            continue;
+        }
+        try {
+            for (const auto& cap : sdk.get_control_caps(info.camera_id)) {
+                if (cap.type == ZWOControlType::AntiDewHeater) {
+                    camera.candidate.has_thermal = true;
+                }
+            }
+            // ASI120MM Mini and some older bodies report no serial; listed without one.
+            camera.candidate.serial = sdk.get_serial_number(info.camera_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("ZWO", "Dew heater listing of " + camera.candidate.name + ": " + e.what());
+        }
+        try {
+            sdk.close_camera(info.camera_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "Dew heater listing could not close " + camera.candidate.name + ": " + e.what());
+        }
+        result.push_back(std::move(camera));
+    }
+    return result;
+}
+
+std::vector<util::ThermalCameraCandidate> candidates_of(const std::vector<ZwoDewHeaterCamera>& cameras) {
+    std::vector<util::ThermalCameraCandidate> candidates;
+    candidates.reserve(cameras.size());
+    for (const auto& camera : cameras) {
+        candidates.push_back(camera.candidate);
+    }
+    return candidates;
+}
+
 } // namespace
 
 class ZWODewHeaterSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
@@ -37,11 +99,15 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWODewHeaterSwitchDriver(int device_number, std::optional<int> camera_id, std::optional<int> camera_index)
+    // camera_index: an SDK slot, or util::kAutoThermalCamera for the one camera
+    // with a heater. bound_serial, when set, names the camera and wins over both.
+    ZWODewHeaterSwitchDriver(int device_number, std::optional<int> camera_id, std::optional<int> camera_index,
+                             std::string bound_serial)
         : AsyncConnectable("ZWO"),
           device_number_(device_number),
           camera_id_(camera_id),
           camera_index_(camera_index),
+          bound_serial_(std::move(bound_serial)),
           serial_number_(),
           camera_name_("ZWO Camera"),
           dew_caps_(),
@@ -128,15 +194,19 @@ public:
 
         auto& sdk = ZWOSDKWrapper::instance();
         if (connected) {
-            int resolved_id = resolve_camera_id_locked();
+            std::vector<ZwoDewHeaterCamera> listing;
+            int resolved_id = resolve_camera_id_locked(listing);
             sdk.open_camera(resolved_id);
             sdk.init_camera(resolved_id);
             try {
                 refresh_camera_name_locked(resolved_id);
-                load_dew_caps_locked(resolved_id);
+                load_dew_caps_locked(resolved_id, listing);
                 serial_number_ = sdk.get_serial_number(resolved_id);
             } catch (...) {
                 sdk.close_camera(resolved_id);
+                if (!camera_bound_by_id_only()) {
+                    camera_id_.reset();
+                }
                 throw;
             }
             connected_.store(true);
@@ -149,7 +219,7 @@ public:
         // the SDK without holding mutex_) — same order as the EFW/CAA/EAF
         // siblings, per the AGENTS.md disconnect rule.
         const std::optional<int> close_id = camera_id_;
-        if (camera_index_.has_value()) {
+        if (!camera_bound_by_id_only()) {
             camera_id_.reset();
             camera_name_ = "ZWO Camera";
             serial_number_.clear();
@@ -329,33 +399,40 @@ private:
         return dew_caps_.value();
     }
 
-    int resolve_camera_id_locked() {
-        if (camera_index_.has_value()) {
-            auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
-            if (cameras.empty()) {
-                ALPACA_LOG_WARN("ZWO", "No ZWO cameras detected by SDK");
-                throw AlpacaException("No ZWO cameras detected", AlpacaError::NotConnected);
+    // A cameraId with no index or serial is the legacy binding: that SDK id, as is.
+    bool camera_bound_by_id_only() const { return !camera_index_.has_value() && bound_serial_.empty(); }
+
+    // Lists the attached cameras into `listing` (the capability refusal names
+    // them too) and picks the one this switch means.
+    int resolve_camera_id_locked(std::vector<ZwoDewHeaterCamera>& listing) {
+        std::vector<ZwoUnreadableSlot> unreadable;
+        listing = list_dew_heater_cameras(&unreadable);
+        if (camera_bound_by_id_only()) {
+            if (camera_id_.has_value()) {
+                return camera_id_.value();
             }
-            int index = camera_index_.value();
-            // The index is the SDK slot; an unreadable slot is skipped, so match the slot, not the list position.
-            const auto it = std::find_if(cameras.begin(), cameras.end(),
-                                         [index](const ZWOCameraInfo& c) { return c.slot_index == index; });
-            if (it == cameras.end()) {
-                ALPACA_LOG_WARN("ZWO", "Camera index not found: " + std::to_string(index) +
-                                           " (readable=" + std::to_string(cameras.size()) + ")");
-                throw AlpacaException("Camera index not found", AlpacaError::InvalidValue);
-            }
-            const auto& info = *it;
-            camera_id_ = info.camera_id;
-            camera_name_ = info.name;
-            return camera_id_.value();
+            throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
         }
 
-        if (camera_id_.has_value()) {
-            return camera_id_.value();
+        util::ThermalCameraRequest request;
+        request.camera_index = camera_index_.value_or(util::kAutoThermalCamera);
+        request.serial = bound_serial_;
+        const auto choice = util::choose_thermal_camera(request, candidates_of(listing), kDewHeaterLabels);
+        if (!choice.chosen.has_value()) {
+            // The camera this entry means may be the slot the SDK could not read: say so.
+            std::string message = choice.refusal;
+            const std::string hint = describe_unreadable_zwo_slots(unreadable);
+            if (!hint.empty()) {
+                message += " " + hint;
+            }
+            ALPACA_LOG_WARN("ZWO", message);
+            throw AlpacaException(message, choice.error_code);
         }
-
-        throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
+        const auto& camera = listing[choice.chosen.value()];
+        ALPACA_LOG_INFO("ZWO", "Dew heater using " + util::describe_thermal_camera(camera.candidate));
+        camera_id_ = camera.camera_id;
+        camera_name_ = camera.candidate.name;
+        return camera.camera_id;
     }
 
     void refresh_camera_name_locked(int camera_id) {
@@ -365,7 +442,7 @@ private:
         }
     }
 
-    void load_dew_caps_locked(int camera_id) {
+    void load_dew_caps_locked(int camera_id, const std::vector<ZwoDewHeaterCamera>& listing) {
         dew_caps_.reset();
         auto caps = ZWOSDKWrapper::instance().get_control_caps(camera_id);
         for (const auto& cap : caps) {
@@ -374,7 +451,17 @@ private:
                 return;
             }
         }
-        throw AlpacaException("Dew heater not supported", AlpacaError::NotImplemented);
+        util::ThermalCameraCandidate bound;
+        bound.name = camera_name_;
+        bound.index = -1;
+        for (const auto& camera : listing) {
+            if (camera.camera_id == camera_id) {
+                bound = camera.candidate;
+            }
+        }
+        const std::string message = util::thermal_capability_refusal(bound, candidates_of(listing), kDewHeaterLabels);
+        ALPACA_LOG_WARN("ZWO", message);
+        throw AlpacaException(message, AlpacaError::NotImplemented);
     }
 
     int camera_id_value() const {
@@ -388,6 +475,7 @@ private:
     int device_number_;
     std::optional<int> camera_id_;
     std::optional<int> camera_index_;
+    std::string bound_serial_;
     std::string serial_number_;
     std::string camera_name_;
     std::optional<ZWOControlCaps> dew_caps_;
@@ -398,11 +486,16 @@ private:
 };
 
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id) {
-    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt);
+    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt, std::string());
 }
 
-std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index) {
-    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index);
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
+                                                                    const std::string& camera_serial) {
+    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index, camera_serial);
+}
+
+std::vector<util::ThermalCameraCandidate> list_zwo_dew_heater_cameras() {
+    return candidates_of(list_dew_heater_cameras(nullptr));
 }
 
 } // namespace alpacacore::vendor::zwo

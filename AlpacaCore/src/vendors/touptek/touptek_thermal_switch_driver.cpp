@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 #include <alpacacore/version.h>
@@ -45,6 +46,25 @@ struct ThermalElement {
     long min_value{};
     long max_value{};
 };
+
+constexpr util::ThermalSwitchLabels kThermalLabels{"ToupTek", "dew heater or fan"};
+
+// From the enumeration flags alone, no open: the index is the position in
+// enumerate_cameras(), which is what cameraIndex has always meant. The tail
+// light has no flag, so a camera with only that is listed without controls
+// (Auto skips it; a pinned index still binds it and the probe decides).
+std::vector<util::ThermalCameraCandidate> thermal_candidates(const std::vector<ToupCameraInfo>& cameras) {
+    std::vector<util::ThermalCameraCandidate> candidates;
+    candidates.reserve(cameras.size());
+    for (std::size_t i = 0; i < cameras.size(); ++i) {
+        util::ThermalCameraCandidate candidate;
+        candidate.index = static_cast<int>(i);
+        candidate.name = cameras[i].name;
+        candidate.has_thermal = cameras[i].supports_heat || (cameras[i].supports_fan && cameras[i].max_fan_speed > 0);
+        candidates.push_back(std::move(candidate));
+    }
+    return candidates;
+}
 
 }  // namespace
 
@@ -120,14 +140,18 @@ public:
 
         auto& sdk = sdk_;
         if (connected) {
-            auto cameras = sdk.enumerate_cameras();
-            if (cameras.empty()) {
-                throw AlpacaException("No ToupTek cameras detected", AlpacaError::NotConnected);
+            const auto cameras = sdk.enumerate_cameras();
+            const auto candidates = thermal_candidates(cameras);
+            util::ThermalCameraRequest request;
+            request.camera_index = camera_index_;
+            const auto choice = util::choose_thermal_camera(request, candidates, kThermalLabels);
+            if (!choice.chosen.has_value()) {
+                ALPACA_LOG_WARN(kLogTag, choice.refusal);
+                throw AlpacaException(choice.refusal, choice.error_code);
             }
-            if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
-                throw AlpacaException("Camera index out of range", AlpacaError::InvalidValue);
-            }
-            const auto& info = cameras[static_cast<std::size_t>(camera_index_)];
+            const auto& info = cameras[choice.chosen.value()];
+            bound_ = candidates[choice.chosen.value()];
+            listed_ = candidates;
             camera_id_ = info.id;
             camera_name_ = info.name;
 
@@ -470,8 +494,9 @@ private:
             // Camera doesn't support the tail-light option; skip it.
         }
         if (elements_.empty()) {
-            throw AlpacaException("Camera has no dew heater, fan, or tail light (uncooled model?)",
-                                  AlpacaError::NotImplemented);
+            const std::string message = util::thermal_capability_refusal(bound_, listed_, kThermalLabels);
+            ALPACA_LOG_WARN(kLogTag, message);
+            throw AlpacaException(message, AlpacaError::NotImplemented);
         }
         // Remember the probed count so MaxSwitch stays stable across a later
         // disconnect (ASCOM expects MaxSwitch not to change once known).
@@ -485,6 +510,9 @@ private:
     std::string camera_id_;
     std::string serial_number_;
     std::string camera_name_;
+    // The connect's camera listing, for the refusal when the bound camera has no controls.
+    util::ThermalCameraCandidate bound_;
+    std::vector<util::ThermalCameraCandidate> listed_;
     HToupcam handle_{nullptr};
     std::vector<ThermalElement> elements_;
     int probed_element_count_ = 0;  // guarded by mutex_; cached MaxSwitch after first probe
@@ -498,6 +526,14 @@ std::unique_ptr<SwitchDriver> create_touptek_thermal_switch(int device_number, i
 
 std::unique_ptr<SwitchDriver> create_touptek_thermal_switch(int device_number, int camera_index, ToupTekSDK& sdk) {
     return std::make_unique<ToupTekThermalSwitchDriver>(device_number, camera_index, sdk);
+}
+
+std::vector<util::ThermalCameraCandidate> list_touptek_thermal_cameras(ToupTekSDK& sdk) {
+    return thermal_candidates(sdk.enumerate_cameras());
+}
+
+std::vector<util::ThermalCameraCandidate> list_touptek_thermal_cameras() {
+    return list_touptek_thermal_cameras(ToupTekSDKWrapper::instance());
 }
 
 }  // namespace alpacacore::vendor::touptek

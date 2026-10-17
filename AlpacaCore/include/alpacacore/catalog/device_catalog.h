@@ -17,8 +17,11 @@
 // instance. Add/lookup shape follows management::DeviceRegistry.
 
 #include <alpacacore/catalog/schema.h>
+#include <alpacacore/util/thermal_camera_choice.h>
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -72,11 +75,21 @@ public:
     void add(Schema schema);    // replaces a schema with the same key
     void add(Factory factory);  // replaces a factory with the same key
 
+    // The attached cameras a vendor's camera-attached thermal switch (dew heater,
+    // fan) can bind to, for the web UI's camera picker. A lister talks to the
+    // vendor SDK, may open cameras through the vendor's ref-counted wrapper, and
+    // may throw. Registered only when the vendor is built.
+    using ThermalCameraLister = std::function<std::vector<util::ThermalCameraCandidate>()>;
+    void add_thermal_camera_lister(std::string vendor, ThermalCameraLister lister);  // replaces the vendor's
+    // nullopt when no lister is registered for the vendor; otherwise the lister's result.
+    std::optional<std::vector<util::ThermalCameraCandidate>> list_thermal_cameras(std::string_view vendor) const;
+
 private:
     const Schema* find_schema(const DeviceKey& key) const;
     const Factory* find_factory(const DeviceKey& key) const;
     std::vector<Schema> schemas_;
     std::vector<Factory> factories_;
+    std::vector<std::pair<std::string, ThermalCameraLister>> thermal_camera_listers_;
 };
 
 // Formats a range bound for a message: an Int field without a fraction, a

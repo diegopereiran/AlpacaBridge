@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
 #include <alpacacore/vendor/playerone/playerone_switch_driver.h>
 #include <alpacacore/version.h>
@@ -44,6 +45,43 @@ struct ThermalElement {
     long max_value{};
 };
 
+constexpr util::ThermalSwitchLabels kThermalLabels{"Player One", "dew heater or fan"};
+
+// The index is the position in enumerate_cameras(), which is what cameraIndex
+// has always meant; the serial comes from the enumeration (POACameraProperties::SN).
+// The heater and fan controls are only visible on an open camera, so each
+// cooled camera is opened through the ref-counted wrapper (a camera the camera
+// driver holds stays open) and probed; an uncooled one is listed without them.
+std::vector<util::ThermalCameraCandidate> thermal_candidates(PlayerOneSDK& sdk,
+                                                             const std::vector<PlayerOneCameraInfo>& cameras) {
+    std::vector<util::ThermalCameraCandidate> candidates;
+    candidates.reserve(cameras.size());
+    for (std::size_t i = 0; i < cameras.size(); ++i) {
+        const auto& info = cameras[i];
+        util::ThermalCameraCandidate candidate;
+        candidate.index = static_cast<int>(i);
+        candidate.name = info.name;
+        candidate.serial = info.serial_number;
+        if (info.has_cooler) {
+            try {
+                sdk.open_camera(info.camera_id);
+                try {
+                    sdk.init_camera(info.camera_id);
+                    const auto caps = sdk.probe_config_caps(info.camera_id);
+                    candidate.has_thermal = caps.has_heater_power || caps.has_fan_power;
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("PlayerOne", "Thermal listing of " + info.name + ": " + e.what());
+                }
+                sdk.close_camera(info.camera_id);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("PlayerOne", "Thermal listing could not open " + info.name + ": " + e.what());
+            }
+        }
+        candidates.push_back(std::move(candidate));
+    }
+    return candidates;
+}
+
 }  // namespace
 
 class PlayerOneSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
@@ -51,10 +89,14 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    PlayerOneSwitchDriver(int device_number, int camera_index)
+    // camera_index: an enumeration index, or util::kAutoThermalCamera for the one
+    // camera with a heater or fan. bound_serial, when set, names the camera and wins.
+    PlayerOneSwitchDriver(int device_number, int camera_index, std::string bound_serial, PlayerOneSDK& sdk)
         : AsyncConnectable("PlayerOne"),
+          sdk_(sdk),
           device_number_(device_number),
           camera_index_(camera_index),
+          bound_serial_(std::move(bound_serial)),
           camera_name_("Player One Camera"),
           connected_(false) {}
 
@@ -117,16 +159,21 @@ public:
             return;
         }
 
-        auto& sdk = PlayerOneSDKWrapper::instance();
+        auto& sdk = sdk_;
         if (connected) {
-            auto cameras = sdk.enumerate_cameras();
-            if (cameras.empty()) {
-                throw AlpacaException("No Player One cameras detected", AlpacaError::NotConnected);
+            const auto cameras = sdk.enumerate_cameras();
+            const auto candidates = thermal_candidates(sdk, cameras);
+            util::ThermalCameraRequest request;
+            request.camera_index = camera_index_;
+            request.serial = bound_serial_;
+            const auto choice = util::choose_thermal_camera(request, candidates, kThermalLabels);
+            if (!choice.chosen.has_value()) {
+                ALPACA_LOG_WARN("PlayerOne", choice.refusal);
+                throw AlpacaException(choice.refusal, choice.error_code);
             }
-            if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
-                throw AlpacaException("Camera index out of range", AlpacaError::InvalidValue);
-            }
-            const auto& info = cameras[static_cast<std::size_t>(camera_index_)];
+            const auto& info = cameras[choice.chosen.value()];
+            bound_ = candidates[choice.chosen.value()];
+            listed_ = candidates;
             camera_id_ = info.camera_id;
             camera_name_ = info.name;
             serial_number_ = info.serial_number;
@@ -218,7 +265,7 @@ public:
         validate_switch_id(id);
         ensure_connected();
         const auto element = element_copy(id);
-        auto& sdk = PlayerOneSDKWrapper::instance();
+        auto& sdk = sdk_;
         const int camera_id = camera_id_copy();
         int value = element.kind == ThermalElementKind::DewHeater ? sdk.get_heater_power_percent(camera_id)
                                                                   : sdk.get_fan_power_percent(camera_id);
@@ -241,7 +288,7 @@ public:
         if (value_long < element.min_value || value_long > element.max_value) {
             throw AlpacaException(element.name + " value out of range", AlpacaError::InvalidValue);
         }
-        auto& sdk = PlayerOneSDKWrapper::instance();
+        auto& sdk = sdk_;
         const int camera_id = camera_id_copy();
         if (element.kind == ThermalElementKind::DewHeater) {
             sdk.set_heater_power_percent(camera_id, static_cast<int>(value_long));
@@ -361,12 +408,20 @@ private:
             elements_.push_back(std::move(e));
         }
         if (elements_.empty()) {
-            throw AlpacaException("Camera has no dew heater or fan (uncooled model?)", AlpacaError::NotImplemented);
+            const std::string message = util::thermal_capability_refusal(bound_, listed_, kThermalLabels);
+            ALPACA_LOG_WARN("PlayerOne", message);
+            throw AlpacaException(message, AlpacaError::NotImplemented);
         }
     }
 
+    // Injected SDK seam: must outlive the driver (see playerone_sdk_wrapper.h).
+    PlayerOneSDK& sdk_;
     int device_number_;
     int camera_index_;
+    std::string bound_serial_;
+    // The connect's camera listing, for the refusal when the bound camera has no controls.
+    util::ThermalCameraCandidate bound_;
+    std::vector<util::ThermalCameraCandidate> listed_;
     int camera_id_{-1};
     std::string serial_number_;
     std::string camera_name_;
@@ -375,8 +430,23 @@ private:
     mutable std::mutex mutex_;
 };
 
-std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index) {
-    return std::make_unique<PlayerOneSwitchDriver>(device_number, camera_index);
+std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index,
+                                                      const std::string& camera_serial) {
+    return std::make_unique<PlayerOneSwitchDriver>(device_number, camera_index, camera_serial,
+                                                   PlayerOneSDKWrapper::instance());
+}
+
+std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index,
+                                                      const std::string& camera_serial, PlayerOneSDK& sdk) {
+    return std::make_unique<PlayerOneSwitchDriver>(device_number, camera_index, camera_serial, sdk);
+}
+
+std::vector<util::ThermalCameraCandidate> list_playerone_thermal_cameras(PlayerOneSDK& sdk) {
+    return thermal_candidates(sdk, sdk.enumerate_cameras());
+}
+
+std::vector<util::ThermalCameraCandidate> list_playerone_thermal_cameras() {
+    return list_playerone_thermal_cameras(PlayerOneSDKWrapper::instance());
 }
 
 }  // namespace alpacacore::vendor::playerone

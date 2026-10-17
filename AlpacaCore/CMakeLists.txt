@@ -80,6 +80,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/host_clock.cpp
     src/core/util/units.cpp
     src/core/util/rotator_sync_offset_store.cpp
+    src/core/util/thermal_camera_choice.cpp
     src/catalog/device_config.cpp
     src/catalog/device_catalog.cpp
 )
@@ -147,6 +148,8 @@ if(ALPACACORE_ENABLE_ZWO)
     add_subdirectory(src/vendors/zwo)
     if(TARGET alpacacore_zwo)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_zwo)
+        # Guards the dew heater's thermal camera lister in register_builtin_factories().
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_ZWO)
     endif()
 endif()
 
@@ -255,6 +258,8 @@ if(ALPACACORE_ENABLE_TOUPTEK)
     add_subdirectory(src/vendors/touptek)
     if(TARGET alpacacore_touptek)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_touptek)
+        # Guards the thermal switch's camera lister in register_builtin_factories().
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_TOUPTEK)
     endif()
 endif()
 

@@ -445,6 +445,34 @@ after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek
 sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
 odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
 
+### Camera-attached thermal switches pick their camera (ZWO, ToupTek, Player One)
+
+A Switch that drives a camera's dew heater or fan (ZWO Dew Heater, ToupTek thermal,
+Player One thermal) binds through `util::choose_thermal_camera()`
+(`alpacacore/util/thermal_camera_choice.h`), never a bare position in the
+enumeration. A bare index bound the 5.0.0~beta4 rig's dew heater to an ASI290MM Mini
+(no heater) at index 0 beside the ASI2600MM Pro at index 1, and the refusal named
+neither camera. The rules:
+
+- **`cameraIndex` -1 is Auto**: the one attached camera with the controls; none or
+  several is a refusal that lists them. A `serialNumber` (ZWO, Player One) binds that
+  camera only and never falls back to the index. A pinned index binds that camera
+  whatever the listing says, so the driver's own probe decides (the ToupTek tail light
+  has no flag), and an empty probe throws `util::thermal_capability_refusal()`, which
+  names the camera to pick. Saved switches keep their index.
+- **One listing per vendor**, `list_<vendor>_*_cameras()`, used by the driver's connect
+  AND by `GET /management/v1/thermalcameras`, through
+  `DeviceCatalog::add_thermal_camera_lister()` so the router includes no vendor header
+  for it. A listing that must open cameras (ZWO controls and serial, Player One
+  heater/fan) opens through the vendor's ref-counted wrapper and closes again.
+- **The web form is the `createThermalCameraPicker()` dropdown** (model in `format.js`,
+  `thermalCameraOptions`) and it always asks: nothing is preselected for a new switch,
+  cameras without the controls are disabled, the submit refuses until one is picked,
+  and Auto is not offered (a rig can carry a 2600MC, a 6200 and a 2400, all with
+  heaters, and a guess that follows a camera swap is the bug this replaced). Its select
+  has no `name`, so it never reaches `FormData`; the submit reads `picker.read()`. A new
+  camera-attached switch for another vendor reuses all three pieces.
+
 ### FilterWheel semantics (all vendors)
 
 - **`Position == -1` IS the ASCOM "moving" sentinel.** SDKs that report `-1` while in

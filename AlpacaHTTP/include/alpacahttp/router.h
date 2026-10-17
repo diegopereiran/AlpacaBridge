@@ -256,6 +256,7 @@ private:
     Response handle_configure_device(const Request& request, std::uint32_t server_tx_id);
     // open-astro#664: GET /management/v1/devicecatalog, serving catalog_json::describe_json(catalog_).
     Response handle_device_catalog(const Request& request, std::uint32_t server_tx_id);
+    Response handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id);
     Response handle_remove_device(const Request& request, std::uint32_t server_tx_id);
     Response handle_shutdown(const Request& request, std::uint32_t server_tx_id);
     Response handle_restart(const Request& request, std::uint32_t server_tx_id);

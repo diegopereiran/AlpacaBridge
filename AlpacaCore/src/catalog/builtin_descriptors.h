@@ -45,5 +45,9 @@ void register_onstep_schema(DeviceCatalog& catalog);
 void register_onstep_factory(DeviceCatalog& catalog);
 void register_celestron_schema(DeviceCatalog& catalog);
 void register_celestron_factory(DeviceCatalog& catalog);
+// Camera listers for the thermal-switch camera picker of vendors whose switch
+// is still built by a router arm (defined in <vendor>_thermal_listing.cpp).
+void register_zwo_thermal_camera_lister(DeviceCatalog& catalog);
+void register_touptek_thermal_camera_lister(DeviceCatalog& catalog);
 
 }  // namespace alpacacore::catalog

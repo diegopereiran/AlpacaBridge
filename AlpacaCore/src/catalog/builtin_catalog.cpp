@@ -56,6 +56,12 @@ void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
 #ifdef ALPACACORE_ENABLE_CELESTRON
     register_celestron_factory(catalog);
 #endif
+#ifdef ALPACACORE_ENABLE_ZWO
+    register_zwo_thermal_camera_lister(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    register_touptek_thermal_camera_lister(catalog);
+#endif
 }
 
 }  // namespace alpacacore::catalog

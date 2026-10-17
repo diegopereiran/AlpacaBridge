@@ -108,7 +108,8 @@
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_PLAYERONE",
     "fields": [
-      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex", "range": {"min": 0, "max": 2147483647}}
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex", "range": {"min": -1, "max": 2147483647}},
+      {"key": "serialNumber", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"}
     ]
   },
   {

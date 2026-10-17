@@ -345,9 +345,7 @@ const INDEX_FIELDS = [
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
     { fieldId: 'touptek-filterwheel-index', vendor: 'touptek', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'touptek-filterwheel-id' },
-    { fieldId: 'touptek-thermal-camera-index', vendor: 'touptek', deviceType: 'switch', configKey: 'cameraIndex' },
     { fieldId: 'playerone-camera-index', vendor: 'playerone', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'playerone-switch-camera-index', vendor: 'playerone', deviceType: 'switch', configKey: 'cameraIndex' },
     { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'astroasis-focuser-index', vendor: 'astroasis', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'astroasis-hid-path' },
     { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
@@ -678,6 +676,135 @@ function normalizeDeviceType(value) {
     return value.toString().trim().toLowerCase();
 }
 
+// Camera picker for a camera-attached thermal switch; the option model and its
+// wording live in format.js (thermalCameraOptions / Selection / Hint). The select
+// has no name, so it never reaches FormData; the submit reads read() instead.
+function createThermalCameraPicker({ vendor, selectId, controls, isTakenBy }) {
+    const select = document.getElementById(selectId);
+    const hint = document.getElementById(selectId + '-hint');
+    const refresh = document.getElementById(selectId + '-refresh');
+    let cameras = [];
+    let listError = '';
+    let saved = null;
+    let loaded = false;
+    let loadSeq = 0;
+
+    function taken() {
+        const editing = document.getElementById('device-form')?.dataset.editing === 'true';
+        const editedNumber = editing ? Number(document.getElementById('device-number')?.value) : null;
+        return currentDevices
+            .filter(d => extractVendor(d) === vendor && extractDeviceType(d) === 'switch')
+            .filter(d => !(editing && Number(d.DeviceNumber) === editedNumber))
+            .map(d => extractDeviceConfig(d) || {})
+            .filter(c => isTakenBy(c));
+    }
+
+    function updateHint() {
+        if (hint) {
+            hint.textContent = thermalCameraHint(cameras, select.value, controls, listError, saved, taken());
+        }
+    }
+
+    function render() {
+        if (!select) {
+            return;
+        }
+        const model = thermalCameraOptions(cameras, saved, controls, select.value, taken());
+        select.replaceChildren(...model.options.map(o => {
+            const option = document.createElement('option');
+            option.value = o.value;
+            option.textContent = o.label;
+            option.disabled = o.disabled;
+            return option;
+        }));
+        select.value = model.selected;
+        updateHint();
+    }
+
+    async function load() {
+        const seq = ++loadSeq;
+        loaded = true;
+        if (hint) {
+            hint.textContent = 'Listing attached cameras...';
+        }
+        try {
+            const response = await fetch(API_BASE + '/management/v1/thermalcameras?vendor=' +
+                                         encodeURIComponent(vendor), { cache: 'no-store' });
+            const data = await response.json();
+            if (seq !== loadSeq) {
+                return;
+            }
+            if (data.ErrorNumber && data.ErrorNumber !== 0) {
+                cameras = null;
+                listError = data.ErrorMessage || 'error ' + data.ErrorNumber;
+            } else {
+                cameras = Array.isArray(data.Value) ? data.Value : [];
+                listError = '';
+            }
+        } catch (e) {
+            if (seq !== loadSeq) {
+                return;
+            }
+            cameras = null;
+            listError = e.message;
+        }
+        render();
+    }
+
+    if (select) {
+        select.addEventListener('change', updateHint);
+    }
+    if (refresh) {
+        refresh.addEventListener('click', () => load());
+    }
+
+    return {
+        // Called by the section toggler each time the picker is shown.
+        ensureLoaded() {
+            if (!loaded) {
+                load();
+            }
+        },
+        // The next show lists the cameras again (a new form, or another device).
+        invalidate() {
+            loaded = false;
+        },
+        // A new form (null) or the edited device's config. A listing already in
+        // flight renders against it when it lands.
+        reset(config) {
+            saved = config ? { cameraIndex: config.cameraIndex, serialNumber: config.serialNumber } : null;
+            if (select) {
+                select.value = '';
+            }
+            render();
+        },
+        // The binding to submit, or null with the select focused when no camera is
+        // picked: the form always asks, it never guesses (a rig can carry several
+        // heater cameras).
+        read() {
+            const selection = thermalCameraSelection(select ? select.value : '', cameras, saved);
+            if (!selection && select) {
+                select.focus();
+            }
+            return selection;
+        },
+        missingMessage: 'Choose the camera this ' + controls + ' is on.',
+    };
+}
+
+const zwoDewHeaterPicker = createThermalCameraPicker({
+    vendor: 'zwo', selectId: 'zwo-dewheater-camera', controls: 'dew heater',
+    isTakenBy: c => (c.switchType || 'dewheater') === 'dewheater',
+});
+const touptekThermalPicker = createThermalCameraPicker({
+    vendor: 'touptek', selectId: 'touptek-thermal-camera', controls: 'dew heater or fan',
+    isTakenBy: c => c.switchType === 'thermal',
+});
+const playerOneThermalPicker = createThermalCameraPicker({
+    vendor: 'playerone', selectId: 'playerone-switch-camera', controls: 'dew heater or fan',
+    isTakenBy: () => true,
+});
+
 function setEditMode(isEditing) {
     const configureTitle = document.getElementById('configure-title');
     const submitButton = document.querySelector('#device-form button[type="submit"]');
@@ -690,6 +817,10 @@ function setEditMode(isEditing) {
     }
     if (form) {
         form.dataset.editing = isEditing ? 'true' : 'false';
+        [zwoDewHeaterPicker, touptekThermalPicker, playerOneThermalPicker].forEach(p => {
+            p.invalidate();
+            p.reset(null);
+        });
         if (!isEditing) {
             delete form.dataset.originalDeviceType;
             delete form.dataset.originalDeviceNumber;
@@ -1051,7 +1182,7 @@ function startEditDevice(device) {
         const touptekSwitchType = config.switchType || 'stellavita';
         setFormValue('touptek-switch-type', touptekSwitchType);
         if (touptekSwitchType === 'thermal') {
-            setFormValue('touptek-thermal-camera-index', config.cameraIndex);
+            touptekThermalPicker.reset(config);
         }
         // Re-run the sub-block toggle now that switchType is set, so the thermal
         // vs StellaVita fields match the loaded config (mirrors ZWO's pattern).
@@ -1094,7 +1225,9 @@ function startEditDevice(device) {
         }
     } else if (vendor === 'playerone') {
         setFormValue('playerone-camera-index', config.cameraIndex);
-        setFormValue('playerone-switch-camera-index', config.cameraIndex);
+        if (deviceType === 'switch') {
+            playerOneThermalPicker.reset(config);
+        }
         setFormValue('playerone-filterwheel-index', config.filterwheelIndex);
         // Only touch the filter-name/slot UI when editing a filter wheel;
         // otherwise editing a Player One camera/switch would blank the slot list.
@@ -1268,6 +1401,9 @@ function startEditDevice(device) {
     setFormValue('rotator-index', config.rotatorIndex);
     setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
+    if (vendor === 'zwo' && deviceType === 'switch' && (config.switchType || 'dewheater') === 'dewheater') {
+        zwoDewHeaterPicker.reset(config);
+    }
 
     // Populate the ASIAIR Pro Switch per-port table from the saved config.
     // When the saved device omits ports/gpioChip/pwmFrequencyHz (one-click
@@ -3711,6 +3847,9 @@ function updateTouptekConfigFields() {
         thermalFields.style.display = isThermal ? 'block' : 'none';
         setFieldGroupEnabled(thermalFields, isThermal);
     }
+    if (isThermal && document.getElementById('vendor')?.value === 'touptek') {
+        touptekThermalPicker.ensureLoaded();
+    }
     if (stellavitaFields) {
         stellavitaFields.style.display = isStellavita ? 'block' : 'none';
         setFieldGroupEnabled(stellavitaFields, isStellavita);
@@ -3767,6 +3906,9 @@ function updatePlayerOneConfigFields() {
         switchFields.style.display = isSwitch ? 'block' : 'none';
         setFieldGroupEnabled(switchFields, isSwitch);
     }
+    if (isSwitch && document.getElementById('vendor')?.value === 'playerone') {
+        playerOneThermalPicker.ensureLoaded();
+    }
 }
 
 function updateZwoConfigFields() {
@@ -3799,10 +3941,18 @@ function updateZwoConfigFields() {
     const isAsiairSwitch = isSwitch &&
         (switchTypeValue === 'asiair' || switchTypeValue === 'asiair-plus-picm4');
     const isAsiairPlusSwitch = isSwitch && switchTypeValue === 'asiair-plus-rk3568';
-    const showCameraFields = isCamera || (isSwitch && !isAsiairSwitch && !isAsiairPlusSwitch);
+    const isDewHeater = isSwitch && !isAsiairSwitch && !isAsiairPlusSwitch;
     if (cameraFields) {
-        cameraFields.style.display = showCameraFields ? 'block' : 'none';
-        setFieldGroupEnabled(cameraFields, showCameraFields);
+        cameraFields.style.display = isCamera ? 'block' : 'none';
+        setFieldGroupEnabled(cameraFields, isCamera);
+    }
+    const dewHeaterFields = document.getElementById('zwo-dewheater-fields');
+    if (dewHeaterFields) {
+        dewHeaterFields.style.display = isDewHeater ? 'block' : 'none';
+        setFieldGroupEnabled(dewHeaterFields, isDewHeater);
+    }
+    if (isDewHeater && document.getElementById('vendor')?.value === 'zwo') {
+        zwoDewHeaterPicker.ensureLoaded();
     }
 
     const asiairFields = document.getElementById('zwo-asiair-fields');
@@ -4124,6 +4274,14 @@ document.getElementById('device-form').addEventListener('submit', async function
             if (normalizedType === 'camera') {
                 Object.assign(deviceData, zwoCameraIdentityFields(formData));
             }
+            if (normalizedType === 'switch' && (formData.get('switchType') || 'dewheater') === 'dewheater') {
+                const dewCamera = zwoDewHeaterPicker.read();
+                if (!dewCamera) {
+                    alert(zwoDewHeaterPicker.missingMessage);
+                    return;
+                }
+                Object.assign(deviceData, dewCamera);
+            }
         }
         if (normalizedType === 'filterwheel') {
             const filterwheelIndex = Number.parseInt(formData.get('filterwheelIndex'), 10);
@@ -4240,8 +4398,13 @@ document.getElementById('device-form').addEventListener('submit', async function
         if (touptekSwitchType === 'thermal') {
             // Camera thermal switch: dew heater + fan, bound by camera index and
             // sharing the camera's SDK connection.
-            const thermalCameraIndex = readOptionalNumber(formData, 'touptekThermalCameraIndex');
-            deviceData.cameraIndex = thermalCameraIndex !== null ? thermalCameraIndex : 0;
+            // ToupTek lists no serial, so this is the index.
+            const thermalCamera = touptekThermalPicker.read();
+            if (!thermalCamera) {
+                alert(touptekThermalPicker.missingMessage);
+                return;
+            }
+            deviceData.cameraIndex = thermalCamera.cameraIndex;
         } else {
             // StellaVita PowerBox: local GPIO, no camera/focuser index. Optional
             // GPIO chip override (defaults to /dev/gpiochip0 server-side) plus
@@ -4305,8 +4468,12 @@ document.getElementById('device-form').addEventListener('submit', async function
                 deviceData.filterNames = playerOneFilterNames;
             }
         } else if (normalizeDeviceType(deviceData.deviceType) === 'switch') {
-            const playerOneSwitchCameraIndex = readOptionalNumber(formData, 'playerOneSwitchCameraIndex');
-            deviceData.cameraIndex = playerOneSwitchCameraIndex !== null ? playerOneSwitchCameraIndex : 0;
+            const thermalCamera = playerOneThermalPicker.read();
+            if (!thermalCamera) {
+                alert(playerOneThermalPicker.missingMessage);
+                return;
+            }
+            Object.assign(deviceData, thermalCamera);
         } else {
             const playerOneCameraIndex = readOptionalNumber(formData, 'playerOneCameraIndex');
             deviceData.cameraIndex = playerOneCameraIndex !== null ? playerOneCameraIndex : 0;
