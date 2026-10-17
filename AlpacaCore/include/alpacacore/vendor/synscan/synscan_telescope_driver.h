@@ -65,6 +65,9 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// Runs one full tick on the calling thread, paused or not. False when the connection is gone.
 bool poll_status_now_for_testing(TelescopeDriver& driver);
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+void set_status_poll_before_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Takes or drops the hold the readback-tick hunt keeps while it owns the line; a held poll tick makes no exchange.
+void hold_status_poll_for_testing(TelescopeDriver& driver, bool hold);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.

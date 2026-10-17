@@ -1255,7 +1255,7 @@ public:
             check_not_parked_locked("PulseGuide");
             // open-astro#775: ITelescopeV4 raises InvalidOperation for a
             // PulseGuide while a slew is in progress.
-            if (get_slewing_locked()) {
+            if (get_slewing_locked(true)) {
                 throw AlpacaException("PulseGuide is not allowed while the mount is slewing",
                                       AlpacaError::InvalidOperation);
             }
@@ -2022,6 +2022,18 @@ public:
     // reads exactly one frame. False when the connection is gone.
     bool poll_status_now_for_testing() { return poll_status_once(nullptr, 0); }
 
+    // Stands in for the readback-tick hunt: takes (true) or drops (false) the hold under mutex_, as the hunt does.
+    void hold_status_poll_for_testing(bool hold) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        poll_hold_ += hold ? 1 : -1;
+    }
+
+    // Called after a poll's first hold check, before its locked second one, with no lock held.
+    void set_status_poll_before_sample_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        status_poll_before_sample_hook_ = std::move(hook);
+    }
+
     // Called between a poll's sample and its publish, with no lock held.
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
@@ -2098,6 +2110,16 @@ private:
         std::atomic<int>& count_;
     };
 
+    struct SamplingFlag {
+        explicit SamplingFlag(std::atomic<bool>& flag) : flag_(flag) {}
+        ~SamplingFlag() { flag_ = false; }
+        SamplingFlag(const SamplingFlag&) = delete;
+        SamplingFlag& operator=(const SamplingFlag&) = delete;
+
+    private:
+        std::atomic<bool>& flag_;
+    };
+
     struct TickHunt {
         bool found = false;
         util::TaskClock::clock::time_point tick;
@@ -2115,6 +2137,13 @@ private:
         auto& protocol = SynScanProtocolWrapper::instance();
         // The hunt reads at a 50 ms cadence tuned on the rig; the poll skips its ticks while it runs (bounded).
         const PollHold hold(poll_hold_);
+        // A tick already inside its exchanges queues the hunt's reads behind it on the wrapper mutex and widens the
+        // bracket around the tick: let it finish (mutex_ is dropped so its publish can run). No new tick starts.
+        while (poll_sampling_.load()) {
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            lock.lock();
+        }
         const auto start = clock_.now();
         TickHunt hunt;
         if (readback_tick_absent_) {
@@ -2509,6 +2538,19 @@ private:
         }
     }
 
+    // Test seam: called after a poll's first hold check, before it takes mutex_, with no lock held, so a case can
+    // start the hunt's hold in the window the second check closes.
+    void run_status_poll_before_sample_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = status_poll_before_sample_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     // One poll tick. The exchanges run WITHOUT mutex_, so a getter never waits behind a slow link and the snapshot
     // mutex is never held across I/O; the frame is decoded and published under mutex_. Returns false when the
     // connection is gone or lost and the poll body should end.
@@ -2518,20 +2560,26 @@ private:
         if ((ctx != nullptr && status_poll_paused_for_testing_.load()) || poll_hold_.load() > 0) {
             return true;  // paused, or the readback-tick hunt owns the line
         }
-        const bool precise = [&] {
-            std::lock_guard<std::mutex> lock(mutex_);
-            return use_precise_commands_;
-        }();
+        run_status_poll_before_sample_hook();
+        bool precise = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_ || link_lost_.load() || stopped()) {
                 return false;
             }
+            // The hunt takes its hold under mutex_, so this check and poll_sampling_ below cannot straddle it: either
+            // the hunt sees the sample in flight and waits for it, or this tick sees the hold and skips.
+            if (poll_hold_.load() > 0) {
+                return true;
+            }
+            precise = use_precise_commands_;
             // The unread site (a connect that could not reach `w`) is retried here, not in a getter.
             if (!site_info_valid_ && tick % kSlowPollEvery == 0) {
                 ensure_site_info_cached_locked();
             }
+            poll_sampling_ = true;
         }
+        const SamplingFlag sampling(poll_sampling_);  // cleared on every exit, a throw included
         const auto token = snapshot_.begin_poll();
         RawSample raw;
         try {
@@ -2626,7 +2674,8 @@ private:
                               AlpacaError::DriverException);
     }
 
-    bool get_slewing_locked() const {
+    // `fresh` asks the handset for the end of the answer (the PulseGuide gate), not the polled frame.
+    bool get_slewing_locked(bool fresh = false) const {
         // A park in flight reports Slewing until the park task flips AtPark
         // (same locked step) — never Slewing false with AtPark false.
         if (parking_) {
@@ -2641,7 +2690,7 @@ private:
         if (clock_.now() < slew_force_until_) {
             return true;
         }
-        return served_frame_locked().value.slewing;
+        return fresh ? poll_hardware_slewing_locked() : served_frame_locked().value.slewing;
     }
 
     // Control path only: asks the handset now (the Park and landing loops are what detect a GOTO's end). The
@@ -3163,6 +3212,9 @@ private:
     std::atomic<bool> status_poll_paused_for_testing_{false};
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> status_poll_before_sample_hook_;
+    // A poll tick is inside its exchanges (set under mutex_ with the hold check).
+    std::atomic<bool> poll_sampling_{false};
     // open-astro#1030: the handset's once-a-second RA readback tick, anchored after the last GOTO. Valid until the
     // deadline; a tracking-mode or time write and connect/disconnect invalidate it.
     mutable util::TaskClock::clock::time_point readback_tick_;
@@ -3318,6 +3370,18 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void hold_status_poll_for_testing(TelescopeDriver& driver, bool hold) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->hold_status_poll_for_testing(hold);
+    }
+}
+
+void set_status_poll_before_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_status_poll_before_sample_hook_for_testing(std::move(hook));
     }
 }
 
