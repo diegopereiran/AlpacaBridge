@@ -65,6 +65,7 @@
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
+#include "skywatcher_fake_clock.h"
 
 namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeSkyWatcherMount;
@@ -226,50 +227,15 @@ void check_landing(const LandedFrame& f, double latitude, double target_ra, doub
 
 // ── Fake-clock helpers (open-astro#715) ─────────────────────────────────────
 //
-// The fake integrates motion against a FakeTaskClock; the driver itself stays
-// on the wall clock in this slice (the issue's rule), so nothing here waits on
-// the clock and FakeTaskClock::wait_for_waiters() has nothing to rendezvous
-// with. The rendezvous is the board traffic instead: each step waits for the
-// driver's next frame, then decides how virtual time moves:
-//   - while an axis runs a goto, jump far enough that it lands at once (a
-//     goto's duration is the only thing this suite ever spent real time on);
-//   - otherwise let virtual time follow wall time, so a tracking RA axis and
-//     the driver's LST agree (decision 0001: LST is host time, never this
-//     clock) and the driver's sampled post-slew rate check sees a sidereal
-//     axis.
-// A jump never moves a tracking axis: only a goto axis is jumped, and the
-// driver restarts tracking only after both axes have landed. Nothing here
-// sleeps for a driver timer.
-// Under util::kLinkStalenessBound: a longer jump would age the status frame into
-// a lost link before the poll could publish. Three or four jumps cover any goto here
-// (180 deg at 800x sidereal = 55 s).
-constexpr auto kGotoJump = std::chrono::seconds(20);
-constexpr auto kFrameRendezvous = std::chrono::milliseconds(50);
-
-bool run_until_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
-                             const std::function<bool()>& pred, std::chrono::milliseconds real_bound) {
-    const auto deadline = std::chrono::steady_clock::now() + real_bound;
-    auto last = std::chrono::steady_clock::now();
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return false;
-        }
-        if (mount.axis_in_goto(1) || mount.axis_in_goto(2)) {
-            clock.advance(kGotoJump);
-        }
-        mount.wait_for_frames(0, mount.frames_seen() + 1, kFrameRendezvous);
-        const auto t = std::chrono::steady_clock::now();
-        clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(t - last));
-        last = t;
-    }
-    return true;
-}
+// The goto-jump pumping lives in skywatcher_fake_clock.h (open-astro#1221).
+using alpacacore::test::skywatcher_clock::follow_wall_clock;
+using alpacacore::test::skywatcher_clock::pump_until;
 
 LandedFrame land_on_fake_clock(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
                                FakeSkyWatcherMount& mount, double ra_hours, double dec) {
     driver.slew_to_coordinates_async(ra_hours, dec);
     REQUIRE(driver.get_slewing());
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(60)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(60)));
     LandedFrame f{};
     f.lst = driver.get_sidereal_time();
     f.a1 = mount.physical_degrees(1);
@@ -823,8 +789,8 @@ TEST_CASE("SkyWatcher pointing - AutoHome resets the remembered branch to the po
     // fake-clock wait lets virtual time follow wall time: it stays real-rate.
     driver->set_tracking(false);
     driver->find_home();
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(180)));
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(180)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
 
     INFO("after AutoHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
     REQUIRE(std::abs(driver->get_declination() - 90.0) < 0.2);
@@ -855,8 +821,8 @@ TEST_CASE("SkyWatcher pointing - the no-indexer FindHome lands on the positive b
     REQUIRE(f.a2 < -1.0);
 
     driver->find_home();
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(60)));
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(60)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
     INFO("after FindHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
     CHECK(driver->get_side_of_pier() == 0);
     CHECK(std::abs(wrap_ha(driver->get_right_ascension() - (driver->get_sidereal_time() - 6.0))) < 0.05);
@@ -885,8 +851,8 @@ TEST_CASE("SkyWatcher pointing - FindHome on a k = -1 board reports the side its
     REQUIRE(f.a2 < -1.0);
 
     driver->find_home();
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(60)));
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(60)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
     const double ra = driver->get_right_ascension();
     const double dec = driver->get_declination();
     INFO("after FindHome a2=" << mount.physical_degrees(2) << " reported RA " << ra << " dec " << dec);
@@ -1004,8 +970,8 @@ TEST_CASE("SkyWatcher pointing - the default Park lands on the positive branch (
     REQUIRE(f.side_of_pier == 1);
 
     driver->park();
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return driver->get_at_park(); }, std::chrono::seconds(60)));
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return driver->get_at_park(); }, std::chrono::seconds(60)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
     INFO("parked a2=" << mount.physical_degrees(2));
     CHECK(driver->get_side_of_pier() == 0);
 
@@ -1157,12 +1123,11 @@ TEST_CASE("SkyWatcher pointing - DeclinationRate raises the physical Dec of an E
     const double dec_start =
         sky_from_axes(latitude, mount.physical_degrees(1), mount.physical_degrees(2), -1).dec_degrees;
     driver->set_declination_rate(10.0);  // arcsec/s, well above the ~0.26 floor
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return mount.axis_running(2); }, std::chrono::seconds(3)));
+    REQUIRE(pump_until(clock, mount, [&] { return mount.axis_running(2); }, std::chrono::seconds(3)));
     // Real-rate motion: no goto runs here, so virtual time follows wall time
     // for the 2 s the rate is measured over.
     const auto rate_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-    run_until_on_fake_clock(
-        clock, mount, [&] { return std::chrono::steady_clock::now() >= rate_end; }, std::chrono::seconds(3));
+    pump_until(clock, mount, [&] { return std::chrono::steady_clock::now() >= rate_end; }, std::chrono::seconds(3));
     const double dec_end =
         sky_from_axes(latitude, mount.physical_degrees(1), mount.physical_degrees(2), -1).dec_degrees;
     const double moved_arcsec = (dec_end - dec_start) * 3600.0;
@@ -1171,7 +1136,7 @@ TEST_CASE("SkyWatcher pointing - DeclinationRate raises the physical Dec of an E
     CHECK(moved_arcsec < 40.0);
 
     driver->set_declination_rate(0.0);
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !mount.axis_running(2); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return !mount.axis_running(2); }, std::chrono::seconds(5)));
     driver->set_tracking(false);
     driver->set_connected(false);
 }
@@ -1191,17 +1156,15 @@ struct MoveAxisSite {
 void jog_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
                        alpacacore::TelescopeDriver& driver, int axis, double rate) {
     driver.move_axis(axis, rate);
-    REQUIRE(
-        run_until_on_fake_clock(clock, mount, [&] { return mount.axis_running(axis + 1); }, std::chrono::seconds(3)));
+    REQUIRE(pump_until(clock, mount, [&] { return mount.axis_running(axis + 1); }, std::chrono::seconds(3)));
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-    run_until_on_fake_clock(
-        clock, mount, [&] { return std::chrono::steady_clock::now() >= end; }, std::chrono::seconds(3));
+    pump_until(clock, mount, [&] { return std::chrono::steady_clock::now() >= end; }, std::chrono::seconds(3));
 }
 
 void stop_jog_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
                             alpacacore::TelescopeDriver& driver, int axis) {
     driver.move_axis(axis, 0.0);
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(10)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(10)));
 }
 
 }  // namespace
@@ -1602,7 +1565,7 @@ TEST_CASE("SkyWatcher pointing - landing is reported when the board reports stop
     // 2. Land every goto (the first and each refinement) the instant the
     //    board starts it. Slewing must then clear a few polls later: well
     //    under the 8 s floor, and under the 8 + 3 + 3 s a refined goto had.
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(30)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(30)));
     const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_started).count();
     const int polls = mount.frames_seen('f') - polls_at_start;
     INFO("Slewing cleared " << took << " s after the goto started; " << polls << " status polls reached the board");

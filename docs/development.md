@@ -163,23 +163,27 @@ CTEST_PARALLEL=4 ./run_all_tests.sh
 
 `run_all_tests.sh` also guards against a shrunken suite. `ctest --no-tests=error` fails only a
 run that finds zero tests, so a vendor target that silently stops configuring would still pass
-with most of its cases gone. After each build the script counts the tests with `ctest -N` and
-fails, naming the configuration, the count found and the floor, when AlpacaCore or AlpacaHTTP
-finds fewer than its floor. The floors sit at the top of `run_all_tests.sh`, keyed by
-`ALPACACORE_ENABLE_ALL_VENDORS` (`OFF` or `ON`), about 10% below the counts at the time they
-were set; any other value has no floor and fails. When tests are removed on purpose, lower the
-floor in the same PR; when the suite grows a lot, raise it so the guard stays tight.
+with most of its cases gone. After the build the script counts the tests with `ctest -N`
+(AlpacaCore in its subdirectory, AlpacaHTTP as the rest of the tree) and fails, naming the
+configuration, the count found and the floor, when AlpacaCore or AlpacaHTTP finds fewer than its
+floor. The floors sit at the top of `run_all_tests.sh`, keyed by `ALPACACORE_ENABLE_ALL_VENDORS`
+(`OFF` or `ON`), about 10% below the counts at the time they were set; any other value has no
+floor and fails. When tests are removed on purpose, lower the floor in the same PR; when the
+suite grows a lot, raise it so the guard stays tight.
 
-Or manually:
+`run_all_tests.sh` builds both suites in one tree, `AlpacaHTTP/build` (issue #1251): AlpacaHTTP
+adds AlpacaCore as a subdirectory, so the core tests land in `AlpacaHTTP/build/AlpacaCore/tests`
+and every AlpacaCore source is compiled once. Or manually, from the repository root:
 
 ```sh
-cd build && ctest
+ctest --test-dir AlpacaHTTP/build              # both suites
+ctest --test-dir AlpacaHTTP/build/AlpacaCore   # AlpacaCore only
 ```
 
-Filter by tag: `./build/tests/alpacacore_tests [zwo][camera]`
-Exclude hardware tests: `./build/tests/alpacacore_tests ~[hardware]`
+Filter by tag: `AlpacaHTTP/build/AlpacaCore/tests/alpacacore_tests [zwo][camera]`
+Exclude hardware tests: `AlpacaHTTP/build/AlpacaCore/tests/alpacacore_tests ~[hardware]`
 
-Both assume the `build` directory `run_all_tests.sh` just made. A pre-flight leaves a different
+These assume the tree `run_all_tests.sh` just made. A pre-flight leaves a different
 one there (see below), so after one, rebuild rather than filtering against what is left.
 
 Before pushing, reproduce the full CI gate set locally:

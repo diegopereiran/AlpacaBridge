@@ -389,7 +389,8 @@ After user approval, apply each edit. If multiple files are touched, group them 
 cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests "[<vendor>]"
 ```
 
-Build into `build-vendors`, not `build`. Since #588 a default pre-flight leaves `AlpacaCore/build`
+Build into `build-vendors`, not `build`. Since #588 a default pre-flight leaves its one tree
+(`AlpacaHTTP/build` since #1251; an older `AlpacaCore/build` is deleted)
 holding the ASan+UBSan, **vendors-OFF** binary from its last pass, so reusing it here rebuilds a
 tree with no driver compiled in: the `"[<vendor>]"` filter matches nothing and Catch2 exits rc 2,
 a failure that says nothing about the fix. A **fresh** `build-vendors` would have the driver

@@ -748,7 +748,8 @@ cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake
 If any test fails, fix it before proceeding. The test tag filter `"[<vendor>]"` runs only the new vendor's tests for faster iteration.
 
 Build into `build-vendors`, not `build`. The `-D` alone is not enough after a pre-flight: since
-#588 the sanitized pass is the last thing to configure `AlpacaCore/build`, and CMake seeds
+#588 the sanitized pass is the last thing to configure the pre-flight's build tree
+(`AlpacaHTTP/build` since #1251, the tree a reused `build` would share that history with), and CMake seeds
 `CMAKE_CXX_FLAGS` from `CXXFLAGS` on a directory's first configure and then caches it -- so
 reconfiguring `build` keeps `-fsanitize=address,undefined` no matter what you pass, and you
 iterate against a slow, LSan-enabled binary with the `ALPACACORE_TESTS_SANITIZED` cases skipped.

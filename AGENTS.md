@@ -1184,7 +1184,7 @@ than one that drops a frame.
 When adding a test file for a new vendor device:
 - Add `test_<vendor>_<device>.cpp` to the conditional `TEST_SOURCES` list in `AlpacaCore/tests/CMakeLists.txt`, guarded by `if(TARGET alpacacore_<vendor>)`.
 - Add `target_link_libraries(alpacacore_tests PRIVATE alpacacore_<vendor>)` in the matching conditional block.
-- Build and run all tests (`cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests`, from `AlpacaCore/`) before considering the driver complete. Use `build-vendors`, not `build`: since #588 a default pre-flight leaves the `build` directory under AlpacaCore/ holding a sanitized, vendors-OFF configure, and CMake caches `CMAKE_CXX_FLAGS` from the first configure of a directory, so reusing it compiles no driver and stays sanitized whatever you pass.
+- Build and run all tests (`cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests`, from `AlpacaCore/`) before considering the driver complete. Use `build-vendors`, not `build`: since #588 a default pre-flight leaves the `build` directory under AlpacaHTTP/ (which holds the core tests too since #1251) holding a sanitized, vendors-OFF configure, and CMake caches `CMAKE_CXX_FLAGS` from the first configure of a directory, so reusing such a tree compiles no driver and stays sanitized whatever you pass.
 
 ## Continuous Integration and Pre-flight
 
