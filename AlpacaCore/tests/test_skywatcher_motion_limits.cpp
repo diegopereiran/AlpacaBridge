@@ -54,7 +54,7 @@ namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
 using alpacacore::test::FakeTaskClock;
-using alpacacore::test::skywatcher_clock::follow_wall_clock;
+using alpacacore::test::skywatcher_clock::follow_until;
 using alpacacore::test::skywatcher_clock::pump_until;
 using alpacacore::util::MotionLimits;
 
@@ -114,13 +114,6 @@ void settle_status_poll(FakeTaskClock& clock, FakeSkyWatcherMount& mount) {
     const int anchors = mount.frames_seen('j');
     REQUIRE(pump_until(
         clock, mount, [&] { return mount.frames_seen('j') >= anchors + 4; }, std::chrono::milliseconds(3000)));
-}
-
-// A wait for motion to START: virtual time follows wall time and never jumps,
-// so the goto or park the case needs in flight is still in flight afterwards.
-bool follow_until(FakeTaskClock& clock, const std::function<bool()>& pred, std::chrono::milliseconds real_bound) {
-    follow_wall_clock(clock, real_bound, pred);
-    return pred();
 }
 
 // Runs a blocking driver call (a synchronous slew) on a worker thread while

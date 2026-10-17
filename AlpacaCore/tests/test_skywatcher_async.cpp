@@ -78,6 +78,7 @@ namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
 using alpacacore::test::FakeTaskClock;
+using alpacacore::test::skywatcher_clock::follow_until;
 using alpacacore::test::skywatcher_clock::follow_wall_clock;
 using alpacacore::test::skywatcher_clock::pump_until;
 
@@ -360,8 +361,8 @@ TEST_CASE("SkyWatcher async - Park completes and Unpark cancels an in-flight par
     // window is genuinely exercised, not skipped by a fast dispatch.
     mount.jump_axis_degrees(1, 25.0);
     driver->park();
-    REQUIRE(pump_until(
-        clock, mount, [&] { return mount.axis_running(1) || mount.axis_running(2); }, std::chrono::seconds(5)));
+    REQUIRE(
+        follow_until(clock, [&] { return mount.axis_running(1) || mount.axis_running(2); }, std::chrono::seconds(5)));
     driver->unpark();
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(30)));

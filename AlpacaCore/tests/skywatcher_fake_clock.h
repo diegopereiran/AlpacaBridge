@@ -91,4 +91,14 @@ inline void follow_wall_clock(FakeTaskClock& clock, std::chrono::milliseconds d,
     }
 }
 
+// A wait for motion to START: virtual time follows wall time and never jumps,
+// so the goto or park the case needs in flight is still in flight afterwards.
+// pump_until() would jump a goto that started between two of its looks to its
+// target before the case could act on it.
+inline bool follow_until(FakeTaskClock& clock, const std::function<bool()>& pred,
+                         std::chrono::milliseconds real_bound) {
+    follow_wall_clock(clock, real_bound, pred);
+    return pred();
+}
+
 }  // namespace alpacacore::test::skywatcher_clock
