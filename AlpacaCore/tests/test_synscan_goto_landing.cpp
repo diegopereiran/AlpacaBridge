@@ -366,7 +366,10 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::u
         std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
 }
 
+// The getters serve the polled frame (decision 0010), so a case that reads the RA at a chosen sawtooth phase takes
+// one frame at that phase first.
 double ra_error_arcsec(alpacacore::TelescopeDriver& driver, double target_hours) {
+    alpacacore::vendor::synscan::poll_status_now_for_testing(driver);
     return std::abs(driver.get_right_ascension() - target_hours) * 15.0 * 3600.0;
 }
 
@@ -1162,6 +1165,9 @@ TEST_CASE("SynScan PulseGuide - a west RA pulse lowers RA and an east one raises
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The case measures the motor over virtual seconds; a status poll tick sharing the wrapper with the pulse's stop
+    // would add real-time jitter to that count.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     driver->set_tracking(true);
     driver->set_guide_rate(alpacacore::GuideRate{7.5 / 3600.0, 7.5 / 3600.0});
     const double expected_counts = 7.5 * kCountsPerArcsec;  // 1 s at 7.5"/s

@@ -642,43 +642,43 @@ TEST_CASE("SynScan position - stale cache faults after repeated failed polls and
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    using alpacacore::vendor::synscan::poll_status_now_for_testing;
     const double ra = driver->get_right_ascension();
-    clock.advance(std::chrono::milliseconds(2100));  // expire the 2 s position cache
     st->mute.store(true);
 
+    // One failed tick: the frame ages but is still served; a single lost reply is not a fault.
+    poll_status_now_for_testing(*driver);
+    CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
+    CHECK(driver->get_link_fault().empty());
+
+    // The third consecutive failed tick latches the fault: the stale frame is no longer an answer.
+    poll_status_now_for_testing(*driver);
+    poll_status_now_for_testing(*driver);
     std::string last_error;
-    for (int i = 0; i < 3; ++i) {
-        try {
-            (void)driver->get_right_ascension();
-            FAIL("stale position must not be served after a failed mount read");
-        } catch (const alpacacore::AlpacaException& e) {
-            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
-            last_error = e.what();
-        }
+    try {
+        (void)driver->get_right_ascension();
+        FAIL("stale position must not be served after a latched link fault");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        last_error = e.what();
     }
     CHECK(driver->get_connected());
     CHECK(last_error.find("communications compromised") != std::string::npos);
     CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
 
-    // The faulted cache is not served for Alt/Az either; a good request clears the latch.
+    // The faulted frame is not served for Alt/Az either.
     try {
         (void)driver->get_altitude();
-        FAIL("faulted position cache must force a hardware poll");
+        FAIL("a faulted frame must not be served for Alt/Az");
     } catch (const alpacacore::AlpacaException& e) {
         CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
     }
+
+    // Recovery is automatic: the next answered tick clears the latch.
     st->mute.store(false);
+    poll_status_now_for_testing(*driver);
     CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
     CHECK(driver->get_link_fault().empty());
-
-    st->mute.store(true);
-    clock.advance(std::chrono::milliseconds(2100));  // expire the recovered position cache
-    try {
-        (void)driver->get_right_ascension();
-        FAIL("an unavailable mount must not return cached coordinates");
-    } catch (const alpacacore::AlpacaException& e) {
-        CHECK(std::string(e.what()).find("communications compromised") == std::string::npos);
-    }
     st->mute.store(false);
     driver->set_connected(false);
 }
