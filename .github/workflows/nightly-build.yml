@@ -118,9 +118,10 @@ jobs:
           set -euo pipefail
           bump="$(python3 scripts/changelog_fragments.py --bump)"
           # Stable branches and release tags: main is past every line they name.
-          refs="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/stable/" --jq '.[].ref'
-                  gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref')"
-          next="$(printf '%s\n' "${refs}" | python3 scripts/nightly_version.py --bump "${bump}")"
+          # One call per assignment: set -e sees only the last command of a $(...).
+          stable="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/stable/" --jq '.[].ref')"
+          tags="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref')"
+          next="$(printf '%s\n%s\n' "${stable}" "${tags}" | python3 scripts/nightly_version.py --bump "${bump}")"
           echo "Fragments propose ${bump}; main's next release is ${next}"
           version="${next}~nightly$(date -u +%Y%m%d%H%M).g${GITHUB_SHA::7}"
           # Guard the ordering the header promises: above any beta of <next>,
