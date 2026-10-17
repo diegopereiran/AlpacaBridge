@@ -180,8 +180,9 @@ it is never reachable through `router.cpp` or the web UI.
     fell to the noise level at 100 hPa, and the raw RA axis angle (`:GX42#`) moved only at the
     sidereal rate. The sign flips between North and South and between HA −9 and +9; HA ±3 is
     clean. Upstream: ASCOMInitiative/ConformU#35 (allow for refraction when `DoesRefraction` is
-    true, #1216). Until that lands, a run on such a mount shows these 4 issues; note them in the
-    saved report instead of changing the tolerance.
+    true, #1216). The maintainer fixed it in ConformU 4.5.2-rc.1 (build 56111) by keeping the test
+    declinations within ±65°. A run with an older build still shows these 4 issues; note them in
+    the saved report instead of changing the tolerance.
   - *Other residuals* (East/West at the 0.07″ boundary): treated as hardware noise after (1) an
     A/B test with refraction rate compensation (`:Tr#`/`:Tn#`) on vs. off, no correlation; (2) mount
     unloaded vs. loaded, no difference; (3) testing far from the pole was blocked by ConformU's own
@@ -209,11 +210,15 @@ it is never reachable through `router.cpp` or the web UI.
   for `1`/`2`, and a write of the other value throws `PropertyNotImplemented`, since the mode is
   fixed when the firmware is built. Legacy firmware, or no answer, keeps the settable local flag.
   The TeSeek HM-17 (OnStepX 10.23a) answers `1`.
-- **ConformU-validated on real hardware** (Generic OnStep DIY harmonic-drive mount, firmware
-  "On-Step" v10.23a, Linux arm64, ConformU 4.4.0): 0 errors, 0 timing violations in the saved
-  run. The only remaining findings are the 2 PulseGuide East/West residual issues documented
-  above as an accepted, inherent hardware-noise limitation rather than a driver bug — earlier
+- **ConformU-validated on real hardware**: the TeSeek HM-17 (OnStepX 10.23a) on Linux arm64,
+  ConformU 4.5.2-rc.1 (build 56111): 0 errors, 0 issues, all members within their timing targets
+  (`AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`). The older Generic OnStep DIY
+  harmonic-drive mount report (firmware "On-Step" v10.23a) is a ConformU 4.5.0 run on x86-64
+  (Linux Mint 22.3), not arm64 as its `Linux-arm64.txt` name suggests, made before validation
+  became arm64-only: 0 errors, 0 timing violations in the saved run. The only remaining
+  findings are the 2 PulseGuide East/West residual issues documented above as an accepted, inherent hardware-noise limitation rather than a driver bug — earlier
   runs during this same validation session also hit the DeviceState-cold-start-style FAST
   timing risk described above (via `get_side_of_pier()`'s live position round trip, since
   fixed), which is why that failure mode is documented even though the saved log is clean of it.
-  See `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.
+  See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`,
+  `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.

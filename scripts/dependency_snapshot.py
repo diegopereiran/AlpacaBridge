@@ -16,6 +16,7 @@ workflow file the snapshot names (GitHub stops listing them itself once it does)
   dependency_snapshot.py [--sha S] [--ref R] [--deb DEB] [--debian-policy F] [--ubuntu-policy F] [--output FILE]
                                                                write the snapshot
   dependency_snapshot.py --apt-packages debian|ubuntu [--deb DEB]  package names to pass to apt-cache policy
+  dependency_snapshot.py --newest-deb DIR                      path of the newest nightly .deb in DIR
   dependency_snapshot.py --check                               drift check
   dependency_snapshot.py --spdx DEB [--output FILE]            SPDX SBOM for a built .deb
   dependency_snapshot.py --pin                                 rewrite the SDK sha256 pins
@@ -69,11 +70,13 @@ WORKFLOW_TOOL_STEPS = {".github/workflows/osv-scan.yml": (("Install OSV-Scanner"
 # Unpinned tools ci.yml installs from the runner's apt (Ubuntu 24.04, not trixie).
 CI_APT_TOOLS = ("catch2", "clang-format", "clang-tidy", "gcovr", "nodejs", "shellcheck")
 CI_APT_QUALIFIERS = "arch=arm64&distro=ubuntu-24.04"
-# ConformU validates every driver on the rig; no workflow installs it. /conformu installs the
-# maintainer's 4.5.1 beta (no GitHub release yet) and names the build it must match.
+# ConformU validates every driver on the rig; no workflow installs it. /conformu installs a
+# maintainer beta (no GitHub release yet) from the project's tools/ mirror and names the build
+# it must match.
 CONFORMU_DOC = ".claude/commands/conformu.md"
 CONFORMU_BUILD_RE = re.compile(r"`(\d+\.\d+\.\d+)\.\d+, Build time:")
 CONFORMU_BETA_URL = "download.ascom-standards.org/beta/"
+CONFORMU_MIRROR_URL = "github.com/open-astro/AlpacaBridge/releases/download/tools/conformu-"
 DETECTOR = {"name": "alpacabridge-dependency-snapshot", "version": "1",
             "url": "https://github.com/open-astro/AlpacaBridge/blob/main/scripts/dependency_snapshot.py"}
 # Packages the installed daemon needs that debian/control's Depends does not name, each with the
@@ -211,13 +214,19 @@ def parse_conformu(text: str) -> tuple[list[str], list[str]]:
     """Return (purls, errors) for the ConformU build /conformu pins.
 
     The version carries ``-beta`` only while the doc installs from the ASCOM beta download
-    (``CONFORMU_BETA_URL``); a pin on a GitHub release reports the bare version.
+    (``CONFORMU_BETA_URL``) or the project's mirror of one (``CONFORMU_MIRROR_URL``); a pin on
+    a GitHub release reports the bare version.
     """
-    m = CONFORMU_BUILD_RE.search(text)
-    if not m:
+    builds = {m.group(0)[1:-len(", Build time:")]: m for m in CONFORMU_BUILD_RE.finditer(text)}
+    if not builds:
         return [], [f"{CONFORMU_DOC}: no pinned ConformU build ('`X.Y.Z.N, Build time:`') found: "
                     "if ConformU is now a GitHub release, update parse_conformu in scripts/dependency_snapshot.py"]
-    suffix = "-beta" if CONFORMU_BETA_URL in text else ""
+    if len(builds) > 1:
+        # Taking the first would report whichever build the prose names first, silently.
+        return [], [f"{CONFORMU_DOC}: more than one pinned ConformU build ({', '.join(sorted(builds))}); "
+                    "keep the '`X.Y.Z.N, Build time:`' form for the standard build only"]
+    m = next(iter(builds.values()))
+    suffix = "-beta" if CONFORMU_BETA_URL in text or CONFORMU_MIRROR_URL in text else ""
     return [f"pkg:github/ASCOMInitiative/ConformU@{m.group(1)}{suffix}"], []
 
 
@@ -278,13 +287,31 @@ def parse_uses(text: str) -> list[str]:
     return out
 
 
-def installed_udev_rules(root: Path) -> list[Path]:
-    """The vendored udev rules files debian/rules installs, with its make variables expanded."""
+def scan_udev_rules(root: Path) -> tuple[list[Path], list[str]]:
+    """(vendored udev rules files debian/rules installs, errors), its make variables expanded.
+
+    Only ``:=`` and ``=`` assignments are expanded. A ``.rules`` path that uses a variable set any other
+    way (``?=``, ``+=``, ``$(shell ...)``), or that still holds a ``$(VAR)`` after expansion, is an error:
+    skipping it would drop that file's evidence without a message. The one exception is an unresolved
+    ``$(VAR)`` after an absolute prefix that cannot lead into AlpacaCore/external/ (the libgphoto2
+    stage path): that is not vendor evidence and is skipped.
+    """
     rules = root / "debian/rules"
     if not rules.is_file():
-        return []
+        return [], []
     text = rules.read_text(encoding="utf-8")
-    values = {m.group(1): m.group(2) for m in re.finditer(r"^([A-Z_][A-Z0-9_]*)\s*:?=\s*(.*?)\s*$", text, re.M)}
+    values: dict[str, str] = {}
+    unsupported: dict[str, str] = {}  # variable -> the form that makes it unexpandable
+    for m in re.finditer(r"^([A-Z_][A-Z0-9_]*)\s*([:?+]?=)\s*(.*?)\s*$", text, re.M):
+        name, op, value = m.groups()
+        if op in ("?=", "+="):
+            unsupported[name] = op
+        elif "$(shell" in value:
+            unsupported[name] = "$(shell ...)"
+        else:
+            values[name] = value
+    for name in unsupported:
+        values.pop(name, None)
     values["CURDIR"] = str(root)
 
     def expand(word: str) -> str:
@@ -296,16 +323,56 @@ def installed_udev_rules(root: Path) -> list[Path]:
         return word
 
     out: list[Path] = []
+    errors: list[str] = []
     for word in re.findall(r"\S+\.rules\b", text):
-        path = Path(expand(word))
+        used = set(re.findall(r"\$\(([A-Z_][A-Z0-9_]*)\)", word))
+        bad = sorted(v for v in used if v in unsupported)
+        expanded = expand(word)
+        if bad:
+            errors.append(f"debian/rules: {word} uses {', '.join(f'{v} ({unsupported[v]})' for v in bad)}, "
+                          "which scan_udev_rules() cannot expand: assign it with := or =")
+            continue
+        if "$(" in expanded or "${" in expanded:
+            text_prefix = re.split(r"\$[({]", expanded, maxsplit=1)[0]
+            prefix, vendored = Path(text_prefix), str(root / EXTERNAL)
+            if (prefix.is_absolute() and not prefix.is_relative_to(root / EXTERNAL)
+                    and not vendored.startswith(text_prefix)):
+                continue  # the text so far cannot lead into the vendored tree: not vendor evidence
+            errors.append(f"debian/rules: {word} still holds an unresolved variable after expansion "
+                          f"({expanded}): define it with := or = in debian/rules")
+            continue
+        path = Path(expanded)
         if path.is_absolute() and path.is_relative_to(root / EXTERNAL) and path.is_file() and path not in out:
             out.append(path)
-    return out
+    return out, sorted(set(errors))
+
+
+def installed_udev_rules(root: Path) -> list[Path]:
+    return scan_udev_rules(root)[0]
+
+
+def newest_nightly_deb(paths: list[str]) -> tuple[str | None, list[str]]:
+    """(newest path by its ``nightlyYYYYMMDDHHMM`` stamp, warnings). A file without a stamp is never chosen."""
+    stamped, warnings = [], []
+    for p in paths:
+        m = re.search(r"nightly(\d{12})(?!\d)", Path(p).name)
+        if m:
+            stamped.append((m.group(1), p))
+        else:
+            warnings.append(f"{p}: no nightlyYYYYMMDDHHMM stamp, ignored")
+    return (max(stamped)[1] if stamped else None), warnings
+
+
+def newest_deb_in_dir(directory: Path) -> tuple[int, str | None, list[str]]:
+    """(exit code, newest stamped .deb, warnings): 1 when .deb files exist and none has a stamp."""
+    debs = sorted(str(p) for p in directory.glob("*.deb"))
+    newest, warnings = newest_nightly_deb(debs)
+    return (1 if debs and newest is None else 0), newest, warnings
 
 
 def parse_runtime_system(root: Path) -> tuple[list[str], list[str]]:
     """Return (package names, errors) for RUNTIME_SYSTEM: a package whose evidence is gone is an error."""
-    names, errors = [], []
+    names, errors = [], list(scan_udev_rules(root)[1])
     for name, pattern, rx in RUNTIME_SYSTEM:
         files = installed_udev_rules(root) if pattern == INSTALLED_UDEV_RULES else sorted(root.glob(pattern))
         if any(re.search(rx, f.read_text(encoding="utf-8", errors="replace"), re.M)
@@ -774,11 +841,21 @@ def self_test() -> int:
     _, errs = parse_ci_tools(ci.replace("          ver=2.17.1\n", ""))
     assert len(errs) == 1 and "cppcheck" in errs[0], errs
     cu_doc = ("curl -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz'\n"
-              "line it prints against the build, `4.5.1.54507, Build time:\nThu 27 August 2026` -- ok\n")
-    assert parse_conformu(cu_doc) == (["pkg:github/ASCOMInitiative/ConformU@4.5.1-beta"], [])
+              "line it prints against the build, `4.5.2.56111, Build time:\nFri 16 October 2026` -- ok\n")
+    assert parse_conformu(cu_doc) == (["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"], [])
     # Pinned to a GitHub release (no beta download URL): the bare version, no -beta.
     released = cu_doc.replace("download.ascom-standards.org/beta/", "github.com/ASCOMInitiative/ConformU/")
-    assert parse_conformu(released) == (["pkg:github/ASCOMInitiative/ConformU@4.5.1"], [])
+    assert parse_conformu(released) == (["pkg:github/ASCOMInitiative/ConformU@4.5.2"], [])
+    # Installed from the project's tools/ mirror of a beta, with the ASCOM beta URL named
+    # nowhere in the doc: still a beta, not a GitHub release.
+    mirrored = cu_doc.replace("download.ascom-standards.org/beta/",
+                              "github.com/open-astro/AlpacaBridge/releases/download/tools/conformu-4.5.2-rc.1/")
+    assert parse_conformu(mirrored) == (["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"], [])
+    # Two different pinned builds: the doc is ambiguous, so it is an error, not the first one.
+    cu, errs = parse_conformu("older `4.5.1.54507, Build time: Thu` here\n" + cu_doc)
+    assert cu == [] and len(errs) == 1 and "4.5.1.54507" in errs[0] and "4.5.2.56111" in errs[0], errs
+    # The same build named twice is not ambiguous.
+    assert parse_conformu(cu_doc + cu_doc)[0] == ["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"]
     cu, errs = parse_conformu("go back to the ordinary release asset\n")
     assert cu == [] and len(errs) == 1 and CONFORMU_DOC in errs[0], errs
     wf = ("jobs:\n  a:\n    container: debian:trixie\n  b:\n    container: debian:trixie  # dup\n"
@@ -922,7 +999,7 @@ def self_test() -> int:
         (r / ".claude/commands").mkdir(parents=True)
         (r / CONFORMU_DOC).write_text(cu_doc)
         snap = build_snapshot(r, "a" * 40, "refs/heads/main", "1", "2026-01-01T00:00:00Z")
-        assert snap["manifests"][CONFORMU_DOC]["resolved"]["pkg:github/ASCOMInitiative/ConformU@4.5.1-beta"][
+        assert snap["manifests"][CONFORMU_DOC]["resolved"]["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"][
             "scope"] == "development"
         (r / CONFORMU_DOC).write_text("no pin\n")
         assert any(CONFORMU_DOC in e for e in check_drift(r)), check_drift(r)
@@ -991,6 +1068,47 @@ def self_test() -> int:
         (r / EXTERNAL / "B/copy.rules").unlink()
         (r / EXTERNAL / "x.rules").write_text(evidence[f"{EXTERNAL}/x.rules"])
         assert installed_udev_rules(r) == [r / EXTERNAL / "x.rules"], installed_udev_rules(r)
+        assert scan_udev_rules(r)[1] == [] and drift() == [], scan_udev_rules(r)
+        # A .rules path built with a form the expansion cannot follow is an error, not a skipped path.
+        good = evidence["debian/rules"]
+        for form, rule_text in (
+                ("?=", good.replace("RULES_DIR :=", "RULES_DIR ?=")),
+                ("+=", good.replace("RULES_DIR :=", "RULES_DIR +=")),
+                ("$(shell ...)", good.replace("$(CURDIR)/AlpacaCore/external", "$(shell echo x)")),
+                ("unresolved", good.replace("$(RULES_DIR)/x.rules", "$(MISSING_DIR)/x.rules"))):
+            (r / "debian/rules").write_text(rule_text)
+            errs = scan_udev_rules(r)[1]
+            assert len(errs) == 1 and "debian/rules" in errs[0] and "x.rules" in errs[0], (form, errs)
+            if form != "unresolved":
+                assert f"({form})" in errs[0], (form, errs)
+            assert any("x.rules" in e for e in drift()), (form, drift())
+        # An unresolved variable in a path already outside the vendored tree is not vendor evidence: no error.
+        (r / "debian/rules").write_text(good + "\tinstall -m 644 $(CURDIR)/debian/$(UNDEFINED)/y.rules x/\n")
+        assert scan_udev_rules(r)[1] == [], scan_udev_rules(r)
+        # A prefix that is an ancestor of the vendored tree could still lead into it: error.
+        for anc in ("$(CURDIR)/$(UNDEFINED)/x.rules", "$(CURDIR)/AlpacaCore/$(UNDEFINED)/x.rules"):
+            (r / "debian/rules").write_text(good + f"\tinstall -m 644 {anc} x/\n")
+            assert len(scan_udev_rules(r)[1]) == 1, (anc, scan_udev_rules(r))
+        # Only the $(shell) rule catches a variable whose value is a shell call inside an otherwise known path.
+        (r / "debian/rules").write_text(good + "SH := /opt/$(shell echo a)\n\tinstall -m 644 $(SH)/z.rules x/\n")
+        assert any("($(shell ...))" in e for e in scan_udev_rules(r)[1]), scan_udev_rules(r)
+        (r / "debian/rules").write_text(good)
+        assert drift() == [], drift()
+        # The pick of the newest nightly .deb orders by its stamp, never by the full name.
+        old, new_ = "alpacabridge_5.0.9-nightly202610150300_arm64.deb", "alpacabridge_5.0.10-nightly202610160300_arm64.deb"
+        assert sorted([new_, old])[-1] == old  # the full-name sort this replaces picks the wrong file
+        assert newest_nightly_deb([old, new_]) == (new_, []), newest_nightly_deb([old, new_])
+        assert newest_nightly_deb([new_, old])[0] == new_
+        pick, warns = newest_nightly_deb(["zzz_arm64.deb", old])
+        assert pick == old and len(warns) == 1 and "zzz_arm64.deb" in warns[0], (pick, warns)
+        assert newest_nightly_deb(["zzz_arm64.deb"])[0] is None
+        with tempfile.TemporaryDirectory() as nd:
+            dd = Path(nd)
+            assert newest_deb_in_dir(dd) == (0, None, []), newest_deb_in_dir(dd)
+            (dd / "foo_arm64.deb").write_text("")
+            assert newest_deb_in_dir(dd)[0] == 1, newest_deb_in_dir(dd)
+            (dd / old).write_text("")
+            assert newest_deb_in_dir(dd)[:2] == (0, str(dd / old)), newest_deb_in_dir(dd)
         # Every workflow manifest the snapshot submits also carries that workflow's action pins:
         # GitHub drops its own scan of a workflow file a submitted snapshot names.
         pin = "c" * 40
@@ -1208,6 +1326,7 @@ def main() -> int:
     ap.add_argument("--output")
     ap.add_argument("--spdx", metavar="DEB")
     ap.add_argument("--deb", metavar="DEB", help="a built .deb whose resolved Depends and Recommends to report")
+    ap.add_argument("--newest-deb", metavar="DIR", help="print the newest nightlyYYYYMMDDHHMM .deb in DIR")
     ap.add_argument("--pin", action="store_true")
     ap.add_argument("--apt-packages", choices=("debian", "ubuntu"))
     ap.add_argument("--debian-policy", metavar="FILE", help="apt-cache policy output from debian:trixie")
@@ -1219,6 +1338,15 @@ def main() -> int:
     if a.apt_packages:
         print("\n".join(apt_packages(ROOT, a.apt_packages, deb)))
         return 0
+    if a.newest_deb:
+        code, newest, warnings = newest_deb_in_dir(Path(a.newest_deb))
+        for w in warnings:
+            print(f"::warning::{w}", file=sys.stderr)
+        if code:
+            print("ERROR: no .deb carries a nightlyYYYYMMDDHHMM stamp", file=sys.stderr)
+        elif newest:
+            print(newest)
+        return code
     if a.pin:
         pin_sdk_hashes(ROOT)
         print(f"{TABLE}: sha256 pins rewritten")
