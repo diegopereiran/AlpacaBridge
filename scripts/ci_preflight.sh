@@ -42,7 +42,7 @@ fi
 
 # --- ccache (issue #529) ---------------------------------------------------
 #
-# run_all_tests.sh does `rm -rf build` and a full clean rebuild, and this
+# run_all_tests.sh does `rm -rf` of its build tree and a full clean rebuild, and this
 # script runs it twice (vendors OFF, then ON) plus the ASan+UBSan pass, which
 # is on by default, plus a fourth clean build when RUN_TSAN=1, so every
 # pre-flight recompiles the whole tree 3-4 times from scratch. Route those
@@ -57,10 +57,10 @@ fi
 # neither the ASan+UBSan pass nor the TSan one is made cheaper by the ordinary
 # builds, though successive runs of each still hit. The TSan build dir is the
 # one reused across runs (the ASan pass goes through run_all_tests.sh, which
-# wipes build/ every time), and there the launcher is only a cache-variable
+# wipes AlpacaHTTP/build every time), and there the launcher is only a cache-variable
 # DEFAULT, so it is also passed explicitly (CCACHE_CMAKE_ARGS) or an older build-tsan/
 # would never pick it up. Invariant: every OTHER build dir is deleted before
-# it is configured (run_all_tests.sh rm -rf's build/ and AlpacaHTTP/build/),
+# it is configured (run_all_tests.sh rm -rf's AlpacaHTTP/build/, its one tree since #1251),
 # which is the only reason the env var alone is enough there; a future gate
 # that reuses a build tree needs "${CCACHE_CMAKE_ARGS[@]}" on its configure
 # too. The scan-build gate must NOT use the launcher: a
