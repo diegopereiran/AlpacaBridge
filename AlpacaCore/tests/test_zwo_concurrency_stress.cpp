@@ -31,10 +31,13 @@
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
+#include <atomic>
+
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
 #include "fake_zwo_sdk.h"
+#include "locked_zwo_sdk.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -125,6 +128,34 @@ TEST_CASE("ZWO camera - connected SDK acquisition lifecycle stress", "[zwo][came
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
     CHECK(sdk.call_count("get_data_after_exposure") > 0);
+}
+
+// Same storm over the serialised seam (issue #1295): LockedZWOSDK around FakeZWOSDK, so every SDK call
+// is one mutex-guarded forward and the driver, not the fake, owns the interleaving.
+TEST_CASE("ZWO camera - connected lifecycle stress behind LockedZWOSDK", "[zwo][camera][stress]") {
+    alpacacore::test::FakeZWOSDK fake;
+    fake.frame_bytes.resize(16 * 8 * 2, 0x5a);
+    alpacacore::test::LockedZWOSDK sdk(fake);
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& camera = static_cast<alpacacore::CameraDriver&>(d);
+        guard([&] { camera.start_exposure(0.001, true); });
+        guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_image_array()); });
+        guard([&] { camera.stop_exposure(); });
+        guard([&] { static_cast<void>(camera.get_camera_state()); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_count() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(fake.call_count("get_data_after_exposure") > 0);
 }
 
 // Focuser stress (#271): same shape as the EFW/camera cases above — no fake
@@ -219,6 +250,65 @@ TEST_CASE("ZWO dew heater switch - concurrent connect/disconnect/operate stress"
 TEST_CASE("ZWO dew heater switch - destruction races an in-flight connect", "[zwo][switch][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0); });
+}
+
+// Dew heater switch stress over a fake SDK (open-astro#1316): the registrations
+// above fail fast at enumeration on the real SDK, so the connect path that
+// matters (camera listing under mutex_, the open in its own try block, the
+// status cache the getters and setter hit) never ran under TSan. Here connect
+// succeeds against FakeDewHeaterSdk, which is thread-safe by construction.
+namespace {
+
+void add_fake_dew_camera(alpacacore::test::FakeDewHeaterSdk& sdk) {
+    alpacacore::vendor::zwo::ZWOCameraInfo cam;
+    cam.camera_id = 9;
+    cam.slot_index = 0;
+    cam.name = "ZWO ASI2600MM Pro";
+    sdk.cameras = {cam};
+}
+
+}  // namespace
+
+TEST_CASE("ZWO dew heater switch over a fake SDK - concurrent connect/disconnect/operate stress",
+          "[zwo][switch][stress]") {
+    alpacacore::test::FakeDewHeaterSdk sdk;
+    add_fake_dew_camera(sdk);
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk);
+
+    // Connected registration: a disconnect racing a getter clears the heater
+    // capability after ensure_connected() passed, so the getter answers
+    // NotImplemented ("Dew heater not supported", 0x400) instead of NotConnected
+    // (seen ~90 times per run with the default guard).
+    alpacacore::test::StressCallGuard guard(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::NotImplemented});
+    std::atomic<bool> saw_connected{false};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard, &saw_connected](AlpacaDriver& d) {
+        auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
+        if (sw.get_connected()) {
+            saw_connected.store(true);
+        }
+        guard([&] { static_cast<void>(sw.get_max_switch()); });
+        guard([&] { static_cast<void>(sw.get_switch(0)); });
+        guard([&] { sw.set_switch(0, true); });
+        guard([&] { static_cast<void>(sw.get_switch_value(0)); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    // A connect reached the end of the fake-backed path (serial read is its last
+    // SDK call), so the case cannot silently fall back to the fail-fast one.
+    CHECK(sdk.serial_reads > 0);
+    CHECK(saw_connected.load());
+}
+
+TEST_CASE("ZWO dew heater switch over a fake SDK - destruction races an in-flight connect", "[zwo][switch][stress]") {
+    alpacacore::test::FakeDewHeaterSdk sdk;
+    add_fake_dew_camera(sdk);
+    alpacacore::test::run_destruction_during_connect_stress(
+        [&sdk]() { return alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk); });
 }
 
 // Telescope stress (audit follow-up, 3.0.1): the ZWO mount driver's worst

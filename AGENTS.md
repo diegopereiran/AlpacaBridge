@@ -135,21 +135,42 @@ vendor-agnostic; do them in the driver from the start.
   only see an *async* connect, so a sync disconnect landing inside a sync connect saw
   "not connected" twice and returned as a no-op while the connect stored true. Guard
   `set_connected()` against `set_connected()` only; never take it in a getter.
-- **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
-  writes a member (e.g. a pulse-guide flag) is the classic trap: if the object dies
-  mid-sleep the wakeup writes freed memory (UB). Make it a joinable member thread
-  with a cancel flag + `std::condition_variable`, and cancel + join it in the
-  destructor. **The 2026-07 full-codebase audit found this rule held on every
-  connect/disconnect *lifecycle* path but was violated on a dozen *operational*
-  paths** (async slews, GOTO setup, pulse-guide timers, cooler-off, slew-completion
-  tails) — apply the checklist to every thread a driver spawns, not just the
-  connection machinery. Two corollaries from the same audit: an async tail that
-  calls anything throwing (e.g. a `*_locked()` helper that rethrows `NotConnected`)
-  must be wrapped in try/catch inside the lambda or it `std::terminate`s the whole
-  server; and a `joinable()` pre-check before spawning a shared member thread is a
-  double-start race unless the check+spawn+assign runs under one mutex.
-- The destructor joins **every** background thread (connection, exposure, timers)
-  before members are destroyed.
+- **Operation task threads: use the slot where a driver has adopted it.** The Celestron
+  (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers and the Gemini
+  focuser and flat panel run their operation bodies (async slew, park, home, pulse-guide
+  timer, slew-completion tail) in a `util::AsyncOperation` slot
+  (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](docs/decisions/0006-async-operation-ownership.md)).
+  The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
+  reasons, cancellable `ctx.wait_for()` polling, the kept failure and the join at
+  destruction; it never detaches a thread. **A new driver must not hand-roll a task
+  thread (no own `std::thread` member, no `reap_*`/`task_wait_for` helper): use the slot.**
+  Call `start()` and `cancel_all_and_join()` without the driver `mutex_` held, join the
+  slots in the destructor before members are destroyed, and never call `start()` or
+  `cancel_all_and_join()` from a body of the same slot (the paragraph after rule 10 in the
+  header comment). A body that calls anything throwing still catches it to reset the
+  driver's own state (`slewing_cached_`, `parking_`) before the slot keeps the failure;
+  an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
+  call stays the caller's job (see the handle-reference-counting item below).
+- **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in the
+  ZWO telescope (`goto_thread_`, `pulse_thread_`, `poll_thread_`, `disconnect_thread_`),
+  the Bisque pulse-guide thread, the iOptron clock-sync thread, the QHYCFW3 move thread,
+  the camera exposure workers, the QHY cooler-off and temperature workers and the GPIO
+  soft-PWM workers; the list is a sample, not a roster.
+  - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
+    writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
+    freed memory (UB). Make it a joinable member thread with a cancel flag +
+    `std::condition_variable`, and cancel + join it in the destructor. The one
+    sanctioned exception is the bounded detach-on-timeout worker below. The 2026-07
+    full-codebase audit found this rule held on every connect/disconnect *lifecycle*
+    path but violated on a dozen *operational* paths; apply it to every thread a driver
+    spawns, not just the connection machinery.
+  - An async tail that calls anything throwing (e.g. a `*_locked()` helper that rethrows
+    `NotConnected`) must be wrapped in try/catch inside the lambda or it
+    `std::terminate`s the whole server.
+  - A `joinable()` pre-check before spawning a shared member thread is a double-start
+    race unless the check, spawn and assign run under one mutex.
+  - The destructor joins **every** background thread that is not in a slot (connection,
+    exposure, timers) before members are destroyed.
 - **Serialize reapers across the whole join.** `AsyncOperation::cancel_all_and_join()`
   takes its body out of the slot before joining; a second caller can see an empty
   slot while the first still owns a running worker. A driver-level lifecycle/handoff
@@ -342,14 +363,13 @@ choreography, not a driver fault — verify by checking that every slew lands on
 
 ConformU 4.5 times `Park` (and every ITelescopeV4 initiator) against the 1 s STANDARD
 target and completes it by polling `AtPark`/`Slewing`. Never block through a park slew.
-The proven shape (SkyWatcher, then SynScan / Celestron in issue #208, the Celestron and SynScan flow now one `util::run_park_slew()`; Bisque pending on `fix/bisque-async-park`): reap the
-slew task, snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
-`parking_` flag, then dispatch the slew + completion poll + tracking stop in the joinable
-task thread, releasing the mutex between polls (`ctx.wait_for()` on the operation slot, cancellable). `AtPark` and
+The proven shape (SkyWatcher, then SynScan / Celestron in issue #208, the Celestron and SynScan flow now one `util::run_park_slew()`; Bisque pending on `fix/bisque-async-park`): snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
+`parking_` flag, then run the slew + completion poll + tracking stop as a body in the driver's
+operation slot (`util::AsyncOperation`, see Threads & shutdown above: the slot owns the thread, the reaping and the cancellable `ctx.wait_for()` between polls). `AtPark` and
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
-`parking_`; the task polls the hardware through a separate `poll_hardware_slewing_locked`).
+`parking_`; the body polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
-stops the axes and joins the task); disconnect and the destructor cancel + join. Keep any
+stops the axes and cancels and joins the body); disconnect and the destructor cancel + join through the slot. Keep any
 pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
 still throws instead of silently never reaching `AtPark`. Drivers with native park commands
 that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task — verified
@@ -546,6 +566,8 @@ notes carry only the pin map and per-board deltas.
   while the ASCOM API reports success. Two-phase shutdown: signal stop under the
   mutex, join outside it, release/close back under it (the classic
   join-under-the-same-mutex deadlock otherwise).
+  These per-port periodic workers are not operation-slot bodies; a cancellable one-shot
+  or polling body added to a GPIO driver uses the slot (Threads & shutdown above).
 - **PWM frequency is the lever, not load type** — a flat panel's internal LED driver
   smooths a too-fast chop into plain on/off (a panel that "won't dim" at 1 kHz dims
   fine at 50 Hz); resistive dew heaters dim at any frequency; regulated gear
@@ -636,7 +658,8 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   even before the node lookup reflects it: a tty returns those only when its device is gone or
   the fd is unusable. Silence with the node still present keeps the rules above. The QHY Q-Focuser follows the same
   shape since #527, detected on its next transaction (request/response, no reader thread) with a
-  lock-free `link_lost_` latch the getter reads. OnStep follows the Sky-Watcher shape since #1241
+  lock-free `link_lost_` latch the getter reads; since #1310 that transaction is the state poll
+  (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
   (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`). The #237 drivers still treat a
   removed node as a fault; that has not been changed. Tests: `sever_link()` on
   `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
@@ -1238,7 +1261,8 @@ Related decision: [Documentation drift gates](docs/decisions/0003-docs-drift-gat
 - **PR template gate** (`.github/workflows/pr-body.yml`, job `pr-template`, `scripts/check_pr_template.py`, pre-flight gate 2b3 reading `PR_BODY_FILE`): the PR body must keep every `## ` section of `.github/PULL_REQUEST_TEMPLATE.md`, each with content of its own (a template line copied unchanged, a bare `-` or an HTML comment does not count), and the Checklist must keep its `- [ ]` items. A heading of the form `A or B` also accepts `## A` or `## B`. The rules are read from the template, so editing the template changes the gate. GitHub fills the template in only for a PR opened from the web page with an empty body; `gh pr create --body`, the API and agents skip it. Bot PRs (Dependabot) skip the job. Same triggers and `env: PR_BODY` rule as the `Falsified by:` gate; not a required check until a maintainer marks it.
 - **Layering gate** (`scripts/check_layering.py`, the `layering` CI job and pre-flight gate 2f, issue #651): counts `#include <alpacacore/vendor/...>` lines under `AlpacaHTTP/` and in the catalog schema files, and fails when either exceeds the baseline held in the script (`MAX_ALPACAHTTP_VENDOR_INCLUDES`, `MAX_CATALOG_SCHEMA_VENDOR_INCLUDES`). Each vendor descriptor slice of [device-catalog](docs/decisions/0004-device-catalog.md) lowers the AlpacaHTTP constant in the PR that deletes the includes; the baseline never rises. The gate also enforces CMake rules L1-L3 on every `CMakeLists.txt` and `*.cmake` under `AlpacaCore/` and `AlpacaHTTP/` (except below `external/` and `build*` directories), including `target_sources(alpacacore ...)` and the directory-scoped `ALPACACORE_ENABLE_` definitions in `AlpacaHTTP/CMakeLists.txt` that precede its `add_subdirectory(../AlpacaCore ...)` (issue #723); the dependency-direction bullet under [CMake and Vendor Integration](#cmake-and-vendor-integration) says what they forbid.
 - **Contract sweep** (`AlpacaCore/tests/contract_sweep.h` + `test_contract_sweep.cpp`, issue #571): every (vendor, device type) pair the server constructs, whether through a `Router::register_device_from_config()` arm or a device-catalog factory (`AlpacaCore/src/vendors/*/*_catalog.cpp`), has one registry entry, and the sweep runs the tier-1 ASCOM contract cases over each disconnected, one ctest case per (driver, case) named `Contract sweep - <vendor>_<type> - <case>`. A driver that differs states the expectation in its registry entry with a source (protocol document, hardware run, or assumption); a new driver gets an entry, not a copy of the assertions. `scripts/check_contract_sweep.py` (the `contract-sweep` CI job and pre-flight gate 2g) fails on a router arm's pair with no entry and no `ALLOWLIST` reason (`UNSWEPT PAIR`), a router arm or catalog file whose `create_*` backend no registry entry calls (`UNSWEPT BACKEND`), a construct its text parser does not follow (`PARSER LIMIT`), a catalog file whose `DeviceKey` vendor differs from its directory (`CATALOG VENDOR MISMATCH`) or has no `DeviceKey` literal to check (`CATALOG VENDOR UNVERIFIED`), a stale allow-list entry, and a guard the tests CMake does not define for `alpacacore_tests` (the `ALPACACORE_ENABLE_<VENDOR>` macros are not inherited from the vendor targets, so without the definition the registry compiles empty and the sweep passes vacuously). The catalog's pairs are not parsed: two cases in `test_contract_sweep.cpp` walk `DeviceCatalog::describe()` and require a registry entry for every available descriptor, and a descriptor for every registry entry of a catalog vendor (a vendor with a descriptor or a factory, read from `DeviceCatalog::factory_keys()`, so a vendor whose whole schema registration is missing still fails). A catalog-built pair cannot be allow-listed. The docs-drift script pins the fake-connectable roster in the same header to the `fake_*.h` files on disk. Tier 2 runs the connected cases over every `kFakeConnectableRoster` row, one ctest case per (row, applicable case; target flags on telescopes only, `InvalidValue` on types with a static out-of-range probe, `ImageArray` before any exposure on cameras only), named `Contract sweep tier 2 - <vendor>_<type> - <case>`. A row whose fake cannot hold a connect open states why in `connecting_unobservable`, and the tier-1 `get_at_park` pins are gone (`AtPark` throws `NotConnected` on every telescope).
-- **Every job in every workflow carries a `timeout-minutes` bound** (issue #363). The numbers are sized from the observed healthy runtime of recent green runs with wide headroom (`sanitizers-tsan` 30 min against a healthy max of 5, `build-vendors` 30 -- the all-vendors build and suite at `-O0` with gcov instrumentation and the gcovr report --, `sanitizers` 25, `build-test` 20, `clang-tidy` 25 -- it does the all-vendors build `build-vendors` does plus libgpiod from source and `clang-tidy-diff` over every changed line, so it gets that job's bound rather than a smaller one -- `cppcheck` 20 -- on a cache miss its dominant cost is building cppcheck 2.17 from source (the build is cached, rebuilt unless the restored binary reports the pinned version, and saved from pushes), so it gets the same bound as the build jobs rather than a text-scan-sized one -- the text scans 10; `release` 10, `beta-deb` 40 -- the all-vendors Release build, with the bundled libgphoto2, of the beta `.deb` in a trixie container -- `nightly-build` 40 for the same build from `main` and 5 for its skip check -- `codeql` 30, `claude-review` 45, `dependency-updates` 30 -- about 50 sequential vendor-site and GitHub requests at a 30 s timeout each, a changelog lookup per opened or retitled issue, plus the ~50 MB ConformU beta tarball at 300 s -- `osv-scan` 20 -- a trixie image build plus two scans; `package-deb` 40 -- the all-vendors Release build of the `.deb` in a trixie container, which now also compiles libgphoto2). They exist because the `[stress]` suite is the one place a regression can *hang* rather than fail, and GitHub's 6-hour default turned that into six hours of runner time before any signal. **When you add a job, give it a bound**, and when a job legitimately outgrows its bound raise the number rather than trimming the work to fit -- these are a backstop against a wedge, not a performance target. Note the deliberate gap on `claude-review`: its 45 min bound is longer than `/pr-checker`'s 30 min verdict-poll budget, so a review running past 30 min times the skill out while CI still lets the job finish. That is the intended precedence (the bound exists to catch a wedged job, not to pace the reviewer); a poll timeout is a re-poll, not a broken workflow.
+- **Optimized all-vendors run (nightly, issue #1313).** `build-vendors` is instrumented (`-O0 --coverage`), so `.github/workflows/nightly-build.yml` carries a `test-optimized` job: all vendors, optimized `Release`, like the .deb (`-DNDEBUG`), the full `run_all_tests.sh` suite, off the PR path. It shares the nightly build's "tag already at this commit" skip, runs beside the `.deb` build, and a red suite fails the run.
+- **Every job in every workflow carries a `timeout-minutes` bound** (issue #363). The numbers are sized from the observed healthy runtime of recent green runs with wide headroom (`sanitizers-tsan` 30 min against a healthy max of 5, `build-vendors` 30 -- the all-vendors build and suite at `-O0` with gcov instrumentation and the gcovr report --, `sanitizers` 25, `build-test` 20, `clang-tidy` 25 -- it does the all-vendors build `build-vendors` does plus libgpiod from source and `clang-tidy-diff` over every changed line, so it gets that job's bound rather than a smaller one -- `cppcheck` 20 -- on a cache miss its dominant cost is building cppcheck 2.17 from source (the build is cached, rebuilt unless the restored binary reports the pinned version, and saved from pushes), so it gets the same bound as the build jobs rather than a text-scan-sized one -- the text scans 10; `release` 10, `beta-deb` 40 -- the all-vendors Release build, with the bundled libgphoto2, of the beta `.deb` in a trixie container -- `nightly-build` 40 for the same build from `main`, 40 for its `test-optimized` job (the all-vendors suite built Release, off the PR path, issue #1313) and 5 for its skip check -- `codeql` 30, `claude-review` 45, `dependency-updates` 30 -- about 50 sequential vendor-site and GitHub requests at a 30 s timeout each, a changelog lookup per opened or retitled issue, plus the ~50 MB ConformU beta tarball at 300 s -- `osv-scan` 20 -- a trixie image build plus two scans; `package-deb` 40 -- the all-vendors Release build of the `.deb` in a trixie container, which now also compiles libgphoto2). They exist because the `[stress]` suite is the one place a regression can *hang* rather than fail, and GitHub's 6-hour default turned that into six hours of runner time before any signal. **When you add a job, give it a bound**, and when a job legitimately outgrows its bound raise the number rather than trimming the work to fit -- these are a backstop against a wedge, not a performance target. Note the deliberate gap on `claude-review`: its 45 min bound is longer than `/pr-checker`'s 30 min verdict-poll budget, so a review running past 30 min times the skill out while CI still lets the job finish. That is the intended precedence (the bound exists to catch a wedged job, not to pace the reviewer); a poll timeout is a re-poll, not a broken workflow.
 - **Run `scripts/ci_preflight.sh` before opening a PR** (it is the `/submit-pr` Step 4 hard gate). It reproduces the CI gates locally, auto-installing missing tools, and exits non-zero if any mandatory gate fails — catching failures before they ever reach CI.
 - **The ASan+UBSan pass runs by default in pre-flight** (issue #588); `RUN_SANITIZERS=0` skips it and reports `[SKIP]`, which is the right call for docs/CI-only work but not much else — it was on by default precisely because it had been the one configuration neither CI nor a contributor ran, and a deterministic 20/20 failure sat in the tree undetected as a result (`RUN_TSAN` is separate and still opt-in). This means a new class of local failure: a sanitizer finding in code the ordinary build passes. **When the sanitizer cannot observe a case rather than having found a defect in it, gate the case out of sanitized builds — do not loosen the assertion**, which would silently cost coverage in `build-test` and `build-vendors` too. The worked example is the `ALPACACORE_TESTS_SANITIZED` guard in `AlpacaCore/tests/test_fake_pty_write.cpp`, whose EMFILE case exhausts the process's descriptors so UBSan cannot obtain one for its vptr check; it returns early with a `WARN` under sanitizers and runs for real everywhere else. A genuine finding, by contrast, is a bug — fix it.
 - **Pi 4 ASan host limitation:** Debian's Raspberry Pi kernel is built with a 39-bit AArch64 virtual address space, which cannot host ASan's 64-bit allocator. Run the sanitizer pass on a 48-bit-VA kernel/host; see [the Pi 4 ASan failure record](docs/failures/0010-rpi4-asan-39-bit-va.md). Do not treat the runtime abort as a passing check.
