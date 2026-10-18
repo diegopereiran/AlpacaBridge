@@ -17,10 +17,12 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "../src/vendors/zwo/zwo_fields.h"
 #include "catch2_compat.h"
 
 namespace {
@@ -128,24 +130,32 @@ namespace {
 struct FakeDewSdk final : alpacacore::vendor::zwo::ZWODewHeaterSdk {
     std::atomic<int> reads{0};
     std::atomic<bool> fail_reads{false};
+    std::atomic<int> last_read_id{-1};
     long heater{40};
 
     std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> cameras;
+    // Per SDK id; an id absent from a non-empty map has no heater / reads "FAKE1".
+    std::map<int, bool> heater_by_id;
+    std::map<int, std::string> serial_by_id;
 
     std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> enumerate_cameras() override { return cameras; }
     bool get_camera_info_by_id(int, alpacacore::vendor::zwo::ZWOCameraInfo&) override { return false; }
     void open_camera(int) override {}
     void init_camera(int) override {}
     void close_camera(int) override {}
-    std::vector<alpacacore::vendor::zwo::ZWOControlCaps> get_control_caps(int) override {
+    std::vector<alpacacore::vendor::zwo::ZWOControlCaps> get_control_caps(int id) override {
+        if (!heater_by_id.empty() && !heater_by_id[id]) {
+            return {};
+        }
         alpacacore::vendor::zwo::ZWOControlCaps cap;
         cap.type = alpacacore::vendor::zwo::ZWOControlType::AntiDewHeater;
         cap.max_value = 100;
         cap.is_writable = true;
         return {cap};
     }
-    bool get_control_value(int, alpacacore::vendor::zwo::ZWOControlType, long& value, bool& is_auto) override {
+    bool get_control_value(int id, alpacacore::vendor::zwo::ZWOControlType, long& value, bool& is_auto) override {
         ++reads;
+        last_read_id = id;
         if (fail_reads) {
             return false;
         }
@@ -154,7 +164,10 @@ struct FakeDewSdk final : alpacacore::vendor::zwo::ZWODewHeaterSdk {
         return true;
     }
     void set_control_value(int, alpacacore::vendor::zwo::ZWOControlType, long value, bool) override { heater = value; }
-    std::string get_serial_number(int) override { return "FAKE1"; }
+    std::string get_serial_number(int id) override {
+        const auto it = serial_by_id.find(id);
+        return it == serial_by_id.end() ? "FAKE1" : it->second;
+    }
 };
 
 void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
@@ -254,4 +267,89 @@ TEST_CASE("ZWO Dew Heater Switch Driver - an index binds the SDK slot, not the l
     auto skipped = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk);
     require_alpaca_error([&]() { skipped->set_connected(true); }, alpacacore::AlpacaError::InvalidValue);
     CHECK_FALSE(skipped->get_connected());
+}
+
+// ---- #1284: Auto, serial and capability refusal on the dew heater's own seam ----
+
+namespace {
+
+alpacacore::vendor::zwo::ZWOCameraInfo dew_camera(int id, int slot, const std::string& name) {
+    alpacacore::vendor::zwo::ZWOCameraInfo cam;
+    cam.camera_id = id;
+    cam.slot_index = slot;
+    cam.name = name;
+    return cam;
+}
+
+// The rig of the bug: an ASI290MM Mini (no heater) at slot 0 beside an ASI2600MM Pro at slot 1.
+void add_mini_and_pro(FakeDewSdk& sdk, bool mini_has_heater) {
+    sdk.cameras = {dew_camera(7, 0, "ZWO ASI290MM Mini"), dew_camera(9, 1, "ZWO ASI2600MM Pro")};
+    sdk.heater_by_id = {{7, mini_has_heater}, {9, true}};
+    sdk.serial_by_id = {{7, "2d0bd20224000900"}, {9, "2e18870f28000900"}};
+}
+
+}  // namespace
+
+TEST_CASE("ZWO Dew Heater Switch Driver - Auto binds the one camera with a heater", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    add_mini_and_pro(sdk, false);
+    auto driver =
+        alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, alpacacore::util::kAutoThermalCamera, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_switch_value(0) == 40.0);
+    CHECK(sdk.last_read_id == 9);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO Dew Heater Switch Driver - a serial binds its camera over a conflicting index", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    add_mini_and_pro(sdk, true);
+    // Saved at index 0, but the serial is the Pro's: after a USB reorder the serial wins.
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk, "2e18870f28000900");
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_switch_value(0) == 40.0);
+    CHECK(sdk.last_read_id == 9);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO Dew Heater Switch Driver - a pinned camera with no heater names the one that has it",
+          "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    add_mini_and_pro(sdk, false);
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk);
+    try {
+        driver->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == static_cast<int>(alpacacore::AlpacaError::NotImplemented));
+        const std::string message = ex.what();
+        CHECK(message.find("ZWO ASI290MM Mini") != std::string::npos);
+        CHECK(message.find("ZWO ASI2600MM Pro") != std::string::npos);
+    }
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("ZWO dew heater binding - a serial wins over cameraId and a bare cameraId binds the id",
+          "[zwo][switch][catalog][unit]") {
+    using alpacacore::catalog::DeviceConfig;
+    DeviceConfig id_only;
+    id_only.set("cameraId", std::int64_t{4});
+    const auto by_id = alpacacore::catalog::zwo_dew_heater_binding(id_only);
+    REQUIRE(by_id.camera_id.has_value());
+    CHECK(*by_id.camera_id == 4);
+
+    DeviceConfig id_and_serial = id_only;
+    id_and_serial.set("cameraIndex", std::int64_t{1});
+    id_and_serial.set("serialNumber", std::string{"2e18870f28000900"});
+    const auto by_serial = alpacacore::catalog::zwo_dew_heater_binding(id_and_serial);
+    CHECK_FALSE(by_serial.camera_id.has_value());
+    CHECK(by_serial.camera_index == 1);
+    CHECK(by_serial.serial == "2e18870f28000900");
+
+    const auto automatic = alpacacore::catalog::zwo_dew_heater_binding(DeviceConfig{});
+    CHECK_FALSE(automatic.camera_id.has_value());
+    CHECK(automatic.camera_index == alpacacore::util::kAutoThermalCamera);
+    CHECK(automatic.serial.empty());
 }

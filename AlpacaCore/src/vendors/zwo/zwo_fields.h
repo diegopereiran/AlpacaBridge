@@ -226,6 +226,26 @@ inline bool zwo_serial_valid(const std::string& text) {
                                             [](char ch) { return std::isxdigit(static_cast<unsigned char>(ch)) != 0; });
 }
 
+// Which camera a dew heater entry binds: a serial wins over cameraId and the
+// index; a bare cameraId (no serial) is the legacy binding by SDK id; otherwise
+// the index, where -1 (the default, and anything below it) is Auto.
+struct ZwoDewHeaterBinding {
+    std::optional<int> camera_id;
+    int camera_index = -1;
+    std::string serial;
+};
+inline ZwoDewHeaterBinding zwo_dew_heater_binding(const DeviceConfig& config) {
+    ZwoDewHeaterBinding binding;
+    binding.serial = config.get(kZwoSwitchSerial);
+    const auto camera_id = static_cast<int>(config.get(kZwoCameraId));
+    if (camera_id >= 0 && binding.serial.empty()) {
+        binding.camera_id = camera_id;
+        return binding;
+    }
+    binding.camera_index = static_cast<int>(std::max<std::int64_t>(config.get(kZwoCameraIndex), kZwoSelectorMin));
+    return binding;
+}
+
 // The switch's cross-field refusals, in the router arm's order. normalize reports
 // them (rejected from the API, warned about for a saved config) and the factory
 // throws the same text, so a saved config normalize could only warn about is

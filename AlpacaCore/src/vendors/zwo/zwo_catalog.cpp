@@ -19,7 +19,6 @@
 // camera therefore has no create_* at all.
 
 #include <alpacacore/util/logging.h>
-#include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
@@ -30,7 +29,6 @@
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
-#include <algorithm>
 #include <optional>
 #include <string>
 
@@ -135,13 +133,9 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
         return vendor::zwo::create_zwo_asiair_switch(device_number, std::move(asiair_config));
     }
 
-    // A serial binds that camera; a bare cameraId is the legacy binding; otherwise
-    // the index, where -1 (the default) is Auto.
-    const int camera_id = static_cast<int>(config.get(kZwoCameraId));
-    const std::string serial = config.get(kZwoSwitchSerial);
-    if (camera_id >= 0 && serial.empty()) return vendor::zwo::create_zwo_dew_heater_switch(device_number, camera_id);
-    return vendor::zwo::create_zwo_dew_heater_switch_by_index(
-        device_number, std::max(static_cast<int>(config.get(kZwoCameraIndex)), util::kAutoThermalCamera), serial);
+    const ZwoDewHeaterBinding binding = zwo_dew_heater_binding(config);
+    if (binding.camera_id) return vendor::zwo::create_zwo_dew_heater_switch(device_number, *binding.camera_id);
+    return vendor::zwo::create_zwo_dew_heater_switch_by_index(device_number, binding.camera_index, binding.serial);
 }
 
 // The camera entry binds by the physical body (#914): the serial, not the
