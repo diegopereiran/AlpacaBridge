@@ -779,6 +779,7 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinates");
+        check_tracking_for_slew_locked("SlewToCoordinates");
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -802,6 +803,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinatesAsync");
+        check_tracking_for_slew_locked("SlewToCoordinatesAsync");
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -1041,6 +1043,40 @@ private:
             slewing_cached_ = false;
         }
         return !complete;
+    }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Read as the Tracking getter does: a failed query is off.
+    // A retarget of this driver's own slew still in flight is not refused: the
+    // TheSkyX docs do not say what IsTracking reads during a GOTO.
+    void check_tracking_for_slew_locked(const char* who) const {
+        if (own_slew_in_flight_locked()) {
+            return;
+        }
+        if (!get_tracking_locked()) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+        }
+    }
+
+    // slewing_cached_ alone is not enough: it stays set until a Slewing read
+    // sees the slew complete, so ask TheSkyX past the force window. A failed
+    // poll proves nothing either way; the IsTracking read then decides.
+    bool own_slew_in_flight_locked() const {
+        if (!slewing_cached_) {
+            return false;
+        }
+        if (clock_.now() < slew_force_until_) {
+            return true;
+        }
+        try {
+            if (!BisqueProtocolWrapper::instance().is_slew_complete()) {
+                return true;
+            }
+            slewing_cached_ = false;
+        } catch (const std::exception&) {
+            return false;  // keep slewing_cached_: a failed poll is not completion
+        }
+        return false;
     }
 
     bool get_tracking_locked() const {
