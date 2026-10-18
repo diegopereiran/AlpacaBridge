@@ -135,8 +135,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
         const speed_t baud = speed == AuxLinkSpeed::Baud9600 ? B9600 : B115200;
         if (::cfsetispeed(&settings, baud) != 0 || ::cfsetospeed(&settings, baud) != 0 ||
             ::tcsetattr(fd, TCSANOW, &settings) != 0) {
-            throw_link_error(std::string("cannot configure ") +
-                             (speed == AuxLinkSpeed::Baud9600 ? "9600" : "115200") +
+            throw_link_error(std::string("cannot configure ") + (speed == AuxLinkSpeed::Baud9600 ? "9600" : "115200") +
                              "-baud serial link: " + util::errno_string(errno));
         }
         if (!util::set_nonblocking(fd)) {
