@@ -5085,6 +5085,18 @@ int main() {
              "has no site latitude and will refuse to connect"},
             {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
 #endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        // Bisque moved into the catalog with the same range rule as Sky-Watcher:
+        // the API text is the catalog's per-field message, and a saved value is
+        // dropped to unset with the wrapped warning while the file entry keeps
+        // 200.0. Bisque has no missing-site refusal, so there is no second WARN.
+        pin("siteLatitude 200 (catalog range message)", "bisque", "telescope", "Telescope",
+            R"({"host":"192.0.2.10","siteLatitude":200.0,"siteLongitude":151.215297})",
+            "siteLatitude is out of range (min -90) (max 90)", "{}", true,
+            R"({"host":"192.0.2.10","siteLatitude":200.0,"siteLongitude":151.215297})",
+            {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted bisque telescope"},
+            {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
+#endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
         // The router-owned arm still words both the API refusal and the saved
         // config's WARN through read_site_coordinates(): short numbers in both.
