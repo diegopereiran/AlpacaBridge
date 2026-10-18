@@ -16,6 +16,7 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/alignment_mode.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
@@ -6969,7 +6970,7 @@ std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
         return std::nullopt;
     }
     std::string mode = config.at("alignmentMode").get<std::string>();
-    if (mode == "auto" || mode == "altaz" || mode == "equatorial") {
+    if (alpacacore::util::is_known_alignment_mode(mode)) {
         return mode;
     }
     return std::nullopt;
@@ -8696,12 +8697,12 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         } else if (version_normalized == "v4" || version_normalized == "4") {
             version = alpacacore::vendor::synscan::SynScanVersion::V4;
         }
-        const std::string alignment_mode = known_alignment_mode(config).value_or("auto");
+        const std::string alignment_mode = known_alignment_mode(config).value_or(std::string(alpacacore::util::kAlignmentModeAuto));
         alpacacore::vendor::synscan::SynScanAlignmentSetting alignment =
             alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto;
-        if (alignment_mode == "altaz") {
+        if (alignment_mode == alpacacore::util::kAlignmentModeAltAz) {
             alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::AltAz;
-        } else if (alignment_mode == "equatorial") {
+        } else if (alignment_mode == alpacacore::util::kAlignmentModeEquatorial) {
             alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::Equatorial;
         }
 

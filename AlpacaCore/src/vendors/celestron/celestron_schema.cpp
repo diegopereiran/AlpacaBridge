@@ -24,6 +24,8 @@
 
 #include <string>
 
+#include <alpacacore/util/alignment_mode.h>
+
 #include "../../catalog/builtin_descriptors.h"
 #include "celestron_fields.h"
 
@@ -41,7 +43,7 @@ NormalizeResult normalize_celestron(const DeviceConfig& in, Source source) {
     // keeps the #860 rule for every caller that does not go through that helper.
     if (in.find(kCelestronAlignmentMode)) {
         const std::string mode = in.get(kCelestronAlignmentMode);
-        if (mode != "auto" && mode != "altaz" && mode != "equatorial") {
+        if (!util::is_known_alignment_mode(mode)) {
             result.config.erase(kCelestronAlignmentMode.key);
         }
     }
