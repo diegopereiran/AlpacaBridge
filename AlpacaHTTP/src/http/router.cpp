@@ -8697,7 +8697,8 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
         } else if (version_normalized == "v4" || version_normalized == "4") {
             version = alpacacore::vendor::synscan::SynScanVersion::V4;
         }
-        const std::string alignment_mode = known_alignment_mode(config).value_or(std::string(alpacacore::util::kAlignmentModeAuto));
+        const std::string alignment_mode =
+            known_alignment_mode(config).value_or(std::string(alpacacore::util::kAlignmentModeAuto));
         alpacacore::vendor::synscan::SynScanAlignmentSetting alignment =
             alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto;
         if (alignment_mode == alpacacore::util::kAlignmentModeAltAz) {

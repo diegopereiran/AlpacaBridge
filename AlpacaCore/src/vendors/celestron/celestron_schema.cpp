@@ -22,9 +22,9 @@
 // endpoint is warned about and kept. An unknown alignmentMode is dropped from
 // either source and reads as "auto" (#860).
 
-#include <string>
-
 #include <alpacacore/util/alignment_mode.h>
+
+#include <string>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "celestron_fields.h"
