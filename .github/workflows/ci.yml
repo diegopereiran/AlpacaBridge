@@ -683,6 +683,8 @@ jobs:
           sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
       - name: Wrap the compilers like build-vendors
+        # Keep paired with CCACHE_COMPILERCHECK=content and the restore below:
+        # without the wrappers every lookup misses, silently.
         run: .github/scripts/coverage-compilers.sh
 
       - name: Restore the compiler cache
