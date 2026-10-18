@@ -274,6 +274,9 @@ public:
             position = max_step;
         }
         const std::uint32_t raw = high_limit_.load() - static_cast<std::uint32_t>(position);
+        // A lost poll reply must not fail this Move until the next poll; the
+        // resync only flushes, so a timed-out GOTO is still never resent.
+        resync_if_needed();
         exchange(kGotoFast, {static_cast<std::uint8_t>(raw >> 16), static_cast<std::uint8_t>(raw >> 8),
                              static_cast<std::uint8_t>(raw)});
         // Write-through: IsMoving reads true right after a successful Move.
@@ -334,8 +337,8 @@ private:
                 }
             }
         } catch (const std::exception&) {
-            ALPACA_LOG_WARN("Celestron", "Focuser firmware query failed");
-            resync_if_needed();
+            ALPACA_LOG_WARN("Celestron", "Focuser firmware query failed; resynchronizing the link");
+            resync_if_needed();  // a failed flush closes the link and fails the connect
         }
         std::lock_guard<std::mutex> lock(firmware_mutex_);
         firmware_ = text;
