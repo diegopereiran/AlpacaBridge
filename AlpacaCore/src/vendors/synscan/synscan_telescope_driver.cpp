@@ -318,7 +318,7 @@ public:
     // polls this getter from the PUT connected wait and from every GET
     // connected in between. Taking mutex_ here made those calls block for the
     // entire connect (25 s measured against a silent hand controller: five
-    // 5 s timeouts), so the router's 8 s deadline never fired and clients
+    // 5 s timeouts), so the router's connect wait limit never fired and clients
     // reported "Dynamic client timeout for method Connected" (issue #130).
     // Same atomic-flag pattern as every other AsyncConnectable driver except
     // the telescopes and the wrapper-backed switches named in
