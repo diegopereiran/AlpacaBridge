@@ -17,13 +17,13 @@ the case's own name or tags say the helper is the subject (`Fake*`, `PtyPair`,
 What counts as a new case (read from `git diff <merge-base>...HEAD`):
   * Catch2: a registration macro (the `CATCH_TEST_MACROS` tuple of
     `check_stress_registration.py`, comments stripped the same way) whose name
-    is absent from every test file at the merge-base. A moved case is not new;
-    a renamed one is.
+    is absent from that file at the merge-base, unless the base declared it in
+    a file that no longer does (a moved case). A renamed case is new.
   * AlpacaHTTP hand-rolled tests: an added top-level block in `main()` (a line
     that is exactly `    {`) must open with `// case: <name>`; the name is then
     treated like a Catch2 name.
   * `AlpacaHTTP/tests/web/*.test.js`: `test('<name>', ...)` calls whose name is
-    absent from the merge-base web tests.
+    absent from that file at the merge-base, with the same moved-case allowance.
   * Parameterised cases (`GENERATE`, `TEMPLATE_TEST_CASE`) take one line per
     case, not per instance. Contract-sweep cases generated from registry rows
     are exempt: they are not macro registrations.
@@ -44,6 +44,10 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# check_stress_registration.py exports names with a leading underscore on purpose
+# (_STRING_LITERAL_RUN): this script imports them so both read test-case
+# declarations with one literal-run pattern. Renaming or removing one there
+# breaks this import, so change both files together.
 from check_stress_registration import (  # noqa: E402
     _STRING_LITERAL_RUN,
     STRING_LITERAL_RE,
@@ -306,15 +310,32 @@ def new_cases_in(path, text, base_names, diff_for_path):
     return {n: t for n, t in found.items() if n not in base_names}, errors
 
 
+def moved_case_names(base_by_path, head_by_path):
+    """Names the base declares in a file that no longer declares them at HEAD.
+
+    A case cut from one file and pasted into another (or carried along by a
+    renamed or deleted file) is moved, not new. A name that merely also exists
+    in a file that still declares it is not moved: a new case named like it is
+    new."""
+    moved = set()
+    for path, names in base_by_path.items():
+        moved |= set(names) - set(head_by_path.get(path, ()))
+    return moved
+
+
 def gather_new_cases(base):
-    """(new, errors, head_cases) for the diff `base...HEAD`."""
+    """(new, errors, head_cases) for the diff `base...HEAD`.
+
+    Base names are kept per path, so a new case named like a case that stays in
+    another file is still new (a single set across all files hid it)."""
     changed = set(git("diff", "-z", "--name-only", "--diff-filter=AMR", base + "...HEAD").split("\0"))
-    base_names = set()
+    base_by_path = {}
     for path in git("ls-tree", "-r", "-z", "--name-only", base, "--", "AlpacaCore/tests", "AlpacaHTTP/tests").split("\0"):
         if not path:
             continue
-        base_names.update(case_names_in(path, git("show", "%s:%s" % (base, path), check=False)))
+        base_by_path[path] = set(case_names_in(path, git("show", "%s:%s" % (base, path), check=False)))
     new, errors, head_cases = {}, [], {}
+    head_by_path, head_texts = {}, {}
     for path in git("ls-files", "-z", "AlpacaCore/tests", "AlpacaHTTP/tests").split("\0"):
         if not path:
             continue
@@ -323,9 +344,14 @@ def gather_new_cases(base):
             continue
         with open(full, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
-        head_cases.update(case_names_in(path, text))
+        head_texts[path] = text
+        head_by_path[path] = case_names_in(path, text)
+        head_cases.update(head_by_path[path])
+    moved = moved_case_names(base_by_path, head_by_path)
+    for path, text in head_texts.items():
         if path in changed:
-            found, errs = new_cases_in(path, text, base_names,
+            known = base_by_path.get(path, set()) | moved
+            found, errs = new_cases_in(path, text, known,
                                        lambda p=path: git("diff", "-U0", base + "...HEAD", "--", p))
             new.update(found)
             errors.extend(errs)
@@ -402,10 +428,15 @@ def moved_base_self_test():
         try:
             git("init", "-q", "-b", "trunk")
             commit("base", "test_a.cpp", "Old")
+            commit("base m", "test_m.cpp", "Mover")
             opened = sha()
             git("checkout", "-q", "-b", "pr")
             commit("pr", "test_a.cpp", "Old", "Mine")
             commit("pr again", "test_c.cpp", "Mine2")
+            commit("pr same name elsewhere", "test_d.cpp", "Old")
+            # "Mover" is cut from test_m.cpp and pasted into test_n.cpp: moved, not new.
+            commit("pr move out", "test_m.cpp")
+            commit("pr move in", "test_n.cpp", "Mover")
             git("checkout", "-q", "trunk")
             commit("other pr", "test_b.cpp", "Other")
             # refs/pull/N/merge: first parent the moved base tip, second the PR head.
@@ -414,15 +445,15 @@ def moved_base_self_test():
                             "merge", "-q", "--no-ff", "-m", "merge", "pr"], capture_output=True)
             old = gather_new_cases(resolve_base(opened))[0]
             new = gather_new_cases(resolve_base(MERGE_PARENT))[0]
-            if set(old) != {"Mine", "Mine2", "Other"}:
+            if set(old) != {"Mine", "Mine2", "Other", "Old"}:
                 failures.append("moved base: old base.sha choice flags the other PR's case")
-            if set(new) != {"Mine", "Mine2"}:
+            if set(new) != {"Mine", "Mine2", "Old"}:
                 failures.append("moved base: merge-parent base flags only this PR's cases")
             # Not a merge commit: falls back to the defaults (main here). The PR has two
             # commits, so HEAD^1 would drop Mine and a dropped HEAD^2 guard shows.
             git("branch", "main", opened)
             git("checkout", "-q", "-B", "plain", "pr")
-            if set(gather_new_cases(resolve_base(MERGE_PARENT))[0]) != {"Mine", "Mine2"}:
+            if set(gather_new_cases(resolve_base(MERGE_PARENT))[0]) != {"Mine", "Mine2", "Old"}:
                 failures.append("merge-parent falls back when HEAD is not a merge commit")
         except Exception as exc:  # noqa: BLE001
             failures.append("moved base scratch repo: %s" % exc)
@@ -469,6 +500,13 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     moved, _e = new_cases_in(cpp, '// moved\nTEST_CASE("Old name", "[x]") {}', base_names, nodiff)
     renamed, _e = new_cases_in(cpp, 'TEST_CASE("Old name 2", "[x]") {}', base_names, nodiff)
     check("moved case is not new", not moved)
+    # Per-path base: a name still declared in another base file does not hide a new case.
+    check("moved: cut from a file that dropped it",
+          moved_case_names({"a.cpp": {"X", "Y"}}, {"a.cpp": {"Y"}, "b.cpp": {"X"}}) == {"X"})
+    check("moved: deleted or renamed file carries its names",
+          moved_case_names({"a.cpp": {"X"}}, {"c.cpp": {"X"}}) == {"X"})
+    check("same name kept in its own file is not moved",
+          moved_case_names({"a.cpp": {"X"}}, {"a.cpp": {"X"}, "b.cpp": {"X"}}) == set())
     check("renamed case is new", set(renamed) == {"Old name 2"})
     wjs = "AlpacaHTTP/tests/web/a.test.js"
     wbase = set(case_names_in(wjs, "test('old web', () => {});"))
