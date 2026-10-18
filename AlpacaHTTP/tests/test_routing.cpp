@@ -4166,6 +4166,68 @@ int main() {
         EXPECT(lon_only);
     }
     {
+        // case: persisted deviceType with a control byte is escaped in the log
+        // sanitize_device_config() logs the deviceType of an entry the catalog
+        // does not recognise, and only the persisted-config load reaches it with
+        // text the file's author chose: a control byte must be logged as \xNN.
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::string original;
+        if (std::filesystem::exists(persisted)) {
+            std::ifstream in(persisted);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        const auto restore_original = [&] {
+            std::ofstream restore(persisted, std::ios::trunc);
+            restore << (original.empty() ? std::string("[]") : original);
+        };
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "bisque"},
+                                           {"deviceType", std::string("tele\x1b[31mscope")},
+                                           {"deviceNumber", 9711}}})
+                       .dump();
+        }
+        std::vector<std::string> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(message);
+            });
+        {
+            alpacahttp::Router startup_router;
+            route_request(startup_router, "GET", "/management/v1/configureddevices");
+        }
+        alpacacore::logging::set_log_sink(logging_restore.sink);
+        restore_original();
+        bool escaped_logged = false;
+        bool raw_logged = false;
+        {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            for (const auto& line : captured) {
+                if (line.find("sanitize_device_config: device type \"tele\\x1b[31mscope\"") != std::string::npos) {
+                    escaped_logged = true;
+                }
+                if (line.find('\x1b') != std::string::npos) {
+                    raw_logged = true;
+                    std::cerr << "raw ESC in log line: " << line << "\n";
+                }
+            }
+        }
+        EXPECT(escaped_logged);
+        EXPECT(!raw_logged);
+    }
+    {
         // Issue #380: the portPath / host / connectionType checks follow the
         // same source rule as the site-coordinate check above. All three used
         // to `return false` regardless of source, so a persisted entry with an
