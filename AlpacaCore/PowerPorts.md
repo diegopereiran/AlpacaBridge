@@ -252,7 +252,7 @@ The value of the toggled pin will flip between `inactive` and `active`.
 
 ### Advanced configuration, disconnect behavior, and stock-app coexistence
 
-All identical to the Pi 4 ASIair Pro — see [Advanced configuration](#advanced-configuration), [Disconnect behavior](#disconnect-behavior--important-for-unattended-observatories), and [Coexistence with the stock ZWO app](#coexistence-with-the-stock-zwo-app) above. In short: per-port overrides use the same `gpioChip` / `pwmFrequencyHz` / `ports[]` schema; released lines keep their last-driven state (so set ports OFF in your client before disconnecting if you want a cold release); and you cannot run AlpacaBridge alongside the factory ASIair app, because the stock `zwoair_imager` claims the lines via `pigpiod` and libgpiod will fail with `EBUSY`.
+All identical to the Pi 4 ASIair Pro — see [Advanced configuration](#advanced-configuration), [Disconnect behavior](#disconnect-behavior--important-for-unattended-observatories), and [Coexistence with the stock ZWO app](#coexistence-with-the-stock-zwo-app) above. In short: per-port overrides use the same `pwmFrequencyHz` / `ports[]` schema (`gpioChip` is fixed at `/dev/gpiochip0`); released lines keep their last-driven state (so set ports OFF in your client before disconnecting if you want a cold release); and you cannot run AlpacaBridge alongside the factory ASIair app, because the stock `zwoair_imager` claims the lines via `pigpiod` and libgpiod will fail with `EBUSY`.
 
 ---
 
@@ -463,7 +463,7 @@ Any of the four ports can be switched from plain on/off to **soft-PWM dimming** 
 
 > **Frequency matters for panels.** A flat panel has its own LED driver with an input capacitor. At a **low frequency** the driver fully powers the LEDs during each on-period and goes dark during each off-period, so the panel visibly dims. **100 Hz tested best on the StellaVita** — it dims smoothly without the visible flicker some panels show at 50 Hz, which is why it is the default. At **~1 kHz** the input cap smooths the chopping into a steady reduced voltage that the driver gates on/off instead of dimming (a panel may just blink off). **Resistive loads (dew heaters) dim at any frequency.** Truly regulated gear — cameras, mounts — should stay on/off regardless.
 
-The defaults match the StellaVita wiring. The configurable fields are the GPIO chip, the PWM frequency, and the per-port name / PWM flags (the GPIO line mapping is fixed):
+The defaults match the StellaVita wiring. The configurable fields are the PWM frequency and the per-port name / PWM flags (the GPIO chip is fixed at `/dev/gpiochip0` and the line mapping is fixed):
 
 ```json
 {
