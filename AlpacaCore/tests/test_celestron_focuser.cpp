@@ -305,6 +305,36 @@ TEST_CASE("Celestron Focuser Driver - a getter right after a connect whose first
     driver->set_connected(false);
 }
 
+TEST_CASE("Celestron Focuser Driver - Halt and Move resynchronize a timed-out link first",
+          "[celestron][focuser][unit][fake]") {
+    // One lost poll reply leaves the AUX stream desynchronized until the next
+    // poll. Halt is the safety stop and must still reach the motor; Move must
+    // not fail on the stale state either. Neither resends a timed-out frame.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    fake.set_muted(true);
+    tick(clock);  // this poll times out: the link is now desynchronized
+    fake.set_muted(false);
+
+    driver->halt();
+    CHECK(fake.count(0x24) == 1);
+
+    fake.set_muted(true);
+    tick(clock);
+    fake.set_muted(false);
+
+    driver->move(5000);
+    REQUIRE(fake.last_goto().has_value());
+    CHECK(*fake.last_goto() == 56000U);
+    CHECK(fake.count(0x02) == 1);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron Focuser Driver - a silent motor faults the link and a reply restores it",
           "[celestron][focuser][unit][fake]") {
     FakeCelestronFocuser fake;
