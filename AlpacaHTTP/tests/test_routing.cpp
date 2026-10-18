@@ -4166,6 +4166,60 @@ int main() {
         EXPECT(lon_only);
     }
     {
+        // case: persisted deviceType with a control byte is escaped in the log
+        // sanitize_device_config() logs the deviceType of an entry the catalog
+        // does not recognise, and only the persisted-config load reaches it with
+        // text the file's author chose: a control byte must be logged as \xNN.
+        // Scratch working directory: the real config is never written.
+        const ScopedCwd scratch;
+        const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(persisted.parent_path());
+        {
+            std::ofstream out(persisted, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "bisque"},
+                                           {"deviceType", std::string("tele\x1b[31mscope")},
+                                           {"deviceNumber", 9711}}})
+                       .dump();
+        }
+        std::vector<std::string> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.emplace_back(message);
+            });
+        {
+            alpacahttp::Router startup_router;
+            route_request(startup_router, "GET", "/management/v1/configureddevices");
+        }
+        alpacacore::logging::set_log_sink(logging_restore.sink);
+        bool escaped_logged = false;
+        bool raw_logged = false;
+        {
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            for (const auto& line : captured) {
+                if (line.find("sanitize_device_config: device type \"tele\\x1b[31mscope\"") != std::string::npos) {
+                    escaped_logged = true;
+                }
+                if (line.find('\x1b') != std::string::npos) {
+                    raw_logged = true;
+                    std::cerr << "raw ESC in log line: " << line << "\n";
+                }
+            }
+        }
+        EXPECT(escaped_logged);
+        EXPECT(!raw_logged);
+    }
+    {
         // Issue #380: the portPath / host / connectionType checks follow the
         // same source rule as the site-coordinate check above. All three used
         // to `return false` regardless of source, so a persisted entry with an
@@ -5021,6 +5075,18 @@ int main() {
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
             {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
              "has no site latitude and will refuse to connect"},
+            {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+        // Bisque moved into the catalog with the same range rule as Sky-Watcher:
+        // the API text is the catalog's per-field message, and a saved value is
+        // dropped to unset with the wrapped warning while the file entry keeps
+        // 200.0. Bisque has no missing-site refusal, so there is no second WARN.
+        pin("siteLatitude 200 (catalog range message)", "bisque", "telescope", "Telescope",
+            R"({"host":"192.0.2.10","siteLatitude":200.0,"siteLongitude":151.215297})",
+            "siteLatitude is out of range (min -90) (max 90)", "{}", true,
+            R"({"host":"192.0.2.10","siteLatitude":200.0,"siteLongitude":151.215297})",
+            {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted bisque telescope"},
             {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON

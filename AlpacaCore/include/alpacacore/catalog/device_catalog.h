@@ -45,6 +45,9 @@ public:
 
     // Every key with a factory, in insertion order, schema or not: a factory whose
     // schema was never added is unreachable, and describe() cannot show it.
+    // For diagnostics and tests (the contract sweep reads it); it is not a
+    // runtime availability API, so a caller must not ask it whether a device
+    // can be created. Use describe() for what the server offers.
     std::vector<DeviceKey> factory_keys() const;
 
     // Per-field rules (required, default, enum, range; record lists recurse and

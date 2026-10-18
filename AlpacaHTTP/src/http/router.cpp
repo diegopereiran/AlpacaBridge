@@ -10479,7 +10479,11 @@ void Router::load_persisted_devices() {
         try {
             nlohmann::json learned_config = nlohmann::json::object();
             if (!register_device_from_config(entry, error_message, ConfigSource::Persisted, &learned_config)) {
-                util::log_warning("Skipping persisted device: " + error_message);
+                // The message can quote the saved vendor / deviceType; the file is
+                // outside the server's control, so escape it (no cut: the whole
+                // message is the diagnosis).
+                util::log_warning("Skipping persisted device: " +
+                                  util::escape_for_log(error_message, error_message.size()));
             } else if (!learned_config.empty()) {
                 // #914: what the registration learned about the device (a ZWO
                 // camera's serial, model name, UniqueID) goes back into the
