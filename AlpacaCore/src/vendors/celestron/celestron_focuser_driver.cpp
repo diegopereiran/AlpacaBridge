@@ -286,8 +286,9 @@ private:
 
     std::vector<std::uint8_t> exchange(std::uint8_t command, std::vector<std::uint8_t> payload = {}) {
         return protocol_
-            .exchange(AuxFrame{.source = kApp, .destination = kFocuser, .command = command, .payload = std::move(payload)},
-                      kExchangeTimeout)
+            .exchange(
+                AuxFrame{.source = kApp, .destination = kFocuser, .command = command, .payload = std::move(payload)},
+                kExchangeTimeout)
             .payload;
     }
 
@@ -303,16 +304,15 @@ private:
     void read_limits() {
         const auto reply = exchange(kGetLimits);
         if (reply.size() != 8) {
-            throw AlpacaException("Celestron focuser: limit query returned " + std::to_string(reply.size()) +
-                                      " bytes, expected 8",
-                                  AlpacaError::DriverException);
+            throw AlpacaException(
+                "Celestron focuser: limit query returned " + std::to_string(reply.size()) + " bytes, expected 8",
+                AlpacaError::DriverException);
         }
         const std::uint32_t low = read_be(reply, 0, 4);
         const std::uint32_t high = read_be(reply, 4, 4);
         if (high <= low || high > kMaxRawPosition) {
             throw AlpacaException(
-                "Celestron focus motor is not calibrated (limits " + std::to_string(low) + ".." +
-                    std::to_string(high) +
+                "Celestron focus motor is not calibrated (limits " + std::to_string(low) + ".." + std::to_string(high) +
                     "); run the calibration from the hand control or the Celestron Focuser Utility, then connect again",
                 AlpacaError::DriverException);
         }

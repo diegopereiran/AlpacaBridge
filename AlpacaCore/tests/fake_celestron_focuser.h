@@ -136,15 +136,16 @@ private:
             if (request.destination != 0x12) continue;
             const auto payload = respond(request);
             if (!payload || muted_.load()) continue;
-            const auto bytes = encode_aux_frame(
-                AuxFrame{.source = 0x12, .destination = request.source, .command = request.command, .payload = *payload});
+            const auto bytes = encode_aux_frame(AuxFrame{
+                .source = 0x12, .destination = request.source, .command = request.command, .payload = *payload});
             static_cast<void>(
                 pty_write_bounded(pty_.master_fd(), reinterpret_cast<const char*>(bytes.data()), bytes.size(), stop_));
         }
     }
 
     static void put_be(std::vector<std::uint8_t>& out, std::uint32_t value, int bytes) {
-        for (int shift = (bytes - 1) * 8; shift >= 0; shift -= 8) out.push_back(static_cast<std::uint8_t>(value >> shift));
+        for (int shift = (bytes - 1) * 8; shift >= 0; shift -= 8)
+            out.push_back(static_cast<std::uint8_t>(value >> shift));
     }
 
     std::optional<std::vector<std::uint8_t>> respond(const alpacacore::vendor::celestron::AuxFrame& request) {

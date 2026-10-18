@@ -30,7 +30,7 @@
 #include "fake_task_clock.h"
 #endif
 
-using alpacacore::AlpacaError;
+namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::vendor::celestron::create_celestron_focuser;
 using namespace std::chrono_literals;
 
