@@ -58,7 +58,11 @@ namespace alpacacore::util {
  *        Every read waits on poll(POLLIN) for the time left before the
  *        deadline, so the bound holds even on a USB-serial adapter that
  *        ignores VMIN/VTIME, where a bare read() on a silent port parks
- *        forever (#836). The fd may be blocking or non-blocking.
+ *        forever (#836). Pass a NON-blocking fd for a hard bound: on a
+ *        blocking fd the bound is complete only in the common case, because
+ *        such an adapter can report a spurious "readable" from poll() and the
+ *        read() that follows then parks with no deadline. The fd is accepted
+ *        either way.
  *
  * Strict, and tolerant of noise ahead of the real reply: only an exact
  * `#`-terminated token that is the echoed byte followed by '#' counts as a
@@ -150,6 +154,8 @@ inline bool port_answers_synscan_echo(const std::string& port_path, int timeout_
     tty.c_cflag &= ~CRTSCTS;
     tty.c_cflag &= ~HUPCL;  // do not drop DTR on close: some adapters reset the far end on it
     tty.c_cc[VMIN] = 0;
+    // VMIN/VTIME only shape a blocking read, and the fd is made non-blocking
+    // below, so VTIME is inert here; the echo helper's poll() is the timeout.
     tty.c_cc[VTIME] = 1;
     // Stay non-blocking, as the Sky-Watcher ":e1" probe does: the echo
     // helper's poll() bounds the wait, and a read after a spurious
