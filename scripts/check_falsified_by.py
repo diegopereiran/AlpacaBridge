@@ -44,6 +44,10 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# check_stress_registration.py exports names with a leading underscore on purpose
+# (_STRING_LITERAL_RUN): this script imports them so both read test-case
+# declarations with one literal-run pattern. Renaming or removing one there
+# breaks this import, so change both files together.
 from check_stress_registration import (  # noqa: E402
     _STRING_LITERAL_RUN,
     STRING_LITERAL_RE,
