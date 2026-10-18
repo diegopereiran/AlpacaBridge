@@ -100,9 +100,9 @@ TEST_CASE("Celestron CGX AUX link - resync clears a timeout but never reopens a 
     link.connect_serial(fake.slave_path());
 
     fake.set_muted(true);
-    CHECK_THROWS_AS(link.get_axis_position(alpacacore::vendor::celestron::CgxAxis::RightAscension,
-                                           std::chrono::milliseconds(50)),
-                    alpacacore::AlpacaException);
+    CHECK_THROWS_AS(
+        link.get_axis_position(alpacacore::vendor::celestron::CgxAxis::RightAscension, std::chrono::milliseconds(50)),
+        alpacacore::AlpacaException);
     REQUIRE_FALSE(link.is_healthy());
     fake.set_muted(false);
     link.resync();

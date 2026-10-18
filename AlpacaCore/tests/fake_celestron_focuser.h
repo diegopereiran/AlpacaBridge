@@ -66,6 +66,11 @@ public:
         version_ = std::move(version);
     }
     void set_muted(bool muted) { muted_.store(muted); }
+    // One-shot: the next request with this command gets no reply (a lost frame).
+    void drop_next_reply(std::uint8_t command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        drop_next_ = command;
+    }
 
     // Finishes the motion a GOTO started: the encoder reaches the target.
     void complete_move() {
@@ -135,12 +140,19 @@ private:
             buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(size));
             if (request.destination != 0x12) continue;
             const auto payload = respond(request);
-            if (!payload || muted_.load()) continue;
+            if (!payload || muted_.load() || take_drop(request.command)) continue;
             const auto bytes = encode_aux_frame(AuxFrame{
                 .source = 0x12, .destination = request.source, .command = request.command, .payload = *payload});
             static_cast<void>(
                 pty_write_bounded(pty_.master_fd(), reinterpret_cast<const char*>(bytes.data()), bytes.size(), stop_));
         }
+    }
+
+    bool take_drop(std::uint8_t command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (drop_next_ != command) return false;
+        drop_next_.reset();
+        return true;
     }
 
     static void put_be(std::vector<std::uint8_t>& out, std::uint32_t value, int bytes) {
@@ -185,6 +197,7 @@ private:
     std::uint32_t raw_ = 30000;
     std::optional<std::uint32_t> target_;
     std::optional<std::uint32_t> last_goto_;
+    std::optional<std::uint8_t> drop_next_;
     std::vector<std::uint8_t> version_{7, 11, 0x0b, 0xb8};
     std::vector<alpacacore::vendor::celestron::AuxFrame> requests_;
     std::atomic<bool> muted_{false};

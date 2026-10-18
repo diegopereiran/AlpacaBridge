@@ -85,7 +85,8 @@ inline const std::vector<FieldRef>& celestron_telescope_fields() {
 
 // Celestron Focus Motor on its own USB port (issue #896): an explicit port
 // only, no auto-detect (the motor's USB descriptors are not verified yet).
-inline const Field<std::string> kCelestronFocuserPortPath{.key = "portPath", .default_value = "", .role = Role::PortPath};
+inline const Field<std::string> kCelestronFocuserPortPath{
+    .key = "portPath", .default_value = "", .role = Role::PortPath};
 
 inline const std::vector<FieldRef>& celestron_focuser_fields() {
     static const std::vector<FieldRef> fields{kCelestronFocuserPortPath.ref()};

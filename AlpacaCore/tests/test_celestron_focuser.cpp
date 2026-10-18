@@ -286,6 +286,25 @@ TEST_CASE("Celestron Focuser Driver - unsupported members report not implemented
     driver->set_connected(false);
 }
 
+TEST_CASE("Celestron Focuser Driver - a getter right after a connect whose first poll was lost measures the motor",
+          "[celestron][focuser][unit][fake]") {
+    // The connect's first poll can publish nothing: its reply is lost, or a
+    // racing Move/Halt write-through drops the frame (the [stress] case found
+    // this). Connected is true by then, so a getter must not answer "state
+    // not available yet"; it measures the motor itself.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.drop_next_reply(0x13);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_position() == 31000);
+    CHECK(driver->get_is_moving() == false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron Focuser Driver - a silent motor faults the link and a reply restores it",
           "[celestron][focuser][unit][fake]") {
     FakeCelestronFocuser fake;

@@ -77,7 +77,7 @@ std::uint32_t read_be(const std::vector<std::uint8_t>& bytes, std::size_t offset
 
 }  // namespace
 
-class CelestronFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
+class CelestronFocuserDriver final : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
@@ -96,7 +96,9 @@ public:
         state_poll_.cancel_all_and_join();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                // Qualified: virtual dispatch is gone in a destructor anyway;
+                // saying so explicitly keeps clang-analyzer's VirtualCall happy.
+                CelestronFocuserDriver::set_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Celestron", "Error during focuser destruction: " + std::string(e.what()));
             }
