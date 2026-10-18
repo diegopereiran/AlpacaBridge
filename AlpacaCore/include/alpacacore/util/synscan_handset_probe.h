@@ -58,7 +58,11 @@ namespace alpacacore::util {
  *        Every read waits on poll(POLLIN) for the time left before the
  *        deadline, so the bound holds even on a USB-serial adapter that
  *        ignores VMIN/VTIME, where a bare read() on a silent port parks
- *        forever (#836). The fd may be blocking or non-blocking.
+ *        forever (#836). Pass a NON-blocking fd for a hard bound: on a
+ *        blocking fd the bound is complete only in the common case, because
+ *        such an adapter can report a spurious "readable" from poll() and the
+ *        read() that follows then parks with no deadline. The fd is accepted
+ *        either way.
  *
  * Strict, and tolerant of noise ahead of the real reply: only an exact
  * `#`-terminated token that is the echoed byte followed by '#' counts as a
