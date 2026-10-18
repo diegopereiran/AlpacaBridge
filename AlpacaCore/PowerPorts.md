@@ -81,7 +81,7 @@ Open `http://<your-asiair-ip>:11111/` in a browser:
 3. **Vendor**: ZWO
 4. **Switch Type**: **ASIair Pro 12V Power Switch**
 5. **Device Number**: 0 (or any unique number)
-6. **Power Ports** table appears with the four ports pre-filled to the Pi 4 ASIair Pro defaults. Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Rename channels in the **Channel name** column if you want NINA to label them by role (e.g. "Mount", "Dew Heater"). Leave **GPIO chip device** and **PWM frequency** at their defaults unless you know you need to override them.
+6. **Power Ports** table appears with the four ports pre-filled to the Pi 4 ASIair Pro defaults. Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Rename channels in the **Channel name** column if you want NINA to label them by role (e.g. "Mount", "Dew Heater"). The **GPIO chip device** is fixed at `/dev/gpiochip0` and its field is read-only; only the **PWM frequency** can change.
 7. Submit
 
 Or `POST` the equivalent JSON to the management API:
@@ -226,7 +226,7 @@ Open `http://<your-asiair-plus-ip>:11111/` in a browser:
 3. **Vendor**: ZWO
 4. **Switch Type**: **ASIair Pro 12V Power Switch** — this is the libgpiod driver, and it serves both the Pi 4 Pro and the CM4 Plus. The pre-filled GPIO defaults (12/13/26/18) are already correct for the CM4 Plus; leave them as-is.
 5. **Device Number**: 0 (or any unique number)
-6. In the **Power Ports** table, tick the **PWM** checkbox on any port you'll use with a dew heater or flat panel, and rename channels to taste. Leave **GPIO chip device** and **PWM frequency** at their defaults.
+6. In the **Power Ports** table, tick the **PWM** checkbox on any port you'll use with a dew heater or flat panel, and rename channels to taste. The **GPIO chip device** is fixed at `/dev/gpiochip0` and its field is read-only; only the **PWM frequency** can change.
 7. Submit
 
 Or `POST` the equivalent JSON to the management API:
@@ -252,7 +252,7 @@ The value of the toggled pin will flip between `inactive` and `active`.
 
 ### Advanced configuration, disconnect behavior, and stock-app coexistence
 
-All identical to the Pi 4 ASIair Pro — see [Advanced configuration](#advanced-configuration), [Disconnect behavior](#disconnect-behavior--important-for-unattended-observatories), and [Coexistence with the stock ZWO app](#coexistence-with-the-stock-zwo-app) above. In short: per-port overrides use the same `gpioChip` / `pwmFrequencyHz` / `ports[]` schema; released lines keep their last-driven state (so set ports OFF in your client before disconnecting if you want a cold release); and you cannot run AlpacaBridge alongside the factory ASIair app, because the stock `zwoair_imager` claims the lines via `pigpiod` and libgpiod will fail with `EBUSY`.
+All identical to the Pi 4 ASIair Pro — see [Advanced configuration](#advanced-configuration), [Disconnect behavior](#disconnect-behavior--important-for-unattended-observatories), and [Coexistence with the stock ZWO app](#coexistence-with-the-stock-zwo-app) above. In short: per-port overrides use the same `pwmFrequencyHz` / `ports[]` schema (`gpioChip` is fixed at `/dev/gpiochip0`); released lines keep their last-driven state (so set ports OFF in your client before disconnecting if you want a cold release); and you cannot run AlpacaBridge alongside the factory ASIair app, because the stock `zwoair_imager` claims the lines via `pigpiod` and libgpiod will fail with `EBUSY`.
 
 ---
 
@@ -432,7 +432,7 @@ Open `http://<your-stellavita-ip>:11111/` in a browser:
 2. **Device Type**: Switch
 3. **Vendor**: ToupTek
 4. **Device Number**: 0 (or any unique number)
-5. The **Power Ports** table appears pre-filled with the four StellaVita ports (Port 1–4, GPIO 18/10/17/4). Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Leave **GPIO Chip** (`/dev/gpiochip0`) and **PWM Frequency** at their defaults unless you know you need to override them.
+5. The **Power Ports** table appears pre-filled with the four StellaVita ports (Port 1–4, GPIO 18/10/17/4). Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. The **GPIO Chip** is fixed at `/dev/gpiochip0` (the server refuses any other chip); only the **PWM Frequency** can change.
 6. Submit
 
 Or `POST` the equivalent JSON to the management API:
@@ -463,7 +463,7 @@ Any of the four ports can be switched from plain on/off to **soft-PWM dimming** 
 
 > **Frequency matters for panels.** A flat panel has its own LED driver with an input capacitor. At a **low frequency** the driver fully powers the LEDs during each on-period and goes dark during each off-period, so the panel visibly dims. **100 Hz tested best on the StellaVita** — it dims smoothly without the visible flicker some panels show at 50 Hz, which is why it is the default. At **~1 kHz** the input cap smooths the chopping into a steady reduced voltage that the driver gates on/off instead of dimming (a panel may just blink off). **Resistive loads (dew heaters) dim at any frequency.** Truly regulated gear — cameras, mounts — should stay on/off regardless.
 
-The defaults match the StellaVita wiring. The configurable fields are the GPIO chip, the PWM frequency, and the per-port name / PWM flags (the GPIO line mapping is fixed):
+The defaults match the StellaVita wiring. The configurable fields are the PWM frequency and the per-port name / PWM flags (the GPIO chip is fixed at `/dev/gpiochip0` and the line mapping is fixed):
 
 ```json
 {

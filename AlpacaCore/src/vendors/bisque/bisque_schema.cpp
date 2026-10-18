@@ -13,7 +13,9 @@
 // The Bisque / Paramount (TheSkyX) telescope schema. No vendor header:
 // compiles in every build (including vendors-OFF). The display name's first
 // word is the router's vendor_label(), so it keeps "Bisque support not
-// enabled ..." and "Registered Bisque telescope" as the arm spelled them.
+// enabled ..." as the arm spelled it. The registration log line now reads
+// "Registered Bisque telescope"; the old arm logged "Registered
+// Bisque/Paramount telescope".
 //
 // One cross-field rule: an empty host. The API is refused; a saved config is
 // registered with a warning so it stays listed and editable in the web UI.

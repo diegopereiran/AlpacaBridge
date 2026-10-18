@@ -164,6 +164,7 @@ CATCH_TEST_MACROS = (
 # Longest first, so TEST_CASE cannot shadow TEST_CASE_METHOD in the alternation.
 _MACRO_ALTERNATION = "|".join(
     re.escape(m) for m in sorted(CATCH_TEST_MACROS, key=len, reverse=True))
+# Underscore-prefixed but imported by check_falsified_by.py: renaming or removing it breaks that script.
 _STRING_LITERAL_RUN = r'(?:"(?:[^"\\]|\\.)*"\s*)+'
 
 # The description is matched as one or more adjacent string literals

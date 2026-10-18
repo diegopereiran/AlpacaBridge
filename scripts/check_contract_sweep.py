@@ -73,6 +73,8 @@ GUARD_OVERRIDE = {
 BACKEND_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
 FACTORY_RE = re.compile(r"::(?P<f>create_[a-z0-9_]+)\s*\(")
+# The vendor id of a catalog file's key: DeviceKey{"<vendor>", DeviceType::X}.
+DEVICE_KEY_VENDOR_RE = re.compile(r'\bDeviceKey\s*\{\s*"(?P<v>[^"]*)"')
 # Constructs the text parsers cannot follow; seeing one is a failure, not a silent miss. The router
 # function is read by regex for arms and factories (raw strings would corrupt strip_comments; a digit separator opens a
 # phantom char literal there, which fails loudly as NO ROUTER ARMS FOUND); the registry header's guards are read from #if/#else/#endif only.
@@ -351,6 +353,17 @@ def check(root: pathlib.Path) -> list[str]:
     catalog_file_texts = {p.relative_to(root).as_posix(): read_text(p) for p in find_catalog_files(root)}
     cat_backends_by_file = catalog_backends(catalog_file_texts)
     catalog_vendors = {pathlib.PurePosixPath(path).parent.name for path in catalog_file_texts}
+    # The vendor comes from the directory name; the ORPHAN ENTRY exemption below trusts it, so the
+    # file's own DeviceKey vendor ids must agree, or the exemption would go to the wrong vendor.
+    for path, text in sorted(catalog_file_texts.items()):
+        dir_vendor = pathlib.PurePosixPath(path).parent.name
+        key_vendors = {m.group("v") for m in DEVICE_KEY_VENDOR_RE.finditer(strip_comments(text))}
+        if not key_vendors:
+            failures.append("CATALOG VENDOR UNVERIFIED: %s has no DeviceKey{\"<vendor>\", ...} literal, so its "
+                            "directory vendor %s cannot be checked; write the key as a literal" % (path, dir_vendor))
+        for key_vendor in sorted(key_vendors - {dir_vendor}):
+            failures.append("CATALOG VENDOR MISMATCH: %s sits in the %s directory but declares DeviceKey vendor "
+                            "%s" % (path, dir_vendor, key_vendor))
 
     # 1 + 2: coverage and stale allow-list.
     for pair in sorted(pairs):
@@ -754,6 +767,15 @@ def self_test() -> int:
                _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG}, **swept),
                "STALE ALLOWLIST ENTRY: astroasis/focuser create_astroasis_focuser_gone is no longer constructed")
         BACKEND_ALLOWLIST = {}
+        expect("catalog DeviceKey vendor differs from its directory",
+               _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG.replace('DeviceKey{"astroasis"', 'DeviceKey{"gemini"')},
+                    **swept),
+               "CATALOG VENDOR MISMATCH: %s sits in the astroasis directory but declares DeviceKey vendor gemini"
+               % CATALOG_ASTROASIS)
+        expect("catalog file with no DeviceKey literal",
+               _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG.replace('DeviceKey{"astroasis", DeviceType::Focuser}',
+                                                                    "make_key()")}, **swept),
+               "CATALOG VENDOR UNVERIFIED: %s" % CATALOG_ASTROASIS)
     finally:
         ALLOWLIST = saved
         BACKEND_ALLOWLIST = saved_backends
