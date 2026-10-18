@@ -1203,8 +1203,6 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     env:
-      CPPCHECK_VER: "2.17.1"
-      CPPCHECK_SHA256: "bfd681868248ec03855ca7c2aea7bcb1f39b8b18860d76aec805a92a967b966c"
       CPPCHECK_PREFIX: /home/runner/.local/cppcheck
     steps:
       - name: Checkout
@@ -1215,16 +1213,19 @@ jobs:
 
       - name: Restore the cppcheck build
         id: cppcheck-cache
-        # Keyed on the pinned version and tarball checksum, so a bump builds
-        # afresh. The prefix is fixed because cppcheck compiles its data
-        # directory path in.
+        # The pin lives in the next step's ver=/sha256= lines (scripts/
+        # dependency_snapshot.py reads it there), so the key follows ci.yml and
+        # restore-keys falls back to an older entry. The next step decides
+        # whether that entry is usable: it rebuilds unless the restored binary
+        # reports the pinned version. The prefix is fixed because cppcheck
+        # compiles its data directory path in.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.CPPCHECK_PREFIX }}
-          key: cppcheck-${{ env.CPPCHECK_VER }}-${{ env.CPPCHECK_SHA256 }}-${{ runner.os }}-${{ runner.arch }}
+          key: cppcheck-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: cppcheck-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build cppcheck 2.17.x from source
-        if: steps.cppcheck-cache.outputs.cache-hit != 'true'
         # The ubuntu-24.04 runner ships cppcheck 2.13, which classifies some
         # checks differently from current cppcheck (e.g. virtualCallInConstructor
         # is a `warning` in 2.13 but reclassified in 2.17). Our dev/target
@@ -1234,11 +1235,19 @@ jobs:
         # pattern below); the tarball is checksum-verified before it is unpacked.
         run: |
           set -euo pipefail
+          ver=2.17.1
+          sha256=bfd681868248ec03855ca7c2aea7bcb1f39b8b18860d76aec805a92a967b966c
+          if [ -x "${CPPCHECK_PREFIX}/bin/cppcheck" ] \
+             && [ "$("${CPPCHECK_PREFIX}/bin/cppcheck" --version)" = "Cppcheck ${ver}" ]; then
+            echo "Restored cppcheck ${ver} from the cache; not rebuilding."
+            exit 0
+          fi
+          rm -rf "${CPPCHECK_PREFIX}"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential cmake g++
-          curl -fsSL "https://github.com/danmar/cppcheck/archive/refs/tags/${CPPCHECK_VER}.tar.gz" \
+          curl -fsSL "https://github.com/danmar/cppcheck/archive/refs/tags/${ver}.tar.gz" \
             -o /tmp/cppcheck.tar.gz
-          echo "${CPPCHECK_SHA256}  /tmp/cppcheck.tar.gz" | sha256sum --check --strict -
+          echo "${sha256}  /tmp/cppcheck.tar.gz" | sha256sum --check --strict -
           mkdir -p /tmp/cppcheck
           tar -xf /tmp/cppcheck.tar.gz -C /tmp/cppcheck --strip-components=1
           cmake -S /tmp/cppcheck -B /tmp/cppcheck/build -DCMAKE_BUILD_TYPE=Release \
@@ -1251,7 +1260,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ env.CPPCHECK_PREFIX }}
-          key: cppcheck-${{ env.CPPCHECK_VER }}-${{ env.CPPCHECK_SHA256 }}-${{ runner.os }}-${{ runner.arch }}
+          key: cppcheck-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/ci.yml') }}
 
       - name: Put cppcheck on the PATH
         run: |
