@@ -17,6 +17,7 @@
 // ALPACACORE_ENABLE_CELESTRON (unlike celestron_schema.cpp), so the vendor
 // header is fine here.
 
+#include <alpacacore/util/alignment_mode.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
 #include <optional>
@@ -40,9 +41,9 @@ void register_celestron_factory(DeviceCatalog& catalog) {
         // normalize has dropped an unknown value, so anything else is "auto".
         auto alignment = vendor::celestron::CelestronAlignmentSetting::Auto;
         const std::string mode = config.get(kCelestronAlignmentMode);
-        if (mode == "altaz") {
+        if (mode == util::kAlignmentModeAltAz) {
             alignment = vendor::celestron::CelestronAlignmentSetting::AltAz;
-        } else if (mode == "equatorial") {
+        } else if (mode == util::kAlignmentModeEquatorial) {
             alignment = vendor::celestron::CelestronAlignmentSetting::Equatorial;
         }
 
