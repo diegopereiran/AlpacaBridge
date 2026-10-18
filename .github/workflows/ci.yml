@@ -634,7 +634,11 @@ jobs:
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
           CXXFLAGS: "--coverage -O0 -g"
           LDFLAGS: "--coverage"
-        run: ./run_all_tests.sh
+        # Zeroed first: the statistics live in the cached directory, so they
+        # would otherwise add up every run since the cache was first saved.
+        run: |
+          ccache --zero-stats
+          ./run_all_tests.sh
 
       - name: Compiler cache statistics
         # --verbose lists why calls were uncacheable.
