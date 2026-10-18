@@ -18,8 +18,7 @@
 #                  plus [stress-guard] (the harness's own self-tests, issue #322)
 #   coverage       informational gcovr line coverage, all vendors ON, per
 #                  component + combined in the job summary, HTML/JSON artifact
-#                  (no threshold, not a required check; bound 30 min). Runs on
-#                  pushes to main/stable and manual runs, not on pull requests
+#                  (no threshold, not a required check; bound 30 min)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   package-deb    build the .deb in debian:trixie, install it, run
@@ -499,12 +498,9 @@ jobs:
     # Informational only: no --fail-under threshold and not a required check.
     # A separate job so instrumentation adds no time to build-test or
     # build-vendors; it runs in parallel with them.
-    # Not run on pull requests: at -O0 with gcov it is the longest job (767 s
-    # against 432 s for build-vendors, run 39080745502), so it set how long
-    # every PR waited for a result that gates nothing. Every merge to main or
-    # stable still produces the report, and workflow_dispatch runs it on demand.
+    # Runs on every pull request like the other jobs. A PR restores the
+    # cache saved by main (it cannot save one other PRs could read).
     name: Line coverage (gcovr, all vendors, arm64)
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
