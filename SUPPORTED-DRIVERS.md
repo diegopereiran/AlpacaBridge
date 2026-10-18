@@ -432,6 +432,22 @@ This document lists all hardware vendors and device types that are verified to w
 
 </details>
 
+### Celestron
+
+| Model Series | Connection | Linux<br>(arm64) | Status |
+|--------------|------------|------------------|--------|
+| Focus Motor for SCT and EdgeHD | USB/Serial (motor's own port) |  | in development, awaiting hardware testing ([#896](https://github.com/open-astro/AlpacaBridge/issues/896)) |
+
+<details>
+<summary><strong>Celestron Focuser Driver Notes</strong></summary>
+
+- **Protocol**: Celestron AUX frames to device 0x12 at 9600 baud, on the motor's own USB port (no SDK). The AUX path through a Celestron mount is not supported.
+- **Configuration**: `portPath` (required; no auto-detect).
+- **Calibration**: the motor must be calibrated first (hand control or Celestron Focuser Utility); an uncalibrated motor refuses the connect. `Position` is `high limit - encoder`, so 0 is one end of the calibrated travel and `MaxStep` is the calibrated range.
+- **Capabilities**: absolute Move (clamped to 0..MaxStep), Halt. No temperature sensor, temperature compensation or `StepSize`.
+
+</details>
+
 ### Gemini
 
 | Model Series | Connection | Linux<br>(arm64) | Status |

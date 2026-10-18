@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/celestron/**,AlpacaCore/include/alpacacore/vend
 
 ### Celestron (NexStar)
 
-Devices: Telescope.
+Devices: Telescope, Focuser (focus motor, see the last section).
 
 Protocol documentation: `AlpacaCore/external/Celestron/nexstar_protocol_reference.md` (combined reference — RS-232 serial, AUX bus, GPS, and AlpacaBridge driver notes). Original sources preserved in same directory. No external SDK required — uses RS-232 serial communication directly.
 
@@ -71,3 +71,9 @@ or optical accuracy, and does not establish a fix for intermittent guide or AUX 
 - Capture the transport generation before collecting home encoder or flip rebase/label evidence, compare it again before publication and retain that original token. Publish the flip reference-established flag only after that comparison. Capturing the current token at publication would adopt an intervening fault generation and incorrectly validate old evidence. The [review evidence](../../docs/celestron-cgx-usb-motion.md#latest-approved-session-and-software-review) records deterministic home/flip race regressions and both killed generation-adoption mutations.
 - Site latitude/longitude remain mutable while idle, including after FindHome; refuse changes during motion, guiding, stop or ownership transitions. Capture the mechanical hemisphere at successful FindHome: changing reported SiteLatitude must not reverse established encoder geometry or guide polarity.
 - AUX identity/status/encoder replies expose no reset-generation counter. Same firmware and matching labels cannot prove absence of a controller reset or HC/AUX interference; do not claim reset-safe continuity or HC/AUX coexistence. Historical [run 5](../../docs/celestron-cgx-usb-motion.md#run-5-passing-qualification-and-final-software-verification) used binary `9c353c87` and motors 7.17.25 / model 0x1788. The current [published privacy-scrubbed report](../../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt) instead records the 2026-10-15 ConformU 4.5.1.54507 pass on binary `f11acde940431dbe2d275af9c112a921ca4bb07383654e7d272dafbbcd7783e8`, both motors 7.18.2214 / model 0x1788, native Linux arm64, bare northern CGX. It qualifies this hardware/backend only, not CGX-L direct USB, southern operation or optical accuracy. Earlier intermittent guide excess remains unresolved; guide-wire behavior was unchanged. Prompt the user and obtain approval before any further deployment or hardware test.
+
+### Focus motor on its own USB port (issue #896)
+
+- `celestron_focuser_driver.cpp` drives the focus motor as AUX device 0x12 from source 0x20 over `CelestronCgxProtocol` at 9600 baud (`AuxLinkSpeed::Baud9600`). Commands come from the reporter's tested script on issue #896 and INDI's `celestron.cpp`, which agree: 0x01 position (u24), 0x02 GOTO_FAST (u24), 0x13 slew done (0xFF idle), 0x24 rate 0 (Halt), 0x2C limits (two u32, high <= low means uncalibrated), 0xFE version. The AUX path through a mount is not implemented.
+- `Position = high - raw` and `MaxStep = high - low` (INDI's `absPos`): the raw count runs opposite a refractor drawtube. An uncalibrated motor refuses the connect; the driver does not run calibration (0x2A/0x2B).
+- The state poll resynchronizes a timed-out stream by reopening the same port before its next read, and Halt does the same before sending the stop; a timed-out Move is never resent. Explicit `portPath` only, no auto-detect. Not yet validated on hardware or by ConformU.

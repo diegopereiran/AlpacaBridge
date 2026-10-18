@@ -207,6 +207,8 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_telescope_deferred_connect.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_celestron_async_slew_failure.cpp)
+    # Focus motor on its own USB port (issue #896).
+    list(APPEND TEST_SOURCES test_celestron_focuser.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
