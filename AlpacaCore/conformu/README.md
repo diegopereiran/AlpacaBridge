@@ -18,9 +18,11 @@ Test results are organized by vendor/driver:
 
 One folder per vendor, one subfolder per tested model. See [SUPPORTED-DRIVERS.md](../../SUPPORTED-DRIVERS.md) for the device type, connection, firmware, and ConformU version behind each report.
 
+- **Altair** - ALTAIR178M3, ALTAIR662M2 cameras (ToupTek OEM, served by the ToupTek camera driver over the Altair SDK)
 - **Astroasis** - Oasis Focuser
 - **Celestron** - CGX-L telescope (NexStar hand controller); CGX telescope (direct USB AUX, northern firmware 7.17.25; site and latitude-derived Sync coordinates privacy-rounded with residuals preserved)
 - **Gemini** - Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3 (CoverCalibrator); Astro Focuser Pro (Focuser); Power & Data Hubs Advanced 3 (Switch)
+- **GPhoto** - Nikon D5300, D3200, D3300 and Canon EOS 4000D, 70D, 250D, 600D cameras (libgphoto2, USB)
 - **iOptron** - HEM27, HAE43, HAE29C, HAE16 telescopes; iCAM178M, iCAM462C, iCAM464C cameras; iEFW-15, iEFW-18 filter wheels; iEAF, iAFS2 focusers; iMate PowerBox switch
 - **OnStep** - Generic OnStep telescope
 - **Player One** - Ceres 462M, Uranus-C PRO, Mars-C II cameras; PW8 filter wheel; Uranus-C PRO thermal switch
