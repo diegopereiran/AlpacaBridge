@@ -13,12 +13,16 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace alpacacore::vendor::playerone {
+
+class PlayerOneSDK;  // camera SDK seam (playerone_sdk_wrapper.h)
 
 /**
  * @brief Create a Player One thermal switch device (dew heater + radiator fan).
@@ -29,9 +33,25 @@ namespace alpacacore::vendor::playerone {
  * it can be connected alongside the camera device or on its own.
  *
  * @param device_number Alpaca device number
- * @param camera_index Player One SDK camera index (0-based, enumeration order)
+ * @param camera_index Player One SDK camera index (0-based, enumeration order),
+ *        or util::kAutoThermalCamera for the one attached camera with a heater or fan
+ * @param camera_serial When not empty, the switch binds only the camera with
+ *        this serial and the index is ignored, so a USB reorder cannot move it
  */
-std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index);
+std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index,
+                                                      const std::string& camera_serial = {});
+
+// Injectable SDK overload for hardware-free tests. `sdk` must outlive the driver.
+std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index,
+                                                      const std::string& camera_serial, PlayerOneSDK& sdk);
+
+/**
+ * @brief Every attached Player One camera for a thermal switch's camera picker:
+ * enumeration index, model, serial, and whether it has a dew heater or fan.
+ * Opens each cooled camera through the ref-counted wrapper to read the controls.
+ */
+std::vector<util::ThermalCameraCandidate> list_playerone_thermal_cameras();
+std::vector<util::ThermalCameraCandidate> list_playerone_thermal_cameras(PlayerOneSDK& sdk);
 
 /**
  * @brief The SDK calls the thermal switch makes, as a driver-local seam so a

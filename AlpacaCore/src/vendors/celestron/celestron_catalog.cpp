@@ -18,6 +18,7 @@
 // headers are fine here. The direct CGX AUX protocol currently requires an
 // explicit serial USB port and site coordinates.
 
+#include <alpacacore/util/alignment_mode.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
@@ -42,9 +43,9 @@ void register_celestron_factory(DeviceCatalog& catalog) {
         // normalize has dropped an unknown value, so anything else is "auto".
         auto alignment = vendor::celestron::CelestronAlignmentSetting::Auto;
         const std::string mode = config.get(kCelestronAlignmentMode);
-        if (mode == "altaz") {
+        if (mode == util::kAlignmentModeAltAz) {
             alignment = vendor::celestron::CelestronAlignmentSetting::AltAz;
-        } else if (mode == "equatorial") {
+        } else if (mode == util::kAlignmentModeEquatorial) {
             alignment = vendor::celestron::CelestronAlignmentSetting::Equatorial;
         }
 

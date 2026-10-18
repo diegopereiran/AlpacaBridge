@@ -133,10 +133,9 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
         return vendor::zwo::create_zwo_asiair_switch(device_number, std::move(asiair_config));
     }
 
-    const int camera_id = static_cast<int>(config.get(kZwoCameraId));
-    if (camera_id >= 0) return vendor::zwo::create_zwo_dew_heater_switch(device_number, camera_id);
-    return vendor::zwo::create_zwo_dew_heater_switch_by_index(device_number,
-                                                              static_cast<int>(config.get(kZwoCameraIndex)));
+    const ZwoDewHeaterBinding binding = zwo_dew_heater_binding(config);
+    if (binding.camera_id) return vendor::zwo::create_zwo_dew_heater_switch(device_number, *binding.camera_id);
+    return vendor::zwo::create_zwo_dew_heater_switch_by_index(device_number, binding.camera_index, binding.serial);
 }
 
 // The camera entry binds by the physical body (#914): the serial, not the

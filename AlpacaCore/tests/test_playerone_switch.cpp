@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "fake_playerone_sdk.h"
 
 namespace {
 
@@ -32,6 +33,37 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     } catch (const alpacacore::AlpacaException& ex) {
         REQUIRE(ex.error_code() == expected_code);
     }
+}
+
+using alpacacore::test::FakePlayerOneSDK;
+
+// The default fake camera (id 17, serial fake-17) is an uncooled guide camera;
+// a cooled camera with a heater and fan enumerates after it at index 1.
+void add_cooled_camera(FakePlayerOneSDK& sdk, int camera_id, const std::string& name, const std::string& serial) {
+    FakePlayerOneSDK::CameraInfo info;
+    info.camera_id = camera_id;
+    info.name = name;
+    info.serial_number = serial;
+    info.has_cooler = true;
+    FakePlayerOneSDK::ConfigCaps caps;
+    caps.has_heater_power = true;
+    caps.heater_power_writable = true;
+    caps.heater_power_max = 100;
+    caps.has_fan_power = true;
+    caps.fan_power_writable = true;
+    caps.fan_power_max = 100;
+    sdk.add_listed_camera(info, caps);
+}
+
+std::string connect_refusal(alpacacore::SwitchDriver& driver, int expected_code) {
+    try {
+        driver.set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == expected_code);
+        return e.what();
+    }
+    FAIL("Expected AlpacaException");
+    return {};
 }
 
 }  // namespace
@@ -143,6 +175,89 @@ TEST_CASE("Player One Switch Driver - Connect fails on invalid camera index", "[
 
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("Player One Switch Driver - Auto binds the one camera with a heater or fan",
+          "[playerone][switch][unit][fakesdk]") {
+    FakePlayerOneSDK sdk;
+    add_cooled_camera(sdk, 18, "Uranus-C Pro", "POA-18");
+    auto driver =
+        alpacacore::vendor::playerone::create_playerone_switch(0, alpacacore::util::kAutoThermalCamera, "", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_max_switch() == 2);
+    CHECK(driver->get_unique_id() == "PLAYERONE_SW_SN_POA-18");
+    CHECK(driver->get_switch_value(0) == 0.0);
+    // The listing opened and closed each cooled camera; only the switch's own open is left.
+    CHECK(sdk.open_refs(18) == 1);
+    CHECK(sdk.open_refs(17) == 0);
+    driver->set_connected(false);
+    CHECK(sdk.open_refs(18) == 0);
+    CHECK(sdk.operation_after_close() == false);
+}
+
+TEST_CASE("Player One Switch Driver - a serial binds its camera whatever the index",
+          "[playerone][switch][unit][fakesdk]") {
+    FakePlayerOneSDK sdk;
+    add_cooled_camera(sdk, 18, "Uranus-C Pro", "POA-18");
+    add_cooled_camera(sdk, 19, "Poseidon-M Pro", "POA-19");
+    // Index 1 is the Uranus; the serial names the Poseidon at index 2.
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 1, "POA-19", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_unique_id() == "PLAYERONE_SW_SN_POA-19");
+    CHECK(sdk.open_refs(19) == 1);
+    CHECK(sdk.open_refs(18) == 0);
+    driver->set_connected(false);
+
+    auto absent = alpacacore::vendor::playerone::create_playerone_switch(1, 1, "POA-99", sdk);
+    const auto message = connect_refusal(*absent, alpacacore::AlpacaError::NotConnected);
+    CHECK(message.find("serial POA-99 is not attached") != std::string::npos);
+    CHECK_FALSE(absent->get_connected());
+}
+
+TEST_CASE("Player One Switch Driver - Auto refuses two cameras with a heater or fan",
+          "[playerone][switch][unit][fakesdk]") {
+    FakePlayerOneSDK sdk;
+    add_cooled_camera(sdk, 18, "Uranus-C Pro", "POA-18");
+    add_cooled_camera(sdk, 19, "Poseidon-M Pro", "POA-19");
+    auto driver =
+        alpacacore::vendor::playerone::create_playerone_switch(0, alpacacore::util::kAutoThermalCamera, "", sdk);
+    const auto message = connect_refusal(*driver, alpacacore::AlpacaError::InvalidValue);
+    CHECK(message.find("Uranus-C Pro (index 1), Poseidon-M Pro (index 2)") != std::string::npos);
+    CHECK(sdk.open_refs(18) == 0);
+    CHECK(sdk.open_refs(19) == 0);
+}
+
+TEST_CASE("Player One Switch Driver - a pinned camera with no heater or fan names the one that has them",
+          "[playerone][switch][unit][fakesdk]") {
+    FakePlayerOneSDK sdk;
+    add_cooled_camera(sdk, 18, "Uranus-C Pro", "POA-18");
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, "", sdk);
+    const auto message = connect_refusal(*driver, alpacacore::AlpacaError::NotImplemented);
+    CHECK(message.find("Camera index 0 is the Fake Player One Camera") != std::string::npos);
+    CHECK(message.find("Uranus-C Pro (index 1)") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(sdk.open_refs(17) == 0);
+}
+
+TEST_CASE("Player One thermal camera listing - probes cooled cameras and closes them",
+          "[playerone][switch][unit][fakesdk]") {
+    FakePlayerOneSDK sdk;
+    add_cooled_camera(sdk, 18, "Uranus-C Pro", "POA-18");
+    const auto cameras = alpacacore::vendor::playerone::list_playerone_thermal_cameras(sdk);
+    REQUIRE(cameras.size() == 2);
+    CHECK(cameras[0].index == 0);
+    CHECK(cameras[0].serial == "fake-17");
+    CHECK(cameras[0].has_thermal == false);
+    CHECK(cameras[1].index == 1);
+    CHECK(cameras[1].name == "Uranus-C Pro");
+    CHECK(cameras[1].serial == "POA-18");
+    CHECK(cameras[1].has_thermal == true);
+    CHECK(sdk.open_refs(17) == 0);
+    CHECK(sdk.open_refs(18) == 0);
+    // The uncooled camera is never opened for the probe.
+    CHECK(sdk.open_count() == 1);
 }
 
 // ---- open-astro#294: one status burst per DeviceState, static members free ----

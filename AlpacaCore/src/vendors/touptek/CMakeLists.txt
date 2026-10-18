@@ -34,6 +34,7 @@ if(ALPACACORE_ENABLE_TOUPTEK)
         touptek_filterwheel_driver.cpp
         touptek_thermal_switch_driver.cpp
         touptek_catalog.cpp
+        touptek_thermal_listing.cpp
     )
 
     # StellaVita power-box Switch backend. The StellaVita is a CM4-based

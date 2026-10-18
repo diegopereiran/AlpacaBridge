@@ -2751,9 +2751,14 @@ private:
                             (static_cast<std::size_t>(row) * static_cast<std::size_t>(eff_w) +
                              static_cast<std::size_t>(col)) * 2;
                         if (src + 1 < exposure_buffer_.size()) {
-                            // QHY delivers 16-bit data big-endian
-                            uint16_t val = (static_cast<uint16_t>(exposure_buffer_[src]) << 8) |
-                                            static_cast<uint16_t>(exposure_buffer_[src + 1]);
+                            // GetQHYCCDSingleFrame fills the buffer with native
+                            // little-endian uint16 samples (low byte first), the same
+                            // layout PHD2's cam_qhy and INDI's qhy_ccd read it as. The
+                            // previous high-byte-first read swapped every pixel: a
+                            // QHY5III585M frame came out as noise with ringed stars and
+                            // the guider's star detector found nothing.
+                            uint16_t val = static_cast<uint16_t>(exposure_buffer_[src]) |
+                                           (static_cast<uint16_t>(exposure_buffer_[src + 1]) << 8);
                             image.data[out_idx] = static_cast<std::int32_t>(val);
                         }
                     }

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 
 #include <memory>
@@ -33,9 +34,23 @@ std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, in
  * @brief Create a ZWO dew heater switch device using a camera index.
  *
  * @param device_number Alpaca device number
- * @param camera_index ZWO SDK camera index (0-based)
+ * @param camera_index ZWO SDK camera index (0-based), or util::kAutoThermalCamera
+ *        for the one attached camera that has an anti-dew heater
+ * @param camera_serial When not empty, the switch binds only the camera with
+ *        this serial and the index is ignored, so a USB reorder cannot move it
  */
-std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index);
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
+                                                                    const std::string& camera_serial = {});
+
+/**
+ * @brief Every attached ZWO camera for a dew heater's camera picker: SDK slot,
+ * model, serial, and whether it has an anti-dew heater.
+ *
+ * Opens each camera through the ref-counted SDK wrapper (a camera already open
+ * in this process stays open) because ASIGetControlCaps and
+ * ASIGetSerialNumber need an open camera.
+ */
+std::vector<util::ThermalCameraCandidate> list_zwo_dew_heater_cameras();
 
 /**
  * @brief The SDK calls the dew heater switch makes, as a driver-local seam so a
@@ -47,6 +62,12 @@ std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_n
 class ZWODewHeaterSdk {
 public:
     virtual std::vector<ZWOCameraInfo> enumerate_cameras() = 0;
+    /// The same list, also reporting the slots the SDK could not read so a
+    /// refusal can name them; a seam with none keeps this default.
+    virtual std::vector<ZWOCameraInfo> enumerate_cameras_reporting_unreadable(
+        std::vector<ZwoUnreadableSlot>* /*unreadable*/) {
+        return enumerate_cameras();
+    }
     virtual bool get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) = 0;
     virtual void open_camera(int camera_id) = 0;
     virtual void init_camera(int camera_id) = 0;
@@ -63,8 +84,10 @@ protected:
 /// Test overload: the driver keeps a reference, `sdk` must outlive it.
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id, ZWODewHeaterSdk& sdk);
 
-/// Test overload binding by SDK slot index; `sdk` must outlive the driver.
+/// Test overload binding by SDK slot index (or Auto, or `camera_serial`, as
+/// above); `sdk` must outlive the driver.
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
-                                                                    ZWODewHeaterSdk& sdk);
+                                                                    ZWODewHeaterSdk& sdk,
+                                                                    const std::string& camera_serial = {});
 
 } // namespace alpacacore::vendor::zwo

@@ -234,7 +234,8 @@
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_PLAYERONE",
     "fields": [
-      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex", "range": {"min": 0, "max": 2147483647}}
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex", "range": {"min": -1, "max": 2147483647}},
+      {"key": "serialNumber", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"}
     ]
   },
   {
@@ -520,6 +521,7 @@
       {"key": "switchType", "type": "string", "default": "dewheater", "required": false, "secret": false, "role": "Discriminator"},
       {"key": "cameraIndex", "type": "int", "default": -1, "required": false, "secret": false, "role": "EnumerationIndex", "appliesWhen": {"key": "switchType", "value": "dewheater"}, "range": {"min": -1, "max": 2147483647}},
       {"key": "cameraId", "type": "int", "default": -1, "required": false, "secret": false, "role": "DeviceId", "appliesWhen": {"key": "switchType", "value": "dewheater"}, "range": {"min": -1, "max": 2147483647}},
+      {"key": "serialNumber", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "switchType", "value": "dewheater"}},
       {"key": "gpioChip", "type": "string", "default": "/dev/gpiochip0", "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "switchType", "value": "asiair"}},
       {"key": "devicePath", "type": "string", "default": "/dev/pwm-gpio-misc", "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "switchType", "value": "asiair-plus-rk3568"}},
       {"key": "pwmFrequencyHz", "type": "int", "default": 1000, "required": false, "secret": false, "role": "Plain"},

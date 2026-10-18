@@ -297,6 +297,102 @@ TEST_CASE("iOptron Telescope Driver - Target Range Validation over the fake moun
     driver->set_connected(false);
 }
 
+TEST_CASE("iOptron Telescope Driver - all four equatorial slews are refused while Tracking is false",
+          "[ioptron][telescope][unit][fake][tracking-guard]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(0);  // stopped: the firmware reports no tracking
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_FALSE(driver->get_tracking());
+
+    // Argument validation comes first: a bad Dec is InvalidValue even with Tracking off.
+    require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 95.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+
+    require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    driver->set_target_right_ascension(12.0);
+    driver->set_target_declination(20.0);
+    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+
+    // Nothing reached the mount, and the driver is not slewing.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(mount.count(":MS1#") == 0);
+    CHECK(mount.count(":MS2#") == 0);
+    CHECK_FALSE(driver->get_slewing());
+
+    // With the mount tracking the same call goes through.
+    mount.set_system_status(1);
+    driver->set_tracking(true);
+    REQUIRE(driver->get_tracking());
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    CHECK(wait_for_goto_dispatch(mount));
+    driver->set_connected(false);
+}
+
+// :GLS reports a GOTO (2), guiding (3) or a meridian flip (4) in place of tracking, and the Tracking getter
+// reads them as off: a slew then is still a slew with Tracking on, so the guard must accept it. A commanded
+// Tracking=false and a stopped mount at home (7) are refused.
+TEST_CASE("iOptron Telescope Driver - a slew while the mount reports motion is not refused for Tracking",
+          "[ioptron][telescope][unit][fake][tracking-guard]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_tracking());
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    mount.set_system_status(2);
+    clock.advance(std::chrono::seconds(31));  // past the connect fast-cache grace and the status TTL
+    REQUIRE_FALSE(driver->get_tracking());    // the getter reads the slewing status as Tracking off
+    CHECK(driver->get_slewing());
+
+    const auto wait_for_gotos = [&](int n) {
+        const auto dispatch_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (mount.count(":MS1#") < n && std::chrono::steady_clock::now() < dispatch_by) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return mount.count(":MS1#");
+    };
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(13.0, 25.0));  // retarget of the GOTO in flight
+    CHECK(wait_for_gotos(2) == 2);
+
+    // Guiding (3) and a meridian flip (4) read as off too, and are not refused either.
+    int gotos = 2;
+    for (const int status : {3, 4}) {
+        INFO("system status " << status);
+        mount.set_system_status(status);
+        clock.advance(std::chrono::seconds(2));  // past the status TTL
+        REQUIRE_FALSE(driver->get_tracking());
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(13.0, 25.0));
+        ++gotos;
+        CHECK(wait_for_gotos(gotos) == gotos);
+    }
+
+    // A commanded Tracking=false is off while the status still reads slewing.
+    driver->set_tracking(false);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(14.0, 25.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+
+    // Stopped at home is off: refused, with nothing more sent.
+    mount.set_system_status(7);
+    clock.advance(std::chrono::seconds(3));  // past the 2 s Tracking read-back window
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(14.0, 25.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(mount.count(":MS1#") == gotos);
+    driver->set_connected(false);
+}
+
 TEST_CASE("iOptron Telescope Driver - HAE16 EQ (0012) GOTO settle is closed by the pulse-guide trim",
           "[ioptron][telescope][unit][fake]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);

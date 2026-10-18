@@ -72,6 +72,48 @@ struct ProbeGuard {
     }
     std::chrono::milliseconds previous_interval_{30000};
 };
+// Parks the pulse task at the restore hook until release(). The destructor
+// releases the parked task and then clears the process-wide hook, whatever the
+// case does (a failed REQUIRE included), so no later case can call into a hook
+// that captured this case's locals. The state is shared so a task still inside
+// its copy of the hook never touches a dead stack frame.
+class ParkedPulseRestoreHook {
+public:
+    ParkedPulseRestoreHook() : state_(std::make_shared<State>()) {
+        alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([state = state_] {
+            std::unique_lock<std::mutex> lock(state->m);
+            state->parked = true;
+            state->cv.notify_all();
+            state->cv.wait_for(lock, std::chrono::seconds(15), [&] { return state->released; });
+        });
+    }
+    ParkedPulseRestoreHook(const ParkedPulseRestoreHook&) = delete;
+    ParkedPulseRestoreHook& operator=(const ParkedPulseRestoreHook&) = delete;
+    ~ParkedPulseRestoreHook() {
+        release();
+        alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr);
+    }
+    bool wait_parked(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(state_->m);
+        return state_->cv.wait_for(lock, timeout, [&] { return state_->parked; });
+    }
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(state_->m);
+            state_->released = true;
+        }
+        state_->cv.notify_all();
+    }
+
+private:
+    struct State {
+        std::mutex m;
+        std::condition_variable cv;
+        bool parked = false;
+        bool released = false;
+    };
+    std::shared_ptr<State> state_;
+};
 }  // namespace
 
 namespace sw = alpacacore::vendor::skywatcher;
@@ -3040,6 +3082,21 @@ TEST_CASE("SkyWatcher async - a short RA guide pulse is not stretched by the rat
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - the pulse restore hook guard clears the hook when a REQUIRE unwinds",
+          "[skywatcher][async]") {
+    // A failed REQUIRE throws; the guard must still clear the process-wide hook
+    // so a later pulse case does not call into this case's dead stack locals.
+    std::atomic<int> calls{0};
+    try {
+        ParkedPulseRestoreHook guard;
+        sw::detail::set_pulse_restore_hook([&] { ++calls; });  // stands in for a hook capturing locals
+        throw std::runtime_error("REQUIRE failed");
+    } catch (const std::runtime_error&) {
+    }
+    sw::detail::run_pulse_restore_hook();
+    CHECK(calls.load() == 0);
+}
+
 TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J leaves RA stopped",
           "[skywatcher][async][pulseguide]") {
     // The pulse task restores the drive with ":I" then ":J", both outside
@@ -3052,29 +3109,11 @@ TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J l
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     const uint32_t sidereal_preset = mount.step_period(1);
 
-    std::mutex m;
-    std::condition_variable cv;
-    bool parked = false;
-    bool released = false;
-    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([&] {
-        std::unique_lock<std::mutex> lock(m);
-        parked = true;
-        cv.notify_all();
-        cv.wait_for(lock, std::chrono::seconds(15), [&] { return released; });
-    });
-    auto release = [&] {
-        {
-            std::lock_guard<std::mutex> lock(m);
-            released = true;
-        }
-        cv.notify_all();
-    };
+    ParkedPulseRestoreHook hook;
+    auto release = [&] { hook.release(); };
 
     driver->pulse_guide(2, 300);
-    {
-        std::unique_lock<std::mutex> lock(m);
-        REQUIRE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return parked; }));
-    }
+    REQUIRE(hook.wait_parked(std::chrono::seconds(5)));
     REQUIRE(mount.step_period(1) == sidereal_preset);
     const int stops_before = mount.stop_count(1);
     const int starts_before = mount.start_count(1);
@@ -3095,7 +3134,6 @@ TEST_CASE("SkyWatcher async - Tracking=false between a pulse restore :I and :J l
     const bool k_seen = wait_until([&] { return mount.stop_count(1) > stops_before; }, 3000);
     release();
     off.join();
-    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr);
     REQUIRE(k_seen);
 
     CHECK_FALSE(threw.load());
@@ -3197,21 +3235,9 @@ TEST_CASE("SkyWatcher async - a second Tracking=false does not clear the first o
     auto driver = connected_driver(mount);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
-    std::mutex m;
-    std::condition_variable cv;
-    bool parked = false;
-    bool released = false;
-    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([&] {
-        std::unique_lock<std::mutex> lock(m);
-        parked = true;
-        cv.notify_all();
-        cv.wait_for(lock, std::chrono::seconds(15), [&] { return released; });
-    });
+    ParkedPulseRestoreHook hook;
     driver->pulse_guide(2, 300);
-    {
-        std::unique_lock<std::mutex> lock(m);
-        REQUIRE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return parked; }));
-    }
+    REQUIRE(hook.wait_parked(std::chrono::seconds(5)));
     const int stops_before = mount.stop_count(1);
     mount.set_stop_ramp_ms(1500);
     std::atomic<bool> threw_b{false};
@@ -3232,13 +3258,8 @@ TEST_CASE("SkyWatcher async - a second Tracking=false does not clear the first o
         }
     });
     a.join();
-    {
-        std::lock_guard<std::mutex> lock(m);
-        released = true;
-    }
-    cv.notify_all();
+    hook.release();
     b.join();
-    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr);
     REQUIRE(k_seen);
     INFO(what_b);
     CHECK_FALSE(threw_b.load());
@@ -3982,6 +4003,7 @@ TEST_CASE("SkyWatcher async - a slew refused at dispatch still publishes the tar
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
+    driver->set_tracking(true);       // equatorial slews need Tracking (open-astro#1274)
     mount.reject_start_motion(1, 1);  // kAxisRa; the goto starts RA first, so that throw is the dispatch failure
     CHECK_THROWS_AS(driver->slew_to_coordinates(5.5, -25.0), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_slewing());

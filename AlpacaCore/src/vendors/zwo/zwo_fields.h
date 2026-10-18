@@ -134,6 +134,11 @@ inline const Field<std::int64_t> kZwoCameraId{.key = "cameraId",
                                               .applies_when = AppliesWhen{"switchType", "dewheater"},
                                               .min = kZwoSelectorMin,
                                               .max = kZwoSelectorMax};
+// Serial of the camera the dew heater binds; when set it wins over cameraIndex
+// and cameraId, so a USB reorder cannot move the heater to another camera.
+// normalize refuses a non-hex value (zwo_serial_valid), as for the camera.
+inline const Field<std::string> kZwoSwitchSerial{
+    .key = "serialNumber", .default_value = "", .applies_when = AppliesWhen{"switchType", "dewheater"}};
 inline const Field<std::string> kZwoGpioChip{
     .key = "gpioChip", .default_value = "/dev/gpiochip0", .applies_when = AppliesWhen{"switchType", "asiair"}};
 inline const Field<std::string> kZwoDevicePath{.key = "devicePath",
@@ -187,9 +192,9 @@ inline const std::vector<FieldRef>& zwo_rotator_fields() {
 }
 
 inline const std::vector<FieldRef>& zwo_switch_fields() {
-    static const std::vector<FieldRef> fields{kZwoSwitchType.ref(), kZwoCameraIndex.ref(), kZwoCameraId.ref(),
-                                              kZwoGpioChip.ref(),   kZwoDevicePath.ref(),  kZwoPwmFrequencyHz.ref(),
-                                              kZwoPorts.ref()};
+    static const std::vector<FieldRef> fields{kZwoSwitchType.ref(),     kZwoCameraIndex.ref(), kZwoCameraId.ref(),
+                                              kZwoSwitchSerial.ref(),   kZwoGpioChip.ref(),    kZwoDevicePath.ref(),
+                                              kZwoPwmFrequencyHz.ref(), kZwoPorts.ref()};
     return fields;
 }
 
@@ -219,6 +224,26 @@ inline bool zwo_identity_text_valid(const std::string& text) {
 inline bool zwo_serial_valid(const std::string& text) {
     return text.size() <= 64 && std::all_of(text.begin(), text.end(),
                                             [](char ch) { return std::isxdigit(static_cast<unsigned char>(ch)) != 0; });
+}
+
+// Which camera a dew heater entry binds: a serial wins over cameraId and the
+// index; a bare cameraId (no serial) is the legacy binding by SDK id; otherwise
+// the index, where -1 (the default, and anything below it) is Auto.
+struct ZwoDewHeaterBinding {
+    std::optional<int> camera_id;
+    int camera_index = -1;
+    std::string serial;
+};
+inline ZwoDewHeaterBinding zwo_dew_heater_binding(const DeviceConfig& config) {
+    ZwoDewHeaterBinding binding;
+    binding.serial = config.get(kZwoSwitchSerial);
+    const auto camera_id = static_cast<int>(config.get(kZwoCameraId));
+    if (camera_id >= 0 && binding.serial.empty()) {
+        binding.camera_id = camera_id;
+        return binding;
+    }
+    binding.camera_index = static_cast<int>(std::max<std::int64_t>(config.get(kZwoCameraIndex), kZwoSelectorMin));
+    return binding;
 }
 
 // The switch's cross-field refusals, in the router arm's order. normalize reports

@@ -363,7 +363,7 @@ public:
     // polls this getter from the PUT connected wait and from every GET
     // connected in between. Taking mutex_ here made those calls block for the
     // entire connect (25 s measured against a silent hand controller: five
-    // 5 s timeouts), so the router's 8 s deadline never fired and clients
+    // 5 s timeouts), so the router's connect wait limit never fired and clients
     // reported "Dynamic client timeout for method Connected" (issue #130).
     // Same atomic-flag pattern as every other AsyncConnectable driver except
     // the telescopes and the wrapper-backed switches named in
@@ -851,8 +851,7 @@ public:
         if (!site_info_valid_) {
             return served_frame_locked().value.side_of_pier;  // the same link checks as every other frame read
         }
-        double lst_hours = compute_local_sidereal_time_hours(std::chrono::system_clock::now(),
-                                                            site_longitude_cached_);
+        double lst_hours = compute_local_sidereal_time_hours(sidereal_wall_now(), site_longitude_cached_);
         double hour_angle = shortest_ra_delta_hours(lst_hours, ra);
         return hour_angle >= 0.0 ? 0 : 1;
     }
@@ -883,7 +882,7 @@ public:
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         // No handset read here: the poll retries an unread site (decision 0010), so DeviceState costs no transaction.
-        return compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+        return compute_local_sidereal_time_hours(sidereal_wall_now(), site_longitude_cached_);
     }
 
     double get_site_elevation() const override {
@@ -1115,8 +1114,7 @@ public:
                 // An hour angle is saved only while a site is known, so a
                 // handset that has since stopped reporting one (a reconnect
                 // without location) still leaves the last known longitude here.
-                const double lst =
-                    compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+                const double lst = compute_local_sidereal_time_hours(sidereal_wall_now(), site_longitude_cached_);
                 park_target_first = park_ra_from_hour_angle(lst, park_hour_angle_hours_);
                 park_target_second = park_dec_degrees_;
                 validate_ra_dec(park_target_first, park_target_second, "Park");
@@ -1268,6 +1266,9 @@ public:
             check_connected();
             check_not_parked_locked("PulseGuide");
             auto& protocol = SynScanProtocolWrapper::instance();
+            if (axis == 0) {
+                refresh_tracking_mode_locked();  // the pulse end restores this mode
+            }
             const double guide_rate = axis == 1 ? guide_rate_.dec : guide_rate_.ra;
             // RA: West (direction_sign +1) lowers RA, East raises it.
             double slew_rate_deg_per_sec =
@@ -1407,6 +1408,8 @@ public:
                     if (end_tracking_mode <= 0) {
                         return;
                     }
+                    // Written through, as AbortSlew's restore: a poll sampled mid-pulse read tracking off.
+                    set_tracking_mode_cached_locked(end_tracking_mode);
                     // A same-mode T leaves the handset's readback regime as it is (measured); the pulse moved RA
                     // by the estimate the override already reports.
                     if (guide_position_valid_) {
@@ -1444,6 +1447,7 @@ public:
             check_not_parked_locked("SlewToCoordinates");
             validate_ra_dec(ra, dec, "SlewToCoordinates");
             // open-astro#775: same Tracking precondition as the async forms.
+            refresh_tracking_mode_locked();
             if (!get_tracking_locked()) {
                 throw AlpacaException("SlewToCoordinates requires Tracking to be true", AlpacaError::InvalidOperation);
             }
@@ -1458,7 +1462,7 @@ public:
         // Slewing stays true from the first GOTO to the end of the last refinement pass (open-astro#880).
         const RefineScope refine_scope(*this, owner_generation, !use_precise_commands_);
         ilock.unlock();
-        if (!wait_for_slew_complete(lock, owner_generation, false)) {
+        if (!wait_for_slew_complete(lock, owner_generation)) {
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
         if (!refine_goto_landing_locked(lock, ra, dec, owner_generation, nullptr) ||
@@ -1479,6 +1483,7 @@ public:
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             // open-astro#775: ITelescopeV4 raises InvalidOperation when a slew
             // is requested with Tracking false.
+            refresh_tracking_mode_locked();
             if (!get_tracking_locked()) {
                 throw AlpacaException("SlewToCoordinatesAsync requires Tracking to be true",
                                       AlpacaError::InvalidOperation);
@@ -1552,7 +1557,7 @@ public:
                     SynScanProtocolWrapper::instance().goto_ra_dec_raw(ra_raw, dec_raw, precise);
                     // Slewing stays true across the refinement passes: the first wait ends when the handset reports
                     // the GOTO done, then the landing is read back and corrected (open-astro#880).
-                    if (precise && wait_for_slew_complete(lock, owner_generation, false, &ctx)) {
+                    if (precise && wait_for_slew_complete(lock, owner_generation, &ctx)) {
                         refine_goto_landing_locked(lock, ra, dec, owner_generation, &ctx);
                     }
                 } catch (const std::exception& ex) {
@@ -1732,6 +1737,18 @@ public:
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
+        if (axis == 0) {
+            // Before manual_axis_slewing_ changes; the stop restores this mode. A failed read keeps the cache on a
+            // stop, which must still be sent; a start has moved nothing yet, so it can throw.
+            if (moving) {
+                refresh_tracking_mode_locked();
+            } else {
+                try {
+                    refresh_tracking_mode_locked();
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                }
+            }
+        }
         manual_axis_slewing_[axis] = moving;
         if (moving) {
             parked_ = false;
@@ -1749,6 +1766,7 @@ public:
             // A variable-rate P slew replaces tracking on the handset, so the stop leaves the RA motor stopped;
             // ASCOM resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked).
             protocol.set_tracking_mode(tracking_mode_cached_);
+            set_tracking_mode_cached_locked(tracking_mode_cached_);  // written through, as AbortSlew's restore
         }
         last_slew_error_.clear();
         set_slewing_locked(false);
@@ -1794,6 +1812,12 @@ public:
                 // The wrapper serializes transactions, so a GOTO already in flight
                 // must finish (or time out) before these stops can reach the mount.
                 auto& protocol = SynScanProtocolWrapper::instance();
+                // With nothing running, the cache may predate a keypad change: read the handset's mode first. A
+                // failed read keeps the cache, since the stops below must still be sent.
+                try {
+                    refresh_tracking_mode_locked();
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                }
                 // Try every stop on its own, so one lost command cannot skip the others (#781).
                 std::string stop_error;
                 const auto try_stop = [&stop_error](const std::function<void()>& stop) {
@@ -1836,6 +1860,8 @@ public:
                     // state is already clear, so a throwing write cannot leave
                     // Slewing true over stopped axes (#830).
                     protocol.set_tracking_mode(tracking_mode_cached_);
+                    // Written through, so a poll sampled during the RA stop (tracking off) cannot publish over it.
+                    set_tracking_mode_cached_locked(tracking_mode_cached_);
                     invalidate_readback_top_locked();
                 }
             }
@@ -2035,6 +2061,12 @@ public:
     void set_status_poll_before_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         status_poll_before_sample_hook_ = std::move(hook);
+    }
+
+    // Replaces the wall time every local-sidereal-time read uses; an empty function restores system_clock.
+    void set_sidereal_wall_clock_for_testing(std::function<std::chrono::system_clock::time_point()> now) {
+        std::lock_guard<std::mutex> lock(sidereal_wall_clock_mutex_);
+        sidereal_wall_clock_ = std::move(now);
     }
 
     // Called between a poll's sample and its publish, with no lock held.
@@ -2736,9 +2768,10 @@ private:
     }
 
     // Control path only: asks the handset now (the Park and landing loops are what detect a GOTO's end). The
-    // getters serve the frame instead.
-    bool poll_hardware_slewing_locked(bool propagate_error = false) const {
-        if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+    // getters serve the frame instead. ignore_dec_jog: a Dec-only MoveAxis does not touch the RA motor or
+    // tracking, so ra_motion_active_locked() leaves it out.
+    bool poll_hardware_slewing_locked(bool propagate_error = false, bool ignore_dec_jog = false) const {
+        if (manual_axis_slewing_[0] || (manual_axis_slewing_[1] && !ignore_dec_jog)) {
             return true;
         }
         if (clock_.now() < slew_force_until_) {
@@ -2779,6 +2812,50 @@ private:
                 false;  // the position getters serve the frame; the control path publishes at the end
         }
         return slewing_cached_;
+    }
+
+    // True while a motion that owns the RA motor or the tracking state is running. The RA motor stop turns
+    // handset tracking off, so the handset's mode is not read while one runs (open-astro#1259). The pulse flag
+    // clears only when IsPulseGuiding is read, so a pulse counts as running until its end time, and the slew state
+    // is polled, never taken from the frame. A Dec-only jog is not an RA motion.
+    bool ra_motion_active_locked() const {
+        const bool pulsing = pulse_guiding_active_[0] && clock_.now() < pulse_guide_end_time_[0];
+        if (pulsing || parking_ || (refining_generation_ != 0 && refining_generation_ == motion_generation_)) {
+            return true;
+        }
+        return poll_hardware_slewing_locked(false, true);
+    }
+
+    // Reads the handset's tracking mode into the cache before a command starts a motion or checks Tracking, so a
+    // stop restores the mode the handset held at the start and not the one cached at connect: the keypad can change
+    // it in between. A motion that starts while another RA motion runs keeps the mode the first one captured.
+    void refresh_tracking_mode_locked() const {
+        if (tracking_mode_valid_ && ra_motion_active_locked()) {
+            return;
+        }
+        int mode = 0;
+        try {
+            mode = SynScanProtocolWrapper::instance().get_tracking_mode();
+        } catch (...) {
+            // A failed read keeps what the driver knew: before the first read that is the polled mode.
+            if (!tracking_mode_valid_) {
+                const auto reading = snapshot_.read();
+                if (reading && reading->value.tracking_mode >= 0) {
+                    tracking_mode_cached_ = reading->value.tracking_mode;
+                    tracking_mode_valid_ = true;
+                }
+            }
+            throw;
+        }
+        // Written through to the frame Tracking serves only when it changed: every write drops the poll tick in
+        // flight, as for the slewing flag (note_slewing_read_locked).
+        const auto reading = snapshot_.read();
+        if (reading && reading->value.tracking_mode != mode) {
+            set_tracking_mode_cached_locked(mode);
+        } else {
+            tracking_mode_cached_ = mode;
+        }
+        tracking_mode_valid_ = true;
     }
 
     bool get_tracking_locked() const {
@@ -2904,8 +2981,7 @@ private:
                 return;
             }
             const auto equatorial = measure_equatorial_locked();
-            const double lst =
-                compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+            const double lst = compute_local_sidereal_time_hours(sidereal_wall_now(), site_longitude_cached_);
             park_hour_angle_hours_ = shortest_ra_delta_hours(lst, equatorial.first);
             park_ra_hours_ = equatorial.first;
             park_dec_degrees_ = equatorial.second;
@@ -2976,7 +3052,7 @@ private:
     // `ctx` (async slew body only) makes every sleep interruptible through the slot's wait_for(), the way the park
     // body waits, so a join by Disconnect, MoveAxis, a new slew or the destructor returns at once; the wait then
     // returns false.
-    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation, bool apply_settle = true,
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation,
                                 util::OperationContext* ctx = nullptr) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = clock_.now();
@@ -3020,9 +3096,6 @@ private:
         publish_measurement_locked();
         guide_position_valid_ = false;
         position_override_until_ = util::TaskClock::clock::time_point::min();
-        if (apply_settle && slew_settle_time_seconds_ > 0) {
-            sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
-        }
         return motion_generation_ == owner_generation &&
                (ctx == nullptr || ctx->stop_reason() == util::StopReason::None);
     }
@@ -3148,7 +3221,7 @@ private:
                 set_slewing_locked(true);
                 slew_force_until_ = clock_.now() + kRefineStartForce;
                 protocol.goto_ra_dec_raw(encode_ra_raw(ra, 24), encode_angle(dec, 24), true);
-                if (!wait_for_slew_complete(lock, owner_generation, false, ctx)) {
+                if (!wait_for_slew_complete(lock, owner_generation, ctx)) {
                     return false;
                 }
                 continue;
@@ -3176,7 +3249,7 @@ private:
                 set_slewing_locked(true);
                 slew_force_until_ = clock_.now() + kRefineStartForce;
                 protocol.goto_ra_dec_raw(encode_ra_raw(aim_ra, 24), encode_angle(aim_dec, 24), true);
-                if (!wait_for_slew_complete(lock, owner_generation, false, ctx)) {
+                if (!wait_for_slew_complete(lock, owner_generation, ctx)) {
                     return false;
                 }
                 continue;
@@ -3370,6 +3443,19 @@ private:
     // AbortSlew, Unpark, and disconnect. Never taken under mutex_; a blocking
     // slew releases it before waiting for motion completion.
     std::mutex initiator_mutex_;
+    // Wall time behind every local-sidereal-time read (park and SetPark target, DestinationSideOfPier,
+    // SiderealTime). Only a test replaces it, so hardware keeps std::chrono::system_clock. Own mutex: the
+    // reads run on client calls (some under mutex_), the test setter on another thread.
+    std::chrono::system_clock::time_point sidereal_wall_now() const {
+        std::function<std::chrono::system_clock::time_point()> now;
+        {
+            std::lock_guard<std::mutex> lock(sidereal_wall_clock_mutex_);
+            now = sidereal_wall_clock_;
+        }
+        return now ? now() : std::chrono::system_clock::now();
+    }
+    mutable std::mutex sidereal_wall_clock_mutex_;
+    std::function<std::chrono::system_clock::time_point()> sidereal_wall_clock_;
     // Declared last, initialised last; must outlive the driver (decision 0005).
     util::TaskClock& clock_;
     // Declared after clock_ (the slots take it) and last, so they are destroyed
@@ -3432,6 +3518,13 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_sidereal_wall_clock_for_testing(TelescopeDriver& driver,
+                                         std::function<std::chrono::system_clock::time_point()> now) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_sidereal_wall_clock_for_testing(std::move(now));
     }
 }
 

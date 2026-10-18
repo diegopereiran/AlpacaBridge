@@ -17,6 +17,8 @@
 // switchType, as the router arm did; its refusals live in touptek_fields.h so
 // the factory throws the same text.
 
+#include <alpacacore/util/thermal_camera_choice.h>
+
 #include <functional>
 #include <string>
 
@@ -48,10 +50,18 @@ void register_touptek_schema(DeviceCatalog& catalog) {
     add_schema(catalog, DeviceType::Focuser, "ToupTek AAF Focuser", touptek_focuser_fields());
     add_schema(catalog, DeviceType::FilterWheel, "ToupTek AFW Filter Wheel", touptek_filterwheel_fields());
     add_schema(catalog, DeviceType::Switch, "ToupTek Switch", touptek_switch_fields(),
-               [](const DeviceConfig& in, Source) {
+               [](const DeviceConfig& in, Source source) {
                    NormalizeResult result;
                    result.config = in;
                    result.rejection = touptek_switch_refusal(in);
+                   if (!result.rejection && in.get(kTouptekSwitchType) == "thermal" &&
+                       in.get(kTouptekThermalCameraIndex) < util::kAutoThermalCamera) {
+                       if (source == Source::Api) {
+                           result.rejection = "cameraIndex must be -1 (Auto) or a camera index";
+                       } else {
+                           result.warnings.emplace_back("cameraIndex below -1 loads as Auto");
+                       }
+                   }
                    return result;
                });
 }

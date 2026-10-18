@@ -273,6 +273,24 @@ void DeviceCatalog::add(Factory factory) {
     factories_.push_back(std::move(factory));
 }
 
+void DeviceCatalog::add_thermal_camera_lister(std::string vendor, ThermalCameraLister lister) {
+    for (auto& entry : thermal_camera_listers_) {
+        if (entry.first == vendor) {
+            entry.second = std::move(lister);
+            return;
+        }
+    }
+    thermal_camera_listers_.emplace_back(std::move(vendor), std::move(lister));
+}
+
+std::optional<std::vector<util::ThermalCameraCandidate>> DeviceCatalog::list_thermal_cameras(
+    std::string_view vendor) const {
+    for (const auto& entry : thermal_camera_listers_) {
+        if (entry.first == vendor && entry.second) return entry.second();
+    }
+    return std::nullopt;
+}
+
 const Schema* DeviceCatalog::find_schema(const DeviceKey& key) const {
     for (const Schema& s : schemas_) {
         if (s.key == key) return &s;

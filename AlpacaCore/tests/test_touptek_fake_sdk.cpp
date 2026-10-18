@@ -157,6 +157,85 @@ TEST_CASE("ToupTek thermal switch - failed connect releases the shared open", "[
     CHECK(fake.underflow_closes == 0);
 }
 
+namespace {
+
+// An uncooled camera first, a cooled one second: the order that bound a
+// switch saved at index 0 to the camera with no heater.
+FakeToupTekSDK make_fake_uncooled_then_cooled() {
+    FakeToupTekSDK fake;
+    auto uncooled = FakeToupTekSDK::default_camera("fake-guide", "G3M678M");
+    uncooled.supports_cooler = false;
+    uncooled.supports_heat = false;
+    uncooled.supports_fan = false;
+    uncooled.max_fan_speed = 0;
+    fake.cameras.push_back(uncooled);
+    fake.cameras.push_back(FakeToupTekSDK::default_camera("fake-main", "ATR585M"));
+    fake.taillight_supported = false;
+    return fake;
+}
+
+}  // namespace
+
+TEST_CASE("ToupTek thermal switch - Auto binds the one camera with a heater or fan",
+          "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_uncooled_then_cooled();
+    auto thermal =
+        alpacacore::vendor::touptek::create_touptek_thermal_switch(0, alpacacore::util::kAutoThermalCamera, fake);
+    thermal->set_connected(true);
+    CHECK(thermal->get_connected() == true);
+    CHECK(fake.last_opened_id == "fake-main");
+    CHECK(fake.ref_count("fake-guide") == 0);
+    thermal->set_connected(false);
+    CHECK(fake.underflow_closes == 0);
+}
+
+TEST_CASE("ToupTek thermal switch - a pinned camera with no heater or fan names the one that has them",
+          "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_uncooled_then_cooled();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    try {
+        thermal->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotImplemented);
+        const std::string message = e.what();
+        CHECK(message.find("Camera index 0 is the G3M678M") != std::string::npos);
+        CHECK(message.find("ATR585M (index 1)") != std::string::npos);
+    }
+    CHECK(thermal->get_connected() == false);
+    CHECK(fake.ref_count("fake-guide") == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+}
+
+TEST_CASE("ToupTek thermal switch - Auto refuses two cooled cameras without opening either",
+          "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_uncooled_then_cooled();
+    fake.cameras.push_back(FakeToupTekSDK::default_camera("fake-second", "ATR2600M"));
+    auto thermal =
+        alpacacore::vendor::touptek::create_touptek_thermal_switch(0, alpacacore::util::kAutoThermalCamera, fake);
+    try {
+        thermal->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidValue);
+        const std::string message = e.what();
+        CHECK(message.find("ATR585M (index 1), ATR2600M (index 2)") != std::string::npos);
+    }
+    CHECK(fake.physical_opens == 0);
+}
+
+TEST_CASE("ToupTek thermal camera listing - flags only, nothing opened", "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_uncooled_then_cooled();
+    const auto cameras = alpacacore::vendor::touptek::list_touptek_thermal_cameras(fake);
+    REQUIRE(cameras.size() == 2);
+    CHECK(cameras[0].index == 0);
+    CHECK(cameras[0].name == "G3M678M");
+    CHECK(cameras[0].has_thermal == false);
+    CHECK(cameras[1].index == 1);
+    CHECK(cameras[1].has_thermal == true);
+    CHECK(fake.physical_opens == 0);
+}
+
 TEST_CASE("ToupTek focuser - connect-path failure releases the shared open", "[touptek][focuser][unit][fakesdk]") {
     FakeToupTekSDK fake;
     FakeToupTekSDK::ToupFocuserInfo focuser;
