@@ -4170,16 +4170,9 @@ int main() {
         // sanitize_device_config() logs the deviceType of an entry the catalog
         // does not recognise, and only the persisted-config load reaches it with
         // text the file's author chose: a control byte must be logged as \xNN.
+        // Scratch working directory: the real config is never written.
+        const ScopedCwd scratch;
         const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
-        std::string original;
-        if (std::filesystem::exists(persisted)) {
-            std::ifstream in(persisted);
-            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        }
-        const auto restore_original = [&] {
-            std::ofstream restore(persisted, std::ios::trunc);
-            restore << (original.empty() ? std::string("[]") : original);
-        };
         std::filesystem::create_directories(persisted.parent_path());
         {
             std::ofstream out(persisted, std::ios::trunc);
@@ -4209,7 +4202,6 @@ int main() {
             route_request(startup_router, "GET", "/management/v1/configureddevices");
         }
         alpacacore::logging::set_log_sink(logging_restore.sink);
-        restore_original();
         bool escaped_logged = false;
         bool raw_logged = false;
         {
