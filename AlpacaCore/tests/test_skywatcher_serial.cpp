@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <filesystem>
@@ -149,6 +150,72 @@ TEST_CASE("SkyWatcher serial - giving up on a second mis-pair still settles the 
     link.board.set_counts(1, 0x812345);
     // The next inquiry must get its OWN reply, not the straggler.
     REQUIRE(link.proto.inquire_position(1) == 0x812345);
+}
+
+TEST_CASE("SkyWatcher serial - giving up on a second malformed reply throws and settles the line",
+          "[skywatcher][serial]") {
+    // Two byte-dropped replies in a row: the wrapper resends once, then gives up
+    // with the "Malformed" refusal (not "Mis-paired") and still settles the line
+    // so the next inquiry is answered by its own reply.
+    SerialLink link(300);
+    link.board.set_counts(1, 0x800000);
+    link.board.malform_next(2);
+    try {
+        (void)link.proto.inquire_position(1);
+        FAIL("expected a malformed-reply refusal");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(std::string(e.what()).find("Malformed motor controller reply") != std::string::npos);
+    }
+    REQUIRE(link.board.count_frames('j') == 2);  // one resend, then gave up
+
+    link.board.set_counts(1, 0x812345);
+    REQUIRE(link.proto.inquire_position(1) == 0x812345);
+}
+
+TEST_CASE("SkyWatcher serial - the settle drain keeps polling after a spurious-readable EAGAIN",
+          "[skywatcher][serial]") {
+    // poll() can report a tty readable while the read that follows yields EAGAIN.
+    // settle_serial used to end the drain there, so a straggler that arrived after
+    // that point survived the settle and could pass the next shape check. Model the
+    // spurious wakeups through the read seam (two EAGAINs while armed) and require
+    // the drain to go on until the straggler is consumed.
+    FakeSkyWatcherSerialBoard board;
+    // The two mis-paired replies are "=00\r" each (8 one-byte reads). The EAGAINs
+    // start once those are consumed, i.e. inside the give-up settle, where the
+    // straggler lands 50 ms after the second reply.
+    constexpr int kReplyBytes = 8;
+    std::atomic<bool> armed{false};
+    std::atomic<int> ok_reads{0};
+    std::atomic<int> eagain_left{2};
+    std::atomic<int> settle_reads{0};
+    auto spurious_read = [&](int fd, char* buf, std::size_t n) -> std::ptrdiff_t {
+        if (armed.load() && ok_reads.load() >= kReplyBytes) {
+            ++settle_reads;
+            if (eagain_left.load() > 0) {
+                --eagain_left;
+                errno = EAGAIN;
+                return -1;
+            }
+        }
+        const auto r = ::read(fd, buf, n);
+        if (armed.load() && r > 0) ++ok_reads;
+        return r;
+    };
+    sw::SkyWatcherProtocolWrapper proto{spurious_read};
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Serial;
+    info.port_path = board.slave_path();
+    info.baud_rate = 9600;
+    info.response_timeout_ms = 300;
+    REQUIRE(proto.connect(info));
+    board.set_counts(1, 0x800000);
+    board.mispair_next(2, "=800000", 50);
+    armed = true;
+    REQUIRE_THROWS_AS(proto.inquire_position(1), alpacacore::AlpacaException);
+    CHECK(eagain_left.load() == 0);
+    // Two EAGAINs, then the straggler's bytes: the drain went on past the first.
+    CHECK(settle_reads.load() > 2);
+    proto.disconnect();
 }
 
 TEST_CASE("SkyWatcher serial - a quiet board times out within the command budget, not the broken-read block",
