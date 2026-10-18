@@ -90,6 +90,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/host_clock.cpp
     src/core/util/units.cpp
     src/core/util/rotator_sync_offset_store.cpp
+    src/core/util/thermal_camera_choice.cpp
     src/catalog/device_config.cpp
     src/catalog/device_catalog.cpp
 )
@@ -165,6 +166,8 @@ if(ALPACACORE_ENABLE_ZWO)
     add_subdirectory(src/vendors/zwo)
     if(TARGET alpacacore_zwo)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_zwo)
+        # Guards the ZWO registrations in register_builtin_factories(), the dew heater's
+        # thermal camera lister among them.
         target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_ZWO)
     endif()
 endif()
@@ -286,7 +289,8 @@ if(ALPACACORE_ENABLE_TOUPTEK)
     add_subdirectory(src/vendors/touptek)
     if(TARGET alpacacore_touptek)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_touptek)
-        # register_builtin_factories() guards its ToupTek factory behind this macro;
+        # register_builtin_factories() guards its ToupTek factory and the thermal switch's
+        # camera lister behind this macro;
         # the schema's gpioChip check and the StellaVita factory follow the second.
         target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_TOUPTEK)
         if(ALPACACORE_TOUPTEK_STELLAVITA)

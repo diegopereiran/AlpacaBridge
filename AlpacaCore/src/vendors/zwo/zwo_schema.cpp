@@ -167,12 +167,20 @@ void register_zwo_schema(DeviceCatalog& catalog) {
     add_schema(catalog, DeviceType::Switch, "ZWO Switch", zwo_switch_fields(),
                [](const DeviceConfig& in, Source source) {
                    if (auto refusal = zwo_switch_refusal(in)) return refusal_only(in, std::move(refusal));
-                   if (source == Source::Api && zwo_switch_type(in) == "dewheater") {
-                       return refusal_only(in, zwo_bound_refusal(in, kZwoCameraId, kZwoCameraIndex,
-                                                                 "ZWO dew heater switch requires cameraIndex or "
-                                                                 "cameraId"));
+                   // A dew heater with no camera selector is Auto (cameraIndex -1): the one
+                   // attached camera with a heater. A bad serial is refused from the API and
+                   // dropped from a saved entry, which then binds by index.
+                   NormalizeResult result;
+                   result.config = in;
+                   if (zwo_switch_type(in) == "dewheater" && !zwo_serial_valid(in.get(kZwoSwitchSerial))) {
+                       if (source == Source::Api) {
+                           result.rejection = "Invalid value for serialNumber";
+                           return result;
+                       }
+                       result.warnings.emplace_back("Ignoring invalid ZWO dew heater serialNumber in the stored entry");
+                       result.config.erase(kZwoSwitchSerial.key);
                    }
-                   return refusal_only(in, std::nullopt);
+                   return result;
                });
 }
 

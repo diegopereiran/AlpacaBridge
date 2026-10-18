@@ -22,6 +22,8 @@
 // endpoint is warned about and kept. An unknown alignmentMode is dropped from
 // either source and reads as "auto" (#860).
 
+#include <alpacacore/util/alignment_mode.h>
+
 #include <string>
 
 #include "../../catalog/builtin_descriptors.h"
@@ -41,7 +43,7 @@ NormalizeResult normalize_synscan(const DeviceConfig& in, Source source) {
     // keeps the #860 rule for every caller that does not go through that helper.
     if (in.find(kSynScanAlignmentMode)) {
         const std::string mode = in.get(kSynScanAlignmentMode);
-        if (mode != "auto" && mode != "altaz" && mode != "equatorial") {
+        if (!util::is_known_alignment_mode(mode)) {
             result.config.erase(kSynScanAlignmentMode.key);
         }
     }

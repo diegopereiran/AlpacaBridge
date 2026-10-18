@@ -17,6 +17,7 @@
 // ALPACACORE_TOUPTEK_STELLAVITA, and without it a stellavita switch throws the
 // "not built" text the router returned.
 
+#include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
@@ -24,6 +25,8 @@
 #ifdef ALPACACORE_TOUPTEK_STELLAVITA
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #endif
+
+#include <algorithm>
 
 #include "../../catalog/builtin_descriptors.h"
 #include "touptek_fields.h"
@@ -35,8 +38,9 @@ namespace {
 std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int device_number) {
     if (auto refusal = touptek_switch_refusal(config)) throw AlpacaException(*refusal, AlpacaError::InvalidValue);
     if (config.get(kTouptekSwitchType) == "thermal") {
-        return vendor::touptek::create_touptek_thermal_switch(device_number,
-                                                              static_cast<int>(config.get(kTouptekThermalCameraIndex)));
+        return vendor::touptek::create_touptek_thermal_switch(
+            device_number,
+            std::max(static_cast<int>(config.get(kTouptekThermalCameraIndex)), util::kAutoThermalCamera));
     }
 #ifdef ALPACACORE_TOUPTEK_STELLAVITA
     // StellaVita PowerBox: on-board 12V DC ports over local GPIO (libgpiod),

@@ -16,6 +16,7 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/alignment_mode.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/hardware_config_refusal.h>
 #include <alpacacore/util/image_validation.h>
@@ -1846,6 +1847,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "devicecatalog";
         return match;
     }
+    if (path == "/management/v1/thermalcameras" || path == "/management/thermalcameras") {
+        match.is_management = true;
+        match.management_endpoint = "thermalcameras";
+        return match;
+    }
     if (path == "/management/v1/configuredevice" || path == "/management/configuredevice") {
         match.is_management = true;
         match.management_endpoint = "configuredevice";
@@ -1971,6 +1977,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_failed_devices(request, server_tx_id);
     } else if (match.management_endpoint == "devicecatalog") {
         return handle_device_catalog(request, server_tx_id);
+    } else if (match.management_endpoint == "thermalcameras") {
+        return handle_thermal_cameras(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
         return handle_configure_device(request, server_tx_id);
     } else if (match.management_endpoint == "removedevice") {
@@ -6639,6 +6647,58 @@ Response Router::handle_device_catalog(const Request& request, std::uint32_t ser
     return response;
 }
 
+// The cameras a vendor's camera-attached thermal switch can bind to, for the web
+// UI's camera picker: GET /management/v1/thermalcameras?vendor=zwo. The lister
+// (registered in the catalog when the vendor is built) may open cameras through
+// the vendor's ref-counted wrapper to read their controls and serial.
+Response Router::handle_thermal_cameras(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for thermalcameras endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
+    }
+
+    const std::string vendor = request.get_query_param("vendor");
+    try {
+        const auto cameras = catalog_.list_thermal_cameras(vendor);
+        if (!cameras.has_value()) {
+            AlpacaResponse alpaca_response = make_error_response(
+                client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
+                "No thermal switch camera listing for vendor '" + util::escape_for_log(vendor) + "' in this build");
+            response.set_body(alpaca_response);
+            return response;
+        }
+        nlohmann::json list = nlohmann::json::array();
+        for (const auto& camera : *cameras) {
+            list.push_back({{"Index", camera.index},
+                            {"Name", camera.name},
+                            {"Serial", camera.serial},
+                            {"HasThermal", camera.has_thermal}});
+        }
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = std::move(list);
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error listing thermal switch cameras: " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
 Response Router::handle_static_file(const Request& request) {
     Response response;
     std::string file_path = request.path();
@@ -6856,7 +6916,7 @@ std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
         return std::nullopt;
     }
     std::string mode = config.at("alignmentMode").get<std::string>();
-    if (mode == "auto" || mode == "altaz" || mode == "equatorial") {
+    if (alpacacore::util::is_known_alignment_mode(mode)) {
         return mode;
     }
     return std::nullopt;
@@ -8641,7 +8701,11 @@ void Router::load_persisted_devices() {
         try {
             nlohmann::json learned_config = nlohmann::json::object();
             if (!register_device_from_config(entry, error_message, ConfigSource::Persisted, &learned_config)) {
-                util::log_warning("Skipping persisted device: " + error_message);
+                // The message can quote the saved vendor / deviceType; the file is
+                // outside the server's control, so escape it (no cut: the whole
+                // message is the diagnosis).
+                util::log_warning("Skipping persisted device: " +
+                                  util::escape_for_log(error_message, error_message.size()));
             } else if (!learned_config.empty()) {
                 // #914: what the registration learned about the device (a ZWO
                 // camera's serial, model name, UniqueID) goes back into the

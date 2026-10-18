@@ -64,8 +64,22 @@ inline const std::vector<FieldRef>& playerone_filterwheel_fields() {
     return fields;
 }
 
+// The thermal switch's camera: an enumeration index as above, or -1 (Auto) for
+// the one attached camera with a dew heater or fan. Absent stays 0, as before
+// Auto existed, so a saved switch keeps the camera it had.
+inline const Field<std::int64_t> kPlayerOneSwitchCameraIndex{.key = "cameraIndex",
+                                                             .default_value = 0,
+                                                             .role = Role::EnumerationIndex,
+                                                             .min = -1,
+                                                             .max = std::numeric_limits<int>::max()};
+
+// Serial (POACameraProperties::SN) of the camera the switch binds; when set it
+// wins over cameraIndex, so a USB reorder cannot move the heater to another
+// camera. Absent or empty binds by cameraIndex.
+inline const Field<std::string> kPlayerOneSwitchSerial{.key = "serialNumber", .default_value = ""};
+
 inline const std::vector<FieldRef>& playerone_switch_fields() {
-    static const std::vector<FieldRef> fields{kPlayerOneCameraIndex.ref()};
+    static const std::vector<FieldRef> fields{kPlayerOneSwitchCameraIndex.ref(), kPlayerOneSwitchSerial.ref()};
     return fields;
 }
 

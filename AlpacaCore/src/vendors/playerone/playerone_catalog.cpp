@@ -19,6 +19,8 @@
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
 #include <alpacacore/vendor/playerone/playerone_switch_driver.h>
 
+#include <algorithm>
+
 #include "../../catalog/builtin_descriptors.h"
 #include "../ioptron/ioptron_camera_fields.h"
 #include "playerone_fields.h"
@@ -47,10 +49,15 @@ void register_playerone_factory(DeviceCatalog& catalog) {
     Factory sw;
     sw.key = DeviceKey{"playerone", DeviceType::Switch};
     sw.create = [](const DeviceConfig& config, int device_number) -> std::unique_ptr<AlpacaDriver> {
-        return vendor::playerone::create_playerone_switch(device_number,
-                                                          static_cast<int>(config.get(kPlayerOneCameraIndex)));
+        // The field's range already refuses below -1; clamp as the ZWO and ToupTek factories do.
+        return vendor::playerone::create_playerone_switch(
+            device_number,
+            std::max(static_cast<int>(config.get(kPlayerOneSwitchCameraIndex)), util::kAutoThermalCamera),
+            config.get(kPlayerOneSwitchSerial));
     };
     catalog.add(std::move(sw));
+
+    catalog.add_thermal_camera_lister("playerone", [] { return vendor::playerone::list_playerone_thermal_cameras(); });
 }
 
 // The iOptron iCAM cameras (e.g. iCAM178M) are rebadged Player One cameras (USB

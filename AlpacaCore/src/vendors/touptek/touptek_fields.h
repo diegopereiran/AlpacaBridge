@@ -53,7 +53,10 @@ inline const Field<std::vector<std::string>> kTouptekFilterNames{.key = "filterN
 // Switch. Two backends share (touptek, switch): "thermal" (a cooled camera's dew
 // heater + fan through the camera SDK, any ToupTek build) and "stellavita" (the
 // default; the StellaVita PowerBox's GPIO ports, only where libgpiod is built).
-// normalize owns the enum rule so the refusal keeps its wording.
+// normalize owns the enum rule so the refusal keeps its wording. The thermal
+// switch's cameraIndex may also be -1 (Auto: the one attached camera with a
+// heater or fan); normalize refuses a value below that from the API, and a saved
+// one loads as Auto (the factory clamps it). Absent stays 0, as before Auto.
 inline const Field<std::string> kTouptekSwitchType{
     .key = "switchType", .default_value = "stellavita", .role = Role::Discriminator};
 inline const Field<std::int64_t> kTouptekThermalCameraIndex{.key = "cameraIndex",

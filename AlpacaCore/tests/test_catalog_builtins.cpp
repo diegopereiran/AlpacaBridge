@@ -462,13 +462,13 @@ const DeviceKey kPlayerOneCameraKey{"playerone", DeviceType::Camera};
 const DeviceKey kPlayerOneWheelKey{"playerone", DeviceType::FilterWheel};
 const DeviceKey kPlayerOneSwitchKey{"playerone", DeviceType::Switch};
 
-void check_index_field(const FieldRef& f, std::string_view key) {
+void check_index_field(const FieldRef& f, std::string_view key, double min = 0.0) {
     CHECK(std::string_view(f.key) == key);
     CHECK(f.kind == FieldRef::Kind::Int);
     CHECK(f.role == Role::EnumerationIndex);
     CHECK_FALSE(f.required);
     REQUIRE(f.min.has_value());
-    CHECK(*f.min == 0.0);
+    CHECK(*f.min == min);
     REQUIRE(f.max.has_value());
     CHECK(*f.max == static_cast<double>(std::numeric_limits<int>::max()));
     REQUIRE(std::holds_alternative<std::int64_t>(f.default_value));
@@ -481,11 +481,17 @@ TEST_CASE("Builtin catalog - Player One index range refuses values the int cast 
           "[catalog][playerone][unit]") {
     DeviceCatalog catalog;
     register_builtin_schemas(catalog);
-    const std::pair<DeviceKey, const char*> targets[]{{kPlayerOneCameraKey, "cameraIndex"},
-                                                      {kPlayerOneSwitchKey, "cameraIndex"},
-                                                      {kPlayerOneWheelKey, "filterwheelIndex"}};
-    for (const auto& [key, field] : targets) {
-        for (const std::int64_t bad : {std::int64_t{1} << 31, std::int64_t{-1}}) {
+    // The thermal switch also takes -1, Auto (the one camera with a heater or fan).
+    struct Target {
+        DeviceKey key;
+        const char* field;
+        std::int64_t lowest;
+    };
+    const Target targets[]{{kPlayerOneCameraKey, "cameraIndex", 0},
+                           {kPlayerOneSwitchKey, "cameraIndex", -1},
+                           {kPlayerOneWheelKey, "filterwheelIndex", 0}};
+    for (const auto& [key, field, lowest] : targets) {
+        for (const std::int64_t bad : {std::int64_t{1} << 31, lowest - 1}) {
             INFO(std::string(field) + " = " + std::to_string(bad));
             DeviceConfig config;
             config.set(field, bad);
@@ -498,12 +504,36 @@ TEST_CASE("Builtin catalog - Player One index range refuses values the int cast 
             CHECK_FALSE(persisted.config.has(field));
             CHECK_FALSE(persisted.warnings.empty());
         }
-        for (const std::int64_t good : {std::int64_t{0}, std::int64_t{std::numeric_limits<int>::max()}}) {
+        for (const std::int64_t good : {lowest, std::int64_t{0}, std::int64_t{std::numeric_limits<int>::max()}}) {
             DeviceConfig config;
             config.set(field, good);
             CHECK_FALSE(catalog.normalize(key, config, Source::Api).rejection.has_value());
         }
     }
+}
+
+TEST_CASE("Builtin catalog - Player One switch serial refuses control bytes and keeps a clean one",
+          "[catalog][playerone][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    DeviceConfig forged;
+    forged.set("cameraIndex", std::int64_t{1});
+    forged.set("serialNumber", std::string("POA\nforged"));
+    const auto api = catalog.normalize(kPlayerOneSwitchKey, forged, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(api.rejection->find("serialNumber") != std::string::npos);
+    // A stored entry loses the serial, keeps its index, and still registers.
+    const auto persisted = catalog.normalize(kPlayerOneSwitchKey, forged, Source::Persisted);
+    CHECK_FALSE(persisted.rejection.has_value());
+    CHECK_FALSE(persisted.config.has("serialNumber"));
+    CHECK(persisted.config.has("cameraIndex"));
+    CHECK_FALSE(persisted.warnings.empty());
+
+    DeviceConfig clean;
+    clean.set("serialNumber", std::string("POA0123456"));
+    const auto ok = catalog.normalize(kPlayerOneSwitchKey, clean, Source::Api);
+    CHECK_FALSE(ok.rejection.has_value());
+    CHECK(ok.config.has("serialNumber"));
 }
 
 TEST_CASE("Builtin catalog - register_builtin_schemas describes the Player One devices in every build",
@@ -523,10 +553,13 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the Player One d
     const DescriptorView* camera = find_view(views, kPlayerOneCameraKey);
     REQUIRE(camera->fields.size() == 1);
     check_index_field(camera->fields[0], "cameraIndex");
-    // The thermal switch binds to a camera by its index.
+    // The thermal switch binds to a camera by its index (-1 is Auto) or its serial.
     const DescriptorView* sw = find_view(views, kPlayerOneSwitchKey);
-    REQUIRE(sw->fields.size() == 1);
-    check_index_field(sw->fields[0], "cameraIndex");
+    REQUIRE(sw->fields.size() == 2);
+    check_index_field(sw->fields[0], "cameraIndex", -1.0);
+    CHECK(std::string_view(sw->fields[1].key) == "serialNumber");
+    CHECK(sw->fields[1].kind == FieldRef::Kind::String);
+    CHECK_FALSE(sw->fields[1].required);
 
     const DescriptorView* wheel = find_view(views, kPlayerOneWheelKey);
     REQUIRE(wheel->fields.size() == 2);
@@ -3080,7 +3113,7 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices 
           std::vector<std::string>{"focuserIndex", "focuserId", "maxStep"});
     CHECK(keys_of(find_view(views, kZwoRotatorKey)) == std::vector<std::string>{"rotatorIndex", "rotatorId"});
     CHECK(keys_of(find_view(views, kZwoSwitchKey)) == std::vector<std::string>{"switchType", "cameraIndex", "cameraId",
-                                                                               "gpioChip", "devicePath",
+                                                                               "serialNumber", "gpioChip", "devicePath",
                                                                                "pwmFrequencyHz", "ports"});
     CHECK(find_field(find_view(views, kZwoWheelKey)->fields, "filterNames")->kind == FieldRef::Kind::StringList);
     CHECK(find_field(find_view(views, kZwoSwitchKey)->fields, "ports")->kind == FieldRef::Kind::RecordList);
@@ -3212,7 +3245,11 @@ TEST_CASE("Builtin catalog - ZWO normalize keeps the arms' refusals and texts", 
     CHECK(refusal_of(kZwoWheelKey, DeviceConfig{}) == "ZWO filter wheel requires filterwheelIndex or filterwheelId");
     CHECK(refusal_of(kZwoFocuserKey, DeviceConfig{}) == "ZWO EAF focuser requires focuserIndex or focuserId");
     CHECK(refusal_of(kZwoRotatorKey, DeviceConfig{}) == "ZWO rotator requires rotatorIndex or rotatorId");
-    CHECK(refusal_of(kZwoSwitchKey, DeviceConfig{}) == "ZWO dew heater switch requires cameraIndex or cameraId");
+    // A dew heater with no camera selector is Auto, so nothing is refused; a non-hex serial is.
+    CHECK(refusal_of(kZwoSwitchKey, DeviceConfig{}).empty());
+    DeviceConfig forged_serial;
+    forged_serial.set("serialNumber", std::string{"not-hex"});
+    CHECK(refusal_of(kZwoSwitchKey, forged_serial) == "Invalid value for serialNumber");
     CHECK(refusal_of(kZwoCameraKey, DeviceConfig{}) == "ZWO camera requires cameraIndex or cameraId");
 
     DeviceConfig index;

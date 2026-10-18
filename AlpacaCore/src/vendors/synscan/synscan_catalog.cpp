@@ -17,6 +17,7 @@
 // ALPACACORE_ENABLE_SYNSCAN (unlike synscan_schema.cpp), so the vendor header
 // is fine here.
 
+#include <alpacacore/util/alignment_mode.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <algorithm>
@@ -52,9 +53,9 @@ void register_synscan_factory(DeviceCatalog& catalog) {
         // normalize has dropped an unknown value, so anything else is "auto".
         auto alignment = vendor::synscan::SynScanAlignmentSetting::Auto;
         const std::string mode = config.get(kSynScanAlignmentMode);
-        if (mode == "altaz") {
+        if (mode == util::kAlignmentModeAltAz) {
             alignment = vendor::synscan::SynScanAlignmentSetting::AltAz;
-        } else if (mode == "equatorial") {
+        } else if (mode == util::kAlignmentModeEquatorial) {
             alignment = vendor::synscan::SynScanAlignmentSetting::Equatorial;
         }
 

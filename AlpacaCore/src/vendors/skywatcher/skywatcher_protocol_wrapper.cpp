@@ -1386,6 +1386,9 @@ private:
             // STARTED arriving yet is still absorbed (the original behaviour),
             // but without ever parking a bare read() past the deadline.
             const int pr = poll_serial_readable(static_cast<int>(remaining));
+            if (pr < 0 && errno == EINTR) {
+                continue;  // a signal is not silence: re-poll the rest of the window
+            }
             if (pr <= 0) {
                 break;  // quiet for the rest of the window (or poll error): drained
             }
@@ -1399,13 +1402,13 @@ private:
                 // the board is answering, so it must not count toward silence.
                 exchange_saw_frame_ = true;
             } else {
-                // EOF / EAGAIN: nothing more to drain this instant. If poll()
-                // reported the fd readable but the read then yields EAGAIN (a
-                // spurious-readable tty), this ends the drain early rather than
-                // re-polling for the rest of the window; a straggler that arrives
-                // after this point is caught by the mis-paired/malformed shape
-                // check on the next exchange, which is the real backstop.
-                break;
+                // EOF / EAGAIN (a spurious-readable tty): nothing consumed this
+                // instant, so keep draining the rest of the window instead of
+                // ending early, which would let a late straggler through to the
+                // next exchange. Pace by 1 ms so a port that keeps reporting
+                // readable cannot spin the core; the deadline bounds the loop.
+                std::this_thread::sleep_until(
+                    std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)));
             }
         }
         tcflush(serial_fd_, TCIFLUSH);
@@ -1510,7 +1513,7 @@ private:
             }
             // A hung-up tty reads 0 bytes at once, which looks like a quiet
             // board until the deadline. Checked once here rather than on
-            // every VTIME tick, so waiting on a quiet board costs no extra
+            // every poll() wakeup, so waiting on a quiet board costs no extra
             // syscalls.
             if (serial_node_removed_locked()) {
                 lose_serial_link_locked("Serial device removed");
