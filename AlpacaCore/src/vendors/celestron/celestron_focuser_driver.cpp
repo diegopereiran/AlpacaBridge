@@ -254,8 +254,8 @@ public:
     void halt() override {
         ensure_connected();
         // Never refused for a link fault: Halt is the safety stop. A link left
-        // desynchronized by an earlier timeout is resynchronized first; this
-        // sends a stop, never a repeat of the motion that timed out.
+        // desynchronized by an earlier timeout is resynchronized first (no
+        // reopen); this sends a stop, never a repeat of the motion that timed out.
         resync_if_needed();
         exchange(kMovePositive, {0x00});
         snapshot_.write([](StateFrame& frame) { frame.moving = false; });
@@ -291,11 +291,12 @@ private:
             .payload;
     }
 
-    // A timed-out exchange leaves the AUX stream desynchronized; reopening the
-    // same port flushes stale input and clears that state (CGX recovery path).
+    // A timed-out exchange leaves the AUX stream desynchronized; resync()
+    // flushes stale input on the port already held. It never reopens one, so a
+    // Halt racing a disconnect cannot leave the port open behind it.
     void resync_if_needed() {
         if (!protocol_.is_healthy()) {
-            protocol_.connect_serial(port_path_, AuxLinkSpeed::Baud9600);
+            protocol_.resync();
         }
     }
 

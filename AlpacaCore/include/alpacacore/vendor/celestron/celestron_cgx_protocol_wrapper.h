@@ -39,6 +39,10 @@ public:
 
     void connect_serial(const std::string& port_path, AuxLinkSpeed speed = AuxLinkSpeed::Baud115200);
     void disconnect();
+    /// Clears a desynchronized link on the port already held: flushes stale input
+    /// and accepts exchanges again. Never opens a port, so a racing disconnect
+    /// cannot be undone (issue #896); throws NotConnected on a closed link.
+    void resync();
     bool is_connected() const;
     bool is_healthy() const { return healthy_.load(); }
     std::uint64_t session_generation() const { return session_generation_.load(); }

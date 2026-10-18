@@ -160,6 +160,23 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
     }
 }
 
+void CelestronCgxProtocol::resync() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (serial_fd_ < 0) {
+        throw AlpacaException("Celestron AUX link is not connected", AlpacaError::NotConnected);
+    }
+    if (!desynchronized_) {
+        return;
+    }
+    if (::tcflush(serial_fd_, TCIFLUSH) != 0) {
+        disconnect_locked();
+        throw_link_error("cannot clear stale AUX input before recovery");
+    }
+    receive_buffer_.clear();
+    desynchronized_ = false;
+    healthy_.store(true);
+}
+
 void CelestronCgxProtocol::disconnect() {
     std::lock_guard<std::mutex> lock(mutex_);
     disconnect_locked();
