@@ -428,11 +428,15 @@ def moved_base_self_test():
         try:
             git("init", "-q", "-b", "trunk")
             commit("base", "test_a.cpp", "Old")
+            commit("base m", "test_m.cpp", "Mover")
             opened = sha()
             git("checkout", "-q", "-b", "pr")
             commit("pr", "test_a.cpp", "Old", "Mine")
             commit("pr again", "test_c.cpp", "Mine2")
             commit("pr same name elsewhere", "test_d.cpp", "Old")
+            # "Mover" is cut from test_m.cpp and pasted into test_n.cpp: moved, not new.
+            commit("pr move out", "test_m.cpp")
+            commit("pr move in", "test_n.cpp", "Mover")
             git("checkout", "-q", "trunk")
             commit("other pr", "test_b.cpp", "Other")
             # refs/pull/N/merge: first parent the moved base tip, second the PR head.
