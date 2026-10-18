@@ -323,11 +323,19 @@ jobs:
           print("## Line coverage (all vendors, arm64)\n")
           print("| Component | Lines covered | Lines total | Line % |")
           print("|---|---:|---:|---:|")
+          totals = {}
           for label, name in rows:
               with open(f"coverage/{name}.json") as f:
                   s = json.load(f)
+              totals[name] = s['line_total']
               print(f"| {label} | {s['line_covered']} | {s['line_total']} "
                     f"| {s['line_percent']:.1f} |")
+          # The component reports are filtered from the combined JSON (gcovr
+          # -a). The two filters are disjoint, so they must add up to the
+          # combined total; if they do not, gcovr stopped applying --filter to
+          # a tracefile and the component rows are wrong.
+          if totals["alpacacore"] + totals["alpacahttp"] != totals["combined"]:
+              raise SystemExit(f"component line totals {totals} do not add up")
           PY
 
       - name: Upload coverage report
@@ -716,6 +724,7 @@ jobs:
           LDFLAGS: "--coverage"
         run: |
           set -euo pipefail
+          ccache --zero-stats
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DALPACAHTTP_BUILD_TESTS=ON \
@@ -723,6 +732,17 @@ jobs:
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
           ccache --show-stats
+          # A low hit rate means this build no longer matches build-vendors'
+          # (wrapper step, flags or configure drifted) and the cache is dead
+          # weight. Warn rather than fail: a cold main cache is legitimate.
+          ccache --print-stats | awk -F'\t' '
+            $1 == "direct_cache_hit" || $1 == "preprocessed_cache_hit" { hits += $2 }
+            $1 == "cache_miss" { misses += $2 }
+            END {
+              total = hits + misses
+              if (total > 0 && hits * 2 < total)
+                printf "::warning::clang-tidy build hit the compiler cache for %d of %d compiles\n", hits, total
+            }'
 
       - name: Run clang-tidy on changed lines
         run: |
