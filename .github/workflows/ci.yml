@@ -637,8 +637,9 @@ jobs:
         run: ./run_all_tests.sh
 
       - name: Compiler cache statistics
+        # --verbose lists why calls were uncacheable.
         if: always()
-        run: ccache --show-stats
+        run: ccache --show-stats --verbose
 
       - name: Save the compiler cache
         # Manual runs save too, so a branch can be measured warm before merge.
