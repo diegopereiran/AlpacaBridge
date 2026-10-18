@@ -152,11 +152,12 @@ TEST_CASE("SkyWatcher serial - giving up on a second mis-pair still settles the 
     REQUIRE(link.proto.inquire_position(1) == 0x812345);
 }
 
-TEST_CASE("SkyWatcher serial - giving up on a second malformed reply throws and settles the line",
+TEST_CASE("SkyWatcher serial - giving up on a second malformed reply throws the Malformed refusal",
           "[skywatcher][serial]") {
     // Two byte-dropped replies in a row: the wrapper resends once, then gives up
-    // with the "Malformed" refusal (not "Mis-paired") and still settles the line
-    // so the next inquiry is answered by its own reply.
+    // with the "Malformed" refusal (not "Mis-paired"), and the next inquiry is
+    // answered by its own reply. (This fake sends no straggler after a malformed
+    // reply, so the settle itself is pinned by the mis-pair case above.)
     SerialLink link(300);
     link.board.set_counts(1, 0x800000);
     link.board.malform_next(2);
