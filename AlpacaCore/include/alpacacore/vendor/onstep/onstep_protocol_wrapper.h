@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -70,7 +71,8 @@ struct AltAz {
 /**
  * @brief Mount status decoded from the :GU# extended status string.
  *
- * side_of_pier: -1 = unknown/not reported, 0 = pier east, 1 = pier west.
+ * side_of_pier: -1 = unknown/not reported, 0 = pier east ('T'), 1 = pier west
+ * ('W'). 'E' in :GU# is the mount type (GEM), not the pier side (#1217).
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
  * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
@@ -120,6 +122,30 @@ public:
     bool is_connected() const;
 
     /**
+     * @brief Whether the serial link is still there (decision 0009, #1241).
+     *
+     * False once the link is lost: the configured port path no longer
+     * reaches the node opened at connect (adapter unplugged or re-enumerated),
+     * or a read or write failed with EIO, ENXIO, ENODEV or EBADF. A loss
+     * found here closes the port when no exchange holds it. No serial I/O;
+     * the network test seam is never lost this way.
+     */
+    bool link_alive();
+
+    /// Why the link was lost, or "" while it is not lost. Cleared by
+    /// disconnect() or a successful connect().
+    std::string link_lost_reason() const;
+
+    /// When the link was lost (first detection), read and cleared. Kept
+    /// across disconnect() so a reconnect can tell how long the outage was.
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
+
+    /// The last time the link was confirmed present before the current loss,
+    /// read and cleared. The adapter went away after this, so `now` minus it
+    /// is an upper bound on the outage even when nothing looked meanwhile.
+    std::optional<std::chrono::steady_clock::time_point> consume_last_alive_before_loss();
+
+    /**
      * @brief Get the mount's reported product name.
      *
      * Sends :GVP#. Used both for auto-detect identification (must be
@@ -133,6 +159,18 @@ public:
      * Sends :GVN#.
      */
     std::string get_version_number();
+
+    /**
+     * @brief Get OnStepX's coordinate mode (the firmware's MOUNT_COORDS - 1).
+     *
+     * Sends :GXEE#, which replies with one bare digit and no '#':
+     * 0 = observed place (no refraction applied to reported RA/Dec),
+     * 1 = topocentric, 2 = topocentric strict (both apply refraction).
+     * Returns std::nullopt for any other reply. Only meaningful on OnStepX:
+     * legacy OnStep answers an unknown command with "0" too, so callers must
+     * check the firmware version first (#1216).
+     */
+    std::optional<int> get_mount_coords_mode();
 
     /**
      * @brief Get current RA/Dec position.

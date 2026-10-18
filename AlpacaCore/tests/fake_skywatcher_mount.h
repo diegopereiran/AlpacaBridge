@@ -46,6 +46,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -59,6 +60,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace alpacacore::test {
 
@@ -151,8 +153,11 @@ public:
     /// @param clock the clock the axis model integrates motion against.
     /// Real by default; a FakeTaskClock makes motion virtual (see the file
     /// comment). The clock must outlive the mount.
+    /// @param bind_port 0 for an ephemeral port; a number to come back on the
+    /// port of a mount that went away (link-loss recovery cases).
     explicit FakeSkyWatcherMount(FakeMountProfile profile = FakeMountProfile::wave_100i(),
-                                 alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock())
+                                 alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock(),
+                                 int bind_port = 0)
         : kCpr(profile.cpr),
           kCprDec(profile.cpr_dec != 0 ? profile.cpr_dec : profile.cpr),
           kTimerFreq(profile.timer_freq),
@@ -169,7 +174,7 @@ public:
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = 0;
+        addr.sin_port = htons(static_cast<uint16_t>(bind_port));
         if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             ::close(fd_);
             fd_ = -1;
@@ -209,6 +214,30 @@ public:
         return (static_cast<double>(a.counts + a.frame_shift) - static_cast<double>(kHome)) * 360.0 / a.cpr;
     }
 
+    /// open-astro#437: give @p axis a gear gap of @p counts between the motor
+    /// and the output shaft (0, the default, couples them rigidly). After a
+    /// reversal the shaft stays put until the motor has travelled the gap:
+    /// the shaft sits at the motor's count when the motor last moved down,
+    /// and @p counts below it when the motor last moved up. The shaft starts
+    /// at the motor's count.
+    void set_gear_gap(int axis, int64_t counts) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Axis& a = ax(axis);
+        a.advance(now());
+        a.gear_gap = counts;
+        a.shaft = a.counts + a.frame_shift;
+    }
+
+    /// open-astro#437: the output shaft's angle in degrees, in the
+    /// controller's count frame: what the register would read if it measured
+    /// the shaft instead of the motor. Equals axis_degrees() with no gear gap.
+    double shaft_degrees(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Axis& a = ax(axis);
+        a.advance(now());
+        return (static_cast<double>(a.shaft - a.frame_shift) - static_cast<double>(kHome)) * 360.0 / a.cpr;
+    }
+
     /// Signed axis angle in degrees from COUNT home (the controller's frame).
     double axis_degrees(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -238,6 +267,12 @@ public:
         return ax(axis).step_period_inquiries;
     }
 
+    // The direction latched by the last ":G" on the axis ('0' or '1').
+    char axis_dir(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).dir;
+    }
+
     bool axis_running(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
@@ -260,6 +295,20 @@ public:
     int frames_seen(char cmd = 0) {
         std::lock_guard<std::mutex> lock(mutex_);
         return frame_count(cmd);
+    }
+
+    /// Every motion-shaping frame (":G" ":S" ":I" ":J" ":K" ":L" ":E"), in the
+    /// order the board received it and exactly as framed, status polls left
+    /// out: the command stream a byte-identical case compares.
+    std::vector<std::string> motion_log() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return motion_log_;
+    }
+
+    /// Forget the motion log so far (a case that wants only the stream of one move).
+    void clear_motion_log() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        motion_log_.clear();
     }
 
     /// Blocks until frames_seen(cmd) >= @p n or @p real_timeout of real time
@@ -308,6 +357,26 @@ public:
     /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
     /// make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+
+    /// Steady state, until set back to zero: every reply is held for @p latency
+    /// before it is sent, on wall time like hold_next_reply. Models a link with
+    /// a fixed per-transaction cost; transactions_served() counts the replies
+    /// that paid it. A reply is counted before the fake sends it (or drops it
+    /// under set_silent), so a client that holds its reply sees it counted; the
+    /// silent decision is taken before the count becomes visible.
+    void set_reply_latency(std::chrono::milliseconds latency) { latency_ms_.store(static_cast<int>(latency.count())); }
+
+    /// A reply latency long enough that a slew still runs after the driver's
+    /// first poll of it: the named constant a case uses to keep a slew alive.
+    static constexpr std::chrono::milliseconds kSlewPastFirstPollLatency{30};
+
+    /// While @p on, the board hears every frame (frames_seen() still counts
+    /// it and the axes still act on it) but never answers: the driver's
+    /// exchange times out with no datagram seen. Until cleared.
+    void set_silent(bool on) { silent_.store(on); }
+
+    /// Transactions the fake has finished, answered or dropped by set_silent().
+    int transactions_served() const { return served_.load(); }
 
     /// While @p on, answer every ":e" identity request with a reply of the
     /// right length that is not hex, so the driver's identify fails
@@ -387,12 +456,43 @@ public:
         a.coast_ms = coast_ms;
     }
 
+    /// open-astro#437: motion frames (":G" ":S" ":I" ":J" ":K" ":L" ":E") the
+    /// axis received while still coasting in after a land_short_by() landing,
+    /// the window the driver's landing settle exists for. A ":K" counts too: it
+    /// ends the coast here, so a motion start that stops the axis first would
+    /// otherwise reach its ":J" with nothing left to see.
+    int commands_while_coasting(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).commands_while_coasting;
+    }
+
+    /// open-astro#437: answer the next @p n ":f" inquiries on an axis with
+    /// "!0", so the wrapper throws: a status read that fails. With
+    /// @p after_next_start the count starts at the axis' next ":J".
+    void fail_status_replies(int axis, int n, bool after_next_start = false) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        (after_next_start ? ax(axis).failed_status_replies_on_start : ax(axis).failed_status_replies) = n;
+    }
+
+    /// How many of those failed replies are still to be served.
+    int status_failures_pending(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).failed_status_replies + ax(axis).failed_status_replies_on_start;
+    }
+
     /// Refuse the next @p n ":J" on an axis with "!2" (Motor not stopped):
     /// the start/re-latch throws in the wrapper. Models a transport-level
     /// failure of the ":J" kick that follows a live ":I" (#249 review).
     void reject_start_motion(int axis, int n) {
         std::lock_guard<std::mutex> lock(mutex_);
         ax(axis).reject_starts = n;
+    }
+
+    /// Refuse the next @p n instant-stop command on an axis. Used to verify
+    /// that async-operation cleanup preserves stop failures.
+    void reject_instant_stop(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).reject_instant_stops = n;
     }
 
     /// The T1 step period the axis is actually running with (last APPLIED ":I").
@@ -406,7 +506,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
         a.advance(now());
-        a.counts = static_cast<int64_t>(kHome) + static_cast<int64_t>(std::llround(deg * a.cpr / 360.0));
+        const int64_t moved =
+            static_cast<int64_t>(kHome) + static_cast<int64_t>(std::llround(deg * a.cpr / 360.0)) - a.counts;
+        a.counts += moved;
+        a.shaft += moved;  // a set-up jump carries the shaft along, gap unchanged
     }
 
 private:
@@ -426,6 +529,8 @@ private:
         uint32_t t1 = 0;
         int64_t goto_target = kHome;
         int64_t frame_shift = 0;                          // physical = counts + frame_shift
+        int64_t gear_gap = 0;                             // motor-to-shaft play, counts (test knob)
+        int64_t shaft = kHome;                            // output shaft, physical frame
         std::chrono::steady_clock::time_point stop_at{};  // ramped ":K" deadline
         bool stopping = false;
         bool in_goto = false;
@@ -442,6 +547,10 @@ private:
         bool coasting = false;     // counts still creeping with ":f" reading stopped
         int64_t coast_target = 0;
         double coast_cps = 0.0;
+        int commands_while_coasting = 0;         // motion frames received while coasting
+        int failed_status_replies = 0;           // ":f" inquiries to answer "!0" (test knob)
+        int failed_status_replies_on_start = 0;  // moved into failed_status_replies at the next ":J"
+        double goto_cps = 0.0;                   // a slow GOTO's ":I" rate; 0 = kGotoDegPerSec
         int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
         int wrong_restart_latches = 0;    // ":J" restarts to latch at the wrong rate (test knob)
 
@@ -449,6 +558,7 @@ private:
         int stall_live_rate_writes = 0;     // ":I" writes on a running axis to store but not apply (test knob)
         int ignore_start_relatches = 0;     // ":J" kicks on a running axis that must NOT re-latch T1 (test knob)
         int reject_starts = 0;              // ":J" to refuse with "!2" (test knob)
+        int reject_instant_stops = 0;       // ":L" to refuse with "!2" (test knob)
         int64_t home_index_counts = kHome;
         // Set from the injected clock in the constructor.
         std::chrono::steady_clock::time_point last{};
@@ -479,13 +589,14 @@ private:
                         counts += static_cast<int64_t>(std::llround(dir_sign * step));
                     }
                     latch_indexer(before_coast);
+                    follow_shaft();
                 }
                 return;
             }
             int64_t before = counts;
             if (in_goto) {
                 double dir_sign = goto_target >= counts ? 1.0 : -1.0;
-                double step = kGotoDegPerSec * cpr / 360.0 * dt;
+                double step = (goto_cps > 0.0 ? goto_cps : kGotoDegPerSec * cpr / 360.0) * dt;
                 double remaining = std::abs(static_cast<double>(goto_target - counts));
                 if (step >= remaining) {
                     running = false;
@@ -519,6 +630,15 @@ private:
                 counts += static_cast<int64_t>(whole);
             }
             latch_indexer(before);
+            follow_shaft();
+        }
+
+        // The play rule: the shaft moves only when the motor pushes it, so it
+        // stays within [motor - gear_gap, motor]. Each advance() step is
+        // monotonic, so applying the rule at its end point is exact.
+        void follow_shaft() {
+            const int64_t motor = counts + frame_shift;
+            shaft = std::min(motor, std::max(shaft, motor - gear_gap));
         }
 
         // Latch the home index on a crossing while armed.
@@ -587,6 +707,10 @@ private:
         a.advance(now());
         ++total_frames_;
         ++frames_by_cmd_[static_cast<unsigned char>(cmd)];
+        if (std::strchr("GSIJKLE", cmd) != nullptr) {
+            motion_log_.push_back(frame);
+            a.commands_while_coasting += a.coasting ? 1 : 0;
+        }
         frames_cv_.notify_all();
         bool was_running_on_start = false;  // ":J" only; declared here to not cross case labels
         switch (cmd) {
@@ -607,6 +731,10 @@ private:
             case 'j':
                 return "=" + u24(static_cast<uint32_t>(a.counts & 0xFFFFFF));
             case 'f': {
+                if (a.failed_status_replies > 0) {
+                    --a.failed_status_replies;
+                    return "!0";
+                }
                 static const char* hex = "0123456789ABCDEF";
                 uint32_t n0 = (a.speed_mode ? 1u : 0u) | (a.dir == '1' ? 2u : 0u) | (a.fast ? 4u : 0u);
                 uint32_t n1 = !a.hide_running && (a.running || a.hold_running) ? 1u : 0u;
@@ -666,6 +794,8 @@ private:
                     return "!2";  // refused: nothing applied
                 }
                 ++a.start_count;
+                a.failed_status_replies += a.failed_status_replies_on_start;
+                a.failed_status_replies_on_start = 0;
                 was_running_on_start = a.running;
                 if (!was_running_on_start) {
                     // Only a genuinely fresh start (from stopped) has no
@@ -682,6 +812,8 @@ private:
                 a.stopping = false;
                 if (a.in_goto) {
                     a.goto_target &= 0xFFFFFF;
+                    // A slow GOTO (mode '2') runs at the ":I" rate, a fast one at kGotoDegPerSec.
+                    a.goto_cps = !a.fast && a.t1 > 0 ? static_cast<double>(kTimerFreq) / a.t1 : 0.0;
                 } else if (a.ignore_start_relatches > 0) {
                     --a.ignore_start_relatches;  // acked, preset still not applied
                 } else {
@@ -700,14 +832,22 @@ private:
                 ++a.stop_count;
                 a.coasting = false;  // an explicit stop ends the landing coast
                 if (a.running && stop_ramp_ms_ > 0) {
-                    a.stopping = true;
-                    a.stop_at = now() + std::chrono::milliseconds(stop_ramp_ms_);
+                    // A second ":K" on an axis already braking leaves the brake
+                    // running: the ramp ends where the first stop put it.
+                    if (!a.stopping) {
+                        a.stopping = true;
+                        a.stop_at = now() + std::chrono::milliseconds(stop_ramp_ms_);
+                    }
                 } else {
                     a.running = false;
                     a.in_goto = false;
                 }
                 return "=";
             case 'L':  // instant stop
+                if (a.reject_instant_stops > 0) {
+                    --a.reject_instant_stops;
+                    return "!2";
+                }
                 ++a.stop_count;
                 a.coasting = false;  // an explicit stop ends the landing coast
                 a.running = false;
@@ -753,17 +893,29 @@ private:
             std::string reply = handle(frame) + "\r";
             if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+            if (const int latency_ms = latency_ms_.load(); latency_ms > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
+            // Decide silence before the count is visible: a case that waits for the count and then
+            // calls set_silent() must not see its late reply dropped. Count before the send, so a
+            // client that has its reply already sees it counted.
+            const bool drop = silent_.load();
+            served_.fetch_add(1);
+            if (drop) continue;
             ::sendto(fd_, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), plen);
         }
     }
 
     int fd_ = -1;
     int port_ = 0;
+    std::vector<std::string> motion_log_;
     FakeMountProfile profile_;
     alpacacore::util::TaskClock& clock_;
     std::atomic<bool> stop_{false};
     std::thread thread_;
     std::atomic<int> hold_ms_{0};
+    std::atomic<int> latency_ms_{0};
+    std::atomic<bool> silent_{false};
+    std::atomic<int> served_{0};
     std::mutex mutex_;
     std::condition_variable frames_cv_;
     int total_frames_ = 0;

@@ -450,16 +450,25 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outli
         CHECK_FALSE(driver->get_connected());
         // If the goto reached the wire the fake is mid-travel and, like the
         // real wheel, silent until it arrives; a reconnect handshake during
-        // that window would time out. Wait for it to land first.
+        // that window would time out. Wait until the fake has read and handled
+        // everything the driver wrote. Counting the goto right after the join
+        // is not enough: the byte can still be on its way to the fake's
+        // reader, and under the -O0 coverage build it often was, so the round
+        // skipped the wait and the next handshake met a travelling wheel. The
+        // pty hands a write to the master side asynchronously, so quiescent()
+        // must hold for a stretch, not once. Worst case is the fake's
+        // shortest-path distance times its travel time (3 slots x 1.5 s from
+        // slot 0), plus slack.
+        const auto settled_by = std::chrono::steady_clock::now() + std::chrono::seconds(7);
+        int quiet_polls = 0;
+        while (quiet_polls < 10 && std::chrono::steady_clock::now() < settled_by) {
+            quiet_polls = fake.quiescent() ? quiet_polls + 1 : 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        REQUIRE(quiet_polls == 10);
         const std::string goto_char(1, static_cast<char>('0' + target));
         if (fake.count(goto_char) > gotos_seen) {
             gotos_seen = fake.count(goto_char);
-            // Worst case is the fake's shortest-path distance times its
-            // travel time (3 slots x 1.5 s from slot 0), plus slack.
-            const auto landed = std::chrono::steady_clock::now() + std::chrono::seconds(7);
-            while (fake.position() != target && std::chrono::steady_clock::now() < landed) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            }
             REQUIRE(fake.position() == target);
         }
     }
@@ -478,6 +487,15 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect mid-move waits out the arr
     driver->set_connected(true);
     driver->set_position(5);
     CHECK(driver->get_position() == -1);
+    // On a pty tcdrain() returns while the goto byte is still unread in the
+    // buffer, and the held-port reconnect flushes the line (tcflush); a real
+    // UART would have sent it. Wait until the fake has taken the byte so the
+    // wheel is really mid-travel when the reconnect lands.
+    const auto seen_by = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (fake.count("5") == 0 && std::chrono::steady_clock::now() < seen_by) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(fake.count("5") > 0);
     driver->set_connected(false);  // cancels the wait; the fake keeps turning
     // Reconnect at once: the arrival '5' is still to come.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
@@ -496,4 +514,19 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect mid-move waits out the arr
     CHECK(driver->get_position() == 5);
     REQUIRE_NOTHROW(driver->set_position(6));
     CHECK(settle_position(*driver) == 6);
+}
+
+// #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
+// connect refuses in words the operator can act on instead of opening "" or auto-detecting.
+TEST_CASE("QHY CFW3 Filter Wheel Driver - Connect with empty serial port names portPath", "[qhy][cfw3][unit]") {
+    auto driver = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, "");
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    CHECK(message.find("portPath") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
 }

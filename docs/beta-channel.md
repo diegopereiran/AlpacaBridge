@@ -35,7 +35,8 @@ build installed this way; repeat the download for each beta, or opt in as above.
 To check the file was built by this repository's release workflow from the beta's tag, and not
 just that it matches its `.sha256`, run on any machine with the GitHub CLI signed in:
 `gh attestation verify alpacabridge_X.Y.Z-beta.N_arm64.deb --repo open-astro/AlpacaBridge`.
-Each attestation is also listed under the repository's Actions > Attestations.
+The same works for a nightly `.deb`. Each attestation, and the SBOM attached to it, is also
+listed under the repository's Actions > Attestations.
 
 **Opt out** by removing `beta` from the apt line and restoring the default
 `update_packages_url`. apt does not downgrade on its own, so a user who leaves mid-beta stays
@@ -43,6 +44,24 @@ on the beta build until the stable release overtakes it.
 
 Every stable release is published to both `main` and `beta`, so the beta index always holds the
 newest build of either kind.
+
+## Nightly builds
+
+`.github/workflows/nightly-build.yml` builds `main` every night (03:17 UTC, skipped when `main` has not
+moved) and replaces the assets of the `nightly-build` pre-release on GitHub, whose tag moves to the built
+commit. A nightly is unreleased, unvalidated code for trying a merged fix before a beta carries it;
+it is never published to apt. Install it the way a beta is installed by hand above: download the
+`.deb` and its `.sha256` from the `nightly-build` release, check the sum, `sudo apt install ./<file>`.
+
+Its version is `<next>~nightly<YYYYMMDDHHMM>.g<sha7>`, where `<next>` is the release `main`'s code
+will ship in (`scripts/nightly_version.py`): what `changelog_fragments.py --bump` prints on `main`, but
+never below `X.(Y+1).0` once a `stable/X.Y` branch or a `vX.Y.Z[-beta.N]` tag exists, since that line
+is built from its stable branch and `main` is already past it. With `stable/5.0` cut, that gives
+`5.0.0~beta4 < 5.0.0 < 5.1.0~nightly202610170317.gabc1234 < 5.1.0`: a nightly is never named after, or
+sorted below, a stable release that lacks its code, and apt upgrades it to the release `main` ships in.
+It also sorts above every beta of the stable line, so apt offers a tester on a nightly no beta of it;
+install one by hand. A maintainer can force a build with
+`gh workflow run nightly-build.yml --repo open-astro/AlpacaBridge -f force=true`.
 
 ## Branch model
 
@@ -126,6 +145,11 @@ newest build of either kind.
   A PR that misses the bar is retargeted with `gh pr edit --base main` before review, not
   reviewed on the branch.
 - Fixes land on the stable branch and reach `main` through the merge down. No cherry-picks.
+- GitHub closes `Closes #N` issues only for a PR merged into `main`, so a merged PR into `stable/**`
+  closes its issues through `.github/workflows/close-linked-issues.yml` (`scripts/close_linked_issues.py`):
+  every issue of this repository named with a closing keyword (`Closes`, `Fixes`, `Resolves` and their
+  other forms) in the PR body is closed as completed with a comment naming the PR and merge commit.
+  `Refs #N`, other repositories and pull-request numbers are ignored.
 - Fix PRs target `stable/X.Y` (`/submit-pr --base stable/X.Y`), run the same CI and review bot, and
   each adds its `changelog.d/` fragment as usual; the fragment travels to `main` in the merge down
   and is consumed at promotion.

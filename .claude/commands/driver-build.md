@@ -548,9 +548,9 @@ Checklist:
 ## Step 6 — AlpacaHTTP integration
 
 All 9 steps required for end-to-end functionality:
-1. Router registration in `AlpacaHTTP/src/http/router.cpp`.
-2. Router includes with `#ifdef ALPACACORE_ENABLE_<VENDOR>` guard.
-3. Config sanitization fields preserved.
+1. Catalog descriptor: `<vendor>_fields.h`, `<vendor>_schema.cpp` and `<vendor>_catalog.cpp` under `AlpacaCore/src/vendors/<vendor>/`, registered in `AlpacaCore/src/catalog/builtin_catalog.cpp` (the router has no vendor arm).
+2. No vendor include in `AlpacaHTTP/src/http/router.cpp` (`scripts/check_layering.py`).
+3. Config sanitization: every persisted field declared in the schema.
 4. Web UI vendor dropdown in `AlpacaHTTP/web/app.js`.
 5. Web UI vendor-specific form fields.
    - **Unique vendor-prefixed `name` on EVERY field** (not just filter wheels): hidden
@@ -715,14 +715,14 @@ The unit cases above run without hardware because they never connect. Concurrenc
 
 **1. The seam.** Pick the shape by what the driver talks to:
 
-- **Vendor SDK** (camera, filter wheel, anything linking a vendor `.so`): the abstract-interface pattern. An abstract `<Vendor>SDK` interface, the production wrapper implementing it, a `<Vendor>SDK&`-taking overload on every `create_<vendor>_*` factory beside the existing one, a scripted fake in `tests/fake_<vendor>_sdk.h`, and a mutex-taking decorator in `tests/locked_<vendor>_sdk.h` that wraps the fake wherever it is injected, so a TSan report points at driver code rather than at the fake. Worked examples: ToupTek (`ToupTekSDK`, `tests/fake_touptek_sdk.h`, `tests/locked_touptek_sdk.h`) shows the seam and `[stress]` registration; QHY has the same seam and a registered connected-camera stress case in `AlpacaCore/tests/qhy_camera_concurrency_stress.cpp`. Read AGENTS.md's QHY fake-SDK constraints before copying its camera worker path. Do not write a mock that subclasses the production wrapper: it is declared `final`, so the subclass will not build. Subclass the abstract `<Vendor>SDK` interface instead.
+- **Vendor SDK** (camera, filter wheel, anything linking a vendor `.so`): the abstract-interface pattern. An abstract `<Vendor>SDK` interface, the production wrapper implementing it, a `<Vendor>SDK&`-taking overload on every `create_<vendor>_*` factory beside the existing one, a scripted fake in `tests/fake_<vendor>_sdk.h`, and a mutex-taking decorator in `tests/locked_<vendor>_sdk.h` that wraps the fake wherever it is injected, so a TSan report points at driver code rather than at the fake. The one exception today is Player One: `FakePlayerOneSDK` takes its own mutex in every method, so it has no `locked_playerone_sdk.h` and its stress case and contract-sweep host use the fake directly. A new seam gets the decorator; if that internal mutex is ever removed, Player One needs one too. Worked examples: ToupTek (`ToupTekSDK`, `tests/fake_touptek_sdk.h`, `tests/locked_touptek_sdk.h`) shows the seam and `[stress]` registration; QHY has the same seam and a registered connected-camera stress case in `AlpacaCore/tests/qhy_camera_concurrency_stress.cpp`. Read AGENTS.md's QHY fake-SDK constraints before copying its camera worker path. Do not write a mock that subclasses the production wrapper: it is declared `final`, so the subclass will not build. Subclass the abstract `<Vendor>SDK` interface instead.
 - **Serial or network protocol** (mounts, focusers, hubs): a fake device on the other end of the real transport. A pseudo-terminal fake for serial (`tests/fake_gemini_focuser.h`, `tests/fake_skywatcher_serial_board.h`; `PtyPair` in `tests/fake_pty_write.h` owns the pty), a loopback server for TCP/UDP (`tests/fake_mount_server.h`, `tests/fake_skywatcher_mount.h`). The driver connects through its real protocol wrapper, so the wrapper's own threads and timeouts are what get stormed.
 
 A driver whose seam cannot be built yet (no fake is possible without the hardware in hand) still registers: with every connect failing fast at enumeration the storm exercises the `AsyncConnectable` machinery, the failure-path cleanup and the getters racing the lifecycle, which is where this driver family's findings have lived. Say so in the file's header comment, the way `test_zwo_concurrency_stress.cpp` does.
 
 **2. The registration.** Create `AlpacaCore/tests/test_<vendor>_concurrency_stress.cpp` (the `_concurrency_stress.cpp` suffix is what `scripts/check_stress_registration.py` globs for; the `test_` prefix is convention, not enforced), built on `tests/concurrency_stress.h`: a factory returning the driver, an `operate` callback exercising its operational surface with **every call wrapped in `StressCallGuard`** (`run_lifecycle_stress` wraps the whole callback in one try/catch, so without a per-call guard the first throw skips every call after it, and a hand-rolled local try/catch is rejected by the gate because it loses the guard's counting), then the scenarios: `run_lifecycle_stress`, `run_destruction_during_connect_stress`, and the racing-disconnect cases. Each `TEST_CASE` carries `[<vendor>][<device>][stress]`; the file ends each case with `INFO(guard.report()); CHECK(guard.unexpected_count() == 0); CHECK(guard.total_calls() > 0);`. Copy the closest existing registration (`ls AlpacaCore/tests/test_*_concurrency_stress.cpp`) and read `concurrency_stress.h`'s header comment first; both the file naming and the guard idiom are gated, so the check will tell you exactly what is missing.
 
-**3. Do not add an `ALLOWLIST` entry.** `scripts/check_stress_registration.py` fails a driver with no `[stress]` case and points you back at this step. The `ALLOWLIST` it mentions exists only for the drivers that predate the gate (see the list in the script for what is left) and is expected to shrink, never grow. A new driver built from this command has no reason to be on it; if you find yourself adding one, the seam in part 1 is the work you skipped.
+**3. Do not add an `ALLOWLIST` entry.** `scripts/check_stress_registration.py` fails a driver with no `[stress]` case and points you back at this step. The `ALLOWLIST` it mentions once held the drivers that predated the gate; every one has since been registered, so it is empty and must stay that way. A new driver built from this command has no reason to be on it; if you find yourself adding one, the seam in part 1 is the work you skipped.
 
 **4. Gate it in CMake.** The stress file goes in the same `if(TARGET alpacacore_<vendor>)` block as the unit file (below); an unconditional listing is itself a gate failure, because a `[stress]` case that compiles with the vendor absent satisfies the TSan zero-test grep vacuously (issue #396).
 
@@ -747,8 +747,10 @@ cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake
 
 If any test fails, fix it before proceeding. The test tag filter `"[<vendor>]"` runs only the new vendor's tests for faster iteration.
 
-Build into `build-vendors`, not `build`. The `-D` alone is not enough after a pre-flight: since
-#588 the sanitized pass is the last thing to configure `AlpacaCore/build`, and CMake seeds
+Build into `build-vendors`, not `build`. The `-D` alone is not enough on a reused directory: from
+#588 until #1251 the pre-flight's sanitized pass was the last thing to configure `AlpacaCore/build`
+(it now builds in `AlpacaHTTP/build` and deletes `AlpacaCore/build`, but a `build` from an older
+run or a manual configure can still be there), and CMake seeds
 `CMAKE_CXX_FLAGS` from `CXXFLAGS` on a directory's first configure and then caches it -- so
 reconfiguring `build` keeps `-fsanitize=address,undefined` no matter what you pass, and you
 iterate against a slow, LSan-enabled binary with the `ALPACACORE_TESTS_SANITIZED` cases skipped.
@@ -801,7 +803,7 @@ full hard rule.
 
 After the driver builds and unit tests pass, the user MUST run ConformU against the driver with real hardware on **Linux arm64**, the only supported target. A driver is NOT complete until it has arm64 ConformU results.
 
-**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Use 4.5.1+ on arm64; 4.5.0 has a known arm64 timing defect (see `AGENTS.md`).
+**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Use 4.5.2 (build 56139) on arm64, the current standard (`/conformu` installs it); 4.5.0 has a known arm64 timing defect (see `AGENTS.md`).
 
 ### Required validation matrix
 

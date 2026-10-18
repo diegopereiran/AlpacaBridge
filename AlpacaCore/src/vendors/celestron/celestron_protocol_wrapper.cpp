@@ -14,6 +14,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -212,11 +213,13 @@ std::vector<CelestronPortInfo> enumerate_celestron_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
+            if (!alpacacore::util::try_mark_serial_port_open(resolved)) continue;
             std::string probe_message = "Probing ";
             probe_message.append(resolved).append(" (").append(name).append(")...");
             ALPACA_LOG_INFO("Celestron", probe_message);
 
             std::string fw = probe_nexstar_port(resolved);
+            alpacacore::util::mark_serial_port_closed(resolved);
             if (!fw.empty()) {
                 std::string found_message = "Found NexStar mount on ";
                 found_message.append(resolved).append(" (HC firmware ").append(fw).append(")");
@@ -246,11 +249,13 @@ std::vector<CelestronPortInfo> enumerate_celestron_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_celestron_candidate(resolved)) continue;
         probed.insert(resolved);
+        if (!alpacacore::util::try_mark_serial_port_open(resolved)) continue;
 
         std::string probe_message = "Probing ";
         probe_message.append(resolved).append("...");
         ALPACA_LOG_INFO("Celestron", probe_message);
         std::string fw = probe_nexstar_port(resolved);
+        alpacacore::util::mark_serial_port_closed(resolved);
         if (!fw.empty()) {
             std::string found_message = "Found NexStar mount on ";
             found_message.append(resolved).append(" (HC firmware ").append(fw).append(")");
@@ -405,7 +410,19 @@ public:
 
         bool success = false;
         if (info.type == ConnectionType::Serial) {
+            std::error_code canonical_error;
+            const auto canonical = std::filesystem::canonical(info.port_path, canonical_error);
+            serial_registry_path_ = canonical_error ? info.port_path : canonical.string();
+            if (!util::try_mark_serial_port_open(serial_registry_path_)) {
+                serial_registry_path_.clear();
+                throw AlpacaException("Celestron serial port is already in use: " + info.port_path,
+                                      AlpacaError::InvalidOperation);
+            }
             success = connect_serial(info.port_path, info.baud_rate);
+            if (!success) {
+                util::mark_serial_port_closed(serial_registry_path_);
+                serial_registry_path_.clear();
+            }
         } else {
             success = connect_network(info.host, info.tcp_port);
         }
@@ -427,6 +444,8 @@ public:
         }
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
+            util::mark_serial_port_closed(serial_registry_path_);
+            serial_registry_path_.clear();
         } else {
             disconnect_network();
         }
@@ -527,8 +546,11 @@ public:
         // NexStar "L" command: ASCII "0" or "1" & "#"
         std::string response = send_command("L", true, 0);
         if (response.empty()) {
-            ALPACA_LOG_WARN("Celestron", "is_goto_in_progress (L): empty response → false");
-            return false;
+            throw AlpacaException("Slew completion query (L) returned no response", AlpacaError::DriverException);
+        }
+        if (response.size() != 1 || (response[0] != '0' && response[0] != '1')) {
+            throw AlpacaException("Slew completion query (L) returned an invalid response",
+                                  AlpacaError::DriverException);
         }
         bool in_progress = response[0] == '1';
         {
@@ -640,9 +662,13 @@ public:
         cmd.push_back(static_cast<char>(1));
         std::string response = send_command(cmd, true, 0, 1);
         if (response.empty()) {
-            return false;
+            throw AlpacaException("Home completion query returned no response", AlpacaError::DriverException);
         }
-        return static_cast<unsigned char>(response[0]) != 0;
+        const auto status = static_cast<unsigned char>(response[0]);
+        if (status != 0x00 && status != 0xFF) {
+            throw AlpacaException("Home completion query returned an invalid response", AlpacaError::DriverException);
+        }
+        return status == 0xFF;
     }
 
     std::string get_device_firmware(int device_address) {
@@ -944,9 +970,15 @@ public:
         cmd.push_back(static_cast<char>(1));
         std::string response = send_command(cmd, true, 0, 1);
         if (response.empty()) {
-            return true;
+            throw AlpacaException("Motor-controller slew completion query returned no response",
+                                  AlpacaError::DriverException);
         }
-        return static_cast<unsigned char>(response[0]) != 0;
+        const auto status = static_cast<unsigned char>(response[0]);
+        if (status != 0x00 && status != 0xFF) {
+            throw AlpacaException("Motor-controller slew completion query returned an invalid response",
+                                  AlpacaError::DriverException);
+        }
+        return status == 0xFF;
     }
 
     uint32_t get_mc_position(int axis) {
@@ -1653,6 +1685,7 @@ private:
 
     int serial_fd_;
     int socket_fd_;
+    std::string serial_registry_path_;
 };
 
 CelestronProtocolWrapper::CelestronProtocolWrapper() : pimpl_(std::make_unique<Impl>()) {}

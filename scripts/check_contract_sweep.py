@@ -65,7 +65,7 @@ ALLOWLIST: dict[tuple[str, str], str] = {}
 
 # Pairs the router builds under another vendor's build flag.
 GUARD_OVERRIDE = {
-    ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (router.cpp)
+    ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (playerone_catalog.cpp)
 }
 
 # (vendor, device_type, factory) -> reason the router's factory has no registry entry. Empty: every
@@ -158,6 +158,18 @@ def strip_comments(text: str) -> str:
             out.append(c)
             i += 1
     return "".join(out)
+
+
+def router_function_parsed(router_text: str) -> bool:
+    """Whether register_device_from_config() was found and its braces matched. Zero arms inside it is
+    legitimate once every vendor is a catalog descriptor (open-astro#664 Part D, the last arm left in
+    #1228); a function the parser cannot find or match is not."""
+    text = strip_comments(router_text)
+    start = text.find(ROUTER_FUNCTION)
+    if start < 0:
+        return False
+    open_idx = text.find("{", text.find(")", start))
+    return open_idx >= 0 and matching_brace(text, open_idx) >= 0
 
 
 def router_pairs(router_text: str) -> set[tuple[str, str]]:
@@ -335,7 +347,7 @@ def check(root: pathlib.Path) -> list[str]:
         return failures
 
     pairs = router_pairs(router_text)
-    if not pairs:
+    if not pairs and not router_function_parsed(router_text):
         failures.append("NO ROUTER ARMS FOUND in %s (%s): the parser is broken or the function moved"
                         % (ROUTER, ROUTER_FUNCTION))
     failures.extend(unparsed_arm_findings(router_text))
@@ -358,10 +370,12 @@ def check(root: pathlib.Path) -> list[str]:
     for path, text in sorted(catalog_file_texts.items()):
         dir_vendor = pathlib.PurePosixPath(path).parent.name
         key_vendors = {m.group("v") for m in DEVICE_KEY_VENDOR_RE.finditer(strip_comments(text))}
+        # A pair built under another vendor's flag (GUARD_OVERRIDE) has its factory in that vendor's file.
+        hosted = {pair[0] for pair, flag in GUARD_OVERRIDE.items() if flag.lower() == dir_vendor}
         if not key_vendors:
             failures.append("CATALOG VENDOR UNVERIFIED: %s has no DeviceKey{\"<vendor>\", ...} literal, so its "
                             "directory vendor %s cannot be checked; write the key as a literal" % (path, dir_vendor))
-        for key_vendor in sorted(key_vendors - {dir_vendor}):
+        for key_vendor in sorted(key_vendors - {dir_vendor} - hosted):
             failures.append("CATALOG VENDOR MISMATCH: %s sits in the %s directory but declares DeviceKey vendor "
                             "%s" % (path, dir_vendor, key_vendor))
 
@@ -626,7 +640,7 @@ def _run(router=FIX_ROUTER, header=FIX_HEADER, cmake=FIX_CMAKE, sweep=FIX_SWEEP,
 
 
 def self_test() -> int:
-    global ALLOWLIST, BACKEND_ALLOWLIST
+    global ALLOWLIST, BACKEND_ALLOWLIST, GUARD_OVERRIDE
     problems: list[str] = []
 
     def expect(name: str, failures: list[str], needle: str | None):
@@ -638,6 +652,7 @@ def self_test() -> int:
 
     saved = dict(ALLOWLIST)
     saved_backends = dict(BACKEND_ALLOWLIST)
+    saved_overrides = dict(GUARD_OVERRIDE)
     try:
         ALLOWLIST = {}
         BACKEND_ALLOWLIST = {}
@@ -737,6 +752,11 @@ def self_test() -> int:
         expect("not expanded", _run(sweep="// nothing\n"), "SWEEP DOES NOT EXPAND THE REGISTRY")
         # Robustness: a moved router function is a finding, not a silent pass.
         expect("router moved", _run(router="int x;\n"), "NO ROUTER ARMS FOUND")
+        # ... but a router whose function holds no arm at all is the end state of the catalog
+        # migration, not a broken parser: it must not raise the finding.
+        no_arms = _run(router="bool Router::register_device_from_config(const nlohmann::json& c) {\n    return false;\n}\n")
+        if any("NO ROUTER ARMS FOUND" in f for f in no_arms):
+            problems.append("armless router: raised NO ROUTER ARMS FOUND, got %r" % (no_arms,))
         expect("empty registry", _run(header="// empty\n"), "EMPTY REGISTRY")
         # open-astro#664: catalog files. Their pairs are checked in C++ (module docstring); here a
         # catalog file supplies backends for UNSWEPT BACKEND and exempts its vendor's entries from
@@ -776,9 +796,14 @@ def self_test() -> int:
                _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG.replace('DeviceKey{"astroasis", DeviceType::Focuser}',
                                                                     "make_key()")}, **swept),
                "CATALOG VENDOR UNVERIFIED: %s" % CATALOG_ASTROASIS)
+        GUARD_OVERRIDE = {**saved_overrides, ("gemini", "focuser"): "ASTROASIS"}
+        expect("catalog DeviceKey vendor built under the directory vendor's flag",
+               _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG + 'DeviceKey{"gemini", DeviceType::Focuser};\n'},
+                    **swept), None)
     finally:
         ALLOWLIST = saved
         BACKEND_ALLOWLIST = saved_backends
+        GUARD_OVERRIDE = saved_overrides
 
     if problems:
         print("check_contract_sweep self-test FAILED:")

@@ -65,6 +65,7 @@
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
+#include "skywatcher_fake_clock.h"
 
 namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeSkyWatcherMount;
@@ -226,47 +227,14 @@ void check_landing(const LandedFrame& f, double latitude, double target_ra, doub
 
 // ── Fake-clock helpers (open-astro#715) ─────────────────────────────────────
 //
-// The fake integrates motion against a FakeTaskClock; the driver itself stays
-// on the wall clock in this slice (the issue's rule), so nothing here waits on
-// the clock and FakeTaskClock::wait_for_waiters() has nothing to rendezvous
-// with. The rendezvous is the board traffic instead: each step waits for the
-// driver's next frame, then decides how virtual time moves:
-//   - while an axis runs a goto, jump far enough that it lands at once (a
-//     goto's duration is the only thing this suite ever spent real time on);
-//   - otherwise let virtual time follow wall time, so a tracking RA axis and
-//     the driver's LST agree (decision 0001: LST is host time, never this
-//     clock) and the driver's sampled post-slew rate check sees a sidereal
-//     axis.
-// A jump never moves a tracking axis: only a goto axis is jumped, and the
-// driver restarts tracking only after both axes have landed. Nothing here
-// sleeps for a driver timer.
-constexpr auto kGotoJump = std::chrono::seconds(120);  // > any goto here (180 deg at 800x sidereal = 55 s)
-constexpr auto kFrameRendezvous = std::chrono::milliseconds(50);
-
-bool run_until_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
-                             const std::function<bool()>& pred, std::chrono::milliseconds real_bound) {
-    const auto deadline = std::chrono::steady_clock::now() + real_bound;
-    auto last = std::chrono::steady_clock::now();
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return false;
-        }
-        if (mount.axis_in_goto(1) || mount.axis_in_goto(2)) {
-            clock.advance(kGotoJump);
-        }
-        mount.wait_for_frames(0, mount.frames_seen() + 1, kFrameRendezvous);
-        const auto t = std::chrono::steady_clock::now();
-        clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(t - last));
-        last = t;
-    }
-    return true;
-}
+// The goto-jump pumping lives in skywatcher_fake_clock.h (open-astro#1221).
+using alpacacore::test::skywatcher_clock::pump_until;
 
 LandedFrame land_on_fake_clock(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
                                FakeSkyWatcherMount& mount, double ra_hours, double dec) {
     driver.slew_to_coordinates_async(ra_hours, dec);
     REQUIRE(driver.get_slewing());
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(60)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(60)));
     LandedFrame f{};
     f.lst = driver.get_sidereal_time();
     f.a1 = mount.physical_degrees(1);
@@ -820,8 +788,8 @@ TEST_CASE("SkyWatcher pointing - AutoHome resets the remembered branch to the po
     // fake-clock wait lets virtual time follow wall time: it stays real-rate.
     driver->set_tracking(false);
     driver->find_home();
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(180)));
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(180)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
 
     INFO("after AutoHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
     REQUIRE(std::abs(driver->get_declination() - 90.0) < 0.2);
@@ -852,8 +820,8 @@ TEST_CASE("SkyWatcher pointing - the no-indexer FindHome lands on the positive b
     REQUIRE(f.a2 < -1.0);
 
     driver->find_home();
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(60)));
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(60)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
     INFO("after FindHome a2=" << mount.physical_degrees(2) << " reported RA " << driver->get_right_ascension());
     CHECK(driver->get_side_of_pier() == 0);
     CHECK(std::abs(wrap_ha(driver->get_right_ascension() - (driver->get_sidereal_time() - 6.0))) < 0.05);
@@ -882,8 +850,8 @@ TEST_CASE("SkyWatcher pointing - FindHome on a k = -1 board reports the side its
     REQUIRE(f.a2 < -1.0);
 
     driver->find_home();
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(60)));
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return driver->get_at_home(); }, std::chrono::seconds(60)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
     const double ra = driver->get_right_ascension();
     const double dec = driver->get_declination();
     INFO("after FindHome a2=" << mount.physical_degrees(2) << " reported RA " << ra << " dec " << dec);
@@ -1001,8 +969,8 @@ TEST_CASE("SkyWatcher pointing - the default Park lands on the positive branch (
     REQUIRE(f.side_of_pier == 1);
 
     driver->park();
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return driver->get_at_park(); }, std::chrono::seconds(60)));
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return driver->get_at_park(); }, std::chrono::seconds(60)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
     INFO("parked a2=" << mount.physical_degrees(2));
     CHECK(driver->get_side_of_pier() == 0);
 
@@ -1154,12 +1122,11 @@ TEST_CASE("SkyWatcher pointing - DeclinationRate raises the physical Dec of an E
     const double dec_start =
         sky_from_axes(latitude, mount.physical_degrees(1), mount.physical_degrees(2), -1).dec_degrees;
     driver->set_declination_rate(10.0);  // arcsec/s, well above the ~0.26 floor
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return mount.axis_running(2); }, std::chrono::seconds(3)));
+    REQUIRE(pump_until(clock, mount, [&] { return mount.axis_running(2); }, std::chrono::seconds(3)));
     // Real-rate motion: no goto runs here, so virtual time follows wall time
     // for the 2 s the rate is measured over.
     const auto rate_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-    run_until_on_fake_clock(
-        clock, mount, [&] { return std::chrono::steady_clock::now() >= rate_end; }, std::chrono::seconds(3));
+    pump_until(clock, mount, [&] { return std::chrono::steady_clock::now() >= rate_end; }, std::chrono::seconds(3));
     const double dec_end =
         sky_from_axes(latitude, mount.physical_degrees(1), mount.physical_degrees(2), -1).dec_degrees;
     const double moved_arcsec = (dec_end - dec_start) * 3600.0;
@@ -1168,9 +1135,110 @@ TEST_CASE("SkyWatcher pointing - DeclinationRate raises the physical Dec of an E
     CHECK(moved_arcsec < 40.0);
 
     driver->set_declination_rate(0.0);
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !mount.axis_running(2); }, std::chrono::seconds(5)));
+    REQUIRE(pump_until(clock, mount, [&] { return !mount.axis_running(2); }, std::chrono::seconds(5)));
     driver->set_tracking(false);
     driver->set_connected(false);
+}
+
+// open-astro#297: MoveAxis is sky-referenced. The judge is the REPORTED RA and
+// Dec, never the raw counts: positive primary = east (RA rises), positive
+// secondary = north (Dec rises), both hemispheres, both Dec branches.
+namespace {
+
+struct MoveAxisSite {
+    const char* name;
+    double latitude;
+    double longitude;
+    double dec;  // target Dec well inside the hemisphere's sky
+};
+
+void jog_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
+                       alpacacore::TelescopeDriver& driver, int axis, double rate) {
+    driver.move_axis(axis, rate);
+    REQUIRE(pump_until(clock, mount, [&] { return mount.axis_running(axis + 1); }, std::chrono::seconds(3)));
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    pump_until(clock, mount, [&] { return std::chrono::steady_clock::now() >= end; }, std::chrono::seconds(3));
+}
+
+void stop_jog_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
+                            alpacacore::TelescopeDriver& driver, int axis) {
+    driver.move_axis(axis, 0.0);
+    REQUIRE(pump_until(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(10)));
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher pointing - MoveAxis is sky-referenced on the primary axis, both hemispheres (#297)",
+          "[skywatcher][telescope][pointing][hemisphere][taskclock][moveaxis]") {
+    const MoveAxisSite sites[] = {{"south", -33.856784, 151.215297, -20.0}, {"north", 51.477833, -0.001500, 20.0}};
+    for (const auto& site : sites) {
+        for (const double rate : {0.5, -0.5}) {
+            INFO(site.name << " site, primary rate " << rate);
+            alpacacore::test::FakeTaskClock clock;
+            FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+            REQUIRE(mount.ok());
+            auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site.latitude, site.longitude, 40.0);
+            driver->set_connected(true);
+            driver->set_tracking(false);
+
+            const double lst = driver->get_sidereal_time();
+            land_on_fake_clock(clock, *driver, mount, std::fmod(lst + 1.0, 24.0), site.dec);  // HA -1 h
+
+            const double ra0 = driver->get_right_ascension();
+            jog_on_fake_clock(clock, mount, *driver, 0, rate);
+            const double ra_moved = wrap_ha(driver->get_right_ascension() - ra0);
+            INFO("reported RA moved " << ra_moved << " h");
+            if (rate > 0.0) {
+                CHECK(ra_moved > 0.02);  // east: RA rises
+            } else {
+                CHECK(ra_moved < -0.02);  // west: RA falls
+            }
+            stop_jog_on_fake_clock(clock, mount, *driver, 0);
+            driver->set_connected(false);
+        }
+    }
+}
+
+TEST_CASE(
+    "SkyWatcher pointing - MoveAxis is sky-referenced on the secondary axis, both hemispheres and pier sides (#297)",
+    "[skywatcher][telescope][pointing][hemisphere][taskclock][moveaxis]") {
+    const MoveAxisSite sites[] = {{"south", -33.856784, 151.215297, -20.0}, {"north", 51.477833, -0.001500, 20.0}};
+    for (const auto& site : sites) {
+        bool seen_positive_branch = false;
+        bool seen_negative_branch = false;
+        for (const double ha : {-3.0, 3.0}) {  // one hour angle per Dec branch
+            for (const double rate : {0.5, -0.5}) {
+                INFO(site.name << " site, HA " << ha << " h, secondary rate " << rate);
+                alpacacore::test::FakeTaskClock clock;
+                FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+                REQUIRE(mount.ok());
+                auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site.latitude, site.longitude, 40.0);
+                driver->set_connected(true);
+                driver->set_tracking(false);
+
+                const double lst = driver->get_sidereal_time();
+                const LandedFrame f =
+                    land_on_fake_clock(clock, *driver, mount, std::fmod(lst - ha + 24.0, 24.0), site.dec);
+                INFO("landed on a2 " << f.a2);
+                (f.a2 >= 0.0 ? seen_positive_branch : seen_negative_branch) = true;
+
+                const double dec0 = driver->get_declination();
+                jog_on_fake_clock(clock, mount, *driver, 1, rate);
+                const double dec_moved = driver->get_declination() - dec0;
+                INFO("reported Dec moved " << dec_moved << " deg");
+                if (rate > 0.0) {
+                    CHECK(dec_moved > 0.2);  // north: Dec rises
+                } else {
+                    CHECK(dec_moved < -0.2);
+                }
+                stop_jog_on_fake_clock(clock, mount, *driver, 1);
+                driver->set_connected(false);
+            }
+        }
+        INFO(site.name << " site");
+        CHECK(seen_positive_branch);
+        CHECK(seen_negative_branch);
+    }
 }
 
 TEST_CASE("SkyWatcher pointing - a Wave 150i goto lands on the sky, south (#458, geometry only)",
@@ -1496,7 +1564,7 @@ TEST_CASE("SkyWatcher pointing - landing is reported when the board reports stop
     // 2. Land every goto (the first and each refinement) the instant the
     //    board starts it. Slewing must then clear a few polls later: well
     //    under the 8 s floor, and under the 8 + 3 + 3 s a refined goto had.
-    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(30)));
+    REQUIRE(pump_until(clock, mount, [&] { return !driver->get_slewing(); }, std::chrono::seconds(30)));
     const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_started).count();
     const int polls = mount.frames_seen('f') - polls_at_start;
     INFO("Slewing cleared " << took << " s after the goto started; " << polls << " status polls reached the board");
@@ -1706,3 +1774,95 @@ TEST_CASE("SkyWatcher pointing - a catalog-built driver maps decAxisSense to the
 }
 
 #endif  // !_WIN32
+
+TEST_CASE("SkyWatcher pointing - a target inside the goto aim-ahead of HA=0 is not re-goto'd for the other branch",
+          "[skywatcher][telescope][pointing]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    // HA just east of the meridian by less than the goto's own aim-ahead
+    // (~3 s = 0.0009 h): the dispatch aims at HA > 0, the landing check used
+    // to evaluate the target at the current LST, HA < 0.
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 0.0004 + 24.0, 24.0);  // HA = -0.0004 h
+    const double target_dec = 30.0;
+    const int starts_before = mount.start_count(2);
+    const LandedFrame f = land_on_fake_clock(clock, *driver, mount, target_ra, target_dec);
+    const int dec_gotos = mount.start_count(2) - starts_before;
+    INFO("dec-axis starts " << dec_gotos << " a2=" << f.a2 << " reported dec " << f.reported_dec);
+    CHECK(dec_gotos <= 2);
+    CHECK(std::abs(f.reported_dec - target_dec) < kDecToleranceDegrees);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a target well away from HA=0 still lands with two dec-axis starts",
+          "[skywatcher][telescope][pointing]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 0.1 + 24.0, 24.0);  // HA = -0.1 h
+    const double target_dec = 30.0;
+    const int starts_before = mount.start_count(2);
+    const LandedFrame f = land_on_fake_clock(clock, *driver, mount, target_ra, target_dec);
+    const int dec_gotos = mount.start_count(2) - starts_before;
+    INFO("dec-axis starts " << dec_gotos << " a2=" << f.a2 << " reported dec " << f.reported_dec);
+    CHECK(dec_gotos == 2);
+    CHECK(std::abs(f.reported_dec - target_dec) < kDecToleranceDegrees);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+namespace {
+
+// The RA landing residual (arcsec) of the second slew of the pair P, Q on a
+// fresh mount, after `trained_slews` earlier slews and, when `reconnect`, a
+// disconnect + connect. The aim-ahead of a slew is built from the driver's
+// measured goto overhead and resume latency, which every landing updates, so
+// the residual of Q reads those two estimates back through the pointing.
+double second_slew_ra_residual_arcsec(int trained_slews, bool reconnect) {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    for (int i = 0; i < trained_slews; ++i) {
+        const double lst = driver->get_sidereal_time();
+        land_on_fake_clock(clock, *driver, mount, std::fmod(lst - 0.3 + 24.0, 24.0), 10.0 + 15.0 * i);
+    }
+    if (reconnect) {
+        driver->set_connected(false);
+        driver->set_connected(true);
+        driver->set_tracking(true);
+    }
+    const double lst_p = driver->get_sidereal_time();
+    land_on_fake_clock(clock, *driver, mount, std::fmod(lst_p - 0.2 + 24.0, 24.0), 60.0);
+    const double lst_q = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst_q - 0.15 + 24.0, 24.0);
+    const LandedFrame f = land_on_fake_clock(clock, *driver, mount, target_ra, 20.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+    return (f.reported_ra - target_ra) * 15.0 * 3600.0;
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher pointing - a reconnect resets the measured goto overhead and resume latency",
+          "[skywatcher][telescope][pointing]") {
+    const double fresh = second_slew_ra_residual_arcsec(0, false);
+    const double trained = second_slew_ra_residual_arcsec(4, false);
+    const double reconnected = second_slew_ra_residual_arcsec(4, true);
+    INFO("fresh " << fresh << " trained " << trained << " reconnected " << reconnected);
+    // The training moves the estimates enough to move the landing...
+    CHECK(std::abs(trained - fresh) > 2.0);
+    // ...and a reconnect puts them back to the seeded constants.
+    CHECK(std::abs(reconnected - fresh) < 1.0);
+}

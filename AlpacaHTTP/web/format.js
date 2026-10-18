@@ -440,21 +440,33 @@ function normalizeAlignmentMode(value) {
     return value === 'altaz' || value === 'equatorial' ? value : 'auto';
 }
 
-// Status dot for a configureddevices row: green = driver loaded and Connected,
-// yellow = loaded, not connected, red = LoadError, LastConnectError, a
-// LinkFault (connected or not), or Connected missing/non-boolean (unknown).
+// Status dot for a configureddevices row: green = driver loaded and a client
+// Connected, yellow = loaded and idle (no client connected; the hardware is not
+// probed until a connect), red = LoadError, LastConnectError, a LinkFault
+// (connected or not), or Connected missing/non-boolean (unavailable).
 // Green means a client is connected AND the device still replies, so any latched
-// LinkFault turns the device red. The red text joins every reason.
+// LinkFault turns the device red. Each red reason carries its own label, and the
+// red text joins every reason.
 function deviceStatus(device) {
     const d = device || {};
     const reasons = [];
-    if (d.LoadError === true) reasons.push('Driver failed to load');
-    if (d.LastConnectError) reasons.push(String(d.LastConnectError));
-    if (d.LinkFault) reasons.push('Link fault: ' + String(d.LinkFault));
-    if (reasons.length > 0) return { state: 'error', text: 'Error: ' + reasons.join('; ') };
-    if (d.Connected === true) return { state: 'connected', text: 'Connected' };
-    if (d.Connected === false) return { state: 'idle', text: 'Loaded, not connected' };
-    return { state: 'error', text: 'Error: status unknown' };
+    if (d.LoadError === true) reasons.push('Driver failed to load, see the server log');
+    if (d.LastConnectError) reasons.push('Last connect failed: ' + String(d.LastConnectError));
+    if (d.LinkFault) reasons.push('Device not responding: ' + String(d.LinkFault));
+    if (reasons.length > 0) return { state: 'error', text: reasons.join('; ') };
+    if (d.Connected === true) return { state: 'connected', text: 'Client connected' };
+    if (d.Connected === false) return { state: 'idle', text: 'Idle, no client connected' };
+    return { state: 'error', text: 'Status unavailable' };
+}
+
+// Site coordinates in the Configured Settings list: finite numbers print at a
+// fixed 6 decimals (about 0.11 m); display only, the stored value keeps full
+// precision. Any other type returns null so the caller keeps its own path.
+// A value that rounds to zero from below prints "0.000000", never "-0.000000".
+function formatSiteCoordinate(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const text = value.toFixed(6);
+    return text === '-0.000000' ? '0.000000' : text;
 }
 
 // Camera picker for a camera-attached thermal switch (ZWO dew heater, ToupTek and
@@ -592,6 +604,6 @@ if (typeof module !== 'undefined' && module.exports) {
                        updateStatusText, installerStateText, renderReleaseNotes,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
-                        normalizeAlignmentMode, deviceStatus,
+                        normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint };
 }

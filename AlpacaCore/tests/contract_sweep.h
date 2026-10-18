@@ -90,6 +90,7 @@
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -101,6 +102,9 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
+#endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#include <alpacacore/vendor/altair/altair_camera_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
@@ -237,6 +241,9 @@ inline constexpr const char* kSrcAgentsAxis =
     "tertiary not); "
     "the per-vendor disconnected unit tests this sweep replaced (fake/disconnected only, not a hardware run); "
     "Command* passthrough flag and Bisque's absence of it are assumptions read from driver source";
+inline constexpr const char* kSrcCelestronCgx =
+    "protocol document: Celestron AUX MC_MOVE_POS/MC_MOVE_NEG expose fixed rates but not measured degrees/second; "
+    "assumption: MoveAxis stays unavailable until CGX motor rates are hardware-calibrated";
 
 #ifdef ALPACACORE_ENABLE_ZWO
 inline ContractEntry contract_entry_zwo_camera() {
@@ -287,7 +294,7 @@ inline ContractEntry contract_entry_zwo_switch() {
                 return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0);
             },
             "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
-            "router arm have their own entries below"),
+            "descriptor have their own entries below"),
         DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
         "ZWODewHeaterSwitchDriver: MaxSwitch returns 1; CanWrite and CanAsync validate the id then "
         "ensure_connected()");
@@ -333,7 +340,7 @@ inline ContractEntry contract_entry_qhy_filterwheel() {
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::qhy::create_qhy_filterwheel_by_index(n, 0); },
         kSrcAgents);
 }
-// Second backend behind the same (qhy, filterwheel) router pair: the standalone CFW3 on a serial port.
+// Second backend behind the same (qhy, filterwheel) catalog pair: the standalone CFW3 on a serial port.
 inline ContractEntry contract_entry_qhy_filterwheel_cfw3() {
     return make_entry(
         "qhy_filterwheel_cfw3", "qhy", "filterwheel", DeviceType::FilterWheel,
@@ -406,7 +413,7 @@ inline ContractEntry contract_entry_ioptron_camera() {
     return with_playerone_actions(make_entry(
         "ioptron_camera", "ioptron", "camera", DeviceType::Camera,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_camera(n, 0); },
-        "assumption: the router's ioptron/camera arm reuses the Player One camera driver (router.cpp); "
+        "assumption: the ioptron/camera descriptor reuses the Player One camera driver (playerone_catalog.cpp); "
         "protocol document: AGENTS.md contract"));
 }
 inline ContractEntry contract_entry_playerone_camera() {
@@ -488,6 +495,20 @@ inline ContractEntry contract_entry_celestron_telescope() {
         },
         kSrcAgentsAxis));
 }
+inline ContractEntry contract_entry_celestron_cgx_telescope() {
+    ContractEntry entry = make_entry(
+        "celestron_telescope_cgx", "celestron", "telescope", DeviceType::Telescope,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::celestron::CelestronCgxConnectionInfo info;
+            info.port_path = "/dev/null";
+            info.site_latitude_degrees = 0.0;
+            info.site_longitude_degrees = 0.0;
+            return vendor::celestron::create_celestron_cgx_telescope(n, info);
+        },
+        kSrcCelestronCgx);
+    entry.can_move_axis = {false, false, false};
+    return entry;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -526,7 +547,7 @@ inline ContractEntry contract_entry_gemini_covercalibrator() {
         },
         kSrcAgents);
 }
-// Second and third backends behind the same (gemini, covercalibrator) router pair: the Flat Panel v2 and
+// Second and third backends behind the same (gemini, covercalibrator) catalog pair: the Flat Panel v2 and
 // the Motorized Flat Panel V3 (Pro). The entry above is the Cover Lite (create_gemini_flatpanel).
 inline ContractEntry contract_entry_gemini_covercalibrator_v2() {
     return make_entry(
@@ -579,6 +600,16 @@ inline ContractEntry contract_entry_gphoto_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ALTAIR
+// Built on the real Altair SDK singleton, disconnected: like touptek_camera,
+// construction enumerates but opens nothing.
+inline ContractEntry contract_entry_altair_camera() {
+    return make_entry(
+        "altair_camera", "altair", "camera", DeviceType::Camera,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::altair::create_altair_camera(n, 0); }, kSrcAgents);
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 inline ContractEntry contract_entry_touptek_camera() {
     return make_entry(
@@ -603,7 +634,7 @@ inline ContractEntry contract_entry_touptek_focuser() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-// Second backend behind the same (touptek, switch) router pair; needs no libgpiod.
+// Second backend behind the same (touptek, switch) catalog pair; needs no libgpiod.
 inline ContractEntry contract_entry_touptek_switch_thermal() {
     return with_switch_caps(
         make_entry(
@@ -738,7 +769,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS_CELESTRON(X) X(celestron_telescope)
+#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope)
 #else
 #define CS_CELESTRON(X)
 #endif
@@ -780,6 +811,11 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #else
 #define CS_TOUPTEK(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CS_ALTAIR(X) X(altair_camera)
+#else
+#define CS_ALTAIR(X)
+#endif
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 #define CS_TOUPTEK_STELLAVITA(X) X(touptek_switch)
 #else
@@ -816,6 +852,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     CS_GPHOTO(X) \
     CS_TOUPTEK(X) \
     CS_TOUPTEK_STELLAVITA(X) \
+    CS_ALTAIR(X) \
     CS_WANDERERASTRO(X) \
     CS_ASTROASIS(X)
 // clang-format on
@@ -841,7 +878,8 @@ inline std::vector<ContractEntry> contract_entries() {
 // case "Contract sweep tier 2 - hosts match kFakeConnectableRoster" pins the two
 // together. Every row hosts every applicable case and no case is registered where it would assert
 // nothing: target flags on telescopes only, InvalidValue only on types with a static out-of-range probe
-// (invalid_probe_reason_for() states why the others have none). A row whose fake cannot hold a connect
+// (invalid_probe_reason_for() states why the others have none), ImageArray before any exposure on cameras
+// only (issue #1167). A row whose fake cannot hold a connect
 // open states why and the source in its connecting_unobservable reason there instead of skipping the
 // Connecting check silently. A row whose fake covers
 // less than its registry entry says so inline.
@@ -857,7 +895,9 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"skywatcher", "telescope", "fake_skywatcher_mount.h"},
     {"skywatcher", "telescope", "fake_skywatcher_serial_board.h"},  // hosted as skywatcher_telescope_serial
     {"zwo", "telescope", "fake_mount_server.h"},
+    {"zwo", "camera", "fake_zwo_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
+    {"celestron", "telescope", "fake_celestron_cgx_mount.h"},  // direct USB backend
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
@@ -869,8 +909,10 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
-    {"svbony", "camera", "fake_svbony_sdk.h"},
+    {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
+    {"altair", "camera", "fake_touptek_sdk.h"},  // the ToupTek camera driver behind the Altair factory
+    {"svbony", "camera", "fake_svbony_sdk.h"},
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},
     {"wandererastro", "filterwheel", "fake_serial_streamer.h"},

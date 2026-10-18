@@ -299,14 +299,16 @@ For **every** Defect, in this order:
      configure and then caches it, so reconfiguring a directory the sanitized pass built would
      keep `-fsanitize=address,undefined` from that cache and handed you a sanitized binary no
      matter what you passed on the command line.
-     After a default pre-flight, `AlpacaCore/build` holds the ASan+UBSan vendors-OFF binary
+     After a default pre-flight, `AlpacaHTTP/build` (the one tree `run_all_tests.sh` builds
+     since #1251; the core binary is `AlpacaHTTP/build/AlpacaCore/tests/alpacacore_tests`, and
+     `AlpacaCore/build` is deleted, not built) holds the ASan+UBSan vendors-OFF binary
      rather than gate 4's vendors-ON one -- since #588 the sanitized pass is the last of the
      three `run_all_tests.sh` invocations (`ci_preflight.sh:477`, after zizmor) and
-     `run_all_tests.sh:20` `rm -rf`s the build directory on entry. `ci_preflight.sh` sets no
+     `run_all_tests.sh` `rm -rf`s its build tree on entry. `ci_preflight.sh` sets no
      `-e`, so it reaches that pass whether or not an earlier gate failed. (Under
-     `RUN_SANITIZERS=0` the pass is skipped and `AlpacaCore/build` does still hold gate 4's
+     `RUN_SANITIZERS=0` the pass is skipped and `AlpacaHTTP/build` does still hold gate 4's
      vendors-ON build -- which is exactly why this is not worth reasoning about case by case.)
-     Never infer what is in `AlpacaCore/build`: build your own.
+     Never infer what is in `AlpacaHTTP/build`: build your own.
    The full `ci_preflight.sh` is for branches that change runtime C++ across vendors.
 5b. **After a rename, grep the old name across the whole tree before pushing.** PR #695
    round 2 renamed `MIN_README_RELATIVE_LINKS` to a dict and pushed with a comment in the
@@ -447,7 +449,7 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 
 - **A gate failure in code this branch does not touch** is not a stop. Re-run the failed
   test in isolation 5 times -- against a binary you built for the purpose, NOT whatever is
-  sitting in `AlpacaCore/build`:
+  sitting in `AlpacaHTTP/build`:
   `cmake -S AlpacaCore -B AlpacaCore/build-isolate -DALPACACORE_ENABLE_ALL_VENDORS=OFF && cmake --build AlpacaCore/build-isolate --target alpacacore_tests`,
   then `AlpacaCore/build-isolate/tests/alpacacore_tests "<test name>"`.
   **Match the vendor set to the test.** The probe needs exactly two properties -- not sanitized,
@@ -461,7 +463,7 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   above already built `AlpacaCore/build-vendors` with the vendor you need, run the probe against
   that binary instead of configuring a second tree. Nothing wipes either directory, so the
   configure cost is paid once and later probes are incremental. Since #588 a default
-  pre-flight leaves `AlpacaCore/build` holding the ASan+UBSan, vendors-OFF binary from its last
+  pre-flight leaves `AlpacaHTTP/build` holding the ASan+UBSan, vendors-OFF binary from its last
   pass (see the gate-3 note above), which breaks this probe two ways: a vendor test name matches nothing
   and Catch2 exits rc 2, and -- the quiet one -- a sanitized binary has different timing, so a
   concurrency flake can stop reproducing under it and get waved through as "passes in

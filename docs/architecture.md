@@ -89,7 +89,7 @@ All interfaces inherit from `AlpacaDriver` which provides device information, co
 - Isolates SDK dependencies from core code
 - Only place where vendor SDK headers are included
 
-Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch; QHY for the Q-Focuser and the standalone CFW3 filter wheel). ZWO, ToupTek and QHY therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" (libgphoto2/libraw) is an open-source system package rather than a vendored proprietary library — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
+Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, Altair, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch; QHY for the Q-Focuser and the standalone CFW3 filter wheel). ZWO, ToupTek and QHY therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" is open source: libgphoto2 is built from a vendored tarball (`AlpacaCore/external/libgphoto2/`, `scripts/build_bundled_gphoto.sh`) into a private prefix, and libraw is a system package — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
 
 #### Layer 3: Vendor implementation
 
@@ -109,18 +109,19 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | QHY | Camera, FilterWheel (integrated CFW, e.g. miniCam8M; standalone QHYCFW3 over USB serial), Focuser (Q-Focuser, serial) | SDK + protocol wrapper | Production |
 | Player One | Camera, FilterWheel (Phoenix Wheel), Switch (dew heater + fan) | SDK wrapper | Production |
 | SVBONY | Camera | SDK wrapper | Production |
+| Altair | Camera (ToupTek OEM: the ToupTek camera driver over libaltaircam, sharing `ToupcamFamilySDK` with ToupTek) | SDK wrapper | Production |
 | ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |
 | iOptron | Telescope, Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, routed to the Player One SDK wrapper) | Protocol wrapper (+ Player One SDK wrapper for iCAM) | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
 | SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, EQ-class boards e.g. EQM-35 Pro, motor controller protocol over USB or WiFi UDP) | Protocol wrapper | Production |
-| Celestron | Telescope | Protocol wrapper | Production |
+| Celestron | Telescope (NexStar hand controller; CGX/CGX-L direct USB AUX) | Protocol wrapper | NexStar production; direct USB in development |
 | OnStep | Telescope (generic DIY/retrofit mounts) | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3), Switch (Power & Data Hubs Advanced 3) | Protocol wrapper | Production |
 | WandererAstro | CoverCalibrator (WandererCover V4), Rotator (WandererRotator Mini V1/V2), FilterWheel (SFW50/SFW50S/SFW36S), Switch (WandererBox Pro V3) | Protocol wrapper | Production |
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
 | Bisque | Telescope | Script/protocol | In development |
-| gphoto (DSLR/mirrorless) | Camera (Canon, Nikon, Sony via libgphoto2) | SDK wrapper (system libgphoto2/libraw, no vendored SDK) | Production |
+| gphoto (DSLR/mirrorless) | Camera (Canon, Nikon, Sony via libgphoto2) | SDK wrapper (bundled libgphoto2 built from source, system libraw) | Production |
 
 ### Management components
 
@@ -239,13 +240,13 @@ AlpacaBridge/
 |   |   +- vendors/                   # Vendor-specific implementations
 |   |   |   +- zwo/ qhy/ ioptron/    # One directory per vendor
 |   |   |   +- synscan/ celestron/
-|   |   |   +- playerone/ svbony/ touptek/
+|   |   |   +- playerone/ svbony/ touptek/ altair/
 |   |   |   +- gemini/ wandererastro/ weewx/ bisque/
-|   |   |   +- gphoto/                # No external/ SDK dir -- system libgphoto2/libraw
+|   |   |   +- gphoto/                # libgphoto2 tarball is under external/libgphoto2; libraw is a system package
 |   |   +- management/               # Device registry, discovery
 |   +- external/                      # Vendor SDKs and protocol docs
 |   |   +- ZWO/ QHY/ PlayerOne/      # SDK libraries
-|   |   +- SVBONY/ ToupTek/
+|   |   +- SVBONY/ ToupTek/ Altair/
 |   |   +- iOptron/ SynScan/         # Protocol documentation
 |   |   +- Celestron/ Losmandy/
 |   |   +- WandererAstro/            # WandererCover V4 serial protocol docs
@@ -288,9 +289,9 @@ Use these names in issues, PRs and records. Domain terms are defined in
 | Device Catalog | One descriptor per (vendor, device) declaring its config fields, roles and construction; AlpacaHTTP bridges JSON once and serves the schema | Planned; [decision 0004](decisions/0004-device-catalog.md) |
 | HTTP route bundles | The router's per-device-type routes, one bundle per Alpaca device type; the common `dispatch_device_method` stays in the router | Planned |
 | Task clock | Every driver wait and deadline, through one injectable clock with a fake for tests | Utility landed (#697); no driver on it yet; [decision 0005](decisions/0005-task-clock.md) |
-| Async operation slot | One cancellable, generation-tagged background body per slot, telling cancelled from superseded; piloted on the SkyWatcher telescope | Utility landed (#717); no driver on it yet; [decision 0006](decisions/0006-async-operation-ownership.md) (proposed) |
-| State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Planned; decision record written as proposed with the pilot |
-| SDK seams | An abstract SDK interface per vendor library with real, fake and locked adapters, so driver paths test without hardware | In place for QHY, ToupTek and gphoto (rules in [AGENTS.md](../AGENTS.md#hardware-free-driver-tests-via-the-sdk-seam-touptek-qhy-and-gphoto--extend-to-other-vendors)) |
+| Async operation slot | One cancellable, generation-tagged background body per slot, telling cancelled from superseded; piloted on the SkyWatcher telescope | Utility landed (#717); the Sky-Watcher (#931), Celestron (#982), SynScan (#996) and iOptron (#1246) telescope bodies and the Gemini flat panel cover and calibrator bodies (#1255) run on it, on `main` only (not `stable/5.0`); [decision 0006](decisions/0006-async-operation-ownership.md) (accepted) |
+| State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Utility landed (#998); Sky-Watcher serves its position, status and `DeviceState` from it (#1011, polled every 100 ms, `TimeStamp` is the measurement time); the Gemini focuser serves `Position`, `IsMoving` and `Temperature` from it (#1229, polled every 250 ms); the SynScan telescope serves position, status and `DeviceState` from it (#1247, polled every 1 s); other drivers not yet; [decision 0010](decisions/0010-snapshot-served-state.md) (accepted) |
+| SDK seams | An abstract SDK interface per vendor library with real, fake and locked adapters, so driver paths test without hardware | In place for QHY, ToupTek, gphoto and the SVBONY camera (rules in [AGENTS.md](../AGENTS.md#hardware-free-driver-tests-via-the-sdk-seam-touptek-qhy-gphoto-and-svbony-camera--extend-to-other-vendors)) |
 
 ## Threading model
 

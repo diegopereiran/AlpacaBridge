@@ -341,6 +341,7 @@ const INDEX_FIELDS = [
     { fieldId: 'qhy-cfw3-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
     { fieldId: 'qhy-focuser-index', vendor: 'qhy', deviceType: 'focuser', configKey: 'focuserIndex' },
     { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
+    { fieldId: 'altair-camera-index', vendor: 'altair', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'gphoto-camera-index', vendor: 'gphoto', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
     { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
@@ -445,6 +446,22 @@ function updateAutoNumbering() {
     maybeAutoFillIndexFields();
 }
 
+// Persisted devices that did not register. They are not in the standard
+// configureddevices list (open-astro#576); this UI-only extension endpoint
+// serves them so the error card can still be edited or removed. A failure here
+// leaves the registered devices usable.
+async function fetchFailedDevices() {
+    try {
+        const response = await fetch(API_BASE + '/management/v1/faileddevices?ts=' + Date.now(), { cache: 'no-store' });
+        if (!response.ok) return [];
+        const data = await response.json();
+        if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return [];
+        return data.Value;
+    } catch (e) {
+        return [];
+    }
+}
+
 // Load devices
 async function loadDevices() {
     const devicesList = document.getElementById('devices-list');
@@ -505,6 +522,8 @@ async function loadDevices() {
             }
         }
         
+        devices = devices.concat(await fetchFailedDevices());
+
         if (devices.length === 0) {
             currentDevices = [];
             devicesList.innerHTML = `
@@ -1041,6 +1060,11 @@ function startEditDevice(device) {
         setFormValue('skywatcher-meridian-limit', config.meridianLimitMinutes ?? '');
         // open-astro#582: absent = auto.
         setFormValue('skywatcher-dec-axis-sense', config.decAxisSense || 'auto');
+        // open-astro#437: absent = 0 steps, off.
+        setFormValue('skywatcher-backlash-steps-ra', config.backlashStepsRA ?? 0);
+        setFormValue('skywatcher-backlash-steps-dec', config.backlashStepsDec ?? 0);
+        document.getElementById('skywatcher-backlash-enabled-ra').checked = config.backlashEnabledRA === true;
+        document.getElementById('skywatcher-backlash-enabled-dec').checked = config.backlashEnabledDec === true;
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             skywatcherLearnSite.checked = config.learnSiteFromClient !== false;
@@ -1065,21 +1089,28 @@ function startEditDevice(device) {
             onstepConnectionTypeEl.dispatchEvent(new Event('change'));
         }
     } else if (vendor === 'celestron') {
+        const protocol = config.protocol || 'nexstar';
+        setFormValue('celestron-protocol', protocol);
         setFormValue('celestron-alignment-mode', normalizeAlignmentMode(config.alignmentMode));
-        const celestronConnectionType = config.connectionType || 'auto';
+        const celestronConnectionType = protocol === 'cgx-aux' ? 'serial' : (config.connectionType || 'auto');
         setFormValue('celestron-connection-type', celestronConnectionType);
         if (celestronConnectionType === 'serial') {
             setFormValue('celestron-port-path', config.portPath);
-            setFormValue('celestron-baud-rate', config.baudRate);
+            if (protocol !== 'cgx-aux') {
+                setFormValue('celestron-baud-rate', config.baudRate);
+            }
         } else {
             setFormValue('celestron-host', config.host);
             setFormValue('celestron-tcp-port', config.tcpPort);
         }
         setFormValue('celestron-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
         setFormValue('celestron-focal-length', opticsMetersToMm(config.focalLength));
-        const celestronConnectionTypeEl = document.getElementById('celestron-connection-type');
-        if (celestronConnectionTypeEl) {
-            celestronConnectionTypeEl.dispatchEvent(new Event('change'));
+        setFormValue('celestron-cgx-site-latitude', config.siteLatitude);
+        setFormValue('celestron-cgx-site-longitude', config.siteLongitude);
+        setFormValue('celestron-cgx-site-elevation', config.siteElevation);
+        const celestronProtocolEl = document.getElementById('celestron-protocol');
+        if (celestronProtocolEl) {
+            celestronProtocolEl.dispatchEvent(new Event('change'));
         }
     } else if (vendor === 'bisque') {
         setFormValue('bisque-host', config.host || 'localhost');
@@ -1087,7 +1118,7 @@ function startEditDevice(device) {
         setFormValue('bisque-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
         setFormValue('bisque-focal-length', opticsMetersToMm(config.focalLength));
     } else if (vendor === 'zwo' && deviceType === 'telescope') {
-        const zwoMountConnectionType = config.connectionType || 'serial';
+        const zwoMountConnectionType = config.connectionType || 'auto';
         setFormValue('zwo-mount-connection-type', zwoMountConnectionType);
         if (zwoMountConnectionType === 'serial') {
             setFormValue('zwo-mount-port-path', config.portPath);
@@ -1175,6 +1206,8 @@ function startEditDevice(device) {
         setFormValue('astroasis-hid-path', config.hidPath);
     } else if (vendor === 'svbony') {
         setFormValue('svbony-camera-index', config.cameraIndex);
+    } else if (vendor === 'altair') {
+        setFormValue('altair-camera-index', config.cameraIndex);
     } else if (vendor === 'gphoto') {
         setFormValue('gphoto-camera-index', config.cameraIndex);
     } else if (vendor === 'touptek' && deviceType === 'switch') {
@@ -1399,6 +1432,8 @@ function startEditDevice(device) {
 
     setFormValue('focuser-index', config.focuserIndex);
     setFormValue('focuser-id', config.focuserId);
+    // Another vendor's focuser also saves maxStep (QHY): only a ZWO focuser fills this input, blank = not set.
+    setFormValue('zwo-focuser-max-step', vendor === 'zwo' && deviceType === 'focuser' ? config.maxStep : '');
     setFormValue('rotator-index', config.rotatorIndex);
     setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
@@ -1509,7 +1544,7 @@ async function pollDeviceStatus() {
         if (!response.ok) return;
         const data = await response.json();
         if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return;
-        for (const device of data.Value) {
+        for (const device of data.Value.concat(await fetchFailedDevices())) {
             const status = deviceStatus(device);
             document.querySelectorAll('.status-dot').forEach(dot => {
                 if (dot.dataset.deviceType === String(device.DeviceType) &&
@@ -2900,6 +2935,11 @@ function updateVendorOptions() {
         svbonyOption.disabled = !isCamera;
         svbonyOption.hidden = !isCamera;
     }
+    const altairOption = vendorSelect.querySelector('option[value="altair"]');
+    if (altairOption) {
+        altairOption.disabled = !isCamera;
+        altairOption.hidden = !isCamera;
+    }
     const gphotoOption = vendorSelect.querySelector('option[value="gphoto"]');
     if (gphotoOption) {
         gphotoOption.disabled = !isCamera;
@@ -2976,6 +3016,9 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'svbony') {
         vendorSelect.value = '';
     }
+    if (!isCamera && vendorSelect.value === 'altair') {
+        vendorSelect.value = '';
+    }
     if (!isCamera && vendorSelect.value === 'gphoto') {
         vendorSelect.value = '';
     }
@@ -3016,6 +3059,7 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('skywatcher-config').style.display = 'block';
     } else if (vendor === 'celestron') {
         document.getElementById('celestron-config').style.display = 'block';
+        updateCelestronConnectionFields();
     } else if (vendor === 'onstep') {
         document.getElementById('onstep-config').style.display = 'block';
     } else if (vendor === 'bisque') {
@@ -3026,6 +3070,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('qhy-config').style.display = 'block';
     } else if (vendor === 'svbony') {
         document.getElementById('svbony-config').style.display = 'block';
+    } else if (vendor === 'altair') {
+        document.getElementById('altair-config').style.display = 'block';
     } else if (vendor === 'gphoto') {
         document.getElementById('gphoto-config').style.display = 'block';
     } else if (vendor === 'touptek') {
@@ -3265,12 +3311,31 @@ if (onstepConnectionType) {
 }
 
 const celestronConnectionType = document.getElementById('celestron-connection-type');
+const celestronProtocol = document.getElementById('celestron-protocol');
+function updateCelestronConnectionFields() {
+    const directUsb = celestronProtocol && celestronProtocol.value === 'cgx-aux';
+    const nexstarOnly = document.getElementById('celestron-nexstar-only');
+    if (nexstarOnly) nexstarOnly.style.display = directUsb ? 'none' : 'block';
+    const cgxSite = document.getElementById('celestron-cgx-site-config');
+    if (cgxSite) cgxSite.style.display = directUsb ? 'block' : 'none';
+    if (directUsb && celestronConnectionType) celestronConnectionType.value = 'serial';
+    const type = directUsb ? 'serial' : (celestronConnectionType ? celestronConnectionType.value : 'auto');
+    document.getElementById('celestron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
+    document.getElementById('celestron-network-config').style.display = type === 'network' ? 'block' : 'none';
+    const baudGroup = document.getElementById('celestron-baud-group');
+    if (baudGroup) baudGroup.style.display = directUsb ? 'none' : 'block';
+    const portHelp = document.getElementById('celestron-port-help');
+    if (portHelp) {
+        portHelp.textContent = directUsb
+            ? 'Select the mount USB serial device. The driver uses its fixed 115200-baud AUX protocol; no hand controller is required.'
+            : 'Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.';
+    }
+}
 if (celestronConnectionType) {
-    celestronConnectionType.addEventListener('change', function() {
-        const type = this.value;
-        document.getElementById('celestron-serial-config').style.display = type === 'serial' ? 'block' : 'none';
-        document.getElementById('celestron-network-config').style.display = type === 'network' ? 'block' : 'none';
-    });
+    celestronConnectionType.addEventListener('change', updateCelestronConnectionFields);
+}
+if (celestronProtocol) {
+    celestronProtocol.addEventListener('change', updateCelestronConnectionFields);
 }
 
 const zwoMountConnectionType = document.getElementById('zwo-mount-connection-type');
@@ -4123,6 +4188,11 @@ document.getElementById('device-form').addEventListener('submit', async function
         deviceData.minAltitudeDeg = readOptionalNumber(formData, 'skywatcherMinAltitudeDeg');
         deviceData.meridianLimitMinutes = readOptionalNumber(formData, 'skywatcherMeridianLimitMinutes');
         deviceData.decAxisSense = formData.get('skywatcherDecAxisSense') || 'auto';  // open-astro#582
+        // open-astro#437: whole microsteps, 0 when blank; a checkbox is absent from FormData when unticked.
+        deviceData.backlashStepsRA = Math.max(0, parseInt(formData.get('skywatcherBacklashStepsRA'), 10) || 0);
+        deviceData.backlashStepsDec = Math.max(0, parseInt(formData.get('skywatcherBacklashStepsDec'), 10) || 0);
+        deviceData.backlashEnabledRA = formData.has('skywatcherBacklashEnabledRA');
+        deviceData.backlashEnabledDec = formData.has('skywatcherBacklashEnabledDec');
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444
@@ -4139,14 +4209,31 @@ document.getElementById('device-form').addEventListener('submit', async function
             return;
         }
     } else if (deviceData.vendor === 'celestron') {
-        deviceData.connectionType = formData.get('celestronConnectionType') || 'auto';
+        deviceData.protocol = formData.get('celestronProtocol') || 'nexstar';
+        deviceData.connectionType = deviceData.protocol === 'cgx-aux'
+            ? 'serial'
+            : (formData.get('celestronConnectionType') || 'auto');
         deviceData.alignmentMode = normalizeAlignmentMode(formData.get('celestronAlignmentMode'));
         if (deviceData.connectionType === 'serial') {
             deviceData.portPath = formData.get('celestronPortPath');
-            deviceData.baudRate = parseInt(formData.get('celestronBaudRate')) || 9600;
+            if (deviceData.protocol !== 'cgx-aux') {
+                deviceData.baudRate = parseInt(formData.get('celestronBaudRate')) || 9600;
+            }
         } else if (deviceData.connectionType === 'network') {
             deviceData.host = formData.get('celestronHost');
             deviceData.tcpPort = parseInt(formData.get('celestronTcpPort')) || 2000;
+        }
+        if (deviceData.protocol === 'cgx-aux') {
+            const latitude = readOptionalNumber(formData, 'celestronSiteLatitude');
+            const longitude = readOptionalNumber(formData, 'celestronSiteLongitude');
+            if (latitude === null || longitude === null) {
+                alert('Site latitude and longitude are required for direct CGX USB. Enter both coordinates to identify the hemisphere and calculate pointing.');
+                return;
+            }
+            deviceData.siteLatitude = latitude;
+            deviceData.siteLongitude = longitude;
+            const elevation = readOptionalNumber(formData, 'celestronSiteElevation');
+            if (elevation !== null) deviceData.siteElevation = elevation;
         }
         // "auto" needs no connection fields - port is discovered at startup
 
@@ -4319,6 +4406,14 @@ document.getElementById('device-form').addEventListener('submit', async function
                     deviceData.focuserId = focuserId;
                 }
             }
+            // Blank means "not set": the key is left out, never sent as 0 or a default.
+            const zwoMaxStepValue = formData.get('zwoFocuserMaxStep');
+            if (zwoMaxStepValue !== null && zwoMaxStepValue !== undefined && zwoMaxStepValue !== '') {
+                const zwoMaxStep = Number.parseInt(zwoMaxStepValue, 10);
+                if (!Number.isNaN(zwoMaxStep)) {
+                    deviceData.maxStep = zwoMaxStep;
+                }
+            }
         }
         if (normalizedType === 'rotator') {
             const rotatorIndex = Number.parseInt(formData.get('rotatorIndex'), 10);
@@ -4391,6 +4486,9 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'svbony') {
         const svbonyCameraIndex = readOptionalNumber(formData, 'svbonyCameraIndex');
         deviceData.cameraIndex = svbonyCameraIndex !== null ? svbonyCameraIndex : 0;
+    } else if (deviceData.vendor === 'altair') {
+        const altairCameraIndex = readOptionalNumber(formData, 'altairCameraIndex');
+        deviceData.cameraIndex = altairCameraIndex !== null ? altairCameraIndex : 0;
     } else if (deviceData.vendor === 'gphoto') {
         const gphotoCameraIndex = readOptionalNumber(formData, 'gphotoCameraIndex');
         deviceData.cameraIndex = gphotoCameraIndex !== null ? gphotoCameraIndex : 0;
@@ -4764,7 +4862,7 @@ function renderDeviceSettings(config) {
         }
         const value = key === 'filterNames'
             ? formatFilterNamesShort(config[key])
-            : formatSettingValue(config[key]);
+            : formatConfigSettingValue(key, config[key]);
         rows.push(`
             <div class="setting-row">
                 <span class="setting-label">${escapeHtml(label)}</span>
@@ -4818,6 +4916,18 @@ function renderDeviceSettings(config) {
             </div>
         </div>
     `;
+}
+
+const SITE_COORDINATE_KEYS = new Set(['siteLatitude', 'siteLongitude']);
+
+function formatConfigSettingValue(key, value) {
+    if (SITE_COORDINATE_KEYS.has(key)) {
+        const site = formatSiteCoordinate(value);
+        if (site !== null) {
+            return site;
+        }
+    }
+    return formatSettingValue(value);
 }
 
 function formatSettingValue(value) {
@@ -4951,7 +5061,7 @@ document.addEventListener('click', (e) => {
 // ---------------------------------------------------------------------------
 // WiFi (see docs/wifi-manager-design.md). Apple-Settings-style interaction:
 // toggles take effect immediately, the network list is tappable, and hotspot
-// settings save themselves on change. No explicit save buttons.
+// settings save themselves on change, asking first when the change can drop the browser connection.
 
 const WIFI_BASE = '/management/v1/wifi';
 const WIFI_COUNTRIES = ['', 'US', 'CA', 'MX', 'GB', 'IE', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'FI', 'DK', 'PL', 'CZ', 'PT', 'GR', 'AU', 'NZ', 'JP', 'KR', 'CN', 'TW', 'IN', 'BR', 'AR', 'CL', 'ZA'];
@@ -5232,6 +5342,18 @@ function wifiConfirmSwitch(action) {
     return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection while it switches.');
 }
 
+// Warning for changes that take the hotspot or the radio away (hotspot off,
+// running-hotspot edit, radio off). Unlike wifiConfirmSwitch there is no
+// on-the-hotspot skip: a browser on the hotspot address is exactly the one
+// that loses the page. Ask whenever the page is not local and the hotspot is
+// up or the client is associated, whatever the interface count or Ssid.
+function wifiConfirmDrop(action) {
+    const status = wifiState.status || {};
+    if (location.hostname === 'localhost') return true;
+    if (!status.ApActive && !status.Ssid) return true;
+    return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection.');
+}
+
 // 5 GHz needs a regulatory country: under the world domain most 5 GHz
 // channels are blocked, so the AP can beacon on a channel clients refuse.
 // The server rejects Band "a" too; this is the friendly front-end check.
@@ -5258,8 +5380,12 @@ function wifiSelectedBand() {
 }
 
 // Apply the hotspot config. Called by the toggle and by field changes; field
-// changes keep whatever on/off state the toggle shows (auto-save).
-async function wifiApplyAp(enabled, fromToggle) {
+// changes keep whatever on/off state the toggle shows (auto-save). Every
+// change that can drop the browser's connection asks first: turning the
+// hotspot on or off, and editing a running hotspot (it restarts). Editing a
+// hotspot that is off cannot drop anything, so it saves without asking.
+// `revert` puts a field back to its previous value when the user cancels.
+async function wifiApplyAp(enabled, fromToggle, revert) {
     if (wifiState.busy) return;
     const ssid = (wifiEl('wifi-ap-ssid') || {}).value || '';
     const passphrase = (wifiEl('wifi-ap-pass') || {}).value || '';
@@ -5275,8 +5401,15 @@ async function wifiApplyAp(enabled, fromToggle) {
         if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false; }
         return;
     }
-    if (enabled && fromToggle && !wifiConfirmSwitch('start the hotspot "' + ssid + '"')) {
-        const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false;
+    if (fromToggle) {
+        const ok = enabled ? wifiConfirmSwitch('start the hotspot "' + ssid + '"')
+            : wifiConfirmDrop('turn off the hotspot');
+        if (!ok) {
+            const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = !enabled;
+            return;
+        }
+    } else if (enabled && !wifiConfirmDrop('restart the hotspot "' + ssid + '" with the new settings')) {
+        if (revert) revert();
         return;
     }
     wifiState.busy = true;
@@ -5325,6 +5458,11 @@ function wifiInit() {
     const radioToggle = wifiEl('wifi-radio-toggle');
     if (radioToggle) {
         radioToggle.addEventListener('change', async () => {
+            // Turning the radio on cannot drop a connection; turning it off can.
+            if (!radioToggle.checked && !wifiConfirmDrop('turn WiFi off')) {
+                radioToggle.checked = true;
+                return;
+            }
             try {
                 await wifiApi('/radio', 'PUT', { Enabled: radioToggle.checked });
                 setTimeout(wifiRefresh, 2000);
@@ -5341,7 +5479,10 @@ function wifiInit() {
     }
     for (const id of ['wifi-ap-ssid', 'wifi-ap-pass']) {
         const el = wifiEl(id);
-        if (el) el.addEventListener('change', () => wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false));
+        if (el) el.addEventListener('change', () => wifiApplyAp(
+            (wifiEl('wifi-ap-toggle') || {}).checked || false, false,
+            // The password is never shown back, so its previous value is empty.
+            () => { el.value = id === 'wifi-ap-ssid' ? ((wifiState.ap && wifiState.ap.Ssid) || '') : ''; }));
     }
     document.querySelectorAll('#wifi-ap-band button').forEach((b) => {
         b.addEventListener('click', () => {
@@ -5349,8 +5490,10 @@ function wifiInit() {
                 wifiRequireCountryFor5GHz();
                 return;
             }
+            const previousBand = wifiSelectedBand();
             wifiSetBandUi(b.dataset.band);
-            wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false);
+            wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false,
+                () => wifiSetBandUi(previousBand));
         });
     });
     const passToggle = wifiEl('wifi-ap-pass-toggle');
