@@ -352,9 +352,18 @@ private:
     StateFrame served_frame() const {
         ensure_connected();
         throw_if_faulted();
-        const auto reading = snapshot_.read();
+        auto reading = snapshot_.read();
+        if (!reading.has_value()) {
+            // Connected but no frame: the connect's first poll was lost, or a
+            // racing Move/Halt write dropped it. Measure the motor now rather
+            // than wait up to a poll period. A disconnect in between makes the
+            // exchange fail and the check below report NotConnected.
+            const_cast<CelestronFocuserDriver*>(this)->poll_state_once();
+            reading = snapshot_.read();
+        }
         if (!reading.has_value()) {
             ensure_connected();
+            throw_if_faulted();
             throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
         }
         return reading->value;
