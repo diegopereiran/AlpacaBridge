@@ -586,6 +586,33 @@ jobs:
           done
           sudo ldconfig
 
+      - name: Wrap the compilers for -fprofile-update=atomic
+        # -fprofile-update=atomic because the [stress] cases are multi-threaded
+        # and plain counter updates would race. ccache 4.9 rejects that option
+        # ("Unknown profiling option") and caches nothing: every compile in this
+        # job was uncacheable (4888 of 4888, run 39102485820). So the option
+        # goes in a wrapper ccache never sees, and CCACHE_COMPILERCHECK=content
+        # keys the cache on the wrapper, which records the real compiler's
+        # version and the flag.
+        run: |
+          set -euo pipefail
+          wrap="${RUNNER_TEMP}/coverage-cc"
+          mkdir -p "${wrap}"
+          for cc in gcc g++; do
+            real="$(command -v "${cc}")"
+            {
+              echo '#!/bin/sh'
+              echo "# $("${real}" --version | head -n1)"
+              echo "exec ${real} -fprofile-update=atomic \"\$@\""
+            } > "${wrap}/${cc}"
+            chmod +x "${wrap}/${cc}"
+            cat "${wrap}/${cc}"
+          done
+          {
+            echo "CC=${wrap}/gcc"
+            echo "CXX=${wrap}/g++"
+          } >> "$GITHUB_ENV"
+
       - name: Restore the compiler cache
         # Keyed per job; see the build-test job.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -597,14 +624,15 @@ jobs:
       - name: Build + run tests with coverage (all vendors)
         # Same seeding as the sanitizers job: CMake takes CXXFLAGS / LDFLAGS
         # on a fresh configure and run_all_tests.sh wipes its build tree first.
-        # -fprofile-update=atomic because the [stress] cases are
-        # multi-threaded and plain counter updates would race.
+        # -fprofile-update=atomic comes from the compiler wrappers above
+        # (CC/CXX), not CXXFLAGS, so ccache can cache these compiles.
         env:
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
-          CXXFLAGS: "--coverage -O0 -g -fprofile-update=atomic"
+          CXXFLAGS: "--coverage -O0 -g"
           LDFLAGS: "--coverage"
         run: ./run_all_tests.sh
 
@@ -613,7 +641,8 @@ jobs:
         run: ccache --show-stats
 
       - name: Save the compiler cache
-        if: always() && github.event_name == 'push'
+        # Manual runs save too, so a branch can be measured warm before merge.
+        if: always() && github.event_name != 'pull_request'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
@@ -633,21 +662,27 @@ jobs:
             --exclude '.*/examples/'
             --exclude '.*/build[^/]*/'
           )
+          # gcov runs once, for the combined report, which also writes the
+          # raw data as JSON; the two component reports are filtered from that
+          # JSON (-a) instead of running gcov over every .gcda again.
+          gcovr --root . -j "$(nproc)" "${excludes[@]}" \
+            --gcov-ignore-parse-errors=all \
+            --filter 'AlpacaCore/(src|include)/' \
+            --filter 'AlpacaHTTP/(src|include)/' \
+            --json coverage/combined-raw.json \
+            --txt coverage/combined.txt \
+            --json-summary-pretty --json-summary coverage/combined.json \
+            --html-details coverage/html/index.html \
+            AlpacaHTTP/build
           report() {
             local name="$1"
             shift
-            gcovr --root . -j "$(nproc)" "$@" "${excludes[@]}" \
-              --gcov-ignore-parse-errors=all \
+            gcovr --root . -a coverage/combined-raw.json "$@" \
               --txt "coverage/${name}.txt" \
-              --json-summary-pretty --json-summary "coverage/${name}.json" \
-              AlpacaHTTP/build
+              --json-summary-pretty --json-summary "coverage/${name}.json"
           }
           report alpacacore --filter 'AlpacaCore/(src|include)/'
           report alpacahttp --filter 'AlpacaHTTP/(src|include)/'
-          report combined \
-            --filter 'AlpacaCore/(src|include)/' \
-            --filter 'AlpacaHTTP/(src|include)/' \
-            --html-details coverage/html/index.html
           cat coverage/combined.txt
           python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json
