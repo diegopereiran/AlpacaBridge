@@ -1502,7 +1502,7 @@ public:
         // Slewing stays true from the first GOTO to the end of the last refinement pass (open-astro#880).
         const RefineScope refine_scope(*this, owner_generation, !use_precise_commands_);
         ilock.unlock();
-        if (!wait_for_slew_complete(lock, owner_generation, false)) {
+        if (!wait_for_slew_complete(lock, owner_generation)) {
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
         if (!refine_goto_landing_locked(lock, ra, dec, owner_generation, false) ||
@@ -1598,7 +1598,7 @@ public:
                 SynScanProtocolWrapper::instance().goto_ra_dec_raw(ra_raw, dec_raw, precise);
                 // Slewing stays true across the refinement passes: the first wait ends when the handset reports
                 // the GOTO done, then the landing is read back and corrected (open-astro#880).
-                if (precise && wait_for_slew_complete(lock, owner_generation, false, &slew_task_cancel_)) {
+                if (precise && wait_for_slew_complete(lock, owner_generation, &slew_task_cancel_)) {
                     refine_goto_landing_locked(lock, ra, dec, owner_generation, true);
                 }
             } catch (const std::exception& ex) {
@@ -2550,7 +2550,7 @@ private:
     // `cancel` (async slew task only) makes every sleep interruptible through task_wait_for(), the way the park
     // task waits, so a join by Disconnect, MoveAxis, a new slew or the destructor returns at once; the wait then
     // returns false.
-    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation, bool apply_settle = true,
+    bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation,
                                 std::atomic<bool>* cancel = nullptr) const {
         const auto timeout = std::chrono::seconds(120);
         auto start = std::chrono::steady_clock::now();
@@ -2594,9 +2594,6 @@ private:
         altaz_cache_valid_ = false;
         guide_position_valid_ = false;
         position_override_until_ = std::chrono::steady_clock::time_point::min();
-        if (apply_settle && slew_settle_time_seconds_ > 0) {
-            sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
-        }
         return motion_generation_ == owner_generation && (cancel == nullptr || !cancel->load());
     }
 
@@ -2695,7 +2692,7 @@ private:
                 slewing_cached_ = true;
                 slew_force_until_ = std::chrono::steady_clock::now() + kRefineStartForce;
                 protocol.goto_ra_dec_raw(encode_ra_raw(ra, 24), encode_angle(dec, 24), true);
-                if (!wait_for_slew_complete(lock, owner_generation, false, cancel)) {
+                if (!wait_for_slew_complete(lock, owner_generation, cancel)) {
                     return false;
                 }
                 continue;
@@ -2720,7 +2717,7 @@ private:
                 slewing_cached_ = true;
                 slew_force_until_ = std::chrono::steady_clock::now() + kRefineStartForce;
                 protocol.goto_ra_dec_raw(encode_ra_raw(aim_ra, 24), encode_angle(aim_dec, 24), true);
-                if (!wait_for_slew_complete(lock, owner_generation, false, cancel)) {
+                if (!wait_for_slew_complete(lock, owner_generation, cancel)) {
                     return false;
                 }
                 continue;
