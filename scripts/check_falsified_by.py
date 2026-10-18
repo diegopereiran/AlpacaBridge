@@ -17,13 +17,13 @@ the case's own name or tags say the helper is the subject (`Fake*`, `PtyPair`,
 What counts as a new case (read from `git diff <merge-base>...HEAD`):
   * Catch2: a registration macro (the `CATCH_TEST_MACROS` tuple of
     `check_stress_registration.py`, comments stripped the same way) whose name
-    is absent from every test file at the merge-base. A moved case is not new;
-    a renamed one is.
+    is absent from that file at the merge-base, unless the base declared it in
+    a file that no longer does (a moved case). A renamed case is new.
   * AlpacaHTTP hand-rolled tests: an added top-level block in `main()` (a line
     that is exactly `    {`) must open with `// case: <name>`; the name is then
     treated like a Catch2 name.
   * `AlpacaHTTP/tests/web/*.test.js`: `test('<name>', ...)` calls whose name is
-    absent from the merge-base web tests.
+    absent from that file at the merge-base, with the same moved-case allowance.
   * Parameterised cases (`GENERATE`, `TEMPLATE_TEST_CASE`) take one line per
     case, not per instance. Contract-sweep cases generated from registry rows
     are exempt: they are not macro registrations.
