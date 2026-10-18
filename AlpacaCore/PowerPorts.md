@@ -81,7 +81,7 @@ Open `http://<your-asiair-ip>:11111/` in a browser:
 3. **Vendor**: ZWO
 4. **Switch Type**: **ASIair Pro 12V Power Switch**
 5. **Device Number**: 0 (or any unique number)
-6. **Power Ports** table appears with the four ports pre-filled to the Pi 4 ASIair Pro defaults. Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Rename channels in the **Channel name** column if you want NINA to label them by role (e.g. "Mount", "Dew Heater"). Leave **GPIO chip device** and **PWM frequency** at their defaults unless you know you need to override them.
+6. **Power Ports** table appears with the four ports pre-filled to the Pi 4 ASIair Pro defaults. Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Rename channels in the **Channel name** column if you want NINA to label them by role (e.g. "Mount", "Dew Heater"). The **GPIO chip device** is fixed at `/dev/gpiochip0` and its field is read-only; only the **PWM frequency** can change.
 7. Submit
 
 Or `POST` the equivalent JSON to the management API:
@@ -226,7 +226,7 @@ Open `http://<your-asiair-plus-ip>:11111/` in a browser:
 3. **Vendor**: ZWO
 4. **Switch Type**: **ASIair Pro 12V Power Switch** — this is the libgpiod driver, and it serves both the Pi 4 Pro and the CM4 Plus. The pre-filled GPIO defaults (12/13/26/18) are already correct for the CM4 Plus; leave them as-is.
 5. **Device Number**: 0 (or any unique number)
-6. In the **Power Ports** table, tick the **PWM** checkbox on any port you'll use with a dew heater or flat panel, and rename channels to taste. Leave **GPIO chip device** and **PWM frequency** at their defaults.
+6. In the **Power Ports** table, tick the **PWM** checkbox on any port you'll use with a dew heater or flat panel, and rename channels to taste. The **GPIO chip device** is fixed at `/dev/gpiochip0` and its field is read-only; only the **PWM frequency** can change.
 7. Submit
 
 Or `POST` the equivalent JSON to the management API:
@@ -432,7 +432,7 @@ Open `http://<your-stellavita-ip>:11111/` in a browser:
 2. **Device Type**: Switch
 3. **Vendor**: ToupTek
 4. **Device Number**: 0 (or any unique number)
-5. The **Power Ports** table appears pre-filled with the four StellaVita ports (Port 1–4, GPIO 18/10/17/4). Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. Leave **GPIO Chip** (`/dev/gpiochip0`) and **PWM Frequency** at their defaults unless you know you need to override them.
+5. The **Power Ports** table appears pre-filled with the four StellaVita ports (Port 1–4, GPIO 18/10/17/4). Tick the **PWM** checkbox on any port you intend to use with a dew heater or flat panel; this exposes that port to ASCOM clients (NINA, etc.) as a 0–100% slider under "Gauges" instead of a plain on/off toggle. The **GPIO Chip** is fixed at `/dev/gpiochip0` (the server refuses any other chip); only the **PWM Frequency** can change.
 6. Submit
 
 Or `POST` the equivalent JSON to the management API:
