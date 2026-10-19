@@ -84,6 +84,19 @@ def job_conclusions(run_id):
     return [line for line in out.splitlines() if line]
 
 
+def run_from_env(env, jobs_fn):
+    """The run dict for `reconcile` from the workflow's environment.
+
+    A success with a run id is checked through `jobs_fn(run_id)` (the job
+    conclusions), so a run that skipped its work does not count as a recovery.
+    """
+    conclusion = env["CONCLUSION"]
+    if conclusion == "success" and env["RUN_ID"]:
+        conclusion = effective_conclusion(conclusion, jobs_fn(env["RUN_ID"]))
+    return {"workflow": env["WORKFLOW_NAME"], "conclusion": conclusion, "url": env["RUN_URL"],
+            "sha": env["HEAD_SHA"], "event": env["EVENT"]}
+
+
 def run_line(run):
     return "[%s run](%s) on `%s` (%s): **%s**." % (run["event"], run["url"], run["sha"][:7], run["workflow"],
                                                    run["conclusion"])
@@ -224,6 +237,25 @@ def self_test():
     reconcile(run("Nightly Build", effective_conclusion("success", ["success", "skipped", "skipped"])), g)
     check("a skip-night success leaves the failure issue open", [i["number"] for i in g.list_open()], [1])
 
+    # main() applies the rule: the run built from the environment reads the jobs
+    # only for a success with a run id, and downgrades a skip-night success.
+    env = {"WORKFLOW_NAME": "Nightly Build", "CONCLUSION": "success", "RUN_URL": "u", "HEAD_SHA": "abc1234",
+           "EVENT": "schedule", "RUN_ID": "42"}
+    asked = []
+
+    def jobs(run_id):
+        asked.append(run_id)
+        return ["success", "skipped", "skipped"]
+
+    check("run_from_env downgrades a skip-night success", run_from_env(env, jobs)["conclusion"], "skipped")
+    check("run_from_env reads the jobs of that run", asked, ["42"])
+    asked.clear()
+    check("run_from_env keeps a failure as is", run_from_env(dict(env, CONCLUSION="failure"), jobs)["conclusion"],
+          "failure")
+    check("run_from_env reads no jobs for a failure", asked, [])
+    check("run_from_env without a run id keeps success", run_from_env(dict(env, RUN_ID=""), jobs)["conclusion"],
+          "success")
+
     # The open issue is found by its marker whatever its labels: a triaged issue
     # that lost `bug` must still be found, or a second one opens (PR #1353 review).
     class Recording(GhIssues):
@@ -259,12 +291,7 @@ def main():
     missing = [k for k in ("WORKFLOW_NAME", "RUN_URL") if not env[k]]
     if missing:
         p.error("missing environment: " + ", ".join(missing))
-    conclusion = env["CONCLUSION"]
-    if conclusion == "success" and env["RUN_ID"]:
-        conclusion = effective_conclusion(conclusion, job_conclusions(env["RUN_ID"]))
-    run = {"workflow": env["WORKFLOW_NAME"], "conclusion": conclusion, "url": env["RUN_URL"],
-           "sha": env["HEAD_SHA"], "event": env["EVENT"]}
-    print(reconcile(run, GhIssues(args.dry_run)))
+    print(reconcile(run_from_env(env, job_conclusions), GhIssues(args.dry_run)))
     return 0
 
 
