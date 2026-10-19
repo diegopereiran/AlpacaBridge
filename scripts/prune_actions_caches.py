@@ -11,8 +11,8 @@ gone within hours. Only the newest cache per prefix can ever be restored, so
 the older ones are deleted. The workflow .github/workflows/cache-prune.yml (issue #1350) runs
 this after each CI, Nightly Build and CodeQL run on main.
 
-The prefix is the key up to a 40-hex commit SHA, so `ccache-sanitizers-` and
-`ccache-sanitizers-tsan-` are separate prefixes, and a CodeQL key with the run
+The prefix is the key up to a 40-hex commit SHA, so a prefix that begins
+another one (`x-` and `x-tsan-`) is still its own group, and a CodeQL key with the run
 id after the SHA groups by the part before it. A key without a commit SHA (the
 cppcheck build, keyed by a 64-hex hash of ci.yml) is never deleted. Caches on
 different refs never supersede each other.
@@ -88,7 +88,7 @@ def self_test():
         cache(1, "ccache-build-test-" + sha[0], "2026-10-19T03:00:00Z"),
         cache(2, "ccache-build-test-" + sha[1], "2026-10-19T04:00:00Z"),
         cache(3, "ccache-build-test-" + sha[2], "2026-10-19T05:00:00Z"),
-        # The ASan prefix is a prefix of the TSan one; each keeps its own newest cache.
+        # One prefix begins the other (the ASan key did until #1355); each keeps its own newest cache.
         cache(4, "ccache-sanitizers-" + sha[0], "2026-10-19T03:00:00Z"),
         cache(5, "ccache-sanitizers-tsan-" + sha[1], "2026-10-19T04:00:00Z"),
         cache(6, "ccache-sanitizers-tsan-" + sha[0], "2026-10-19T03:30:00Z"),
