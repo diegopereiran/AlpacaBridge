@@ -15,17 +15,26 @@ runs and how it is scoped.
 **Headless, by hand.** On a host without the card, make both edits by hand and together: the
 update check reads only `update_packages_url`, and the install always goes through apt. With the
 apt line alone the card never offers a beta. With the URL alone it offers a beta that apt cannot
-find. A `beta` component in `openastro.list` plus the beta URL below shows in the card as an
+find. The beta source plus the beta URL below shows in the card as an
 override ("set by update_packages_url"): the selector is disabled and you remove the URL line to
 hand the channel back to the card.
 
-1. Add `beta` to the apt line (same line as the README install step):
+1. Write the beta apt source, the same file the card's Beta switch writes. Leave
+   `openastro.list` at `main`, as the README install step writes it:
 
    ```sh
-   echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/openastro-archive-keyring.gpg] \
-   https://apt.openastro.net trixie main beta" \
-       | sudo tee /etc/apt/sources.list.d/openastro.list
+   printf '%s\n' 'Types: deb' 'URIs: https://apt.openastro.net' 'Suites: trixie' \
+       'Components: beta' 'Architectures: arm64' \
+       'Signed-By: /usr/share/keyrings/openastro-archive-keyring.gpg' \
+       | sudo tee /etc/apt/sources.list.d/alpacabridge-beta.sources
+   sudo apt update
    ```
+
+   An earlier version of this page, and the 5.0.0-beta.5 release notes, said to add `beta` to the
+   `openastro.list` line instead. If yours reads `trixie main beta`, change it back to `trixie main`.
+   The card does not read `openastro.list`, so with `beta` there it shows Stable while apt still
+   installs betas, choosing Stable changes nothing, and choosing Beta makes `apt update` warn that
+   each beta target "is configured multiple times".
 
 2. Under `server:` in the AlpacaBridge config set (see [software-update.md](software-update.md)):
 
