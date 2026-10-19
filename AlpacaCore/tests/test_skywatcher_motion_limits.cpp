@@ -835,6 +835,40 @@ TEST_CASE("SkyWatcher limits - a slew after a Tracking=false stop that threw kee
     driver->set_connected(false);
 }
 
+// AbortSlew during a MoveAxis restores tracking (ITelescopeV4), but publishes
+// Tracking false first and then waits on the RA stop with mutex_ released. A
+// guard polling in that window (every 250 ms during a jog) exits, and the
+// restored tracking then ran with no limit enforced.
+TEST_CASE("SkyWatcher limits - AbortSlew restoring tracking after a MoveAxis keeps the guard running",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, floor_deg(-80.0));
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    REQUIRE(wait_until([&] { return sw::detail::limit_guard_bodies_running() == 1; }, 2000));
+
+    driver->move_axis(1, 2.0);  // a Dec jog: RA keeps tracking
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+
+    // RA keeps reporting running for a second after the instant stop, so the
+    // restore's stop-wait spans several guard polls.
+    mount.hold_running(1, true);
+    std::thread release([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        mount.hold_running(1, false);
+    });
+    driver->abort_slew();
+    release.join();
+
+    REQUIRE(driver->get_tracking());
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(sw::detail::limit_guard_bodies_running() == 1);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 // The guard re-anchors the position cache on hardware every 2 s while
 // tracking. An RA guide pulse that changed the dead-reckoning rate without
 // re-anchoring then lost the pulse distance driven since that anchor: the read
