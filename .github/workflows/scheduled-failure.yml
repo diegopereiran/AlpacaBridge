@@ -39,6 +39,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read   # the run's job conclusions: a green run with a skipped job closes nothing
       issues: write   # open, comment on and close the failure issue
     steps:
       - name: Checkout default branch
@@ -55,6 +56,7 @@ jobs:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           EVENT: ${{ github.event.workflow_run.event }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
         # pipefail: the default `bash -e` would let tee hide a failed gh call.
         run: |
           set -o pipefail

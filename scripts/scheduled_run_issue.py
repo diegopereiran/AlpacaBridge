@@ -9,15 +9,17 @@ of those workflows on main.
 
 - A failed, timed-out or never-started run opens an issue for its workflow, or
   comments on the one already open, with a link to the run.
-- A successful run closes that workflow's open issue.
-- A cancelled or skipped run changes nothing.
+- A successful run closes that workflow's open issue, unless one of its jobs
+  was skipped: the nightly skips its build and suite when nothing moved, and
+  such a run does not show that the failure was fixed.
+- Any other result (cancelled, skipped, neutral) changes nothing.
 
 The issue is found by a marker in its body, not by its title, so a retitled
 issue is still found. The run details come from the environment.
 
 Usage:
   scheduled_run_issue.py [--dry-run]   (WORKFLOW_NAME, CONCLUSION, RUN_URL,
-                                        HEAD_SHA, EVENT; GH_TOKEN, GH_REPO)
+                                        HEAD_SHA, EVENT, RUN_ID; GH_TOKEN, GH_REPO)
   scheduled_run_issue.py --self-test
 """
 import argparse
@@ -62,6 +64,24 @@ def decide(conclusion, issue):
     if conclusion == "success" and issue:
         return "close"
     return "none"
+
+
+def effective_conclusion(conclusion, job_conclusions):
+    """The run's conclusion, except that a successful run with a skipped job counts as 'skipped'.
+
+    Such a run did not redo its work (the nightly skips its build and suite when
+    the tag is already at HEAD), so it cannot show that a failure was fixed.
+    """
+    if conclusion == "success" and "skipped" in job_conclusions:
+        return "skipped"
+    return conclusion
+
+
+def job_conclusions(run_id):
+    """The conclusion of each job of run `run_id` (GH_REPO from the environment)."""
+    out = subprocess.run(["gh", "api", "--paginate", "repos/{owner}/{repo}/actions/runs/%s/jobs" % run_id,
+                          "--jq", ".jobs[].conclusion"], check=True, capture_output=True, text=True).stdout
+    return [line for line in out.splitlines() if line]
 
 
 def run_line(run):
@@ -188,6 +208,22 @@ def self_test():
     ])
     check("CodeQL issue still open", [i["number"] for i in f.list_open()], [2, 3])
 
+    # A green run that skipped its work proves nothing: the nightly's `check` job
+    # skips `build` and `test-optimized` when the tag is already at HEAD, and the
+    # run still concludes success (review of #1353).
+    for conclusion, jobs, want in [
+        ("success", ["success", "success", "success"], "success"),
+        ("success", ["success", "skipped", "skipped"], "skipped"),
+        ("success", ["success", "success", "skipped"], "skipped"),
+        ("success", [], "success"),
+        ("failure", ["success", "failure", "skipped"], "failure"),
+    ]:
+        check("effective_conclusion(%r, %r)" % (conclusion, jobs), effective_conclusion(conclusion, jobs), want)
+    g = Fake()
+    reconcile(run("Nightly Build", "failure"), g)
+    reconcile(run("Nightly Build", effective_conclusion("success", ["success", "skipped", "skipped"])), g)
+    check("a skip-night success leaves the failure issue open", [i["number"] for i in g.list_open()], [1])
+
     # The open issue is found by its marker whatever its labels: a triaged issue
     # that lost `bug` must still be found, or a second one opens (PR #1353 review).
     class Recording(GhIssues):
@@ -219,11 +255,14 @@ def main():
     args = p.parse_args()
     if args.self_test:
         return self_test()
-    env = {k: os.environ.get(k, "") for k in ("WORKFLOW_NAME", "CONCLUSION", "RUN_URL", "HEAD_SHA", "EVENT")}
+    env = {k: os.environ.get(k, "") for k in ("WORKFLOW_NAME", "CONCLUSION", "RUN_URL", "HEAD_SHA", "EVENT", "RUN_ID")}
     missing = [k for k in ("WORKFLOW_NAME", "RUN_URL") if not env[k]]
     if missing:
         p.error("missing environment: " + ", ".join(missing))
-    run = {"workflow": env["WORKFLOW_NAME"], "conclusion": env["CONCLUSION"], "url": env["RUN_URL"],
+    conclusion = env["CONCLUSION"]
+    if conclusion == "success" and env["RUN_ID"]:
+        conclusion = effective_conclusion(conclusion, job_conclusions(env["RUN_ID"]))
+    run = {"workflow": env["WORKFLOW_NAME"], "conclusion": conclusion, "url": env["RUN_URL"],
            "sha": env["HEAD_SHA"], "event": env["EVENT"]}
     print(reconcile(run, GhIssues(args.dry_run)))
     return 0
