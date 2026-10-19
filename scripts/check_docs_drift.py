@@ -135,8 +135,8 @@ Checks:
      behind, and never more than MAX_UPDATED_DAYS_AHEAD past the badge, which
      catches a typo'd year without consulting the clock. Pure, so it runs in
      pre-flight; no git state is consulted.
- 17. Every AlpacaError value AGENTS.md and .claude/commands/driver-build.md
-     write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
+ 17. Every AlpacaError value AGENTS.md, the ascom-contract and testing
+     instructions and .claude/commands/driver-build.md write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
      (issue #682): the name must be a constant in `namespace AlpacaError` and
      the hex value must be the one the header defines. Four written forms are
      read: `Name` (0xNNN), Name `0xNNN`, `A` (or `B` ..., both 0xNNN), and an
@@ -1952,7 +1952,7 @@ def check_supported_drivers_updated_date(root=ROOT):
 ALPACA_ERRORS_H = "AlpacaCore/include/alpacacore/alpaca_errors.h"
 ERROR_CODE_DOCS = ("AGENTS.md", ".github/instructions/ascom-contract.instructions.md",
                    ".github/instructions/testing.instructions.md", ".claude/commands/driver-build.md")
-# Today's two docs carry ~15 pins; a floor well under that catches an
+# The four docs carry ~20 pins today (AGENTS.md none); a floor well under that catches an
 # extractor that stops matching without tripping on an ordinary rewording.
 MIN_ERROR_CODE_PINS = 8
 
@@ -2928,7 +2928,7 @@ def self_test():
     check("error codes: an enum the parser cannot read is a finding, not a pass",
           f is not None and any("no AlpacaError constants" in x for x in f))
 
-    # check 18: the AGENTS.md CI job roster vs ci.yml (issue #702).
+    # check 18: the ci-gates CI job roster vs ci.yml (issue #702).
     roster_ci = (
         "on:\n"
         "  pull_request:\n"
