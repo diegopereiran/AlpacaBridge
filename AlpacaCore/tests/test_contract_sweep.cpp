@@ -57,6 +57,8 @@
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
+#include "fake_zwo_caa_sdk.h"
+#include "fake_zwo_eaf_sdk.h"
 #include "fake_zwo_efw_sdk.h"
 #include "fake_zwo_sdk.h"
 #endif
@@ -304,6 +306,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
             p.push_back({"get_gain", [&] { (void)c.get_gain(); }});
             p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
+            p.push_back({"get_camera_state", [&] { (void)c.get_camera_state(); }});
+            p.push_back({"get_percent_completed", [&] { (void)c.get_percent_completed(); }});
             p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
             p.push_back({"get_cooler_on", [&] { (void)c.get_cooler_on(); }});
             p.push_back({"get_cooler_power", [&] { (void)c.get_cooler_power(); }});
@@ -862,7 +866,7 @@ Tier2Host tier2_host_zwo_camera() {
     return h;
 }
 
-// The EFW fake: open_delay holds the connect open, fail_open fails it.
+// The EFW, EAF and CAA fakes share one recipe: open_delay holds the connect open, fail_open fails it.
 Tier2Host tier2_host_zwo_filterwheel() {
     Tier2Host h{"zwo_filterwheel",
                 "zwo",
@@ -886,6 +890,46 @@ Tier2Host tier2_host_zwo_filterwheel() {
         sdk->fail_open = true;
         return host_over(sdk, [](alpacacore::test::FakeZWOEFWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, fake.id, fake);
+        });
+    };
+    return h;
+}
+
+Tier2Host tier2_host_zwo_focuser() {
+    Tier2Host h{"zwo_focuser", "zwo", "focuser", "fake_zwo_eaf_sdk.h", DeviceType::Focuser, "zwo_focuser", {},
+                true,          {},    ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOEAFSDK>();
+        if (hold) sdk->open_delay = kHold;
+        return host_over(sdk, [](alpacacore::test::FakeZWOEAFSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, fake.id, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOEAFSDK>();
+        sdk->fail_open = true;
+        return host_over(sdk, [](alpacacore::test::FakeZWOEAFSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, fake.id, fake);
+        });
+    };
+    return h;
+}
+
+Tier2Host tier2_host_zwo_rotator() {
+    Tier2Host h{"zwo_rotator", "zwo", "rotator", "fake_zwo_caa_sdk.h", DeviceType::Rotator, "zwo_rotator", {},
+                true,          {},    ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOCAASDK>();
+        if (hold) sdk->open_delay = kHold;
+        return host_over(sdk, [](alpacacore::test::FakeZWOCAASDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_caa_rotator(0, fake.id, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOCAASDK>();
+        sdk->fail_open = true;
+        return host_over(sdk, [](alpacacore::test::FakeZWOCAASDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_caa_rotator(0, fake.id, fake);
         });
     };
     return h;
@@ -1654,7 +1698,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 // CAM = a camera, which has no such probe either and also gets the ImageArray case.
 // clang-format off
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM) X(zwo_filterwheel, PRB)
+#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM) X(zwo_filterwheel, PRB) X(zwo_focuser, NPR) X(zwo_rotator, PRB)
 #else
 #define CS2_ZWO(X)
 #endif
