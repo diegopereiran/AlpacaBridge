@@ -1,5 +1,5 @@
 ---
-applyTo: "AlpacaCore/src/**,AlpacaCore/include/**"
+applyTo: "AlpacaCore/src/**,AlpacaCore/include/**,AlpacaCore/tests/**"
 ---
 
 ## Driver concurrency and lifecycle

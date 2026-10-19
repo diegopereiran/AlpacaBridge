@@ -2,6 +2,7 @@
 paths:
   - "AlpacaCore/src/**"
   - "AlpacaCore/include/**"
+  - "AlpacaCore/tests/**"
 ---
 
 Before working on these files, read `.github/instructions/driver-lifecycle.instructions.md` in full.

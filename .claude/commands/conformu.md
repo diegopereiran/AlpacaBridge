@@ -184,7 +184,7 @@ gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name
 Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix, then `printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1` — installed is current only if it equals that maximum.
 
 **Read this before running any install command.** On arm64 -- which is every rig this project
-supports (AGENTS.md "Target Architecture") -- an installed **4.5.0 or 4.5.1 counts as outdated no matter what
+supports (AGENTS.md "Target Architecture"; the version rule is "ConformU version" in `.github/instructions/testing.instructions.md`) -- an installed **4.5.0 or 4.5.1 counts as outdated no matter what
 `releases/latest` says**. The 4.5.0 arm64 asset was published without `PublishReadyToRun`, so the *first*
 member returning each distinct response type is charged ~0.13-0.22 s "OUTSIDE FAST RESPONSE TIME TARGET"
 ([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); the standard is **4.5.2**, which fixes it and

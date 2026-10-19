@@ -23,7 +23,7 @@ Checks:
   2. The zizmor pinned version + sha256 are identical between ci.yml and
      ci_preflight.sh.
   3. The cppcheck --suppress list is identical between ci.yml and
-     ci_preflight.sh (AGENTS.md: "Keep the cppcheck --suppress list
+     ci_preflight.sh (ci-gates instructions: "Keep the cppcheck --suppress list
      identical between ci.yml and ci_preflight.sh").
   4. VERSION matches the version in the README's changelog badge line.
   5. The drivers whose `get_connected()` blocks are exactly the ones
