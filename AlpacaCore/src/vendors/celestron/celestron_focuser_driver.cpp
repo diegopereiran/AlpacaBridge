@@ -247,7 +247,9 @@ public:
         if (same_action(action_name, kActionCalibrationStatus)) {
             ensure_connected();
             std::lock_guard<std::mutex> lock(calibration_mutex_);
-            if (calibration_.running) return "Calibrating";
+            // Until the poll reads the limits after it ends, the old ones are
+            // not the answer (an abort can wipe them).
+            if (calibration_.running || calibration_.refresh_limits) return "Calibrating";
             return calibration_.limits.calibrated() ? "Calibrated" : "NotCalibrated";
         }
         throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
@@ -416,6 +418,12 @@ private:
         std::lock_guard<std::mutex> lock(calibration_mutex_);
         if (calibration_.running) {
             throw AlpacaException("Celestron focus motor calibration is in progress", AlpacaError::InvalidOperation);
+        }
+        // A calibration that just ended or was aborted (which can wipe it)
+        // left limits the motor may no longer have until the poll reads 0x2C.
+        if (calibration_.refresh_limits) {
+            throw AlpacaException("Celestron focus motor calibration has ended; its limits are being read again",
+                                  AlpacaError::InvalidOperation);
         }
         if (!calibration_.limits.calibrated()) {
             throw AlpacaException(

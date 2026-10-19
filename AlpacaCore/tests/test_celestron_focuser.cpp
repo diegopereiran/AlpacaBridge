@@ -389,6 +389,7 @@ TEST_CASE("Celestron Focuser Driver - an aborted calibration serves no old limit
     require_alpaca_error([&] { static_cast<void>(driver->get_max_step()); }, AlpacaError::InvalidOperation);
     require_alpaca_error([&] { static_cast<void>(driver->get_max_increment()); }, AlpacaError::InvalidOperation);
     require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, AlpacaError::InvalidOperation);
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrating");
     CHECK(fake.count(0x02) == 0);
 
     tick(clock);
