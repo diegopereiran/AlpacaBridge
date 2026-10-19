@@ -5105,6 +5105,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadLogSettings();
     loadLogFiles();
     wifiInit();
+    updateRefresh();
     updateVendorOptions();
 
     document.querySelectorAll('.section-toggle').forEach(button => {
