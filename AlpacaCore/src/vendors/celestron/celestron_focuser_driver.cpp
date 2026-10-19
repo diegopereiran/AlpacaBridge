@@ -192,6 +192,7 @@ public:
                     ALPACA_LOG_WARN("Celestron",
                                     "Focus motor is not calibrated; run the Calibrate action before moving it");
                 }
+                resume_running_calibration();
             } catch (...) {
                 protocol_.disconnect();
                 throw;
@@ -448,7 +449,15 @@ private:
             }
         }
         const auto session = protocol_.session_generation();
-        exchange(kCalibrationEnable, {0x01});
+        try {
+            exchange(kCalibrationEnable, {0x01});
+        } catch (const std::exception&) {
+            // The frame may have reached the motor even though no reply came back.
+            ALPACA_LOG_WARN("Celestron",
+                            "Focus motor calibration start was not confirmed; the motor may be calibrating. "
+                            "Check CalibrationStatus or power-cycle the motor before moving it");
+            throw;
+        }
         {
             std::lock_guard<std::mutex> lock(calibration_mutex_);
             // A reconnect in between reset the state for its own session.
@@ -461,6 +470,27 @@ private:
         }
         snapshot_.write([](StateFrame& frame) { frame.moving = true; });
         ALPACA_LOG_INFO("Celestron", "Focus motor calibration started");
+    }
+
+    // Connect half of a calibration: a disconnect does not abort one, so a
+    // motor still calibrating from an earlier session is tracked again
+    // instead of being served as idle. A failed status read leaves it idle.
+    void resume_running_calibration() {
+        std::vector<std::uint8_t> reply;
+        try {
+            reply = exchange(kCalibrationDone);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("Celestron", std::string("Focus motor calibration status not read at connect: ") + e.what());
+            return;
+        }
+        if (reply.size() < 2 || reply[0] != 0 || reply[1] == 0) return;
+        {
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            calibration_.running = true;
+            calibration_.started = clock_.now() - kCalibrationStartGrace;
+            ++calibration_.generation;
+        }
+        ALPACA_LOG_WARN("Celestron", "Focus motor is still calibrating from an earlier session; waiting for it to finish");
     }
 
     // Sends 0x2A 00 only while a calibration runs: on an idle motor it would

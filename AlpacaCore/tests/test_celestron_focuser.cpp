@@ -15,6 +15,7 @@
 // advance(), not a sleep.
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
@@ -22,6 +23,7 @@
 #include <chrono>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -406,6 +408,66 @@ TEST_CASE("Celestron Focuser Driver - a Halt racing the poll that sees the calib
     driver->set_connected(false);
 }
 
+TEST_CASE("Celestron Focuser Driver - a reconnect during a calibration keeps tracking it",
+          "[celestron][focuser][unit][fake]") {
+    // Disconnect does not abort a calibration. The reconnect used to start
+    // from "not running" and serve the mid-sweep limits as a calibrated motor.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    driver->action("Calibrate", "");
+    driver->set_connected(false);
+    REQUIRE(fake.calibrating());
+
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrating");
+    CHECK(driver->get_is_moving() == true);
+    require_alpaca_error([&] { driver->move(100); }, AlpacaError::InvalidOperation);
+    driver->action("AbortCalibration", "");
+    const auto requests = fake.requests();
+    REQUIRE(requests.back().command == 0x2a);
+    CHECK(requests.back().payload == std::vector<std::uint8_t>{0x00});
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Focuser Driver - an unconfirmed calibration start warns that the motor may be calibrating",
+          "[celestron][focuser][unit][fake]") {
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    std::vector<std::string> warnings;
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+        ~SinkGuard() {
+            alpacacore::logging::set_log_sink(previous);
+            alpacacore::logging::set_log_level(level);
+        }
+    } sink_guard;
+    alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Warn);
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+            if (level == alpacacore::logging::LogLevel::Warn && component == "Celestron") {
+                warnings.emplace_back(message);
+            }
+        });
+    fake.drop_next_reply(0x2a);  // the start reaches the motor; its reply is lost
+    CHECK_THROWS(driver->action("Calibrate", ""));
+    CHECK(fake.calibrating());
+    CHECK(std::any_of(warnings.begin(), warnings.end(), [](const std::string& message) {
+        return message.find("may be calibrating") != std::string::npos;
+    }));
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron Focuser Driver - a calibration status still idle right after the start is not an abort",
           "[celestron][focuser][unit][fake]") {
     // INDI waits after the start before it reads 0x2B; a status read at once
@@ -417,15 +479,16 @@ TEST_CASE("Celestron Focuser Driver - a calibration status still idle right afte
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(1, kBound));
 
+    const int read_at_connect = fake.count(0x2b);  // the connect's own status read
     fake.hold_calibration_status_idle(true);
     driver->action("Calibrate", "");
     tick(clock);
-    CHECK(fake.count(0x2b) == 0);
+    CHECK(fake.count(0x2b) == read_at_connect);
     CHECK(driver->action("CalibrationStatus", "") == "Calibrating");
 
     fake.hold_calibration_status_idle(false);
     for (int i = 0; i < 4; ++i) tick(clock);
-    CHECK(fake.count(0x2b) > 0);
+    CHECK(fake.count(0x2b) > read_at_connect);
     CHECK(driver->action("CalibrationStatus", "") == "Calibrating");
     driver->set_connected(false);
 }
