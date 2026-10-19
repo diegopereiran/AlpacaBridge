@@ -446,7 +446,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **Protocol**: Celestron AUX frames to device 0x12 at 9600 baud, on the motor's own USB port (no SDK). The AUX path through a Celestron mount is not supported.
 - **Configuration**: `portPath` (required; no auto-detect).
-- **Calibration**: the motor must be calibrated first (hand control or Celestron Focuser Utility); an uncalibrated motor refuses the connect. `Position` is `high limit - encoder`, so 0 is one end of the calibrated travel and `MaxStep` is the calibrated range.
+- **Calibration**: run the `Calibrate` action (about 5 minutes; `CalibrationStatus` answers `Calibrating`, `Calibrated` or `NotCalibrated`, `AbortCalibration` or Halt stops it). An uncalibrated motor connects but refuses `Position`, `MaxStep` and Move. The Celestron Focuser Utility can erase the calibration when it closes. `Position` is `high limit - encoder`, so 0 is one end of the calibrated travel and `MaxStep` is the calibrated range.
 - **Capabilities**: absolute Move (clamped to 0..MaxStep), Halt. No temperature sensor, temperature compensation or `StepSize`.
 
 </details>

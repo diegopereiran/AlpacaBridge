@@ -37,6 +37,7 @@ void focuser_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) 
     guard([&] { static_cast<void>(focuser.get_max_step()); });
     guard([&] { static_cast<void>(focuser.get_max_increment()); });
     guard([&] { focuser.move(1234); });
+    guard([&] { static_cast<void>(focuser.action("CalibrationStatus", "")); });
     // Halt resynchronizes before its stop; it must never reopen the port a
     // racing disconnect closed (issue #896).
     guard([&] { focuser.halt(); });

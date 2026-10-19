@@ -34,10 +34,13 @@
 namespace alpacacore::test {
 
 // Celestron Focus Motor on its own USB port (issue #896): AUX device 0x12
-// answering the commands the reporter's script and INDI's driver use. KNOWN
-// PARITY GAPS: motion is explicit (complete_move()), not timed; replies to
-// commands the fake does not know are silent, as on the bus; the calibration
-// commands (0x2A/0x2B) are not modelled.
+// answering the commands the reporter's script and INDI's driver use.
+// Calibration: 0x2A 01 starts it, 0x2A 00 aborts it and, as the reporter saw
+// on hardware (issue #896), wipes the limits even when no calibration runs;
+// 0x2B answers [complete, state] (INDI's layout). KNOWN PARITY GAPS: motion and
+// calibration are explicit (complete_move(), complete_calibration()), not
+// timed; the encoder does not sweep during a calibration; replies to commands
+// the fake does not know are silent, as on the bus.
 class FakeCelestronFocuser {
 public:
     FakeCelestronFocuser() : pty_("FakeCelestronFocuser"), worker_([this] { run(); }) {}
@@ -77,6 +80,25 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (target_) raw_ = *target_;
         target_.reset();
+    }
+
+    // Finishes a running calibration with these limits.
+    void complete_calibration(std::uint32_t low, std::uint32_t high) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        low_ = low;
+        high_ = high;
+        calibrating_ = false;
+        calibration_complete_ = true;
+    }
+    // While held, 0x2B reports [0, 0] (idle) even during a calibration: a
+    // motor whose status has not caught up with the start yet.
+    void hold_calibration_status_idle(bool hold) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        status_idle_held_ = hold;
+    }
+    bool calibrating() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return calibrating_;
     }
 
     std::uint32_t raw_position() const {
@@ -180,6 +202,26 @@ private:
             case 0x24:
                 if (request.payload.size() == 1 && request.payload[0] == 0) target_.reset();
                 return out;
+            case 0x2a:
+                if (request.payload.size() != 1) return std::nullopt;
+                if (request.payload[0] == 1) {
+                    calibrating_ = true;
+                    calibration_complete_ = false;
+                } else {
+                    calibrating_ = false;
+                    calibration_complete_ = false;
+                    low_ = 0;
+                    high_ = 0;
+                }
+                return out;
+            case 0x2b:
+                if (status_idle_held_) {
+                    out = {0x00, 0x00};
+                } else {
+                    out.push_back(calibration_complete_ ? 0x01 : 0x00);
+                    out.push_back(calibrating_ ? 0x05 : 0x00);
+                }
+                return out;
             case 0x2c:
                 put_be(out, low_, 4);
                 put_be(out, high_, 4);
@@ -198,6 +240,9 @@ private:
     std::optional<std::uint32_t> target_;
     std::optional<std::uint32_t> last_goto_;
     std::optional<std::uint8_t> drop_next_;
+    bool calibrating_ = false;
+    bool calibration_complete_ = false;
+    bool status_idle_held_ = false;
     std::vector<std::uint8_t> version_{7, 11, 0x0b, 0xb8};
     std::vector<alpacacore::vendor::celestron::AuxFrame> requests_;
     std::atomic<bool> muted_{false};

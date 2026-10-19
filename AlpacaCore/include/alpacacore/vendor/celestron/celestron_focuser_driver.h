@@ -24,9 +24,9 @@ namespace alpacacore::vendor::celestron {
  * @brief Create a Celestron Focus Motor driver on the motor's own USB port (issue #896).
  *
  * The motor speaks AUX frames at 9600 baud (device 0x12). The port is opened at
- * connect, so construction succeeds while the motor is absent. The motor must
- * have been calibrated (hand control or Celestron Focuser Utility); an
- * uncalibrated motor refuses the connect.
+ * connect, so construction succeeds while the motor is absent. An uncalibrated
+ * motor connects but refuses Position, MaxStep and Move until the Calibrate
+ * action has run (actions Calibrate, AbortCalibration, CalibrationStatus).
  *
  * @param device_number Alpaca device number
  * @param port_path Serial port path (e.g. "/dev/serial/by-id/usb-...")

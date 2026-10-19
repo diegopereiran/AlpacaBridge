@@ -22,6 +22,8 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -95,9 +97,15 @@ TEST_CASE("Celestron Focuser Driver - Disconnected behavior", "[celestron][focus
 TEST_CASE("Celestron Focuser Driver - Unsupported actions", "[celestron][focuser][unit]") {
     auto driver = create_celestron_focuser(0, "/dev/ttyUSB0");
 
-    CHECK(driver->get_supported_actions().empty());
+    CHECK(driver->get_supported_actions() ==
+          std::vector<std::string>{"Calibrate", "AbortCalibration", "CalibrationStatus"});
+    CHECK(driver->can_action("calibrate"));  // ASCOM action names are case-insensitive
     CHECK(driver->can_action("anything") == false);
     require_alpaca_error([&] { driver->action("noop", ""); }, AlpacaError::ActionNotImplemented);
+    for (const char* name : {"Calibrate", "AbortCalibration", "CalibrationStatus"}) {
+        INFO(name);
+        require_alpaca_error([&] { driver->action(name, ""); }, AlpacaError::NotConnected);
+    }
     require_alpaca_error([&] { driver->command_blind("noop", false); }, AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { driver->command_bool("noop", false); }, AlpacaError::MethodNotImplemented);
     require_alpaca_error([&] { driver->command_string("noop", false); }, AlpacaError::MethodNotImplemented);
@@ -243,27 +251,162 @@ TEST_CASE("Celestron Focuser Driver - Halt stops the motor", "[celestron][focuse
     driver->set_connected(false);
 }
 
-TEST_CASE("Celestron Focuser Driver - an uncalibrated motor refuses the connect", "[celestron][focuser][unit][fake]") {
+TEST_CASE("Celestron Focuser Driver - an uncalibrated motor connects but refuses positions and moves",
+          "[celestron][focuser][unit][fake]") {
+    // Issue #896: the Celestron utilities can wipe the calibration, so the
+    // connect stays open for the Calibrate action instead of refusing.
     FakeCelestronFocuser fake;
     REQUIRE(fake.ok());
     fake.set_limits(5000, 5000);
     FakeTaskClock clock;
     auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
-
-    try {
-        driver->set_connected(true);
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == AlpacaError::DriverException);
-        CHECK(std::string(ex.what()).find("not calibrated") != std::string::npos);
-    }
-    CHECK(driver->get_connected() == false);
-    CHECK(fake.count(0x02) == 0);
-
-    // The port was released: once calibrated, the same driver connects.
-    fake.set_limits(1000, 61000);
     driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
     CHECK(driver->get_connected() == true);
+    CHECK(driver->action("CalibrationStatus", "") == "NotCalibrated");
+    CHECK(driver->get_is_moving() == false);
+    for (const auto& [name, call] : std::vector<std::pair<const char*, std::function<void()>>>{
+             {"Position", [&] { (void)driver->get_position(); }},
+             {"MaxStep", [&] { (void)driver->get_max_step(); }},
+             {"MaxIncrement", [&] { (void)driver->get_max_increment(); }},
+             {"Move", [&] { driver->move(100); }}}) {
+        INFO(name);
+        try {
+            call();
+            FAIL("Expected AlpacaException");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == AlpacaError::InvalidOperation);
+            CHECK(std::string(ex.what()).find("not calibrated") != std::string::npos);
+        }
+    }
+    CHECK(fake.count(0x02) == 0);
+    bool has_position = false;
+    for (const auto& entry : driver->get_device_state()) {
+        has_position = has_position || entry.name == "Position";
+    }
+    CHECK_FALSE(has_position);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Focuser Driver - Calibrate runs to completion and the new limits take effect",
+          "[celestron][focuser][unit][fake]") {
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.set_limits(0, 0);
+    fake.set_raw_position(30000);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    CHECK(driver->action("Calibrate", "") == "");
+    const auto requests = fake.requests();
+    REQUIRE(requests.back().command == 0x2a);
+    CHECK(requests.back().payload == std::vector<std::uint8_t>{0x01});
+    CHECK(fake.calibrating());
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrating");
+    CHECK(driver->get_is_moving() == true);
+    require_alpaca_error([&] { driver->move(100); }, AlpacaError::InvalidOperation);
+
+    for (int i = 0; i < 5; ++i) tick(clock);  // past the start grace: the status is polled
+    CHECK(fake.count(0x2b) > 0);
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrating");
+    CHECK(driver->get_is_moving() == true);
+
+    fake.complete_calibration(2000, 52000);
+    tick(clock);
+    tick(clock);
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrated");
+    CHECK(driver->get_max_step() == 50000);
+    CHECK(driver->get_position() == 22000);  // 52000 - 30000
+    CHECK(driver->get_is_moving() == false);
+    driver->move(1000);
+    CHECK(*fake.last_goto() == 51000U);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Focuser Driver - Halt and AbortCalibration abort a calibration and never wipe an idle motor",
+          "[celestron][focuser][unit][fake]") {
+    // The reporter saw 0x2A 00 wipe a good calibration (issue #896), so it is
+    // sent only while a calibration this driver started is running.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.set_limits(1000, 61000);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    CHECK(driver->action("AbortCalibration", "") == "");
+    driver->halt();
+    tick(clock);
+    CHECK(fake.count(0x2a) == 0);
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrated");
+    CHECK(driver->get_max_step() == 60000);
+
+    SECTION("Halt") {
+        driver->action("Calibrate", "");
+        driver->halt();
+    }
+    SECTION("AbortCalibration") {
+        driver->action("Calibrate", "");
+        driver->action("AbortCalibration", "");
+    }
+    const auto requests = fake.requests();
+    REQUIRE(requests.back().command == 0x2a);
+    CHECK(requests.back().payload == std::vector<std::uint8_t>{0x00});
+    CHECK_FALSE(fake.calibrating());
+    CHECK(driver->get_is_moving() == false);
+    tick(clock);
+    // The abort wiped the motor's limits; the driver reads them again.
+    CHECK(driver->action("CalibrationStatus", "") == "NotCalibrated");
+    require_alpaca_error([&] { driver->move(100); }, AlpacaError::InvalidOperation);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Focuser Driver - a calibration status still idle right after the start is not an abort",
+          "[celestron][focuser][unit][fake]") {
+    // INDI waits after the start before it reads 0x2B; a status read at once
+    // could still say idle and end the calibration the motor is running.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    fake.hold_calibration_status_idle(true);
+    driver->action("Calibrate", "");
+    tick(clock);
+    CHECK(fake.count(0x2b) == 0);
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrating");
+
+    fake.hold_calibration_status_idle(false);
+    for (int i = 0; i < 4; ++i) tick(clock);
+    CHECK(fake.count(0x2b) > 0);
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrating");
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Focuser Driver - Calibrate is refused while the motor moves or a calibration runs",
+          "[celestron][focuser][unit][fake]") {
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    driver->move(100);
+    require_alpaca_error([&] { driver->action("Calibrate", ""); }, AlpacaError::InvalidOperation);
+    CHECK(fake.count(0x2a) == 0);
+
+    fake.complete_move();
+    tick(clock);
+    driver->action("Calibrate", "");
+    require_alpaca_error([&] { driver->action("Calibrate", ""); }, AlpacaError::InvalidOperation);
+    CHECK(fake.count(0x2a) == 1);
     driver->set_connected(false);
 }
 

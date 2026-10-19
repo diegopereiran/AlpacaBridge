@@ -511,12 +511,16 @@ inline ContractEntry contract_entry_celestron_cgx_telescope() {
     return entry;
 }
 inline ContractEntry contract_entry_celestron_focuser() {
-    return make_entry(
+    auto entry = make_entry(
         "celestron_focuser", "celestron", "focuser", DeviceType::Focuser,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             return vendor::celestron::create_celestron_focuser(n, "/dev/ttyUSB0");
         },
         kSrcAgents);
+    // Action list read from celestron_focuser_driver.cpp get_supported_actions() (assumption: not
+    // checked against a hardware run).
+    entry.actions = {"Calibrate", "AbortCalibration", "CalibrationStatus"};
+    return entry;
 }
 #endif
 

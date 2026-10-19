@@ -20,6 +20,11 @@
 //   0x02 MC_GOTO_FAST  u24     -> empty ack
 //   0x13 MC_SLEW_DONE          -> 0xFF when idle, anything else while moving
 //   0x24 MC_MOVE_POS   rate 0  -> stops the motor (Halt)
+//   0x2A FOC_CALIB_ENABLE u8   -> 1 starts a calibration, 0 aborts it
+//   0x2B FOC_CALIB_DONE        -> [complete, state]; state 0 means idle
+//   TODO(#896): the 0x2B layout is read from INDI's code (its header comment
+//   says the opposite for 0x2A, the code and the reporter's capture agree on
+//   1 = start); confirm both on hardware.
 //   0x2C FOC_GET_HS_POSITIONS  -> two big-endian u32: low and high limit;
 //                                 high <= low means not calibrated
 //   0xFE GET_VER               -> major, minor[, build hi, build lo]
@@ -27,6 +32,14 @@
 // The raw count rises as the mirror moves toward the corrector, the reverse of
 // a refractor's drawtube, so Position = high - raw (INDI's absPos): 0 is the
 // high raw limit and MaxStep is high - low.
+//
+// Calibration (issue #896): the Celestron utilities send 0x2A 00 on exit,
+// which the reporter saw wipe a good calibration, so an uncalibrated motor
+// connects and the Calibrate action runs it here (INDI's flow). This driver
+// sends 0x2A 00 only while a calibration it started is running.
+// TODO(#896): the wipe is the reporter's observation on one firmware; whether
+// the motor sweeps the encoder (and what 0x01 reads) during a calibration is
+// not known yet.
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
@@ -39,7 +52,9 @@
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
@@ -56,6 +71,8 @@ constexpr std::uint8_t kGetPosition = 0x01;
 constexpr std::uint8_t kGotoFast = 0x02;
 constexpr std::uint8_t kSlewDone = 0x13;
 constexpr std::uint8_t kMovePositive = 0x24;
+constexpr std::uint8_t kCalibrationEnable = 0x2a;
+constexpr std::uint8_t kCalibrationDone = 0x2b;
 constexpr std::uint8_t kGetLimits = 0x2c;
 constexpr std::uint8_t kGetVersion = 0xfe;
 constexpr std::uint32_t kMaxRawPosition = 0x00ffffffU;
@@ -66,6 +83,19 @@ constexpr auto kExchangeTimeout = std::chrono::milliseconds(500);
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
 constexpr auto kSnapshotMaxAge = 2 * kStatePollPeriod;
 constexpr int kFaultThreshold = 3;
+// INDI waits about a second after the start before it reads 0x2B; a status
+// read sooner could still say idle and end a calibration the motor runs.
+constexpr auto kCalibrationStartGrace = std::chrono::seconds(1);
+
+constexpr const char* kActionCalibrate = "Calibrate";
+constexpr const char* kActionAbortCalibration = "AbortCalibration";
+constexpr const char* kActionCalibrationStatus = "CalibrationStatus";
+
+bool same_action(std::string_view a, std::string_view b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+           });
+}
 
 std::uint32_t read_be(const std::vector<std::uint8_t>& bytes, std::size_t offset, std::size_t count) {
     std::uint32_t value = 0;
@@ -153,8 +183,15 @@ public:
 
         if (connected) {
             protocol_.connect_serial(port_path_, AuxLinkSpeed::Baud9600);
+            {
+                std::lock_guard<std::mutex> lock(calibration_mutex_);
+                calibration_ = CalibrationState{};
+            }
             try {
-                read_limits();
+                if (!read_limits()) {
+                    ALPACA_LOG_WARN("Celestron",
+                                    "Focus motor is not calibrated; run the Calibrate action before moving it");
+                }
             } catch (...) {
                 protocol_.disconnect();
                 throw;
@@ -170,8 +207,9 @@ public:
             poll_state_once();
             connected_.store(true);
             start_state_poll();
-            ALPACA_LOG_INFO("Celestron", "Focuser connected (limits " + std::to_string(low_limit_.load()) + ".." +
-                                             std::to_string(high_limit_.load()) + ")");
+            const auto limits = current_limits();
+            ALPACA_LOG_INFO("Celestron", "Focuser connected (limits " + std::to_string(limits.low) + ".." +
+                                             std::to_string(limits.high) + ")");
         } else {
             // Driver state first, transport close second (AGENTS.md, issue #387).
             {
@@ -190,13 +228,34 @@ public:
         }
     }
 
-    std::vector<std::string> get_supported_actions() const override { return {}; }
+    std::vector<std::string> get_supported_actions() const override {
+        return {kActionCalibrate, kActionAbortCalibration, kActionCalibrationStatus};
+    }
 
     std::string action(std::string_view action_name, std::string_view) override {
+        if (same_action(action_name, kActionCalibrate)) {
+            start_calibration();
+            return "";
+        }
+        if (same_action(action_name, kActionAbortCalibration)) {
+            ensure_connected();
+            resync_if_needed();
+            abort_calibration_if_running();
+            return "";
+        }
+        if (same_action(action_name, kActionCalibrationStatus)) {
+            ensure_connected();
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            if (calibration_.running) return "Calibrating";
+            return calibration_.limits.calibrated() ? "Calibrated" : "NotCalibrated";
+        }
         throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
 
-    bool can_action(std::string_view) const override { return false; }
+    bool can_action(std::string_view action_name) const override {
+        return same_action(action_name, kActionCalibrate) || same_action(action_name, kActionAbortCalibration) ||
+               same_action(action_name, kActionCalibrationStatus);
+    }
 
     std::string command_blind(std::string_view, bool) override {
         throw AlpacaException("Command not supported", AlpacaError::MethodNotImplemented);
@@ -218,12 +277,17 @@ public:
 
     int get_max_step() const override {
         ensure_connected();
-        return static_cast<int>(high_limit_.load() - low_limit_.load());
+        const auto limits = usable_limits();
+        return static_cast<int>(limits.high - limits.low);
     }
 
     int get_max_increment() const override { return get_max_step(); }
 
-    int get_position() const override { return served_frame().position; }
+    int get_position() const override {
+        const auto frame = served_frame();
+        static_cast<void>(usable_limits());
+        return frame.position;
+    }
 
     double get_step_size() const override {
         // The motor reports encoder counts only; microns per count depend on
@@ -259,21 +323,25 @@ public:
         // desynchronized by an earlier timeout is resynchronized first (no
         // reopen); this sends a stop, never a repeat of the motion that timed out.
         resync_if_needed();
-        exchange(kMovePositive, {0x00});
+        // During a calibration the stop is its abort (INDI); 0x24 is not.
+        if (!abort_calibration_if_running()) {
+            exchange(kMovePositive, {0x00});
+        }
         snapshot_.write([](StateFrame& frame) { frame.moving = false; });
     }
 
     void move(int position) override {
         ensure_connected();
         throw_if_faulted();
-        const int max_step = get_max_step();
+        const auto limits = usable_limits();
+        const int max_step = static_cast<int>(limits.high - limits.low);
         // ConformU expects graceful clamping, not an exception (as Gemini).
         if (position < 0) {
             position = 0;
         } else if (position > max_step) {
             position = max_step;
         }
-        const std::uint32_t raw = high_limit_.load() - static_cast<std::uint32_t>(position);
+        const std::uint32_t raw = limits.high - static_cast<std::uint32_t>(position);
         // A lost poll reply must not fail this Move until the next poll; the
         // resync only flushes, so a timed-out GOTO is still never resent.
         resync_if_needed();
@@ -287,6 +355,22 @@ private:
     struct StateFrame {
         int position = 0;
         bool moving = false;
+    };
+
+    struct Limits {
+        std::uint32_t low = 0;
+        std::uint32_t high = 0;
+        bool calibrated() const { return high > low && high <= kMaxRawPosition; }
+    };
+
+    struct CalibrationState {
+        Limits limits;
+        bool running = false;
+        util::TaskClock::clock::time_point started{};
+        // Bumped by every start and abort, so a poll that read the status
+        // before one of them does not end the newer calibration.
+        std::uint64_t generation = 0;
+        bool refresh_limits = false;
     };
 
     std::vector<std::uint8_t> exchange(std::uint8_t command, std::vector<std::uint8_t> payload = {}) {
@@ -306,23 +390,129 @@ private:
         }
     }
 
-    void read_limits() {
+    // Reads 0x2C into the calibration state; returns whether it is calibrated.
+    bool read_limits() {
         const auto reply = exchange(kGetLimits);
         if (reply.size() != 8) {
             throw AlpacaException(
                 "Celestron focuser: limit query returned " + std::to_string(reply.size()) + " bytes, expected 8",
                 AlpacaError::DriverException);
         }
-        const std::uint32_t low = read_be(reply, 0, 4);
-        const std::uint32_t high = read_be(reply, 4, 4);
-        if (high <= low || high > kMaxRawPosition) {
-            throw AlpacaException(
-                "Celestron focus motor is not calibrated (limits " + std::to_string(low) + ".." + std::to_string(high) +
-                    "); run the calibration from the hand control or the Celestron Focuser Utility, then connect again",
-                AlpacaError::DriverException);
+        const Limits limits{.low = read_be(reply, 0, 4), .high = read_be(reply, 4, 4)};
+        std::lock_guard<std::mutex> lock(calibration_mutex_);
+        calibration_.limits = limits;
+        return limits.calibrated();
+    }
+
+    Limits current_limits() const {
+        std::lock_guard<std::mutex> lock(calibration_mutex_);
+        return calibration_.limits;
+    }
+
+    // The limits Position, MaxStep and Move work from, or InvalidOperation
+    // while the motor has none.
+    Limits usable_limits() const {
+        std::lock_guard<std::mutex> lock(calibration_mutex_);
+        if (calibration_.running) {
+            throw AlpacaException("Celestron focus motor calibration is in progress", AlpacaError::InvalidOperation);
         }
-        low_limit_.store(low);
-        high_limit_.store(high);
+        if (!calibration_.limits.calibrated()) {
+            throw AlpacaException(
+                "Celestron focus motor is not calibrated; run the Calibrate action (about 5 minutes) first",
+                AlpacaError::InvalidOperation);
+        }
+        return calibration_.limits;
+    }
+
+    void start_calibration() {
+        ensure_connected();
+        throw_if_faulted();
+        {
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            if (calibration_.running) {
+                throw AlpacaException("Celestron focus motor calibration is already in progress",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
+        if (served_frame().moving) {
+            throw AlpacaException("Celestron focus motor is moving; Halt it before calibrating",
+                                  AlpacaError::InvalidOperation);
+        }
+        resync_if_needed();
+        const auto session = protocol_.session_generation();
+        exchange(kCalibrationEnable, {0x01});
+        {
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            // A reconnect in between reset the state for its own session.
+            if (protocol_.session_generation() != session) {
+                throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+            }
+            calibration_.running = true;
+            calibration_.started = clock_.now();
+            ++calibration_.generation;
+        }
+        snapshot_.write([](StateFrame& frame) { frame.moving = true; });
+        ALPACA_LOG_INFO("Celestron", "Focus motor calibration started");
+    }
+
+    // Sends 0x2A 00 only while a calibration runs: on an idle motor it would
+    // wipe the calibration. Returns whether it sent the abort.
+    bool abort_calibration_if_running() {
+        {
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            if (!calibration_.running) return false;
+        }
+        exchange(kCalibrationEnable, {0x00});
+        {
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            calibration_.running = false;
+            calibration_.refresh_limits = true;
+            ++calibration_.generation;
+        }
+        snapshot_.write([](StateFrame& frame) { frame.moving = false; });
+        ALPACA_LOG_INFO("Celestron", "Focus motor calibration aborted");
+        return true;
+    }
+
+    // Poll-thread half of a calibration: reads 0x2B once the start grace has
+    // passed and reads the limits again when it has ended.
+    void poll_calibration() {
+        CalibrationState state;
+        {
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            state = calibration_;
+        }
+        if (state.running && clock_.now() - state.started >= kCalibrationStartGrace) {
+            const auto reply = exchange(kCalibrationDone);
+            if (reply.size() < 2) {
+                throw AlpacaException("calibration status reply is shorter than 2 bytes", AlpacaError::DriverException);
+            }
+            const bool complete = reply[0] != 0;
+            if (complete || reply[1] == 0) {
+                std::lock_guard<std::mutex> lock(calibration_mutex_);
+                if (calibration_.generation == state.generation) {
+                    calibration_.running = false;
+                    calibration_.refresh_limits = true;
+                    state.refresh_limits = true;
+                }
+                ALPACA_LOG_INFO("Celestron", complete ? "Focus motor calibration complete"
+                                                      : "Focus motor calibration ended without completing");
+            }
+        }
+        if (state.refresh_limits) {
+            const bool calibrated = read_limits();
+            {
+                std::lock_guard<std::mutex> lock(calibration_mutex_);
+                calibration_.refresh_limits = false;
+            }
+            const auto limits = current_limits();
+            const std::string text = std::to_string(limits.low) + ".." + std::to_string(limits.high);
+            if (calibrated) {
+                ALPACA_LOG_INFO("Celestron", "Focus motor limits " + text);
+            } else {
+                ALPACA_LOG_WARN("Celestron", "Focus motor is not calibrated (limits " + text + ")");
+            }
+        }
     }
 
     // A failed version query must not fail the connect.
@@ -385,9 +575,16 @@ private:
             if (done.size() != 1) {
                 throw AlpacaException("slew-done reply is not one byte", AlpacaError::DriverException);
             }
-            frame.position = static_cast<int>(static_cast<std::int64_t>(high_limit_.load()) -
+            poll_calibration();
+            CalibrationState state;
+            {
+                std::lock_guard<std::mutex> lock(calibration_mutex_);
+                state = calibration_;
+            }
+            // Meaningless while uncalibrated; the getters refuse it then.
+            frame.position = static_cast<int>(static_cast<std::int64_t>(state.limits.high) -
                                               static_cast<std::int64_t>(read_be(position, 0, 3)));
-            frame.moving = done[0] != 0xff;
+            frame.moving = done[0] != 0xff || state.running;
         } catch (const std::exception&) {
             std::lock_guard<std::mutex> lock(health_mutex_);
             if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
@@ -440,9 +637,9 @@ private:
     std::string port_path_;
     std::atomic<bool> connected_{false};
     CelestronCgxProtocol protocol_;
-    // Written at connect before connected_ is stored true; read-only after.
-    std::atomic<std::uint32_t> low_limit_{0};
-    std::atomic<std::uint32_t> high_limit_{0};
+    // Limits and calibration progress; never held across an exchange.
+    mutable std::mutex calibration_mutex_;
+    CalibrationState calibration_;
     mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
     mutable std::mutex health_mutex_;
     util::PolledLinkHealth health_;
