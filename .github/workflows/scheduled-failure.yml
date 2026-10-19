@@ -20,8 +20,12 @@ on:
 
 permissions: {}
 
+# One group per watched workflow: a group holds at most one pending run and a
+# newer one cancels it, so a shared group could drop one workflow's report when
+# several finish together (Monday 05:41 UTC: CodeQL and Dependency updates).
+# Runs that share an issue still run one at a time.
 concurrency:
-  group: scheduled-failure
+  group: scheduled-failure-${{ github.event.workflow_run.name }}
   cancel-in-progress: false
 
 jobs:
