@@ -57,7 +57,9 @@ author must do. Read the docstring before changing a gate.
   heading needs its README brand item, the recounted brand word and a
   `SUPPORTED_HEADING_TO_README_BRAND` entry in the same PR; keep `SUPPORTED-DRIVERS.md`'s
   `## Updated` date no older than the README badge date; give each workflow cache a key prefix no
-  other key starts with; keep `AGENTS.md` under its 15,000-byte budget; never state a count of the
+  other key starts with; keep `AGENTS.md` under its 15,000-byte budget; keep every error-code
+  value written in `AGENTS.md`, the ascom-contract and testing instructions or `driver-build.md`
+  equal to `alpaca_errors.h` (check 17); never state a count of the
   blocking-`get_connected()` drivers, name them; and keep every `std::regex` in `router.cpp` `static`.
 - **Nightly optimized run** (`.github/workflows/nightly-build.yml`, job `test-optimized`, issue
   #1313): `build-vendors` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
