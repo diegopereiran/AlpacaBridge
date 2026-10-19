@@ -57,8 +57,10 @@ The same works for a nightly `.deb` and for the `alpacabridge_X.Y.Z_arm64.deb` t
 Release carries too. Each attestation, and the SBOM attached to it, is also
 listed under the repository's Actions > Attestations.
 
-**Opt out** by choosing **Stable** in the card, or on a headless install by removing `beta` from
-the apt line and restoring the default `update_packages_url`. apt does not downgrade on its own, so a user who leaves mid-beta stays
+**Opt out** by choosing **Stable** in the card. On a headless install, delete the beta source
+(`sudo rm /etc/apt/sources.list.d/alpacabridge-beta.sources`, then `sudo apt update`) and remove
+the beta `update_packages_url` line, so the default URL applies again. If an older opt-in left
+`trixie main beta` in `openastro.list`, change it back to `trixie main` too. apt does not downgrade on its own, so a user who leaves mid-beta stays
 on the beta build until the stable release overtakes it.
 
 Every stable release is published to both `main` and `beta`, so the beta index always holds the
