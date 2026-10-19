@@ -2645,9 +2645,15 @@ public:
         // and the refine loop exits promptly -- without this, the refinement
         // re-slews after the abort's stop).
         slew_.cancel();
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_writable_locked();
         check_not_fully_parked_locked("AbortSlew");
+        // ITelescopeV4: aborting a MoveAxis returns Tracking to the state it
+        // had before the move. A jog leaves tracking_ as it found it, so that
+        // state is still tracking_ here.
+        const bool restore_tracking = tracking_effectively_on_locked() &&
+                                      (manual_axis_slewing_[0] || manual_axis_slewing_[1]) && !goto_in_progress_ &&
+                                      !parking_ && !homing_;
         // AbortSlew is itself a motion command: bump the generation so any
         // stop-wait sleeping in an unlock window observes the supersession
         // and its dispatch aborts BEFORE sending new motor commands (the
@@ -2676,6 +2682,13 @@ public:
         restore_tracking_after_slew_ = false;
         tracking_ = false;
         invalidate_position_cache_locked();
+        if (restore_tracking) {
+            try {
+                set_tracking_locked(lock, true);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("SkyWatcher", std::string("AbortSlew: failed to restore tracking: ") + e.what());
+            }
+        }
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {

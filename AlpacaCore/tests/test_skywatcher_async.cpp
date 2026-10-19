@@ -1051,6 +1051,41 @@ TEST_CASE("SkyWatcher async - MoveAxis stop task clears Slewing and restores tra
     driver->set_connected(false);
 }
 
+// ITelescopeV4 AbortSlew: "In the case of MoveAxis() or SlewToAltAzAsync(),
+// Tracking must be returned to the state before the slew stopped." AbortSlew
+// cleared tracking_ whatever it aborted, so a MoveAxis jog stopped by AbortSlew
+// left the mount untracked, and a later goto then landed untracked too.
+TEST_CASE("SkyWatcher async - AbortSlew during an RA MoveAxis returns tracking to its earlier state",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(driver->get_slewing());
+    driver->abort_slew();
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    REQUIRE(wait_until([&] { return driver->get_tracking() && mount.axis_running(1); }, 5000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - AbortSlew during a Dec MoveAxis returns tracking to its earlier state",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(1, 2.0);
+    REQUIRE(driver->get_slewing());
+    driver->abort_slew();
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 10000));
+    REQUIRE_FALSE(mount.axis_running(2));
+    REQUIRE(wait_until([&] { return driver->get_tracking() && mount.axis_running(1); }, 5000));
+    driver->set_connected(false);
+}
+
 namespace {
 // Counts ERROR-level "telescope" log lines mentioning the #547 watchdog, so
 // a case can assert it fired (or didn't) without depending on log text
