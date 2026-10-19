@@ -6,17 +6,35 @@ and then promoted to stable. Day-to-day PR work on `main` does not change.
 
 ## For users: opt in to the beta
 
-Do both edits together. The web UI update check does not read apt sources; it fetches only
-`update_packages_url`, and the install always goes through apt. With the apt line alone the
-update card never offers a beta. With the URL alone it offers a beta that apt cannot find.
+**Web UI.** Open the Software Update card on the Server Info tab and set **Update channel** to
+**Beta**. One switch changes both halves: the host's apt source and the index the update check
+reads, so they cannot disagree. Then press **Check for Updates**. Setting it back to **Stable**
+reverses both. See [software-update.md](software-update.md#update-channel) for what the switch
+runs and how it is scoped.
 
-1. Add `beta` to the apt line (same line as the README install step):
+**Headless, by hand.** On a host without the card, make both edits by hand and together: the
+update check reads only `update_packages_url`, and the install always goes through apt. With the
+apt line alone the card never offers a beta. With the URL alone it offers a beta that apt cannot
+find. The beta source plus the beta URL below shows in the card as an
+override ("set by update_packages_url"): the selector is disabled and you remove the URL line to
+hand the channel back to the card.
+
+1. Write the beta apt source, the same file the card's Beta switch writes. Leave
+   `openastro.list` at `main`, as the README install step writes it:
 
    ```sh
-   echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/openastro-archive-keyring.gpg] \
-   https://apt.openastro.net trixie main beta" \
-       | sudo tee /etc/apt/sources.list.d/openastro.list
+   printf '%s\n' 'Types: deb' 'URIs: https://apt.openastro.net' 'Suites: trixie' \
+       'Components: beta' 'Architectures: arm64' \
+       'Signed-By: /usr/share/keyrings/openastro-archive-keyring.gpg' \
+       | sudo tee /etc/apt/sources.list.d/alpacabridge-beta.sources
+   sudo apt update
    ```
+
+   An earlier version of this page, and the 5.0.0-beta.5 release notes, said to add `beta` to the
+   `openastro.list` line instead. If yours reads `trixie main beta`, change it back to `trixie main`.
+   The card does not read `openastro.list`, so with `beta` there it shows Stable while apt still
+   installs betas, choosing Stable changes nothing, and choosing Beta makes `apt update` warn that
+   each beta target "is configured multiple times".
 
 2. Under `server:` in the AlpacaBridge config set (see [software-update.md](software-update.md)):
 
@@ -35,11 +53,14 @@ build installed this way; repeat the download for each beta, or opt in as above.
 To check the file was built by this repository's release workflow from the beta's tag, and not
 just that it matches its `.sha256`, run on any machine with the GitHub CLI signed in:
 `gh attestation verify alpacabridge_X.Y.Z-beta.N_arm64.deb --repo open-astro/AlpacaBridge`.
-The same works for a nightly `.deb`. Each attestation, and the SBOM attached to it, is also
+The same works for a nightly `.deb` and for the `alpacabridge_X.Y.Z_arm64.deb` that every stable
+Release carries too. Each attestation, and the SBOM attached to it, is also
 listed under the repository's Actions > Attestations.
 
-**Opt out** by removing `beta` from the apt line and restoring the default
-`update_packages_url`. apt does not downgrade on its own, so a user who leaves mid-beta stays
+**Opt out** by choosing **Stable** in the card. On a headless install, delete the beta source
+(`sudo rm /etc/apt/sources.list.d/alpacabridge-beta.sources`, then `sudo apt update`) and remove
+the beta `update_packages_url` line, so the default URL applies again. If an older opt-in left
+`trixie main beta` in `openastro.list`, change it back to `trixie main` too. apt does not downgrade on its own, so a user who leaves mid-beta stays
 on the beta build until the stable release overtakes it.
 
 Every stable release is published to both `main` and `beta`, so the beta index always holds the
@@ -85,7 +106,8 @@ because CI's all-vendors job is instrumented and unoptimized; a failure fails th
    `## [A.B.C] - UNRELEASED` heading in `CHANGELOG.md` is renamed to `X.Y.0` (heading only), so
    the `.deb` build does not warn that it disagrees with `VERSION`.
 2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file, builds the arm64
-   `.deb` in a Debian trixie container and attaches it with a `.sha256` (job `beta-deb`). The `.deb`
+   `.deb` in a Debian trixie container and attaches it and its `alpacabridge-dbgsym` debug-symbols
+   package, each with a `.sha256` (job `deb`, which runs for every tag, stable or beta). The `.deb`
    is also published to the apt `beta` component (outside this repository).
 3. **Fix.** A bug found in beta that the previous stable release did not have is fixed by a PR
    against `stable/X.Y` (see "Rules for the stable branch"); it is not fixed on `main` first and
@@ -103,7 +125,9 @@ because CI's all-vendors job is instrumented and unoptimized; a failure fails th
    now the newest, so its `VERSION` and badge come across. `docs/releases/` notes and code come
    across as they are. `/submit-pr --merge-down` resolves this in the head before the PR opens.
 5. **Promote.** `/bump-release` runs on `stable/X.Y`: `VERSION` becomes `X.Y.0`, the fragments are
-   assembled into the dated section, tag `vX.Y.0`. The package goes to both apt components.
+   assembled into the dated section, tag `vX.Y.0`. `release.yml` attaches the `.deb` to the stable
+   Release as it does for a beta (`alpacabridge_X.Y.0_arm64.deb`). The package goes to both apt
+   components.
 6. **Final merge down.** Merge `stable/X.Y` into `main` once more. It carries the dated CHANGELOG
    section, the `VERSION` and badge bump (the exception above), and the deletion of the consumed
    fragments. If `main` touched the same lines as a branch fix since the last merge down, the
