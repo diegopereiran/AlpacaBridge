@@ -19,7 +19,10 @@ Five rule families, not one:
    in a conditionally-compiled file; this is the other half of that assumption
    (issue #396), and without it appending a correctly-named, correctly-tagged
    registration to the unconditional `TEST_SOURCES` list passes every other
-   rule while making the TSan zero-test grep vacuous again.
+   rule while making the TSan zero-test grep vacuous again. Only the vendor's
+   own `if(TARGET alpacacore_<vendor>)` counts: `if(NOT TARGET ...)` and a
+   non-vendor `if(... TARGET ...)` do not gate (see the comment above
+   the gating check).
 5. A registration file must use `StressCallGuard` the way the ci-gates instructions document
    it (issues #379, #334), or be named in `GUARD_ALLOWLIST` with a reason:
    the guard present, `CHECK(...unexpected_count())`, `INFO(...report())`,

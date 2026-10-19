@@ -5,8 +5,8 @@ applyTo: ".github/workflows/**,.github/scripts/**,scripts/**"
 ## CI gates and the review bot
 
 Shared rules for every vendor, moved from `AGENTS.md` (which keeps the core rules
-and routes here); the CI section is condensed to author rules. A rule that applies to a second vendor belongs in
-the matching shared file, not in a vendor file.
+and routes here); the CI section is condensed to author rules. A rule that applies
+to a second vendor belongs in the matching shared file, not in a vendor file.
 
 ### Review bot on fork PRs (`safe-to-review` label)
 
@@ -28,8 +28,9 @@ them collaborator/write access; the `safe-to-review` label stays the per-PR trus
 ## Continuous Integration and Pre-flight
 
 Related decision: [Documentation drift gates](../../docs/decisions/0003-docs-drift-gates.md).
-Each gate script's docstring is the authoritative description of what it enforces; the
-bullets below hold only what an author must do. Read the docstring before changing a gate.
+Each gate script's docstring (for timeouts and the nightly job, the workflow file) is the
+authoritative description of what it enforces; the bullets below hold only what an
+author must do. Read the docstring before changing a gate.
 
 - CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
 - **PR body gates** (`.github/workflows/pr-body.yml`, not required checks): `falsified-by`
