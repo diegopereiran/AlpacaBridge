@@ -441,7 +441,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
-| Focus Motor for SCT and EdgeHD | USB/Serial (motor's own port) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/Focus%20Motor/) |
+| Focus Motor 94155 for SCT and EdgeHD | USB/Serial (motor's own port) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/Focus%20Motor%2094155/) |
 
 <details>
 <summary><strong>Celestron Focuser Driver Notes</strong></summary>
