@@ -36,7 +36,8 @@
 // Calibration (issue #896): the Celestron utilities send 0x2A 00 on exit,
 // which the reporter saw wipe a good calibration, so an uncalibrated motor
 // connects and the Calibrate action runs it here (INDI's flow). This driver
-// sends 0x2A 00 only while a calibration it started is running.
+// sends 0x2A 00 only while the motor is calibrating: one it started, or one
+// from an earlier session that the connect found still running.
 // TODO(#896): the wipe is the reporter's observation on one firmware; whether
 // the motor sweeps the encoder (and what 0x01 reads) during a calibration is
 // not known yet.

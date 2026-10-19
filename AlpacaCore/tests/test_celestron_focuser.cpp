@@ -332,7 +332,7 @@ TEST_CASE("Celestron Focuser Driver - Calibrate runs to completion and the new l
 TEST_CASE("Celestron Focuser Driver - Halt and AbortCalibration abort a calibration and never wipe an idle motor",
           "[celestron][focuser][unit][fake]") {
     // The reporter saw 0x2A 00 wipe a good calibration (issue #896), so it is
-    // sent only while a calibration this driver started is running.
+    // sent only while a calibration the driver tracks is running.
     FakeCelestronFocuser fake;
     REQUIRE(fake.ok());
     fake.set_limits(1000, 61000);
