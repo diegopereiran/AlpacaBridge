@@ -4,8 +4,8 @@ applyTo: ".github/workflows/**,.github/scripts/**,scripts/**"
 
 ## CI gates and the review bot
 
-Shared rules for every vendor, moved verbatim from `AGENTS.md`, which keeps the
-core rules and routes here. A rule that applies to a second vendor belongs in
+Shared rules for every vendor, moved from `AGENTS.md` (which keeps the core rules
+and routes here); the CI section is condensed to author rules. A rule that applies to a second vendor belongs in
 the matching shared file, not in a vendor file.
 
 ### Review bot on fork PRs (`safe-to-review` label)

@@ -4,8 +4,8 @@ applyTo: "AlpacaCore/tests/**,AlpacaHTTP/tests/**,AlpacaCore/conformu/**"
 
 ## Tests, fakes and ConformU
 
-Shared rules for every vendor, moved verbatim from `AGENTS.md`, which keeps the
-core rules and routes here. A rule that applies to a second vendor belongs in
+Shared rules for every vendor, moved from `AGENTS.md` (which keeps the core rules
+and routes here) and, for the QHY `before_call` exception, from the ci-gates rules. A rule that applies to a second vendor belongs in
 the matching shared file, not in a vendor file.
 
 ## Testing Requirements

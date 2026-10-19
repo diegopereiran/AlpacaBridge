@@ -108,12 +108,12 @@ TESTS_CMAKELISTS = "AlpacaCore/tests/CMakeLists.txt"
 # #included by several TUs, so a TEST_CASE added to one would compile in and
 # re-inflate the vendor threshold while slipping past a *.cpp-only scan.
 #
-# The .cpp glob is deliberately *.cpp and not test_*.cpp: the ci-gates instructions state the
-# rule as "a [stress] case anywhere else under AlpacaCore/tests/", and a
-# narrower glob would leave a file not named test_* outside the check while the
-# prose said otherwise. Registration files are excluded by path in
+# The .cpp glob is deliberately *.cpp and not test_*.cpp: rule 3 in this
+# file's docstring states the rule as "a [stress] case anywhere else under
+# AlpacaCore/tests/", and a narrower glob would leave a file not named test_*
+# outside the check while the docstring said otherwise. Registration files are excluded by path in
 # find_stray_stress_cases(), not by failing to match here. The .hpp/.cc/.inc/
-# .ipp entries match nothing today and exist for the same reason: the prose
+# .ipp entries match nothing today and exist for the same reason: rule 3
 # says "anywhere else under AlpacaCore/tests/", so an extension the globs miss
 # would be a silent hole rather than a documented limit.
 TEST_GLOBS = ("AlpacaCore/tests/*.cpp", "AlpacaCore/tests/*.h",
