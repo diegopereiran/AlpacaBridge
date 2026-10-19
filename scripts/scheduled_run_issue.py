@@ -105,8 +105,8 @@ class GhIssues:
         return subprocess.run(["gh", *args], input=stdin, check=True, capture_output=True, text=True).stdout
 
     def list_open(self):
-        out = self._gh("issue", "list", "--label", LABELS[0], "--state", "open", "--limit", str(LIST_LIMIT),
-                       "--json", "number,body")
+        # No label filter: the marker identifies the issue, and triage may relabel it.
+        out = self._gh("issue", "list", "--state", "open", "--limit", str(LIST_LIMIT), "--json", "number,body")
         return json.loads(out or "[]")
 
     def create(self, title, body, labels):
@@ -187,6 +187,22 @@ def self_test():
         ("create", "Scheduled run failing: Nightly Build", LABELS),
     ])
     check("CodeQL issue still open", [i["number"] for i in f.list_open()], [2, 3])
+
+    # The open issue is found by its marker whatever its labels: a triaged issue
+    # that lost `bug` must still be found, or a second one opens (PR #1353 review).
+    class Recording(GhIssues):
+        def __init__(self):
+            super().__init__(dry_run=False)
+            self.calls = []
+
+        def _gh(self, *args, stdin=None):
+            self.calls.append(args)
+            return json.dumps([{"number": 5, "body": marker("CodeQL")}])
+
+    r = Recording()
+    check("list_open returns every listed issue", [i["number"] for i in r.list_open()], [5])
+    check("list_open is not filtered by label", "--label" in r.calls[0], False)
+    check("list_open asks for open issues only", r.calls[0][r.calls[0].index("--state") + 1], "open")
 
     for line in bad:
         print(line)
