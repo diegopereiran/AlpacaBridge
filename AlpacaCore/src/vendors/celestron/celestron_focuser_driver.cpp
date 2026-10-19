@@ -480,7 +480,8 @@ private:
         try {
             reply = exchange(kCalibrationDone);
         } catch (const std::exception& e) {
-            ALPACA_LOG_DEBUG("Celestron", std::string("Focus motor calibration status not read at connect: ") + e.what());
+            ALPACA_LOG_DEBUG("Celestron",
+                             std::string("Focus motor calibration status not read at connect: ") + e.what());
             return;
         }
         if (reply.size() < 2 || reply[0] != 0 || reply[1] == 0) return;
@@ -490,7 +491,8 @@ private:
             calibration_.started = clock_.now() - kCalibrationStartGrace;
             ++calibration_.generation;
         }
-        ALPACA_LOG_WARN("Celestron", "Focus motor is still calibrating from an earlier session; waiting for it to finish");
+        ALPACA_LOG_WARN("Celestron",
+                        "Focus motor is still calibrating from an earlier session; waiting for it to finish");
     }
 
     // Sends 0x2A 00 only while a calibration runs: on an idle motor it would
