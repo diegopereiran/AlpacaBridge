@@ -11,12 +11,13 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the ZWO EFW filter wheel
-// (issue #101). No fake seam exists for the EFW SDK, so on a hardware-free
-// host every connect fails fast at enumeration — which still storms the
-// AsyncConnectable machinery, the failure-path cleanup, and the property
-// getters racing the lifecycle: the exact surfaces where this driver family's
-// review findings lived. With a wheel attached the same tests exercise the
-// full connect path.
+// (issue #101). The cases built on the real SDK singleton find no wheel on a
+// hardware-free host, so every connect fails fast at enumeration — which still
+// storms the AsyncConnectable machinery, the failure-path cleanup, and the
+// property getters racing the lifecycle: the exact surfaces where this driver
+// family's review findings lived. With a wheel attached the same tests exercise
+// the full connect path; the case over the EFW SDK seam at the end does so with
+// no hardware.
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -36,7 +37,9 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_zwo_efw_sdk.h"
 #include "fake_zwo_sdk.h"
+#include "locked_zwo_efw_sdk.h"
 #include "locked_zwo_sdk.h"
 
 using alpacacore::AlpacaDriver;
@@ -216,6 +219,41 @@ TEST_CASE("ZWO CAA rotator - concurrent connect/disconnect/operate stress", "[zw
 TEST_CASE("ZWO CAA rotator - destruction races an in-flight connect", "[zwo][rotator][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0); });
+}
+
+// Connected lifecycle storm over the EFW SDK seam (open-astro#1309): the cases above
+// stop at the connect-failure path on a host with no wheel, so the poll, the status cache and the
+// disconnect ordering never ran with a connect that succeeds. The fake sits behind its Locked
+// decorator, so every SDK call is one mutex-guarded forward and the driver owns the interleaving.
+// A connected wheel legitimately answers InvalidValue (a slot or position out of range) and
+// InvalidOperation (a move during a move), so those join NotConnected in the expected set. The
+// fake scripts the moving window (Position -1 for two reads after a move), so a move issued
+// during another is refused instead of each one settling at once.
+TEST_CASE("ZWO EFW - connected lifecycle stress behind LockedZWOEFWSDK", "[zwo][filterwheel][stress]") {
+    alpacacore::test::FakeZWOEFWSDK fake;
+    fake.moving_reads = 2;
+    alpacacore::test::LockedZWOEFWSDK sdk(fake);
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidValue,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
+        guard([&] { static_cast<void>(wheel.get_position()); });
+        guard([&] { wheel.set_position(1); });
+        guard([&] { static_cast<void>(wheel.get_names()); });
+        guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_calls == fake.close_calls);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(fake.set_position_calls > 0);
+    CHECK(fake.moving_refusals > 0);
 }
 
 // Dew heater switch stress (#271): same shape — the dew heater switch wraps
