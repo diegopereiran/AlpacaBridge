@@ -1256,20 +1256,28 @@ TEST_CASE("SkyWatcher async - client-silence watchdog stops a moving axis after 
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
     driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const uint32_t sidereal_period = mount.step_period(1);
     WatchdogLogGuard log_guard;
 
     const auto t0 = std::chrono::steady_clock::now();
     driver->note_client_activity(t0);
     driver->move_axis(0, 2.0);
-    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1) && mount.step_period(1) != sidereal_period; }, 3000));
     REQUIRE(driver->get_slewing());
     const int stops_before = mount.stop_count(1);
 
     REQUIRE(driver->stop_motion_if_client_silent(t0 + std::chrono::seconds(31), std::chrono::seconds(30)));
 
-    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 5000));
+    // The watchdog stops the jog through AbortSlew, and ITelescopeV4 AbortSlew
+    // returns Tracking to its state before a MoveAxis: tracking was on, so RA
+    // goes back to the sidereal rate instead of standing still.
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
     CHECK(mount.stop_count(1) > stops_before);
-    REQUIRE_FALSE(driver->get_slewing());
+    REQUIRE(wait_until(
+        [&] { return driver->get_tracking() && mount.axis_running(1) && mount.step_period(1) == sidereal_period; },
+        5000));
+    CHECK_FALSE(mount.axis_running(2));
     CHECK(log_guard.count.load() == 1);
     driver->set_connected(false);
 }

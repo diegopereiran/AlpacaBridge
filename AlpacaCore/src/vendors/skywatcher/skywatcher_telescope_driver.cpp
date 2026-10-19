@@ -2682,12 +2682,27 @@ public:
         restore_tracking_after_slew_ = false;
         tracking_ = false;
         invalidate_position_cache_locked();
+        bool need_duty = false;
+        bool restarted = false;
         if (restore_tracking) {
             try {
                 set_tracking_locked(lock, true);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("AbortSlew: failed to restore tracking: ") + e.what());
             }
+            need_duty = tracking_ && (ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0);
+            restarted = tracking_;
+        }
+        lock.unlock();
+        // As in set_tracking(): the restore's RA stop-wait releases mutex_
+        // while tracking_ reads false, and a limit guard polling in that window
+        // exits, so start it (and the duty worker) again for the restored
+        // tracking.
+        if (need_duty) {
+            start_duty_worker();
+        }
+        if (restarted) {
+            start_limit_guard();
         }
     }
 
