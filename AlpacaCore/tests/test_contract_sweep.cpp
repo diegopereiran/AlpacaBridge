@@ -57,6 +57,7 @@
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
+#include "fake_zwo_efw_sdk.h"
 #include "fake_zwo_sdk.h"
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -854,6 +855,35 @@ Tier2Host tier2_host_zwo_camera() {
     };
     return h;
 }
+
+// The EFW fake: open_delay holds the connect open, fail_open fails it.
+Tier2Host tier2_host_zwo_filterwheel() {
+    Tier2Host h{"zwo_filterwheel",
+                "zwo",
+                "filterwheel",
+                "fake_zwo_efw_sdk.h",
+                DeviceType::FilterWheel,
+                "zwo_filterwheel",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOEFWSDK>();
+        if (hold) sdk->open_delay = kHold;
+        return host_over(sdk, [](alpacacore::test::FakeZWOEFWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, fake.id, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOEFWSDK>();
+        sdk->fail_open = true;
+        return host_over(sdk, [](alpacacore::test::FakeZWOEFWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, fake.id, fake);
+        });
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -1579,7 +1609,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 // CAM = a camera, which has no such probe either and also gets the ImageArray case.
 // clang-format off
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM)
+#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM) X(zwo_filterwheel, PRB)
 #else
 #define CS2_ZWO(X)
 #endif
