@@ -176,7 +176,7 @@ across its filter wheel lineup? (e.g. ZWO EFW and Player One Phoenix Wheel both 
 
 The answer drives the web UI slot-count selector in Step 6 — the select must list
 exactly the manufacturer's offered slot counts (with model names in the labels where
-known) plus a Custom option. See "FilterWheel vendors — required web UI" in AGENTS.md.
+known) plus a Custom option. See "FilterWheel vendors — required web UI" in `.github/instructions/http-integration.instructions.md`.
 
 ### Question 5: Protocol documentation
 
@@ -437,7 +437,7 @@ setup and UI as the existing ones — use the **ZWO EFW** (`zwo_filterwheel_driv
 One Phoenix Wheel** drivers as the canonical templates. Specifically match:
 - the slot-count handling and the default/standard filter name set,
 - `Names` and `FocusOffsets` semantics (array length tied to slot count, defaults, persistence),
-- the web UI slot lineup built with `createFilterwheelSlotUI({...})` (see Step 6 and AGENTS.md).
+- the web UI slot lineup built with `createFilterwheelSlotUI({...})` (see Step 6 and `.github/instructions/http-integration.instructions.md`).
 
 A new filter wheel should differ from ZWO/Player One only where the hardware genuinely differs
 (slot counts offered, enumeration/SDK details) — never in how filters are named, stored, or
@@ -571,7 +571,7 @@ All 9 steps required for end-to-end functionality:
    per-`(vendor, deviceType)` auto-increment and manual-edit tracking, so a second device
    of the same vendor/type doesn't silently reuse index 0. (Distinct from the Alpaca
    device number, which auto-assigns per type already.) See "Enumeration index fields" in
-   AGENTS.md.
+   `.github/instructions/http-integration.instructions.md`.
 7. Frontend validation logic.
 8. Build-flag propagation from AlpacaCore to AlpacaHTTP.
 9. Routing/config tests in `AlpacaHTTP/tests/`.
@@ -953,7 +953,7 @@ Every telescope driver in this project has hit most of these:
 
 ## Step 11 — Update repository instructions with lessons learned (MANDATORY)
 
-After the driver is implemented, tested, and validated, update the applicable `.github/instructions/<vendor>.instructions.md` with vendor-specific knowledge and `AGENTS.md` with shared knowledge discovered during the session. **This step is non-negotiable** — these files are the project's living knowledge base.
+After the driver is implemented, tested, and validated, update the applicable `.github/instructions/<vendor>.instructions.md` with vendor-specific knowledge and the matching shared topic file under `.github/instructions/` (listed in `docs/agent-instructions.md`) with shared knowledge discovered during the session; `AGENTS.md` gets a one-line pointer at most. **This step is non-negotiable** — these files are the project's living knowledge base.
 
 ### What to add
 
@@ -983,7 +983,7 @@ After the driver is implemented, tested, and validated, update the applicable `.
 
 ### How to update
 
-Read `AGENTS.md` and the applicable vendor instruction file, then add the notes in the right place. Follow the existing format — look at the SynScan, iOptron, Celestron, or SVBONY instruction files for examples of vendor notes.
+Read `AGENTS.md`, the matching shared topic file and the applicable vendor instruction file, then add the notes in the right place. Follow the existing format — look at the SynScan, iOptron, Celestron, or SVBONY instruction files for examples of vendor notes.
 
 If in doubt about whether something is worth documenting, document it. A note that saves 30 minutes of debugging next time is always worth the two lines it takes to write.
 

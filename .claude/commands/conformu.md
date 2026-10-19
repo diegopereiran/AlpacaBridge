@@ -203,7 +203,7 @@ The printed version line must read `Conform Universal 4.5.2 (Build 56139.4ccb591
 (`ASCOM Universal Device Conformance Checker Version ...`) must carry `4.5.2.56139, Build time:` (4.5.2, build 56139). Reports made with
 4.5.2-rc.1 (build 56111) and 4.5.1 (build 54507) stay valid. A newer ConformU release is adopted only after a
 check on one camera and one telescope run: then update the URL, sha256 and build line above, the
-`conformu` watch in `scripts/dependency_sdk_versions.json` and the version AGENTS.md names.
+`conformu` watch in `scripts/dependency_sdk_versions.json` and the version `.github/instructions/testing.instructions.md` names ("ConformU version").
 
 (If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/`
 directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a

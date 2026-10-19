@@ -83,7 +83,7 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 
 ### AGENTS.md — the knowledge base
 
-[AGENTS.md](../AGENTS.md) is the project's living memory: architecture rules, the three-layer driver pattern, ConformU failure patterns, and per-vendor quirks discovered on real hardware. Every driver session ends by updating it — if something surprising was learned, it gets documented so the next session (human or agent) doesn't rediscover it. Read it before touching any driver code.
+[AGENTS.md](../AGENTS.md) and the shared topic files it routes to ([index](agent-instructions.md)) are the project's living memory: architecture rules, the three-layer driver pattern, ConformU failure patterns, and per-vendor quirks discovered on real hardware. Every driver session ends by updating it — if something surprising was learned, it gets documented so the next session (human or agent) doesn't rediscover it. Read it before touching any driver code.
 
 ## Prerequisites
 
