@@ -2,7 +2,7 @@
 applyTo: "AlpacaCore/tests/**,AlpacaHTTP/tests/**,AlpacaCore/conformu/**"
 ---
 
-## Testing requirements
+## Tests, fakes and ConformU
 
 Shared rules for every vendor, moved verbatim from `AGENTS.md`, which keeps the
 core rules and routes here. A rule that applies to a second vendor belongs in

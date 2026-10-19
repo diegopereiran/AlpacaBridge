@@ -2,7 +2,7 @@
 applyTo: ".github/workflows/**,.github/scripts/**,scripts/**"
 ---
 
-## Continuous integration and pre-flight
+## CI gates and the review bot
 
 Shared rules for every vendor, moved verbatim from `AGENTS.md`, which keeps the
 core rules and routes here. A rule that applies to a second vendor belongs in
