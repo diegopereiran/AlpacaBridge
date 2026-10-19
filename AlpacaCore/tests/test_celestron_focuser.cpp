@@ -368,6 +368,36 @@ TEST_CASE("Celestron Focuser Driver - Halt and AbortCalibration abort a calibrat
     driver->set_connected(false);
 }
 
+TEST_CASE("Celestron Focuser Driver - an aborted calibration serves no old limits before the poll reads them",
+          "[celestron][focuser][unit][fake]") {
+    // The abort wipes the motor's limits (issue #896) and the driver reads
+    // them again only on its next poll, up to 250 ms later. Until then a Move
+    // must not GOTO against the limits the motor had before.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.set_limits(1000, 61000);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(driver->get_max_step() == 60000);
+
+    driver->action("Calibrate", "");
+    driver->action("AbortCalibration", "");
+    // No tick: the poll has not read the wiped limits yet.
+    require_alpaca_error([&] { driver->move(100); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { static_cast<void>(driver->get_max_step()); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { static_cast<void>(driver->get_max_increment()); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { static_cast<void>(driver->get_position()); }, AlpacaError::InvalidOperation);
+    CHECK(fake.count(0x02) == 0);
+
+    tick(clock);
+    CHECK(driver->action("CalibrationStatus", "") == "NotCalibrated");
+    require_alpaca_error([&] { driver->move(100); }, AlpacaError::InvalidOperation);
+    CHECK(fake.count(0x02) == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron Focuser Driver - a Halt racing the poll that sees the calibration finish never wipes it",
           "[celestron][focuser][unit][fake]") {
     // The poll's 0x2B can report the calibration complete between Halt's
