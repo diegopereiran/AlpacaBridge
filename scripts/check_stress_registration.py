@@ -19,8 +19,11 @@ Five rule families, not one:
    in a conditionally-compiled file; this is the other half of that assumption
    (issue #396), and without it appending a correctly-named, correctly-tagged
    registration to the unconditional `TEST_SOURCES` list passes every other
-   rule while making the TSan zero-test grep vacuous again.
-5. A registration file must use `StressCallGuard` the way AGENTS.md documents
+   rule while making the TSan zero-test grep vacuous again. The block must be
+   an `if(TARGET alpacacore_...)` condition: `if(NOT TARGET ...)` and a
+   condition naming a non-`alpacacore_` target do not gate (see the comment
+   above `_TARGET_GATE_RE`). Which vendor's target it names is not checked.
+5. A registration file must use `StressCallGuard` the way the ci-gates instructions document
    it (issues #379, #334), or be named in `GUARD_ALLOWLIST` with a reason:
    the guard present, `CHECK(...unexpected_count())`, `INFO(...report())`,
    `CHECK(...total_calls() > 0)` (the comparison is part of the rule: `>= 0`
@@ -37,7 +40,7 @@ macro, not just `TEST_CASE`, and join adjacent tag literals the way the
 preprocessor does (issue #393).
 
 
-AGENTS.md requires every new or substantially-changed driver to register a
+The ci-gates instructions (.github/instructions/ci-gates.instructions.md) require every new or substantially-changed driver to register a
 `[stress]` TEST_CASE with the ThreadSanitizer concurrency suite
 (`AlpacaCore/tests/concurrency_stress.h`, wired into the `sanitizers-tsan` CI
 job). Registration is manual today, and nothing failed when it was skipped.
@@ -89,7 +92,7 @@ import subprocess
 import sys
 
 VENDORS_PREFIX = "AlpacaCore/src/vendors/"
-# The registration-file glob is the naming convention AGENTS.md and this
+# The registration-file glob is the naming convention the ci-gates instructions and this
 # script's own failure messages state: `*_concurrency_stress.cpp`, with no
 # `test_` prefix (issue #376). The prefix used to be load-bearing in two
 # opposite directions -- find_registered_pairs() only scanned files that had
@@ -108,12 +111,12 @@ TESTS_CMAKELISTS = "AlpacaCore/tests/CMakeLists.txt"
 # #included by several TUs, so a TEST_CASE added to one would compile in and
 # re-inflate the vendor threshold while slipping past a *.cpp-only scan.
 #
-# The .cpp glob is deliberately *.cpp and not test_*.cpp: AGENTS.md states the
-# rule as "a [stress] case anywhere else under AlpacaCore/tests/", and a
-# narrower glob would leave a file not named test_* outside the check while the
-# prose said otherwise. Registration files are excluded by path in
+# The .cpp glob is deliberately *.cpp and not test_*.cpp: rule 3 in this
+# file's docstring states the rule as "a [stress] case anywhere else under
+# AlpacaCore/tests/", and a narrower glob would leave a file not named test_*
+# outside the check while the docstring said otherwise. Registration files are excluded by path in
 # find_stray_stress_cases(), not by failing to match here. The .hpp/.cc/.inc/
-# .ipp entries match nothing today and exist for the same reason: the prose
+# .ipp entries match nothing today and exist for the same reason: rule 3
 # says "anywhere else under AlpacaCore/tests/", so an extension the globs miss
 # would be a silent hole rather than a documented limit.
 TEST_GLOBS = ("AlpacaCore/tests/*.cpp", "AlpacaCore/tests/*.h",
@@ -370,8 +373,8 @@ LOCAL_CALL_HELPER_RE = re.compile(
 
 def check_guard_usage():
     """StressCallGuard is used, and its result is actually asserted (issue #379),
-    scoped to each TEST_CASE that constructs one (issue #514) -- AGENTS.md
-    states the closing idiom as ending THE TEST_CASE, not the file, and a
+    scoped to each TEST_CASE that constructs one (issue #514) -- the ci-gates instructions
+    state the closing idiom as ending THE TEST_CASE, not the file, and a
     file-wide presence check let one fully-guarded case cover for every other
     case in the same file that dropped the closing lines: #468 emptied
     GUARD_ALLOWLIST, and files with many [stress] cases (the ToupTek and ZWO
@@ -442,7 +445,8 @@ def check_guard_usage():
                     "GUARD NOT ASSERTED: %s (TEST_CASE %r) constructs a StressCallGuard but never CHECKs "
                     "unexpected_count() IN THAT SAME CASE. Counting without failing is worse than not "
                     "guarding: the file looks like it follows the documented pattern. End the TEST_CASE "
-                    "with the INFO/CHECK pair from AGENTS.md." % (path, label)
+                    "with the three closing lines (INFO report, CHECK unexpected_count, CHECK total_calls) from "
+                    ".github/instructions/ci-gates.instructions.md." % (path, label)
                 )
             if not re.search(r"INFO\s*\(\s*[\w.]*report\s*\(\s*\)", seg):
                 failures.append(
@@ -677,7 +681,7 @@ def find_stray_stress_cases():
 
 
 # `if(TARGET alpacacore_<vendor>)` gates a file on that VENDOR's target, which
-# is what AGENTS.md tells authors to write. Three shapes look like gating and
+# is what the ci-gates instructions tell authors to write. Three shapes look like gating and
 # are not, and a bare `"TARGET" in line` accepts all three: `if(NOT TARGET x)`
 # compiles the file exactly when the vendor is ABSENT, which is the opposite of
 # gating; any identifier merely CONTAINING the word counts, and
