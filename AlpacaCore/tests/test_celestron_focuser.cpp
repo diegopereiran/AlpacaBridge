@@ -18,6 +18,7 @@
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <string>
@@ -362,6 +363,46 @@ TEST_CASE("Celestron Focuser Driver - Halt and AbortCalibration abort a calibrat
     // The abort wiped the motor's limits; the driver reads them again.
     CHECK(driver->action("CalibrationStatus", "") == "NotCalibrated");
     require_alpaca_error([&] { driver->move(100); }, AlpacaError::InvalidOperation);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Focuser Driver - a Halt racing the poll that sees the calibration finish never wipes it",
+          "[celestron][focuser][unit][fake]") {
+    // The poll's 0x2B can report the calibration complete between Halt's
+    // running check and its 0x2A 00, which then reaches an idle motor and
+    // wipes the new calibration (issue #896).
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.set_limits(0, 0);
+    fake.set_raw_position(30000);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    driver->action("Calibrate", "");
+    for (int i = 0; i < 5; ++i) tick(clock);  // past the start grace
+    REQUIRE(fake.count(0x2b) > 0);
+
+    // The next poll's 0x2B is held unanswered while the calibration still runs.
+    fake.gate_next(0x2b);
+    clock.advance(kTick);
+    REQUIRE(fake.wait_gate_reached(kBound));
+    std::thread halter([&] { driver->halt(); });
+    // Halt reaches its lock before the reply; well inside the 500 ms reply timeout.
+    std::this_thread::sleep_for(100ms);
+    fake.complete_calibration(2000, 52000);
+    fake.release_gate();
+    halter.join();
+    REQUIRE(clock.wait_for_woken_settled(kBound));
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    tick(clock);
+
+    const auto requests = fake.requests();
+    CHECK(std::none_of(requests.begin(), requests.end(), [](const auto& frame) {
+        return frame.command == 0x2a && frame.payload == std::vector<std::uint8_t>{0x00};
+    }));
+    CHECK(driver->action("CalibrationStatus", "") == "Calibrated");
+    CHECK(driver->get_max_step() == 50000);
     driver->set_connected(false);
 }
 

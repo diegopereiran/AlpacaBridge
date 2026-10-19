@@ -20,6 +20,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -101,6 +103,27 @@ public:
         return calibrating_;
     }
 
+    // One-shot: the next request with this command is held, unanswered and
+    // unrecorded, until release_gate(), so a test can act while the driver
+    // waits on that reply. wait_gate_reached() reports when it arrived.
+    void gate_next(std::uint8_t command) {
+        std::lock_guard<std::mutex> lock(gate_mutex_);
+        gate_command_ = command;
+        gate_reached_ = false;
+        gate_open_ = false;
+    }
+    bool wait_gate_reached(std::chrono::milliseconds bound) {
+        std::unique_lock<std::mutex> lock(gate_mutex_);
+        return gate_cv_.wait_for(lock, bound, [this] { return gate_reached_; });
+    }
+    void release_gate() {
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex_);
+            gate_open_ = true;
+        }
+        gate_cv_.notify_all();
+    }
+
     std::uint32_t raw_position() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return raw_;
@@ -161,6 +184,7 @@ private:
             }
             buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(size));
             if (request.destination != 0x12) continue;
+            hold_at_gate(request.command);
             const auto payload = respond(request);
             if (!payload || muted_.load() || take_drop(request.command)) continue;
             const auto bytes = encode_aux_frame(AuxFrame{
@@ -168,6 +192,16 @@ private:
             static_cast<void>(
                 pty_write_bounded(pty_.master_fd(), reinterpret_cast<const char*>(bytes.data()), bytes.size(), stop_));
         }
+    }
+
+    // Bounded by stop_, so a test that never releases cannot hang the destructor.
+    void hold_at_gate(std::uint8_t command) {
+        std::unique_lock<std::mutex> lock(gate_mutex_);
+        if (gate_command_ != command) return;
+        gate_command_.reset();
+        gate_reached_ = true;
+        gate_cv_.notify_all();
+        while (!gate_open_ && !stop_.load()) gate_cv_.wait_for(lock, std::chrono::milliseconds(20));
     }
 
     bool take_drop(std::uint8_t command) {
@@ -245,6 +279,11 @@ private:
     bool status_idle_held_ = false;
     std::vector<std::uint8_t> version_{7, 11, 0x0b, 0xb8};
     std::vector<alpacacore::vendor::celestron::AuxFrame> requests_;
+    std::mutex gate_mutex_;
+    std::condition_variable gate_cv_;
+    std::optional<std::uint8_t> gate_command_;
+    bool gate_reached_ = false;
+    bool gate_open_ = false;
     std::atomic<bool> muted_{false};
     std::atomic<bool> stop_{false};
     PtyPair pty_;

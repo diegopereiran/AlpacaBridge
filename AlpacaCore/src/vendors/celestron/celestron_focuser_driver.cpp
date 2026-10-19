@@ -439,6 +439,14 @@ private:
                                   AlpacaError::InvalidOperation);
         }
         resync_if_needed();
+        std::lock_guard<std::mutex> command(calibration_command_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            if (calibration_.running) {
+                throw AlpacaException("Celestron focus motor calibration is already in progress",
+                                      AlpacaError::InvalidOperation);
+            }
+        }
         const auto session = protocol_.session_generation();
         exchange(kCalibrationEnable, {0x01});
         {
@@ -458,6 +466,9 @@ private:
     // Sends 0x2A 00 only while a calibration runs: on an idle motor it would
     // wipe the calibration. Returns whether it sent the abort.
     bool abort_calibration_if_running() {
+        // Held across the check and the send: the poll's 0x2B can otherwise
+        // see the calibration finish in between, and the abort then wipes it.
+        std::lock_guard<std::mutex> command(calibration_command_mutex_);
         {
             std::lock_guard<std::mutex> lock(calibration_mutex_);
             if (!calibration_.running) return false;
@@ -477,6 +488,7 @@ private:
     // Poll-thread half of a calibration: reads 0x2B once the start grace has
     // passed and reads the limits again when it has ended.
     void poll_calibration() {
+        std::unique_lock<std::mutex> command(calibration_command_mutex_);
         CalibrationState state;
         {
             std::lock_guard<std::mutex> lock(calibration_mutex_);
@@ -499,6 +511,7 @@ private:
                                                       : "Focus motor calibration ended without completing");
             }
         }
+        command.unlock();
         if (state.refresh_limits) {
             const bool calibrated = read_limits();
             {
@@ -637,6 +650,10 @@ private:
     std::string port_path_;
     std::atomic<bool> connected_{false};
     CelestronCgxProtocol protocol_;
+    // Serializes the calibration commands (0x2A start and abort) with the
+    // poll's 0x2B read and its decision. Held across an exchange; taken before
+    // the protocol's mutex and before calibration_mutex_.
+    mutable std::mutex calibration_command_mutex_;
     // Limits and calibration progress; never held across an exchange.
     mutable std::mutex calibration_mutex_;
     CalibrationState calibration_;
