@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-19
+## Updated 2026-10-20
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -441,7 +441,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
-| Focus Motor for SCT and EdgeHD | USB/Serial (motor's own port) |  | in development, awaiting hardware testing ([#896](https://github.com/open-astro/AlpacaBridge/issues/896)) |
+| Focus Motor for SCT and EdgeHD | USB/Serial (motor's own port) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/Focus%20Motor/) |
 
 <details>
 <summary><strong>Celestron Focuser Driver Notes</strong></summary>
@@ -450,6 +450,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Configuration**: `portPath` (required; no auto-detect).
 - **Calibration**: run the `Calibrate` action (about 5 minutes; `CalibrationStatus` answers `Calibrating`, `Calibrated` or `NotCalibrated`, `AbortCalibration` or Halt stops it). An uncalibrated motor connects but refuses `Position`, `MaxStep` and Move. The Celestron Focuser Utility can erase the calibration when it closes. `Position` is `high limit - encoder`, so 0 is one end of the calibrated travel and `MaxStep` is the calibrated range.
 - **Capabilities**: absolute Move (clamped to 0..MaxStep), Halt. No temperature sensor, temperature compensation or `StepSize`.
+- **ConformU**: 4.5.2 (build 56139), 0 errors, 0 issues, 0 timing issues (2026-10-19, user-run on issue #896, PR head `d8f2020df2`, motor calibrated). AlpacaBridge ran on Linux arm64 (the OpenAstro Raspberry Pi image); ConformU itself ran on a Windows 11 x64 client over the LAN. ConformU cannot test `Action`: the same user checked `Calibrate`, `CalibrationStatus` and `AbortCalibration` by hand, and that a calibration made by INDI reads back the same `Position` and `MaxStep`.
 
 </details>
 
