@@ -1,0 +1,2 @@
+### Fixed
+- **The Software Update card loads when the page opens** (issue #1103, follow-up to PR #1329): the card was filled in only by **Check for Updates** or the Refresh button, so after a reload the **Update channel** selector showed Stable on a beta host, stayed disabled, and the installed version read `...`. The page now reads `GET /management/v1/update/status` on load (`update.test.js`, "the update card loads its status when the page opens").
