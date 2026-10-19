@@ -26,6 +26,10 @@
 #include "catch2_compat.h"
 
 #ifndef _WIN32
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+
 #include "fake_celestron_focuser.h"
 #include "fake_task_clock.h"
 #endif
@@ -152,6 +156,28 @@ TEST_CASE("Celestron Focuser Driver - Position and MaxStep are referenced to the
         CHECK(frame.destination == 0x12);
     }
     driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Focuser Driver - the motor's USB port runs at 9600 baud", "[celestron][focuser][unit][fake]") {
+    // The PTY fake answers at any line rate, so only the termios the driver
+    // set shows a connect that would never reach a real motor (115200, the
+    // CGX mount's speed). An observer opened before the connect reads it back.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.set_limits(1000, 61000);
+    const int observer = ::open(fake.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    REQUIRE(observer >= 0);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    struct termios settings {};
+    REQUIRE(::tcgetattr(observer, &settings) == 0);
+    CHECK(::cfgetospeed(&settings) == B9600);
+    CHECK(::cfgetispeed(&settings) == B9600);
+    driver->set_connected(false);
+    ::close(observer);
 }
 
 TEST_CASE("Celestron Focuser Driver - Move sends the raw target and IsMoving follows the motor",
