@@ -397,6 +397,38 @@ All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not
 
 ### Serial / socket I/O: always use the shared helpers (`util/serial_io.h`)
 
+**Open every serial port with `util::SerialLink` (`util/serial_link.h`, issue #1202).** Many vendors ship
+the same CH340 adapter, so one vendor's auto-detect probe matches every other vendor's device. When only
+some wrappers used the in-use registry, a Gemini flat panel scan opened the connected Gemini PDH's port at
+its own baud rate and the hub stayed faulted until restart, and a port retuned to `VMIN=1` by another
+program parked a WandererRotator monitor and an OnStep drain in `n_tty_read`, hanging Disconnect.
+`SerialLink::open(path, kind, owner, configure, &error)` claims the port (`util/serial_port_registry.h`),
+takes `TIOCEXCL`, applies the line settings and keeps the fd **non-blocking**; `close()` releases all three.
+Rules:
+
+- **The connected link** opens with `SerialClaimKind::Link`. A port another connected device holds is
+  refused with a message that names the holder; put it in the connect refusal.
+- **A probe** opens with `SerialClaimKind::Probe` for exactly the probe's duration. Before probing,
+  `enumerate_*_ports()` classifies each candidate with `util::serial_candidate_use(path, owner)`: a port held
+  by another kind of device is skipped without being opened, and a port held by a connected device of the
+  same kind stays in the results at its scan position without being probed, so an auto-detect index still
+  names the same device while its sibling is connected. Probes that collide on a port take turns (the claim
+  waits, bounded by `kSerialProbeClaimWait`); they never skip each other.
+- **One owner name per wrapper**, shared by its probe and its link (`"Gemini focuser"`): it is what the
+  sibling test compares and what a refused operator reads.
+- **Reads go through `util::tty_read(fd, buf, n, timeout_ms)` and writes through `util::tty_write_all()`.**
+  Both are `poll()`-bounded. `VMIN`/`VTIME` do nothing on the non-blocking fd, so a retune cannot park a
+  reader, and a bare `read()` returns `EAGAIN` at once. A read timeout also checks the line settings and puts
+  back any another program changed. A streaming reader whose link-health latch trips calls
+  `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
+- `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
+  fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment or a
+  pre-#1202 `mark_serial_port_*` call anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the
+  two helper headers. The `write_all`/`clear_nonblocking` advice below now applies to sockets and to
+  non-tty fds only.
+- A by-id name does not identify a CH340 device (they carry no serial number): the connect-time handshake
+  is what proves which device is on a port, so every serial driver must check its handshake reply.
+
 POSIX serial and socket code has several easy-to-get-wrong patterns that must not
 be hand-rolled in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only,
 included inside the existing `#ifndef _WIN32` branches):
@@ -1187,7 +1219,7 @@ When adding a test file for a new vendor device:
 
 Related decision: [Documentation drift gates](docs/decisions/0003-docs-drift-gates.md).
 
-- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `coverage` (gcovr line coverage, all vendors), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `coverage` (gcovr line coverage, all vendors), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `serial-port-ownership` (`scripts/check_serial_port_ownership.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
 - **`Falsified by:` gate** (`.github/workflows/pr-body.yml`, job `falsified-by`, `scripts/check_falsified_by.py`, pre-flight gate 2b2 reading `PR_BODY_FILE`): every test case a PR adds or renames needs a line `- "<case name>": <path>:<line> <change>` under a `## Falsified by` heading in the PR body (after `## What Changed`), naming the production-code mutation that fails it. It runs on `opened`, `edited`, `synchronize` and `reopened`, takes the body only through `env: PR_BODY` (never into a `run:` line), diffs against the merge commit's first parent (`FALSIFIED_BASE: merge-parent`, so a base that moved after the PR opened adds none of the cases other PRs landed; a HEAD that is not a merge commit keeps the merge-base default, which is what gate 2b2 uses) and is not a required check. One exemption: a merge-down PR skips the check, because every case it carries was already gated on its own fix PR against `stable/X.Y` and would read as new again against the receiving branch's merge-base. `scripts/merge_down.py` decides it, in the job and in gate 2b2 alike: a head named `merge-down/X.Y-to-main` or `merge-down/X.Y-to-X.Z` in this repository, the base that name targets, and no non-merge commit that is not already on `stable/X.Y` (`docs/beta-channel.md`). See Testing Requirements.
 - **PR template gate** (`.github/workflows/pr-body.yml`, job `pr-template`, `scripts/check_pr_template.py`, pre-flight gate 2b3 reading `PR_BODY_FILE`): the PR body must keep every `## ` section of `.github/PULL_REQUEST_TEMPLATE.md`, each with content of its own (a template line copied unchanged, a bare `-` or an HTML comment does not count), and the Checklist must keep its `- [ ]` items. A heading of the form `A or B` also accepts `## A` or `## B`. The rules are read from the template, so editing the template changes the gate. GitHub fills the template in only for a PR opened from the web page with an empty body; `gh pr create --body`, the API and agents skip it. Bot PRs (Dependabot) skip the job. Same triggers and `env: PR_BODY` rule as the `Falsified by:` gate; not a required check until a maintainer marks it.
 - **Layering gate** (`scripts/check_layering.py`, the `layering` CI job and pre-flight gate 2f, issue #651): counts `#include <alpacacore/vendor/...>` lines under `AlpacaHTTP/` and in the catalog schema files, and fails when either exceeds the baseline held in the script (`MAX_ALPACAHTTP_VENDOR_INCLUDES`, `MAX_CATALOG_SCHEMA_VENDOR_INCLUDES`). Each vendor descriptor slice of [device-catalog](docs/decisions/0004-device-catalog.md) lowers the AlpacaHTTP constant in the PR that deletes the includes; the baseline never rises. The gate also enforces CMake rules L1-L3 on every `CMakeLists.txt` and `*.cmake` under `AlpacaCore/` and `AlpacaHTTP/` (except below `external/` and `build*` directories), including `target_sources(alpacacore ...)` and the directory-scoped `ALPACACORE_ENABLE_` definitions in `AlpacaHTTP/CMakeLists.txt` that precede its `add_subdirectory(../AlpacaCore ...)` (issue #723); the dependency-direction bullet under [CMake and Vendor Integration](#cmake-and-vendor-integration) says what they forbid.
