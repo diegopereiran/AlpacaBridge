@@ -129,6 +129,10 @@ public:
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    // Operator-facing reason the last connect() returned false (e.g. the
+    // serial port is held by another connected device, #1202); empty when it
+    // gave none.
+    std::string last_connect_error() const;
     // open-astro#445: is_connected() without I/O and without waiting on an
     // exchange, that also notices a serial device which has gone away (and
     // closes the dead link when it can). Safe to call from a Connected poll.
