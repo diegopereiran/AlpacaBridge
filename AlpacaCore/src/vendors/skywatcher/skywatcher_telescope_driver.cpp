@@ -479,16 +479,18 @@ public:
                 connection_info_, connection_resolved_, connection_resolver_,
                 [&protocol](const ConnectionInfo& info) {
                     if (!protocol.connect(info)) {
+                        // The wrapper's reason (a port another device holds, #1202)
+                        // goes to the operator.
+                        const std::string reason = protocol.last_connect_error();
+                        const std::string message =
+                            reason.empty() ? "Failed to connect to Sky-Watcher motor controller"
+                                           : "Failed to connect to Sky-Watcher motor controller: " + reason;
                         // Unanswered UDP endpoint, vanished serial node, or a port another
                         // connected device now holds (#1202): stale, re-scan.
                         if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
-                            throw util::StaleEndpoint("Failed to connect to Sky-Watcher motor controller");
+                            throw util::StaleEndpoint(message);
                         }
-                        // A port held by another device names its holder (#1202).
-                        const std::string why = protocol.last_connect_error();
-                        throw AlpacaException(why.empty()
-                                                  ? std::string("Failed to connect to Sky-Watcher motor controller")
-                                                  : "Failed to connect to Sky-Watcher motor controller: " + why);
+                        throw AlpacaException(message);
                     }
                 },
                 "SkyWatcher");
