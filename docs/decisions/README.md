@@ -36,6 +36,23 @@ uses the `Symbol:` line. With a `Symbol:` line, only scanned files that name it
 need a row; with none, every scanned file does. A symbol named only in a comment
 does not count.
 
+**Changing a record.** A change to any file in this directory, this index
+included, needs two things before it can merge:
+
+- A repository collaborator with write, maintain or admin permission comments
+  `ADR authorized <head sha>` on the PR, on a line of its own, naming the
+  current head commit. A new push needs a new authorization. The author may
+  authorize their own PR. `scripts/check_adr_authorization.py` posts the result
+  as the `adr-authorization` commit status (`.github/workflows/decision-records.yml`).
+- An approving review from a code owner other than the author
+  (`.github/CODEOWNERS`).
+
+Both are required by the "Decision records" ruleset, which repository
+maintainers and admins may bypass. The PR body's `## Decision records` section
+names every record the PR changes (`scripts/check_adr_scope.py`). The review
+bot reads the Rules each changed file falls under and reports a broken rule as
+a defect.
+
 Status is one of:
 
 - `proposed`: written so a pilot change can be reviewed against it; not yet a rule.
