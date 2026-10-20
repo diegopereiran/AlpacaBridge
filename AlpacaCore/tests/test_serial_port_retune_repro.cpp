@@ -120,8 +120,10 @@ TEST_CASE("Serial port retune - second driver cannot retune a connected rotator'
     const Tuning before = read_tuning(fake.keepalive_fd());
     WARN("rotator link before the second open: " << describe(before));
     REQUIRE(before.baud == B19200);
+    // SerialLink keeps the fd non-blocking and zeroes VMIN/VTIME; reads are
+    // bounded by poll(), not by VTIME.
     REQUIRE(before.vmin == 0);
-    REQUIRE(before.vtime == 5);
+    REQUIRE(before.vtime == 0);
 
     bool second_connect_succeeded = false;
     gemini::GeminiProtocolWrapper focuser;
