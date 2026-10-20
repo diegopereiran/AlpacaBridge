@@ -42,6 +42,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -52,7 +53,7 @@
 
 namespace alpacacore::util {
 
-enum class SerialClaimKind {
+enum class SerialClaimKind : std::uint8_t {
     Probe,  ///< an auto-detect probe has the port open for a few seconds
     Link,   ///< a connected driver holds the port
 };
@@ -109,7 +110,7 @@ inline std::optional<SerialPortHolder> serial_port_holder(const std::string& pat
 inline bool is_serial_port_in_use(const std::string& path) { return serial_port_holder(path).has_value(); }
 
 /// How an auto-detect scan treats one candidate port, see serial_candidate_use().
-enum class SerialCandidateUse {
+enum class SerialCandidateUse : std::uint8_t {
     Free,           ///< probe it (the probe's claim waits out another scan's probe)
     HeldBySibling,  ///< a connected device of this same scan's kind holds it
     HeldByOther,    ///< a connected device of another kind holds it: skip

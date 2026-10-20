@@ -158,7 +158,9 @@ inline ssize_t tty_read(int fd, void* buf, std::size_t len, int timeout_ms) {
             errno = EBADF;
             return -1;
         }
-        const ssize_t n = ::read(fd, buf, len);
+        // Callers hold their wrapper mutex across I/O. This read cannot block: the fd is
+        // non-blocking and poll() just reported data (or it returns EAGAIN at once).
+        const ssize_t n = ::read(fd, buf, len);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
         if (n > 0) return n;
         if (n == 0) {
             errno = EIO;
