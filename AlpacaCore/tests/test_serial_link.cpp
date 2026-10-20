@@ -279,3 +279,21 @@ TEST_CASE("Serial port claim - a scan counts a sibling's port and skips another 
     CHECK(serial_candidate_use(path, "Gemini focuser") == SerialCandidateUse::HeldBySibling);
     CHECK(serial_candidate_use(path, "Gemini flat panel") == SerialCandidateUse::HeldByOther);
 }
+
+TEST_CASE("Serial link - a retune of VMIN/VTIME alone is put back too", "[serial][serial_link][issue1202]") {
+    alpacacore::test::PtyPair pty("link-vmin");
+    auto link = SerialLink::open(pty.slave_path(), SerialClaimKind::Link, "WandererRotator", raw_19200);
+    REQUIRE(link);
+    struct termios tty {};
+    REQUIRE(tcgetattr(pty.keepalive_fd(), &tty) == 0);
+    tty.c_cc[VMIN] = 1;  // the #1202 retune, baud unchanged
+    tty.c_cc[VTIME] = 0;
+    REQUIRE(tcsetattr(pty.keepalive_fd(), TCSANOW, &tty) == 0);
+
+    CHECK(alpacacore::util::restore_serial_line_settings(link.fd()));
+    struct termios now {};
+    REQUIRE(tcgetattr(pty.keepalive_fd(), &now) == 0);
+    CHECK(now.c_cc[VMIN] == 0);
+    CHECK(cfgetospeed(&now) == B19200);
+    CHECK_FALSE(alpacacore::util::restore_serial_line_settings(link.fd()));  // nothing left to restore
+}
