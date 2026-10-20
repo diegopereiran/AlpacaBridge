@@ -119,9 +119,10 @@ inline bool restore_serial_line_settings(int fd) {
     if (tcgetattr(fd, &now) != 0) return false;
     if (detail::same_line_settings(now, it->second.applied)) return false;
     const bool ok = tcsetattr(fd, TCSANOW, &it->second.applied) == 0;
-    ALPACA_LOG_WARN("Serial", "Line settings of " + it->second.port +
-                                  " were changed by another program while this driver held it; " +
-                                  (ok ? std::string("restored them") : "restoring them failed: " + errno_string(errno)));
+    ALPACA_LOG_WARN("Serial",
+                    "Line settings of " + it->second.port +
+                        " were changed by another program while this driver held it; " +
+                        (ok ? std::string("restored them") : "restoring them failed: " + errno_string(errno)));
     return true;
 }
 

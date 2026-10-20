@@ -877,9 +877,7 @@ int64_t parse_int64_field(const std::string& text, const char* context) {
 // PIMPL implementation class
 class iOptronProtocolWrapper::Impl {
 public:
-    Impl() : connected_(false), connection_type_(ConnectionType::Serial) {
-        socket_fd_ = -1;
-    }
+    Impl() : connected_(false), connection_type_(ConnectionType::Serial) { socket_fd_ = -1; }
 
     ~Impl() {
         disconnect();

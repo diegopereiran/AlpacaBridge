@@ -159,8 +159,8 @@ public:
                     try {
                         protocol_.connect(cfg);
                     } catch (const AlpacaException& e) {
-                        // Only a vanished node, or a port another connected device now holds (#1202), is stale; a handshake miss on a present
-                        // port must not trigger the probe, which resets every CH340 MCU.
+                        // Only a vanished node, or a port another connected device now holds (#1202), is stale; a
+                        // handshake miss on a present port must not trigger the probe, which resets every CH340 MCU.
                         if (util::serial_endpoint_stale(cfg.serial_port))
                             throw util::StaleEndpoint(e.what(), e.error_code());
                         throw;
