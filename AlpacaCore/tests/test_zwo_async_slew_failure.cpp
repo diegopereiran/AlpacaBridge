@@ -262,6 +262,59 @@ TEST_CASE("ZWO moving status remains visible when coordinate reads fail", "[zwo]
     CHECK(alpacacore::test::settle_connected(*driver, false));
 }
 
+TEST_CASE("ZWO horizon rejection never retries with mirrored longitude", "[zwo][telescope][async][longitude]") {
+    const bool west = GENERATE(false, true);
+    CAPTURE(west);
+    const double longitude = west ? -100.5 : 100.5;
+    const std::string wire_site = west ? "+30*00:00&+100*30:00" : "+30*00:00&-100*30:00";
+    struct Counts {
+        std::atomic<int> attempts{0};
+        std::atomic<int> site_writes{0};
+        std::atomic<int> wrong_site_writes{0};
+    };
+    auto counts = std::make_shared<Counts>();
+    auto state = std::make_shared<FakeZwoState>();
+    state->serve_position.store(true);
+    const auto fallback = zwo_responder(state);
+    alpacacore::test::FakeMountServer server(
+        [counts, wire_site, fallback, pending = std::string{}](const std::string& chunk) mutable {
+            pending += chunk;
+            std::string response;
+            for (auto end = pending.find('#'); end != std::string::npos; end = pending.find('#')) {
+                const auto command = pending.substr(0, end + 1);
+                pending.erase(0, end + 1);
+                if (command == ":MS#") {
+                    counts->attempts.fetch_add(1);
+                    response += "e5#";
+                } else if (command == ":GMGE#") {
+                    response += wire_site + "#";
+                } else if (command.starts_with(":SMGE")) {
+                    counts->site_writes.fetch_add(1);
+                    if (command != ":SMGE" + wire_site + "#") counts->wrong_site_writes.fetch_add(1);
+                    response += "1#";
+                } else if (command.starts_with(":SMTI")) {
+                    response += "1#";
+                } else {
+                    response += fallback(command);
+                }
+            }
+            return response;
+        });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int writes_before = counts->site_writes.load();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    std::string error;
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &error) == SlewingRead::Threw; }, 10000));
+    CHECK(error.find("e5") != std::string::npos);
+    CHECK(counts->attempts.load() == 2);
+    CHECK(counts->site_writes.load() >= writes_before + 2);
+    CHECK(counts->wrong_site_writes.load() == 0);
+    CHECK(std::abs(driver->get_site_longitude() - longitude) < 1e-9);
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+}
+
 TEST_CASE("ZWO async - a GOTO the mount rejects surfaces through Slewing (#575)",
           "[zwo][telescope][async][slewfailure]") {
     auto st = std::make_shared<FakeZwoState>();
