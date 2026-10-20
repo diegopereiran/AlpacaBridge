@@ -483,7 +483,11 @@ public:
                         if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
                             throw util::StaleEndpoint("Failed to connect to Sky-Watcher motor controller");
                         }
-                        throw AlpacaException("Failed to connect to Sky-Watcher motor controller");
+                        // A port held by another device names its holder (#1202).
+                        const std::string why = protocol.last_connect_error();
+                        throw AlpacaException(why.empty()
+                                                  ? std::string("Failed to connect to Sky-Watcher motor controller")
+                                                  : "Failed to connect to Sky-Watcher motor controller: " + why);
                     }
                 },
                 "SkyWatcher");
