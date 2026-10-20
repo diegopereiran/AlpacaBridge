@@ -441,13 +441,14 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
-| Focus Motor 94155 for SCT and EdgeHD | USB/Serial (motor's own port) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/Focus%20Motor%2094155/) |
+| Focus Motor 94155-A for SCT and EdgeHD | USB/Serial (motor's own port) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/Focus%20Motor%2094155-A/) |
 
 <details>
 <summary><strong>Celestron Focuser Driver Notes</strong></summary>
 
 - **Protocol**: Celestron AUX frames to device 0x12 at 9600 baud, on the motor's own USB port (no SDK). The AUX path through a Celestron mount is not supported.
-- **Configuration**: `portPath` (required; no auto-detect).
+- **Tested model**: 94155-A, the reissue with a notch in the body for the EdgeHD focal reducer, firmware 7.16.9300. The earlier 94155 without the notch has not been tested.
+- **Configuration**: `portPath` (required; no auto-detect). The motor appears as `/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00`; use that path, since a `/dev/ttyUSB*` number can change when other USB devices are plugged in.
 - **Calibration**: run the `Calibrate` action (about 5 minutes; `CalibrationStatus` answers `Calibrating`, `Calibrated` or `NotCalibrated`, `AbortCalibration` or Halt stops it). An uncalibrated motor connects but refuses `Position`, `MaxStep` and Move. The Celestron Focuser Utility can erase the calibration when it closes. `Position` is `high limit - encoder`, so 0 is one end of the calibrated travel and `MaxStep` is the calibrated range.
 - **Capabilities**: absolute Move (clamped to 0..MaxStep), Halt. No temperature sensor, temperature compensation or `StepSize`.
 - **ConformU**: 4.5.2 (build 56139), 0 errors, 0 issues, 0 timing issues (2026-10-19, user-run on issue #896, PR head `d8f2020df2`, motor calibrated). AlpacaBridge ran on Linux arm64 (the OpenAstro Raspberry Pi image); ConformU itself ran on a Windows 11 x64 client over the LAN. ConformU cannot test `Action`: the same user checked `Calibrate`, `CalibrationStatus` and `AbortCalibration` by hand, and that a calibration made by INDI reads back the same `Position` and `MaxStep`.
