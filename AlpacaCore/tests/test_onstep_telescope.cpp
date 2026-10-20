@@ -38,6 +38,7 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 #endif
 
 using alpacacore::DeviceType;
@@ -540,6 +541,10 @@ struct MoveAxisFake {
     std::shared_ptr<std::atomic<int>> altitude_tenths = std::make_shared<std::atomic<int>>(450);
     std::shared_ptr<std::atomic<int>> horizon = std::make_shared<std::atomic<int>>(0);
     std::shared_ptr<std::atomic<int>> overhead = std::make_shared<std::atomic<int>>(90);
+    // Every driver timer runs on this (decision 0005): the re-send interval,
+    // the 2 s status cache. Declared before `server` and the driver, so it
+    // outlives both.
+    alpacacore::test::FakeTaskClock clock;
     alpacacore::test::FakeMountServer server;
 
     explicit MoveAxisFake(bool firmware_sends_g)
@@ -601,20 +606,44 @@ struct MoveAxisFake {
         conn.host = "127.0.0.1";
         conn.tcp_port = server.port();
         conn.response_timeout_ms = 50;
-        return alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+        return alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
     }
-};
 
-// Restores the process-wide re-send interval when a test ends.
-struct ResendIntervalGuard {
-    explicit ResendIntervalGuard(std::chrono::milliseconds interval)
-        : saved(alpacacore::vendor::onstep::detail::move_axis_resend_interval()) {
-        alpacacore::vendor::onstep::detail::set_move_axis_resend_interval(interval);
+    // Moves virtual time by `d` and waits until every task it woke has run
+    // and is waiting again or has returned (the re-send body's tick).
+    void advance(std::chrono::nanoseconds d) {
+        clock.advance(d);
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     }
-    ~ResendIntervalGuard() { alpacacore::vendor::onstep::detail::set_move_axis_resend_interval(saved); }
-    ResendIntervalGuard(const ResendIntervalGuard&) = delete;
-    ResendIntervalGuard& operator=(const ResendIntervalGuard&) = delete;
-    std::chrono::milliseconds saved;
+
+    // Starts or changes a move, and waits until the new re-send body waits on
+    // the clock: a replaced body may still be registered for a moment, so the
+    // rendezvous is the wait count, which only the new body's wait raises.
+    void start_move(alpacacore::TelescopeDriver& driver, int axis, double rate) {
+        const auto before = clock.wait_count();
+        driver.move_axis(axis, rate);
+        REQUIRE(clock.wait_for_wait_count(before + 1, std::chrono::seconds(5)));
+    }
+
+    // One re-send interval (7 s) with the re-send body waiting for it.
+    void resend_tick() {
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        advance(std::chrono::seconds(7));
+    }
+
+    // Serial I/O, not a driver timer: waits (real time) until the server has
+    // logged `n` of `needle`; false at `timeout`.
+    bool logged(const std::string& needle, std::size_t n,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) const {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (count(needle) < n) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return true;
+    }
 };
 
 }  // namespace
@@ -623,25 +652,23 @@ struct ResendIntervalGuard {
 // with a MoveAxis still running, so 'G' must not end the move. Those ticks
 // send nothing; the re-send resumes once 'g' is back.
 TEST_CASE("OnStep Telescope Driver - a pulse guide does not end a running MoveAxis", "[onstep][telescope][unit]") {
-    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     fake.guide_active->store(true);
-    driver->move_axis(0, 1.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));  // the re-send has seen 'g'
+    fake.start_move(*driver, 0, 1.0);
+    fake.resend_tick();  // the re-send has seen 'g'
+    REQUIRE(fake.logged(":Me#", 2));
     fake.pulse_guide->store(true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));  // a tick that read 'g' before finishes its send
-    const auto at_pulse = fake.count(":Me#");
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
-    CHECK(fake.count(":Me#") == at_pulse);
+    fake.resend_tick();
+    CHECK_FALSE(fake.logged(":Me#", 3, std::chrono::milliseconds(300)));  // nothing sent during the pulse
     CHECK(driver->get_slewing());
 
     fake.pulse_guide->store(false);
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
-    CHECK(fake.count(":Me#") > at_pulse);
+    fake.resend_tick();
+    CHECK(fake.logged(":Me#", 3));
     CHECK(driver->get_slewing());
 
     driver->move_axis(0, 0.0);
@@ -652,7 +679,6 @@ TEST_CASE("OnStep Telescope Driver - a pulse guide does not end a running MoveAx
 // the 'g' it keeps is from before the move and must not end the move.
 TEST_CASE("OnStep Telescope Driver - a Tracking write right after MoveAxis does not end the move",
           "[onstep][telescope][unit]") {
-    const ResendIntervalGuard interval(std::chrono::seconds(30));  // no re-send read in this test
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     auto driver = fake.connect();
@@ -661,17 +687,17 @@ TEST_CASE("OnStep Telescope Driver - a Tracking write right after MoveAxis does 
     // A first move teaches the driver that this firmware sends 'g': a :GU#
     // read past the 2 s cache, while the move runs.
     fake.guide_active->store(true);
-    driver->move_axis(0, 1.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    fake.start_move(*driver, 0, 1.0);
+    fake.advance(std::chrono::milliseconds(2100));
     REQUIRE(driver->get_slewing());
     fake.guide_active->store(false);
     driver->move_axis(0, 0.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
-    (void)driver->get_tracking();                                  // a :GU# without 'g' is now in the cache
-    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // and stale
+    fake.advance(std::chrono::milliseconds(2100));
+    (void)driver->get_tracking();                   // a :GU# without 'g' is now in the cache
+    fake.advance(std::chrono::milliseconds(2100));  // and stale
 
     fake.guide_active->store(true);
-    driver->move_axis(0, 1.0);
+    fake.start_move(*driver, 0, 1.0);
     driver->set_tracking(true);  // marks the stale cache fresh without a :GU# read
     CHECK(driver->get_slewing());
 
@@ -684,7 +710,6 @@ TEST_CASE("OnStep Telescope Driver - a Tracking write right after MoveAxis does 
 // 1 degree of either limit, or past it. 90 overhead means no overhead limit.
 TEST_CASE("OnStep Telescope Driver - the MoveAxis re-send stays clear of the altitude limits",
           "[onstep][telescope][unit]") {
-    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     fake.guide_active->store(true);
@@ -693,28 +718,25 @@ TEST_CASE("OnStep Telescope Driver - the MoveAxis re-send stays clear of the alt
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
+    // True when one re-send tick sent the move again.
     const auto resends_at = [&](int altitude_tenths, int overhead) {
         fake.altitude_tenths->store(altitude_tenths);
         fake.overhead->store(overhead);
         const auto before = fake.count(":Mn#");
-        driver->move_axis(1, 1.0);
-        const auto landed = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (fake.count(":Mn#") == before && std::chrono::steady_clock::now() < landed) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));  // the start lands first
-        }
-        const auto started = fake.count(":Mn#");
-        std::this_thread::sleep_for(std::chrono::milliseconds(800));
-        const auto resends = fake.count(":Mn#") - started;
+        fake.start_move(*driver, 1, 1.0);
+        REQUIRE(fake.logged(":Mn#", before + 1));  // the start
+        fake.resend_tick();
+        const bool resent = fake.logged(":Mn#", before + 2, std::chrono::milliseconds(300));
         driver->move_axis(1, 0.0);
-        return resends;
+        return resent;
     };
 
-    CHECK(resends_at(450, 80) > 0);   // well inside both limits
-    CHECK(resends_at(105, 80) == 0);  // 0.5 deg above the horizon limit
-    CHECK(resends_at(50, 80) == 0);   // below the horizon limit
-    CHECK(resends_at(795, 80) == 0);  // 0.5 deg under the overhead limit
-    CHECK(resends_at(895, 90) > 0);   // overhead limit off
-    CHECK(resends_at(450, 0) == 0);   // an overhead reply out of range sends nothing
+    CHECK(resends_at(450, 80));        // well inside both limits
+    CHECK_FALSE(resends_at(105, 80));  // 0.5 deg above the horizon limit
+    CHECK_FALSE(resends_at(50, 80));   // below the horizon limit
+    CHECK_FALSE(resends_at(795, 80));  // 0.5 deg under the overhead limit
+    CHECK(resends_at(895, 90));        // overhead limit off
+    CHECK_FALSE(resends_at(450, 0));   // an overhead reply out of range sends nothing
 
     driver->set_connected(false);
 }
@@ -724,26 +746,26 @@ TEST_CASE("OnStep Telescope Driver - the MoveAxis re-send stays clear of the alt
 // and not when a joystick-style client updates it faster than the interval.
 TEST_CASE("OnStep Telescope Driver - a MoveAxis on one axis does not delay the other axis's re-send",
           "[onstep][telescope][unit]") {
-    const ResendIntervalGuard interval(std::chrono::milliseconds(600));
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     fake.guide_active->store(true);
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
-    driver->move_axis(0, 1.0);  // axis 0 due at 600 ms
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
-    driver->move_axis(1, 1.0);  // a new body; axis 0 is still due at 600 ms, not 1000
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    CHECK(fake.count(":Me#") >= 2);
+    fake.start_move(*driver, 0, 1.0);  // axis 0 due at 7 s
+    fake.advance(std::chrono::seconds(4));
+    fake.start_move(*driver, 1, 1.0);  // a new body; axis 0 is still due at 7 s, not 11 s
+    fake.advance(std::chrono::seconds(3));
+    CHECK(fake.logged(":Me#", 2));
+    CHECK(fake.count(":Mn#") == 1);  // axis 1 is not due yet
 
-    // Axis 1 updated every 300 ms for 2.4 s: axis 0 keeps its own 600 ms rhythm.
-    const auto before = fake.count(":Me#");
-    for (int i = 0; i < 8; ++i) {
-        driver->move_axis(1, 1.0 + 0.1 * i);
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // Axis 1 updated every 3 s, faster than the interval: axis 0 keeps its
+    // own 7 s rhythm (due again at 14 s).
+    for (int i = 0; i < 3; ++i) {
+        fake.advance(std::chrono::seconds(3));
+        fake.start_move(*driver, 1, 1.0 + 0.1 * i);
     }
-    CHECK(fake.count(":Me#") - before >= 2);  // about 3; 2 leaves room for a slow runner
+    CHECK(fake.logged(":Me#", 3));
 
     driver->move_axis(0, 0.0);
     driver->move_axis(1, 0.0);
@@ -754,22 +776,21 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis on one axis does not delay the o
 // so a running MoveAxis must be re-sent until the client stops it, and never
 // after.
 TEST_CASE("OnStep Telescope Driver - a running MoveAxis is re-sent until it is stopped", "[onstep][telescope][unit]") {
-    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     fake.guide_active->store(true);
-    driver->move_axis(0, 1.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    CHECK(fake.count(":Me#") >= 3);  // the start plus at least two re-sends
+    fake.start_move(*driver, 0, 1.0);
+    fake.resend_tick();
+    fake.resend_tick();
+    CHECK(fake.logged(":Me#", 3));  // the start plus two re-sends
 
     driver->move_axis(0, 0.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // a send already on the wire lands
     const auto after_stop = fake.count(":Me#");
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    CHECK(fake.count(":Me#") == after_stop);
+    fake.advance(std::chrono::seconds(7));
+    CHECK_FALSE(fake.logged(":Me#", after_stop + 1, std::chrono::milliseconds(300)));
     CHECK_FALSE(driver->get_slewing());
 
     driver->set_connected(false);
@@ -780,33 +801,24 @@ TEST_CASE("OnStep Telescope Driver - a running MoveAxis is re-sent until it is s
 // stop.
 TEST_CASE("OnStep Telescope Driver - Slewing drops when OnStepX ends a MoveAxis by itself",
           "[onstep][telescope][unit]") {
-    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     fake.guide_active->store(true);
-    driver->move_axis(1, -1.0);
-    // Wait for a re-send: its tick read a :GU# with 'g' first.
-    const auto started = fake.count(":Ms#");
-    const auto seen_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (fake.count(":Ms#") == started && std::chrono::steady_clock::now() < seen_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    REQUIRE(fake.count(":Ms#") > started);
+    fake.start_move(*driver, 1, -1.0);
+    fake.resend_tick();  // its :GU# showed 'g'
+    REQUIRE(fake.logged(":Ms#", 2));
     REQUIRE(driver->get_slewing());
+
     fake.guide_active->store(false);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    fake.advance(std::chrono::milliseconds(2100));  // past the 2 s status cache
     CHECK_FALSE(driver->get_slewing());
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // a send already on the wire lands
     const auto after_end = fake.count(":Ms#");
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    CHECK(fake.count(":Ms#") == after_end);
+    fake.advance(std::chrono::seconds(7));
+    CHECK_FALSE(fake.logged(":Ms#", after_end + 1, std::chrono::milliseconds(300)));
 
     driver->set_connected(false);
 }
@@ -817,23 +829,22 @@ TEST_CASE("OnStep Telescope Driver - Slewing drops when OnStepX ends a MoveAxis 
 // when the mount shows a move again later (the hand controller's own).
 TEST_CASE("OnStep Telescope Driver - the MoveAxis re-send never restarts a move the mount ended",
           "[onstep][telescope][unit]") {
-    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
     MoveAxisFake fake(true);
     REQUIRE(fake.server.ok());
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     fake.guide_active->store(true);
-    driver->move_axis(0, 1.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
-    REQUIRE(fake.count(":Me#") >= 2);  // re-sending while the mount shows the move
+    fake.start_move(*driver, 0, 1.0);
+    fake.resend_tick();
+    REQUIRE(fake.logged(":Me#", 2));  // re-sending while the mount shows the move
 
     fake.guide_active->store(false);  // stopped at the mount
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    fake.resend_tick();               // the body sees it and ends
     const auto after_end = fake.count(":Me#");
     fake.guide_active->store(true);  // a move the hand controller started
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
-    CHECK(fake.count(":Me#") == after_end);
+    fake.advance(std::chrono::seconds(7));
+    CHECK_FALSE(fake.logged(":Me#", after_end + 1, std::chrono::milliseconds(300)));
     fake.guide_active->store(false);
     CHECK_FALSE(driver->get_slewing());
 
@@ -846,15 +857,15 @@ TEST_CASE("OnStep Telescope Driver - the MoveAxis re-send never restarts a move 
 // client stops the move, as before.
 TEST_CASE("OnStep Telescope Driver - a MoveAxis the mount does not show is never re-sent",
           "[onstep][telescope][unit]") {
-    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
     MoveAxisFake fake(false);
     REQUIRE(fake.server.ok());
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
-    driver->move_axis(0, -1.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    CHECK(fake.count(":Mw#") == 1);  // the start only
+    fake.start_move(*driver, 0, -1.0);
+    fake.resend_tick();
+    fake.resend_tick();
+    CHECK_FALSE(fake.logged(":Mw#", 2, std::chrono::milliseconds(300)));  // the start only
     CHECK(driver->get_slewing());
 
     driver->move_axis(0, 0.0);
@@ -1041,34 +1052,63 @@ struct ScriptedOnStep {
     }
 };
 
-// Polls Slewing until the driver has fetched the scripted in-progress status
-// with a :GU# (past its 2 s status cache and slew grace), so it has seen the
-// slew running and will notice the slew end. Call right after set_status().
-void observe_slewing(alpacacore::TelescopeDriver& driver, ScriptedOnStep& mount) {
+// The driver runs on `clock` (decision 0005): moves virtual time past the
+// 2 s status cache and the slew grace, so the next Slewing read fetches the
+// scripted in-progress status with a :GU#, and the driver has seen the slew
+// running and will notice its end. Call right after set_status().
+void observe_slewing(alpacacore::TelescopeDriver& driver, ScriptedOnStep& mount,
+                     alpacacore::test::FakeTaskClock& clock) {
     const std::size_t polls_before = mount.count(":GU#");
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    bool slewing = false;
-    while (mount.count(":GU#") == polls_before) {
-        REQUIRE(std::chrono::steady_clock::now() < deadline);
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        slewing = driver.get_slewing();  // cached answers before the poll may be stale
-    }
-    REQUIRE(slewing);  // the answer from the call that polled
+    clock.advance(std::chrono::milliseconds(2100));
+    REQUIRE(driver.get_slewing());
+    REQUIRE(mount.count(":GU#") > polls_before);
 }
 
-// Polls Slewing (each poll may refresh :GU#) until it reads false.
-bool wait_slew_done(alpacacore::TelescopeDriver& driver, std::chrono::seconds timeout) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (!driver.get_slewing()) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+// Moves virtual time past the status cache; true when Slewing then reads false.
+bool wait_slew_done(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock) {
+    clock.advance(std::chrono::milliseconds(2100));
+    return !driver.get_slewing();
+}
+
+// Runs a synchronous slew on a thread and steps `clock` in the driver's 250 ms
+// poll steps until it returns. `while_polling` runs once, after the slew's first
+// poll wait has begun. The slew's exception, if any, is rethrown here.
+void run_synchronous_slew(alpacacore::test::FakeTaskClock& clock, const std::function<void()>& slew,
+                          const std::function<void()>& while_polling = {}) {
+    std::exception_ptr error;
+    std::atomic<bool> done{false};
+    std::thread runner([&] {
+        try {
+            slew();
+        } catch (...) {
+            error = std::current_exception();  // Catch2 asserts only on the test thread
+        }
+        done = true;
+    });
+    bool first = true;
+    const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!done && std::chrono::steady_clock::now() < give_up) {
+        if (!clock.wait_for_waiters(1, std::chrono::milliseconds(50))) {
+            continue;  // the slew is talking to the mount, or has returned
+        }
+        if (first && while_polling) {
+            while_polling();
+        }
+        first = false;
+        clock.advance(std::chrono::milliseconds(250));
+        (void)clock.wait_for_woken_settled(std::chrono::seconds(5));
     }
-    return false;
+    runner.join();
+    CHECK(done);
+    if (error) {
+        std::rethrow_exception(error);
+    }
 }
 
 }  // namespace
 
 TEST_CASE("OnStep Telescope Driver - FindHome and Park never restart tracking", "[onstep][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // every driver timer (decision 0005); outlives the driver
     auto mount = std::make_shared<ScriptedOnStep>();
     mount->set_status("NpEW180#");  // tracking, not at home or parked
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
@@ -1078,15 +1118,15 @@ TEST_CASE("OnStep Telescope Driver - FindHome and Park never restart tracking", 
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     const auto finish_home = [&]() {
         mount->set_status("npHhEo180#");  // homing
-        observe_slewing(*driver, *mount);
+        observe_slewing(*driver, *mount, clock);
         mount->clear_log();
         mount->set_status("nNpHEo180#");  // at home, not tracking (HM-17 trace, #1218)
-        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        REQUIRE(wait_slew_done(*driver, clock));
         CHECK(driver->get_at_home());
         CHECK(mount->count(":ST6") == 0);
         CHECK(mount->count(":Te#") == 0);
@@ -1108,10 +1148,10 @@ TEST_CASE("OnStep Telescope Driver - FindHome and Park never restart tracking", 
         abort_a_goto();
         REQUIRE_NOTHROW(driver->park());
         mount->set_status("nIEW180#");  // parking
-        observe_slewing(*driver, *mount);
+        observe_slewing(*driver, *mount, clock);
         mount->clear_log();
         mount->set_status("nNPHEo180#");  // parked
-        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        REQUIRE(wait_slew_done(*driver, clock));
         CHECK(driver->get_at_park());
         CHECK(mount->count(":ST6") == 0);
         CHECK(mount->count(":Te#") == 0);
@@ -1122,6 +1162,7 @@ TEST_CASE("OnStep Telescope Driver - FindHome and Park never restart tracking", 
 
 TEST_CASE("OnStep Telescope Driver - a coordinate slew restores tracking only if the mount lost it",
           "[onstep][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // every driver timer (decision 0005); outlives the driver
     auto mount = std::make_shared<ScriptedOnStep>();
     mount->set_status("NpEW180#");  // tracking before the slew
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
@@ -1131,7 +1172,7 @@ TEST_CASE("OnStep Telescope Driver - a coordinate slew restores tracking only if
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     REQUIRE(driver->get_tracking());
@@ -1139,29 +1180,29 @@ TEST_CASE("OnStep Telescope Driver - a coordinate slew restores tracking only if
     SECTION("tracking kept through the GOTO: nothing is sent") {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
         mount->set_status("pEW180#");  // slewing, tracking
-        observe_slewing(*driver, *mount);
+        observe_slewing(*driver, *mount, clock);
         mount->clear_log();
         mount->set_status("NpEW180#");  // done, still tracking (OnStepX)
-        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        REQUIRE(wait_slew_done(*driver, clock));
         CHECK(mount->count(":ST6") == 0);
     }
 
     SECTION("a slew already running at connect is left alone") {
         mount->set_status("npEW180#");  // slewing, not tracking: started elsewhere
-        observe_slewing(*driver, *mount);
+        observe_slewing(*driver, *mount, clock);
         mount->clear_log();
         mount->set_status("nNpEW180#");
-        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        REQUIRE(wait_slew_done(*driver, clock));
         CHECK(mount->count(":ST6") == 0);
     }
 
     SECTION("tracking lost during the GOTO: restored once") {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
         mount->set_status("pEW180#");  // slewing, tracking
-        observe_slewing(*driver, *mount);
+        observe_slewing(*driver, *mount, clock);
         mount->clear_log();
         mount->set_status("nNpEW180#");  // done, tracking off
-        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        REQUIRE(wait_slew_done(*driver, clock));
         CHECK(mount->count(":ST6") == 1);
     }
 
@@ -1253,6 +1294,7 @@ TEST_CASE("OnStep Telescope Driver - DoesRefraction follows the OnStepX coordina
 }
 
 TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its slew", "[onstep][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // every driver timer (decision 0005); outlives the driver
     auto mount = std::make_shared<ScriptedOnStep>();
     mount->set_status("NpEW180#");  // tracking, not slewing
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
@@ -1262,7 +1304,7 @@ TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its sle
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     REQUIRE(driver->get_tracking());
 
@@ -1270,44 +1312,37 @@ TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its sle
     // with tracking off: a left-over flag would restart tracking here.
     const auto foreign_slew_ends_untracked = [&]() {
         mount->set_status("npEW180#");  // slewing, not tracking
-        observe_slewing(*driver, *mount);
+        observe_slewing(*driver, *mount, clock);
         mount->set_status("nNpEW180#");
-        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        REQUIRE(wait_slew_done(*driver, clock));
     };
 
     SECTION("synchronous GOTO, then a foreign slew: no restore") {
-        REQUIRE_NOTHROW(driver->slew_to_coordinates(12.0, 45.0));  // ends after the 2 s grace
+        REQUIRE_NOTHROW(
+            run_synchronous_slew(clock, [&] { driver->slew_to_coordinates(12.0, 45.0); }));  // ends after the 2 s grace
         mount->clear_log();
         foreign_slew_ends_untracked();
         CHECK(mount->count(":ST6") == 0);
     }
 
     SECTION("synchronous GOTO that loses tracking: restored once at its end") {
-        // A throw must fail the case, not escape the thread and std::terminate the binary.
-        std::exception_ptr slew_error;
-        std::thread slew([&] {
-            try {
-                driver->slew_to_coordinates(12.0, 45.0);
-            } catch (...) {
-                slew_error = std::current_exception();
-            }
-        });
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        mount->clear_log();
-        mount->set_status("nNpEW180#");  // done, tracking off
-        slew.join();
-        REQUIRE_NOTHROW(slew_error ? std::rethrow_exception(slew_error) : void());
+        REQUIRE_NOTHROW(run_synchronous_slew(
+            clock, [&] { driver->slew_to_coordinates(12.0, 45.0); },
+            [&] {
+                mount->clear_log();
+                mount->set_status("nNpEW180#");  // done, tracking off
+            }));
         CHECK(mount->count(":ST6") == 1);
     }
 
     SECTION("Tracking=false during a GOTO wins over the restore") {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
         mount->set_status("pEW180#");  // slewing, tracking
-        observe_slewing(*driver, *mount);
+        observe_slewing(*driver, *mount, clock);
         REQUIRE_NOTHROW(driver->set_tracking(false));
         mount->clear_log();
         mount->set_status("nNpEW180#");  // done, tracking off as asked
-        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        REQUIRE(wait_slew_done(*driver, clock));
         CHECK(mount->count(":ST6") == 0);
     }
 

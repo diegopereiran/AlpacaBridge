@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -146,6 +148,16 @@ public:
      * the network test seam is never lost this way.
      */
     bool link_alive();
+
+    /**
+     * @brief The clock the link-loss and last-alive stamps read (decision 0005,
+     *        #1378): the driver's injected TaskClock, set at connect, so the
+     *        driver times the #521 outage on the clock it runs on. Default:
+     *        util::default_task_clock(). release_task_clock() puts the default
+     *        back if `clock` is still the one set (a driver going away).
+     */
+    void set_task_clock(util::TaskClock& clock);
+    void release_task_clock(util::TaskClock& clock);
 
     /// Why the link was lost, or "" while it is not lost. Cleared by
     /// disconnect() or a successful connect().

@@ -54,6 +54,9 @@ constexpr auto kSlewForceGrace = std::chrono::seconds(2);
 // open-astro#1378: how far inside the horizon and overhead limits a MoveAxis
 // re-send must stay.
 constexpr double kAltitudeLimitMarginDeg = 1.0;
+// open-astro#1378: how often a running MoveAxis is re-sent so OnStepX's guide
+// time limit (10 s by default) does not end it. Tests advance a FakeTaskClock.
+constexpr auto kMoveAxisResendInterval = std::chrono::seconds(7);
 // Informational only — OnStep does not expose a guide-rate query command in
 // this driver, and CanSetGuideRates is false, so this value is never sent to
 // or read from the mount; it merely satisfies the ASCOM GuideRate property.
@@ -141,8 +144,10 @@ public:
     OnStepTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                           std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
-                          util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
+                          util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
+                          util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("OnStep"),
+          clock_(clock),
           device_number_(device_number),
           connection_info_(connection_info),
           connection_resolver_(std::move(connection_resolver)),
@@ -170,6 +175,9 @@ public:
                 // Best-effort teardown during destruction.
             }
         }
+        // Last: the process-wide wrapper must not keep a clock that may die
+        // with this driver (a test's FakeTaskClock).
+        OnStepProtocolWrapper::instance().release_task_clock(clock_);
     }
 
     int get_device_number() const override { return device_number_; }
@@ -261,6 +269,8 @@ public:
         }
 
         if (connected) {
+            // The wrapper's loss stamps read this driver's clock (decision 0005).
+            protocol.set_task_clock(clock_);
             // An auto-detected mount resolves its port here, not in the factory (#659).
             util::connect_resolved(
                 connection_info_, connection_resolved_, connection_resolver_,
@@ -386,7 +396,7 @@ public:
                 cached_ra_hours_ = pos.ra_hours;
                 cached_dec_degrees_ = pos.dec_degrees;
                 equatorial_cache_valid_ = true;
-                last_equatorial_update_ = std::chrono::steady_clock::now();
+                last_equatorial_update_ = clock_.now();
             } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
             try {
@@ -398,7 +408,7 @@ public:
                 cached_alt_degrees_ = altaz.altitude_degrees;
                 cached_az_degrees_ = altaz.azimuth_degrees;
                 altaz_cache_valid_ = true;
-                last_altaz_update_ = std::chrono::steady_clock::now();
+                last_altaz_update_ = clock_.now();
             } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
             try {
@@ -502,7 +512,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (pulse_guiding_active_ && std::chrono::steady_clock::now() >= pulse_guide_end_time_) {
+        if (pulse_guiding_active_ && clock_.now() >= pulse_guide_end_time_) {
             pulse_guiding_active_ = false;
         }
         return pulse_guiding_active_;
@@ -561,7 +571,7 @@ public:
         }
         cached_status_.is_tracking = tracking;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         // The client has said what it wants; a pending GOTO restore must not
         // override it when the slew ends (#1230).
         tracking_before_slew_ = false;
@@ -818,7 +828,7 @@ public:
             } catch (...) {  // NOLINT(bugprone-empty-catch)
                 last_utc_set_ = std::chrono::system_clock::now();
             }
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+            last_utc_set_monotonic_ = clock_.now();
             last_utc_valid_ = true;
         }
         return current_utc_time_locked();
@@ -852,7 +862,7 @@ public:
         cached_status_.is_at_home = false;
         cached_status_.is_slewing = true;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
     }
 
     void park() override {
@@ -869,7 +879,7 @@ public:
         cached_status_.is_slewing = true;
         cached_status_.is_at_home = false;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         clear_manual_motion_locked();
     }
 
@@ -895,7 +905,7 @@ public:
         const int clamped_duration = std::clamp(duration, 0, 9999);
         OnStepProtocolWrapper::instance().pulse_guide(direction, duration);
         pulse_guiding_active_ = true;
-        pulse_guide_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(clamped_duration);
+        pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(clamped_duration);
         equatorial_cache_valid_ = false;
     }
 
@@ -963,7 +973,7 @@ public:
         cached_ra_hours_ = ra;
         cached_dec_degrees_ = dec;
         equatorial_cache_valid_ = true;
-        last_equatorial_update_ = std::chrono::steady_clock::now();
+        last_equatorial_update_ = clock_.now();
     }
 
     void sync_to_target() override {
@@ -985,7 +995,7 @@ public:
         OnStepProtocolWrapper::instance().unpark();
         cached_status_.is_parked = false;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1060,7 +1070,7 @@ public:
             manual_axis_dir_[axis] = dir;
             manual_axis_rate_[axis] = std::abs(rate);
             manual_axis_resend_[axis] = true;
-            manual_axis_resend_due_[axis] = std::chrono::steady_clock::now() + detail::move_axis_resend_interval();
+            manual_axis_resend_due_[axis] = clock_.now() + kMoveAxisResendInterval;
             status_read_since_move_ = false;  // a :GU# from before the move must not end it (#1378)
         }
 
@@ -1198,6 +1208,10 @@ private:
 
     // Ends the driver's record of a MoveAxis and its re-send (#1378).
     // cancel() may be called with mutex_ held (async_operation.h rule 10).
+    // Slews, Park and AbortSlew end the re-send here with cancel() rather
+    // than a supersede (decision 0006 rule 3): safe, because the body checks
+    // ctx.stop_reason() under mutex_ before it sends anything, and these
+    // callers hold mutex_.
     void clear_manual_motion_locked() const {
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -1303,8 +1317,7 @@ private:
                             earliest = std::min(earliest, manual_axis_resend_due_[axis]);
                         }
                     }
-                    wait = std::max(earliest - std::chrono::steady_clock::now(),
-                                    std::chrono::steady_clock::duration::zero());
+                    wait = std::max(earliest - clock_.now(), std::chrono::steady_clock::duration::zero());
                 }
                 if (!ctx.wait_for(wait)) {
                     return;
@@ -1313,7 +1326,7 @@ private:
                 if (ctx.stop_reason() != util::StopReason::None || !connected_) {
                     return;
                 }
-                const auto now = std::chrono::steady_clock::now();
+                const auto now = clock_.now();
                 bool due[2] = {false, false};
                 for (int axis = 0; axis < 2; ++axis) {
                     due[axis] = wants_resend(axis) && manual_axis_resend_due_[axis] <= now;
@@ -1325,7 +1338,7 @@ private:
                 // Due again a full interval after this tick ends, whatever it
                 // did: a skipped tick never spins, and mutex_ is free between
                 // ticks.
-                const auto next = std::chrono::steady_clock::now() + detail::move_axis_resend_interval();
+                const auto next = clock_.now() + kMoveAxisResendInterval;
                 for (int axis = 0; axis < 2; ++axis) {
                     if (due[axis]) {
                         manual_axis_resend_due_[axis] = next;
@@ -1348,7 +1361,7 @@ private:
             cached_status_ = protocol.get_status();
             status_cache_valid_ = true;
             status_read_since_move_ = true;
-            last_status_update_ = std::chrono::steady_clock::now();
+            last_status_update_ = clock_.now();
         } catch (const std::exception& ex) {
             ALPACA_LOG_WARN("OnStep", std::string("MoveAxis re-send skipped, status read failed: ") + ex.what());
             return true;
@@ -1418,7 +1431,8 @@ private:
         // re-send checks the link, #1378), the first to notice
         // may be the reconnect itself (the router reads Connected before every
         // Connect), which would make a long unattended outage look like 0 s.
-        const auto outage = util::default_task_clock().now() - (alive_at ? *alive_at : *lost_at);
+        // The wrapper stamped both times on clock_ (set at connect).
+        const auto outage = clock_.now() - (alive_at ? *alive_at : *lost_at);
         if (outage < detail::relink_motion_preserve_window()) {
             return;
         }
@@ -1491,7 +1505,7 @@ private:
         altaz_cache_valid_ = false;
         status_cache_valid_ = false;
         slewing_cached_ = true;
-        slew_force_until_ = std::chrono::steady_clock::now() + kSlewForceGrace;
+        slew_force_until_ = clock_.now() + kSlewForceGrace;
         clear_manual_motion_locked();
         tracking_before_slew_ = cached_status_.is_tracking;
     }
@@ -1509,7 +1523,7 @@ private:
             }
             clear_manual_motion_locked();
         }
-        if (std::chrono::steady_clock::now() < slew_force_until_) {
+        if (clock_.now() < slew_force_until_) {
             return true;
         }
         const bool was_slewing = cached_status_.is_slewing;
@@ -1560,13 +1574,13 @@ private:
     template <typename Predicate>
     void wait_for_condition_locked(std::unique_lock<std::mutex>& lock, Predicate done) const {
         const auto timeout = std::chrono::seconds(120);
-        const auto start = std::chrono::steady_clock::now();
+        const auto start = clock_.now();
         while (!done()) {
-            if (std::chrono::steady_clock::now() - start > timeout) {
+            if (clock_.now() - start > timeout) {
                 throw AlpacaException("Operation timed out waiting for mount status");
             }
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            clock_.sleep_for(std::chrono::milliseconds(250));
             lock.lock();
             check_connected();
             refresh_status_cache_locked(true);
@@ -1580,14 +1594,14 @@ private:
         finish_slew_tracking_locked();
         if (slew_settle_time_seconds_ > 0) {
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+            clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
             lock.lock();
             check_connected();
         }
     }
 
     void refresh_status_cache_locked(bool force) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force && status_cache_valid_ && (now - last_status_update_) < kStatusCacheTtl) {
             return;
         }
@@ -1604,7 +1618,7 @@ private:
     }
 
     void refresh_equatorial_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
         }
@@ -1622,7 +1636,7 @@ private:
     }
 
     void refresh_altaz_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
@@ -1653,7 +1667,7 @@ private:
         if (site_info_valid_) {
             return;
         }
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (last_site_info_attempt_ != std::chrono::steady_clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
             return;
@@ -1704,7 +1718,7 @@ private:
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         OnStepProtocolWrapper::instance().set_time(info);
         last_utc_set_ = utc;
-        last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+        last_utc_set_monotonic_ = clock_.now();
         last_utc_valid_ = true;
         // The mount now runs on the client's clock and so does the LST above;
         // on a disciplined host say so once (open-astro#409).
@@ -1714,13 +1728,16 @@ private:
     std::chrono::system_clock::time_point current_utc_time_locked() const {
         if (!last_utc_valid_) {
             last_utc_set_ = std::chrono::system_clock::now();
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+            last_utc_set_monotonic_ = clock_.now();
             last_utc_valid_ = true;
         }
-        auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
+        auto elapsed = clock_.now() - last_utc_set_monotonic_;
         return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
     }
 
+    // Decision 0005: every wait, sleep and deadline of this driver (#1378),
+    // and the wrapper's link-loss stamps (set_task_clock() at connect).
+    util::TaskClock& clock_;
     int device_number_;
     ConnectionInfo connection_info_;
     // Set by the auto-detect factory; empty for an explicit port or host.
@@ -1813,22 +1830,22 @@ private:
     // Last, so it is destroyed (and its body joined) before every member the
     // body touches. The destructor joins it explicitly as well.
     util::OperationGeneration move_axis_generation_;
-    mutable util::AsyncOperation move_axis_resend_{"OnStep MoveAxis re-send", move_axis_generation_};
+    mutable util::AsyncOperation move_axis_resend_{"OnStep MoveAxis re-send", move_axis_generation_, clock_};
 };
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info) {
+std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                         util::TaskClock& clock) {
     return create_onstep_telescope_with_site(device_number, connection_info, std::nullopt, std::nullopt, std::nullopt,
-                                             std::nullopt);
+                                             std::nullopt, clock);
 }
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(int device_number,
-                                                                   const ConnectionInfo& connection_info,
-                                                                   std::optional<double> site_latitude_deg,
-                                                                   std::optional<double> site_longitude_deg,
-                                                                   std::optional<double> site_elevation_m,
-                                                                   std::optional<bool> sync_time_on_connect) {
+std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, util::TaskClock& clock) {
     return std::make_unique<OnStepTelescopeDriver>(device_number, connection_info, site_latitude_deg,
-                                                   site_longitude_deg, site_elevation_m, sync_time_on_connect);
+                                                   site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                   util::ConnectionResolver<ConnectionInfo>{}, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_onstep_telescope_deferred(
@@ -1887,19 +1904,6 @@ void set_relink_motion_preserve_window(std::chrono::milliseconds window) { relin
 
 std::chrono::milliseconds relink_motion_preserve_window() {
     return std::chrono::milliseconds(relink_window_ms().load());
-}
-
-namespace {
-std::atomic<std::chrono::milliseconds::rep>& move_axis_resend_ms() {
-    static std::atomic<std::chrono::milliseconds::rep> interval{7000};
-    return interval;
-}
-}  // namespace
-
-void set_move_axis_resend_interval(std::chrono::milliseconds interval) { move_axis_resend_ms() = interval.count(); }
-
-std::chrono::milliseconds move_axis_resend_interval() {
-    return std::chrono::milliseconds(move_axis_resend_ms().load());
 }
 
 }  // namespace detail

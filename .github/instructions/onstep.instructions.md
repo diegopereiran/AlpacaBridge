@@ -107,6 +107,17 @@ it is never reachable through `router.cpp` or the web UI.
   attempt about 14 s after the last send, past the default 10 s limit: the move ends there. The re-send needs a `GUIDE_TIME_LIMIT` of 8 s or more; with less the move lapses
   between re-sends and reads as ended. Seen on the HM-17 before the fix: `MoveAxis(0, 0.5)` held
   for 20 s moved for about 10 s.
+  - **On the task clock (decision 0005).** The driver takes a `util::TaskClock&` (factories
+    `create_onstep_telescope()` / `create_onstep_telescope_with_site()`, default the real clock),
+    the re-send slot waits through it, and the other deadlines read it too: the 2 s status and
+    position cache ages, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
+    sleeps, the elapsed time since a UTCDate write (decision 0014), and the #521 relink outage:
+    the driver hands its clock to the process-wide wrapper at connect
+    (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
+    when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
+    clock. The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
+    `advance()` it (7 s per re-send tick, 2.1 s past a cache, 250 ms steps through a synchronous
+    slew, 2 s past the relink window).
   - **Only while the mount shows the move.** Each tick reads `:GU#` first and re-sends only when
     that read shows `g` (a guide-style move runs, either axis). A move the firmware let lapse stays
     ended: its time limit, or the 5 s `GUIDE_TIME_NO_LIMITS` cap it applies while its soft limits

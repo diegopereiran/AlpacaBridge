@@ -14,6 +14,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 
 #include <chrono>
@@ -22,14 +23,16 @@
 
 namespace alpacacore::vendor::onstep {
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info);
+// `clock` drives every wait, sleep and deadline of the driver (decision 0005),
+// and the wrapper's link-loss stamps while it is connected. Tests inject a
+// FakeTaskClock.
+std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                         util::TaskClock& clock = util::default_task_clock());
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(int device_number,
-                                                                   const ConnectionInfo& connection_info,
-                                                                   std::optional<double> site_latitude_deg,
-                                                                   std::optional<double> site_longitude_deg,
-                                                                   std::optional<double> site_elevation_m,
-                                                                   std::optional<bool> sync_time_on_connect);
+std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, util::TaskClock& clock = util::default_task_clock());
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
@@ -56,11 +59,6 @@ namespace detail {
 // Process-wide; tests restore the default afterwards.
 void set_relink_motion_preserve_window(std::chrono::milliseconds window);
 std::chrono::milliseconds relink_motion_preserve_window();
-// open-astro#1378: how often a running MoveAxis is re-sent so OnStepX's guide
-// time limit does not end it (default 7 s; a test shortens it). Process-wide;
-// tests restore the default afterwards.
-void set_move_axis_resend_interval(std::chrono::milliseconds interval);
-std::chrono::milliseconds move_axis_resend_interval();
 }  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

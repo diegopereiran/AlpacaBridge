@@ -645,6 +645,15 @@ public:
 
     // ── Link loss (decision 0009, #1241) ──
 
+    // Decision 0005 (#1378): the loss and last-alive stamps read the clock of
+    // the driver that uses this process-wide wrapper, so the driver's #521
+    // outage is measured on one clock. Default: the process clock.
+    void set_task_clock(util::TaskClock& c) { clock_.store(&c); }
+    void release_task_clock(util::TaskClock& c) {
+        util::TaskClock* expected = &c;
+        clock_.compare_exchange_strong(expected, &util::default_task_clock());
+    }
+
     bool link_alive() {
         if (!connected_) {
             return false;
@@ -1420,12 +1429,12 @@ private:
             lost_reason_ = reason;
             link_lost_ = true;
             const auto alive_ns = last_alive_ns_.load();
-            if (alive_ns != 0) {
-                alive_before_loss_ = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(alive_ns));
+            if (alive_ns != 0) {  // stored + 1 ns, so 0 means never (see mark_alive())
+                alive_before_loss_ = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(alive_ns - 1));
             }
         }
         (void)link_lost_at_.consume();  // an older, unclaimed loss is superseded by this one
-        link_lost_at_.note(util::default_task_clock().now());
+        link_lost_at_.note(clock().now());
         return true;
     }
 
@@ -1433,10 +1442,13 @@ private:
     // link_alive(), the check before an exchange). A loss happened after it,
     // so it bounds the outage from above even when nobody looked for a while.
     void mark_alive() {
+        // Stored + 1 ns: 0 means "never", and a FakeTaskClock starts at the
+        // epoch, where a real stamp would otherwise read as never.
         last_alive_ns_ =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(util::default_task_clock().now().time_since_epoch())
-                .count();
+            std::chrono::duration_cast<std::chrono::nanoseconds>(clock().now().time_since_epoch()).count() + 1;
     }
+
+    util::TaskClock& clock() const { return *clock_.load(); }
 
     void clear_loss() {
         std::lock_guard<std::mutex> lock(loss_mutex_);
@@ -1485,6 +1497,7 @@ private:
         throw AlpacaException("Failed to send command to mount");
     }
 
+    std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
     mutable std::mutex mutex_;
     std::atomic<bool> connected_;
     std::atomic<bool> link_lost_{false};
@@ -1519,6 +1532,10 @@ bool OnStepProtocolWrapper::connect(const ConnectionInfo& info) { return pimpl_-
 void OnStepProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 
 bool OnStepProtocolWrapper::is_connected() const { return pimpl_->is_connected(); }
+
+void OnStepProtocolWrapper::set_task_clock(util::TaskClock& clock) { pimpl_->set_task_clock(clock); }
+
+void OnStepProtocolWrapper::release_task_clock(util::TaskClock& clock) { pimpl_->release_task_clock(clock); }
 
 bool OnStepProtocolWrapper::link_alive() { return pimpl_->link_alive(); }
 
