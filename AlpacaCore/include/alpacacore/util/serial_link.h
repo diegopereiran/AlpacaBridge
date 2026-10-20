@@ -84,9 +84,10 @@ struct SerialLineRegistry {
     std::mutex mutex;
     std::map<int, SerialLineRecord> lines;
 };
+// Never destroyed, for the same reason as detail::serial_registry().
 inline SerialLineRegistry& serial_line_registry() {
-    static SerialLineRegistry r;
-    return r;
+    static auto* r = new SerialLineRegistry();  // NOLINT(cppcoreguidelines-owning-memory)
+    return *r;
 }
 
 inline bool same_line_settings(const struct termios& a, const struct termios& b) {

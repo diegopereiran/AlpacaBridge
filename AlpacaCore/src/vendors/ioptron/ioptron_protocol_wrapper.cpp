@@ -879,13 +879,6 @@ class iOptronProtocolWrapper::Impl {
 public:
     Impl() : connected_(false), connection_type_(ConnectionType::Serial) {
         socket_fd_ = -1;
-#ifndef _WIN32
-        // This Impl lives in a function-local static singleton. Build the
-        // serial registries it releases into first, so they are destroyed
-        // after it: a mount still connected at exit closes link_ from here.
-        (void)util::detail::serial_registry();
-        (void)util::detail::serial_line_registry();
-#endif
     }
 
     ~Impl() {
