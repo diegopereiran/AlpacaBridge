@@ -183,7 +183,7 @@ Checks:
  23. Every `## Adoption` table agrees with the code, both ways: every file
      the `Scan:` glob matches that names the `Symbol:` (with no `Symbol:`
      line, every scanned file) has a row; a Symbol column overrides the symbol
-     per row; comments are blanked before matching; an adopted or partial row's
+     per row and a blank cell falls back to the `Symbol:` line; comments are blanked before matching; an adopted or partial row's
      source names its symbol; a planned row's source does not; a partial row names
      the issue that finishes it. The rosters were prose in five places and
      three disagreed with the code (PR #1410). Check 7 also resolves a
@@ -3418,6 +3418,14 @@ def self_test():
     f = _adoption_findings("rec", both, {"t/locked_x.h": "class L : public XSDK", "t/locked_y.h": "class M : public YSDK"})
     check("adoption: with a Symbol line, a Symbol column overrides per row and an unrelated scanned file needs no row",
           f == [])
+    mixed = ("\nScan: `src/*_driver.cpp`\nSymbol: `Clock`\n\n| Driver | Symbol | Source | State | Issue |\n"
+             "| --- | --- | --- | --- | --- |\n| A |  | `src/a_driver.cpp` | adopted | #1 |\n"
+             "| B | `Other` | `src/b_driver.cpp` | adopted | #2 |\n")
+    mixed_files = {"src/a_driver.cpp": "Clock c;", "src/b_driver.cpp": "Other o;", "src/c_driver.cpp": "nothing"}
+    check("adoption: a blank Symbol cell uses the Symbol line, and a file naming neither needs no row",
+          _adoption_findings("rec", mixed, mixed_files) == [])
+    f = _adoption_findings("rec", mixed, dict(mixed_files, **{"src/a_driver.cpp": "Other o;"}))
+    check("adoption: a blank Symbol cell is checked against the Symbol line", any("row A is adopted" in x for x in f))
     f = adoption(files=dict(adoption_files, **{"src/a_driver.cpp": "// Clock is not used here\nint x;"}))
     check("adoption: a symbol named only in a comment does not count as adoption", any("row A is adopted" in x for x in f))
     f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))

@@ -31,9 +31,10 @@ Symbol: `<identifier an adopter names>`
 State is `adopted`, `partial` or `planned`. A `partial` row names the issue
 that finishes it; code that deviates from a record is a defect with an issue,
 never an exception written into the record. A `planned` row may give `—` as its
-source. A `Symbol` column overrides the symbol for its row. With no `Symbol:`
-line, every scanned file needs a row. A symbol named only in a comment does not
-count.
+source. A `Symbol` column overrides the symbol for its row, and a blank cell
+uses the `Symbol:` line. With a `Symbol:` line, only scanned files that name it
+need a row; with none, every scanned file does. A symbol named only in a comment
+does not count.
 
 Status is one of:
 
