@@ -14,6 +14,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_port_registry.h>
 
 #include <exception>
 #include <filesystem>
@@ -96,6 +97,20 @@ inline bool device_node_missing(const std::string& path) {
     const auto status = std::filesystem::status(path, ec);
     if (status.type() == std::filesystem::file_type::not_found) return true;
     return ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory;
+}
+
+/// True when a serial endpoint a previous connect resolved is no longer this
+/// device's to reuse: the node is gone (device_node_missing()), or another
+/// connected device now holds the port (issue #1202). Many vendors share the
+/// CH340 adapter, so after a replug or a change of plug order the name a
+/// driver remembered can belong to another device. Its connect is refused by
+/// the port claim without touching the line, and a fresh scan finds this
+/// device on its new port. Only a connected holder counts: a port another
+/// scan is still probing is waited for by the claim, not re-scanned around.
+inline bool serial_endpoint_stale(const std::string& path) {
+    if (device_node_missing(path)) return true;
+    const auto holder = serial_port_holder(path);
+    return holder.has_value() && holder->kind == SerialClaimKind::Link;
 }
 
 template <typename Info, typename TryConnect>

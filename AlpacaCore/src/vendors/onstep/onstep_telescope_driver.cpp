@@ -217,8 +217,9 @@ public:
                 connection_info_, connection_resolved_, connection_resolver_,
                 [&protocol](const ConnectionInfo& info) {
                     if (!protocol.connect(info)) {
-                        // Refused TCP connect or vanished serial node: stale, re-scan.
-                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                        // Refused TCP connect, vanished serial node, or a port another connected
+                        // device now holds (#1202): stale, re-scan.
+                        if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
                             throw util::StaleEndpoint("Failed to connect to OnStep mount");
                         }
                         // A port held by another device names its holder (#1202).
