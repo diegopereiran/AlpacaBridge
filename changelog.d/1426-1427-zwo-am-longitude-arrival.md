@@ -7,4 +7,4 @@
 - **ZWO AM mount site reads and writes invert protocol longitude correctly** (AlpacaCore, issue #1426): prevent disagreement between the mount's pointing model and the driver's sidereal time when connecting, changing site coordinates or preparing a GoTo; for saved workaround entries, see Breaking changes.
 
 ### Changed (validation)
-- **ZWO AM5 firmware 1.8.6 validated on Linux arm64**: ConformU 4.5.2 completed with no errors, warnings, issues or timing violations; the redacted report is saved under `AlpacaCore/conformu/ZWO/AM5/Linux-arm64.txt`. This run covers the initial longitude/cache fixes and predates removal of the inverted-longitude retry, which has separate fake-mount regression coverage.
+- **ZWO AM5 firmware 1.8.6 validated on Linux arm64**: ConformU 4.5.2 completed with no errors, warnings, issues or timing violations on the stable/5.0-based build, including removal of the inverted-longitude retry; the redacted report is saved under `AlpacaCore/conformu/ZWO/AM5/Linux-arm64.txt`. The repeated-horizon-rejection path also has separate fake-mount regression coverage.
