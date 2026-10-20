@@ -22,7 +22,7 @@ The rules and their history are owned by the [testing instructions](../../.githu
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
 1. A seamed driver reaches its vendor library only through the injected interface; the wrapper's `instance()` is named only by production factories, enumeration helpers and production adapters. Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
-2. Each seam has a scripted fake and a `Locked<Vendor>SDK` decorator under `AlpacaCore/tests/`, and the decorator takes its mutex on every forward. Scope: `AlpacaCore/tests/fake_*.h`, `AlpacaCore/tests/locked_*.h`. Checked by: `scripts/check_docs_drift.py` check 6 (QHY) and check 23 (roster), review.
+2. Each seam has a scripted fake and a `Locked<Vendor>SDK` decorator under `AlpacaCore/tests/`, and the decorator takes its mutex on every forward; the gphoto `RawDecoder` seam has only a fake (see its Adoption row). Scope: `AlpacaCore/tests/fake_*.h`, `AlpacaCore/tests/locked_*.h`. Checked by: `scripts/check_docs_drift.py` check 6 (QHY) and check 23 (roster), review.
 3. A seam over a shared library singleton has a protected non-virtual destructor; a seam the driver owns through `std::unique_ptr` has a public virtual one. Scope: `AlpacaCore/include/alpacacore/vendor/**`. Checked by: review.
 4. A fake is the harsher of the two where it and the library disagree, and calls used as a pair agree in the fake. Scope: `AlpacaCore/tests/fake_*.h`. Checked by: review.
 5. No fake method blocks unless a test sets an explicit hook. Scope: `AlpacaCore/tests/fake_*.h`. Checked by: review.

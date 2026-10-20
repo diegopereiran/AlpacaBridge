@@ -1091,7 +1091,7 @@ def check_agents_md_paths_exist(root=ROOT):
 MEMORY_COMMENT_PATH_RE = re.compile(r"\bdocs/(?:failures|decisions)/[A-Za-z0-9._-]+\.md\b")
 # A comment may cite a record by number only (`docs/decisions/0008`, PR #1410 audit):
 # the number must name exactly one record.
-MEMORY_COMMENT_ID_RE = re.compile(r"\bdocs/(failures|decisions)/(\d{4})(?![-\w.])")
+MEMORY_COMMENT_ID_RE = re.compile(r"\bdocs/(failures|decisions)/(\d{4})(?!-|\w|\.\w)")
 FIRST_PARTY_COMMENT_EXTENSIONS = {".cpp", ".h", ".js", ".py", ".sh"}
 # The real tree has ~330 candidate files; the self-test fixture has a handful.
 MIN_MEMORY_COMMENT_FILES = 5
@@ -2438,7 +2438,8 @@ def _adoption_findings(where, body, files):
         for source in sources:
             listed.add(source)
             if source not in files:
-                findings.append("%s: Adoption row %s names %s, which is not a tracked file" % (where, name, source))
+                findings.append("%s: Adoption row %s names %s, which is not a tracked AlpacaCore/ or AlpacaHTTP/ "
+                                ".cpp or .h file (the files check 23 reads)" % (where, name, source))
                 continue
             uses = uses or bool(pattern.search(code_of(source)))
         if state in ("adopted", "partial") and not uses:
@@ -2660,7 +2661,9 @@ def self_test():
           ["docs/decisions/0001-example.md"])
     check("memory comment ids: a bare record number is read, a full file name is not",
           MEMORY_COMMENT_ID_RE.findall("// (docs/decisions/0008).") == [("decisions", "0008")]
-          and MEMORY_COMMENT_ID_RE.findall("// docs/decisions/0008-x.md") == [])
+          and MEMORY_COMMENT_ID_RE.findall("// docs/decisions/0008-x.md") == []
+          and MEMORY_COMMENT_ID_RE.findall("// see docs/decisions/0008.") == [("decisions", "0008")]
+          and MEMORY_COMMENT_ID_RE.findall("// docs/decisions/0008.md") == [])
 
     # check_memory_comment_paths_exist over a fixture tree. The root lives
     # under a directory named "build-fixture": the checkout's own ancestors
@@ -3401,7 +3404,7 @@ def self_test():
     f = adoption(body=adoption_body.replace("| partial | #2 |", "| partial | — |"))
     check("adoption: a partial row with no issue is reported", any("row B is partial" in x for x in f))
     f = adoption(body=adoption_body.replace("`src/c_driver.cpp`", "`src/gone_driver.cpp`"))
-    check("adoption: a source that is not tracked is reported", any("not a tracked file" in x for x in f))
+    check("adoption: a source that is not tracked is reported", any("not a tracked AlpacaCore/ or AlpacaHTTP/" in x for x in f))
     f = adoption(body=adoption_body.replace("| adopted |", "| done |"))
     check("adoption: an unknown state is reported", any("state 'done'" in x for x in f))
     f = adoption(body=adoption_body.replace("Scan: `src/*_driver.cpp`\n", ""))
