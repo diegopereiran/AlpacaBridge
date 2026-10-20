@@ -339,8 +339,9 @@ public:
                         const std::string reason = protocol.last_connect_error();
                         const std::string message = reason.empty() ? "Failed to connect to Celestron mount"
                                                                    : "Failed to connect to Celestron mount: " + reason;
-                        // Refused TCP connect or vanished serial node: stale, re-scan.
-                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
+                        // Refused TCP connect, vanished serial node, or a port another connected
+                        // device now holds (#1202): stale, re-scan.
+                        if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
                             throw util::StaleEndpoint(message);
                         }
                         throw AlpacaException(message);

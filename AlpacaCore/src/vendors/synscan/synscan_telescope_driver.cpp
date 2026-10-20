@@ -439,9 +439,10 @@ public:
                         const std::string reason = protocol.last_connect_error();
                         const std::string message = reason.empty() ? "Failed to connect to SynScan mount"
                                                                    : "Failed to connect to SynScan mount: " + reason;
-                        // Refused TCP connect or vanished serial node: stale, re-scan.
+                        // Refused TCP connect, vanished serial node, or a port another connected
+                        // device now holds (#1202): stale, re-scan.
                         if (info.type == alpacacore::vendor::synscan::ConnectionType::Network ||
-                            util::device_node_missing(info.port_path)) {
+                            util::serial_endpoint_stale(info.port_path)) {
                             throw util::StaleEndpoint(message);
                         }
                         throw AlpacaException(message);
