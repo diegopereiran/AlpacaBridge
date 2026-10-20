@@ -54,6 +54,7 @@ These drivers also serve their polled telemetry from a snapshot. Their per-drive
 | QHY Q-Focuser | #1310 | 250 ms | [QHY instructions](../../.github/instructions/qhy.instructions.md) |
 | Astroasis focuser | #1327 | 100 ms | [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
 | SynScan telescope | #1247 | 1 s | [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
+| Celestron focus motor | #1320 | 250 ms | [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
 
 ## Alternatives rejected
 
