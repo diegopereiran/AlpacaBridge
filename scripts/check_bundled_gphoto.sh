@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Acceptance checks for the bundled libgphoto2, run against an INSTALLED
-# alpacabridge package (CI `package-deb` job, or the rig):
+# alpacabridge package (the nightly build job in .github/workflows/nightly-build.yml, or the rig):
 #
 #   scripts/check_bundled_gphoto.sh [--pid N]
 #

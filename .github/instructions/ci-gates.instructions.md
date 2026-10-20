@@ -32,7 +32,7 @@ Each gate script's docstring (for timeouts and the nightly job, the workflow fil
 authoritative description of what it enforces; the bullets below hold only what an
 author must do. Read the docstring before changing a gate.
 
-- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `package-deb` (builds the `.deb` in `debian:trixie`, installs it and runs `scripts/check_bundled_gphoto.sh`), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
+- CI (`.github/workflows/ci.yml`) runs on every PR, all on the native arm64 runner. Its jobs, by id (docs-drift check 18 holds this list to the job ids in `ci.yml`, both ways): `build-test` (vendors OFF), `build-vendors` (vendors ON, instrumented for gcov; per-component and combined line coverage in the job summary), `sanitizers` (ASan+UBSan), `sanitizers-tsan` (ThreadSanitizer over the `[stress]` connect/disconnect/operate concurrency suite, all vendors ON, plus `[stress-guard]` for the harness's own self-tests), `format` (clang-format on changed lines), `clang-tidy` (changed lines), `unicode` (`.github/scripts/check-unicode.py`), `docs-drift` (`scripts/check_docs_drift.py`), `connect-error-hook` (`scripts/check_connect_error_hook.py`), `layering` (`scripts/check_layering.py`), `stress-registration` (`scripts/check_stress_registration.py`), `contract-sweep` (`scripts/check_contract_sweep.py`), `conformu-reports` (`scripts/check_conformu_reports.py`), `shellcheck`, `javascript` (`node --check` and `node --test`), `cppcheck` (changed files), and `zizmor` (workflow audit).
 - **PR body gates** (`.github/workflows/pr-body.yml`, not required checks): `falsified-by`
   (`scripts/check_falsified_by.py`, pre-flight gate 2b2) needs a `## Falsified by` line for
   every test case the PR adds or renames (see the [testing rules](testing.instructions.md#new-test-cases-name-their-falsifying-mutation));
@@ -74,6 +74,13 @@ author must do. Read the docstring before changing a gate.
 - **Nightly optimized run** (`.github/workflows/nightly-build.yml`, job `test-optimized`, issue
   #1313): `build-vendors` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
   (`-DNDEBUG`) nightly, off the PR path.
+- **Packaging is checked nightly, not per PR**: no PR job builds the `.deb`. The nightly `build`
+  job builds it, installs it and runs `scripts/check_bundled_gphoto.sh` before it publishes;
+  `release.yml` builds it again for every stable and beta tag. A PR that changes `debian/`,
+  `scripts/build_deb.sh`, `scripts/build_bundled_gphoto.sh` or a vendor SDK under
+  `AlpacaCore/external/` can be checked before merge with `gh workflow run nightly-build.yml
+  --ref <branch>` on a fork (upstream builds `main` only), or with `scripts/build_deb.sh` and
+  `scripts/check_bundled_gphoto.sh` on an arm64 Debian trixie host.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
   green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
   6-hour default wasted six hours of runner time first. Give every new job a bound; when a job
