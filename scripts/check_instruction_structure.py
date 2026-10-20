@@ -154,8 +154,8 @@ def check(root=ROOT):
             # to the rule owners, and a renamed heading broke one silently (#1412).
             fragment = target.split('#', 1)[1] if '#' in target else ''
             target_path = (path.parent / file).resolve()
-            in_decisions = 'docs/decisions/' in path.relative_to(root).as_posix() or \
-                (target_path.is_file() and 'docs/decisions/' in target_path.as_posix())
+            decisions_dir = (root / 'docs/decisions').resolve()
+            in_decisions = path.resolve().parent == decisions_dir or target_path.parent == decisions_dir
             if fragment and in_decisions and file.endswith('.md') and target_path.is_file():
                 require(unquote(fragment) in heading_anchors(target_path.read_text(encoding="utf-8", errors="replace")),
                         '%s: link %s names a heading that does not exist' % (path.relative_to(root).as_posix(), target))

@@ -181,9 +181,10 @@ Checks:
      planned decision-record gate reads these sections, so a record it cannot
      parse would pass every pull request.
  23. Every `## Adoption` table agrees with the code, both ways: every file
-     the `Scan:` glob matches that names the `Symbol:` (or, with a Symbol
-     column, every scanned file) has a row; an adopted or partial row's source
-     names its symbol; a planned row's source does not; a partial row names
+     the `Scan:` glob matches that names the `Symbol:` (with no `Symbol:`
+     line, every scanned file) has a row; a Symbol column overrides the symbol
+     per row; comments are blanked before matching; an adopted or partial row's
+     source names its symbol; a planned row's source does not; a partial row names
      the issue that finishes it. The rosters were prose in five places and
      three disagreed with the code (PR #1410). Check 7 also resolves a
      comment that cites a record by number only (`docs/decisions/0008`).
@@ -2269,11 +2270,10 @@ CODE_SPAN_ONLY_RE = re.compile(r"`([^`]+)`")
 
 
 def _glob_match(path, pattern):
-    # Same semantics as check_instruction_structure.matches(): a single star
-    # stays inside one directory, ** crosses them.
-    expression = re.escape(pattern).replace(r"\*\*/", "(?:.*/)?")
-    expression = expression.replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
-    return re.fullmatch(expression, path) is not None
+    # One glob rule for the repo: a single star stays inside one directory,
+    # ** crosses them. The instruction-structure check owns it.
+    from check_instruction_structure import matches
+    return matches(path, pattern)
 
 
 def _decision_sections(text):
@@ -2384,8 +2384,16 @@ def _adoption_findings(where, body, files):
     """One record's `## Adoption` section against the files it names.
 
     files: {repo path: text} for every tracked file (the Scan glob and the
-    Source cells are resolved against it)."""
+    Source cells are resolved against it). Comments are blanked before a
+    symbol is matched, so a comment that names one is not adoption."""
     findings = []
+    code = {}
+
+    def code_of(path):
+        if path not in code:
+            code[path] = _strip_comments(files[path])
+        return code[path]
+
     scan = re.search(r"^Scan: `([^`]+)`$", body, re.M)
     symbol = re.search(r"^Symbol: `([^`]+)`$", body, re.M)
     if not scan:
@@ -2432,7 +2440,7 @@ def _adoption_findings(where, body, files):
             if source not in files:
                 findings.append("%s: Adoption row %s names %s, which is not a tracked file" % (where, name, source))
                 continue
-            uses = uses or bool(pattern.search(files[source]))
+            uses = uses or bool(pattern.search(code_of(source)))
         if state in ("adopted", "partial") and not uses:
             findings.append("%s: Adoption row %s is %s but no source names `%s`" % (where, name, state, word))
         if state == "planned" and uses:
@@ -2444,7 +2452,7 @@ def _adoption_findings(where, body, files):
     for path in sorted(scanned):
         if path in listed:
             continue
-        if symbol and not re.search(r"\b%s\b" % re.escape(symbol.group(1)), files[path]):
+        if symbol and not re.search(r"\b%s\b" % re.escape(symbol.group(1)), code_of(path)):
             continue
         findings.append("%s: %s %s but has no Adoption row"
                         % (where, path, ("names `%s`" % symbol.group(1)) if symbol else "is in the scan"))
@@ -3406,6 +3414,14 @@ def self_test():
     check("adoption: with per-row symbols, every scanned file needs a row", any("t/locked_y.h" in x for x in f))
     f = _adoption_findings("rec", per_row, {"t/locked_x.h": "class L : public XSDK"})
     check("adoption: a per-row symbol fixture with every file listed is clean", f == [])
+    both = per_row.replace("\n\n| Driver", "\nSymbol: `XSDK`\n\n| Driver")
+    f = _adoption_findings("rec", both, {"t/locked_x.h": "class L : public XSDK", "t/locked_y.h": "class M : public YSDK"})
+    check("adoption: with a Symbol line, a Symbol column overrides per row and an unrelated scanned file needs no row",
+          f == [])
+    f = adoption(files=dict(adoption_files, **{"src/a_driver.cpp": "// Clock is not used here\nint x;"}))
+    check("adoption: a symbol named only in a comment does not count as adoption", any("row A is adopted" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))
+    check("adoption: a planned row whose source names the symbol only in a comment is clean", f == [])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
