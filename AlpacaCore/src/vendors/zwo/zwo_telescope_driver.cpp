@@ -2676,12 +2676,16 @@ private:
         }
         auto& protocol = ZWOMountProtocolWrapper::instance();
         const auto now = std::chrono::steady_clock::now();
+        std::optional<StatusInfo> status;
         try {
-            const StatusInfo status = protocol.get_status();
+            status = protocol.get_status();
             std::lock_guard<std::mutex> lock(mutex_);
-            cached_status_ = status;
-            cached_status_at_ = now;
-            tracking_state_cached_ = !status.no_tracking;
+            // A failed position read must not hide motion; only completion waits for coordinates.
+            if (!status->stop_or_tracking) {
+                cached_status_ = status.value();
+                cached_status_at_ = now;
+            }
+            tracking_state_cached_ = !status->no_tracking;
             tracking_state_valid_ = true;
             tracking_state_at_ = now;
         } catch (const std::exception&) {
@@ -2695,6 +2699,11 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             cached_equatorial_ = eq;
             cached_equatorial_at_ = now;
+            // Publish arrival only with its position; a failed/paused read must not complete the slew.
+            if (status.has_value()) {
+                cached_status_ = status.value();
+                cached_status_at_ = now;
+            }
         } catch (const std::exception&) {
         }
         if (poll_pause_.load()) return;

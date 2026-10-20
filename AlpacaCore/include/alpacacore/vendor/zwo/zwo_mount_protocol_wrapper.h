@@ -77,7 +77,7 @@ struct HorizontalCoordinates {
 
 struct SiteInfo {
     double latitude_degrees = 0.0;
-    double longitude_degrees = 0.0;
+    double longitude_degrees = 0.0;  // East-positive; the wrapper converts the west-positive wire value.
 };
 
 struct TimeInfo {
