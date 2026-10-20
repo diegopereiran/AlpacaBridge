@@ -21,10 +21,9 @@
 # SPDX SBOM attestation (Actions > Attestations); `gh attestation verify` on
 # the file proves it was built here, by this workflow, from the named commit.
 #
-# The run is also where packaging is checked: the .deb is installed and
-# scripts/check_bundled_gphoto.sh runs against it before anything is
-# published. Pull requests do not build the .deb (ci.yml has no packaging
-# job); release.yml builds it again for every stable and beta tag.
+# The .deb is also installed and scripts/check_bundled_gphoto.sh runs against
+# it before anything is published, as ci.yml's package-deb job does on every
+# pull request, so a nightly .deb that fails the check is never published.
 #
 # The same run also builds all vendors optimized and runs the full suite
 # (issue #1313): CI's build-vendors job is instrumented (-O0 --coverage), so
@@ -267,11 +266,11 @@ jobs:
           dpkg-deb --info "dist/${ASSET}" | sed -n '/Package:/,/Depends:/p'
           ls -l dist
 
-      # The packaging acceptance checks live here, not on every PR (they moved
-      # from ci.yml's package-deb job): install the .deb just built and check
-      # the bundled libgphoto2 loader path (decision 0012). Both run before the
-      # SBOM, the attestations and the publish, so a .deb that fails them is
-      # never published. Recommends (NetworkManager, polkit) are not needed.
+      # The packaging acceptance checks of ci.yml's package-deb job, on the .deb
+      # this run publishes: install it and check the bundled libgphoto2 loader
+      # path (decision 0012). Both run before the SBOM, the attestations and the
+      # publish, so a .deb that fails them is never published. Recommends
+      # (NetworkManager, polkit) are not needed.
       - name: Install the .deb
         env:
           ASSET: ${{ steps.version.outputs.asset }}
