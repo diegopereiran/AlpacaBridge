@@ -60,8 +60,10 @@ enum class SerialClaimKind : std::uint8_t {
 
 /// How long a probe or a connect waits for another probe that has the port
 /// open. The slowest probe in the tree is the QHY CFW3's, which waits up to
-/// ~17 s for the wheel's boot byte; anything still claimed after this is
-/// treated as held.
+/// ~17 s for the wheel's boot byte (`enumerate_cfw3_ports(boot_timeout_ms)`);
+/// anything still claimed after this is treated as held. Keep this above that
+/// probe's worst case: if it grows past this wait, a second scan that meets it
+/// on the same port is refused instead of delayed.
 inline constexpr std::chrono::milliseconds kSerialProbeClaimWait{20000};
 
 /// The canonical form of @p path, or @p path itself when it cannot be

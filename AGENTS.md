@@ -699,7 +699,10 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   so repeated ConformU / NINA connects stay under the Platform 7 5 s `Connect()`
   budget. **Re-scanning is opt-in**: the retry falls through to the resolver
   only when the lambda throws `util::StaleEndpoint`, which it does for a
-  vanished serial or HID node (`util::device_node_missing()`), a refused network
+  vanished serial or HID node (`util::device_node_missing()`), a serial port
+  another connected device now holds (#1202: after a replug or a change of plug
+  order the remembered name can belong to another CH340 device; serial drivers
+  check both with `util::serial_endpoint_stale()`), a refused network
   connect, or a failed identity gate (SynScan's echo test). Every other
   exception propagates: a scan DTR-resets every CP210x / CH340 device on the
   box, so a wheel still homing or a handshake that missed once must never start
@@ -708,7 +711,10 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   connect after a service restart pays the scan** (5.5 s for the iOptron Wi-Fi
   sweep, up to two boots for the CFW3 probe) inside the Platform 7 `Connecting`
   window, so before a ConformU run against a freshly restarted service connect
-  the device once from the web UI, or give it an explicit port or host.
+  the device once from the web UI, or give it an explicit port or host. A
+  connect that finds another device's probe on its serial port waits for that
+  probe too (up to `util::kSerialProbeClaimWait`, sized for the CFW3 probe,
+  #1202), which can likewise outlast the 5 s window.
 - **Every driver converted from a construction-time scan (the ten in #660)
   exposes a `create_*_deferred(device_number, resolver, ...)` seam** and ships
   the cases in `tests/deferred_connect_cases.h` over its fake:

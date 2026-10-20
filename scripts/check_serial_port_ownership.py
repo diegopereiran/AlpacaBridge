@@ -26,6 +26,8 @@ on the hand-rolled shapes:
 
 Scanned: AlpacaCore/src and AlpacaCore/include, except the two files that
 implement the helper. Comments are stripped first, string literals are not.
+AlpacaHTTP is not scanned on purpose: it opens no tty, and the layering
+rules (no vendor SDK or device I/O in AlpacaHTTP) keep it that way.
 
 Regex regression guard (no repo state needed):
     python3 scripts/check_serial_port_ownership.py --self-test

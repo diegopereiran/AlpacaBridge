@@ -92,7 +92,8 @@ inline SerialLineRegistry& serial_line_registry() {
 
 inline bool same_line_settings(const struct termios& a, const struct termios& b) {
     return a.c_iflag == b.c_iflag && a.c_oflag == b.c_oflag && a.c_cflag == b.c_cflag && a.c_lflag == b.c_lflag &&
-           cfgetispeed(&a) == cfgetispeed(&b) && cfgetospeed(&a) == cfgetospeed(&b);
+           cfgetispeed(&a) == cfgetispeed(&b) && cfgetospeed(&a) == cfgetospeed(&b) && a.c_cc[VMIN] == b.c_cc[VMIN] &&
+           a.c_cc[VTIME] == b.c_cc[VTIME];
 }
 
 inline int remaining_ms(std::chrono::steady_clock::time_point deadline) {
@@ -111,18 +112,25 @@ inline int remaining_ms(std::chrono::steady_clock::time_point deadline) {
  * A no-op for an fd SerialLink did not open. Cheap: one tcgetattr().
  */
 inline bool restore_serial_line_settings(int fd) {
-    auto& reg = detail::serial_line_registry();
-    std::lock_guard<std::mutex> lock(reg.mutex);
-    auto it = reg.lines.find(fd);
-    if (it == reg.lines.end()) return false;
-    struct termios now {};
-    if (tcgetattr(fd, &now) != 0) return false;
-    if (detail::same_line_settings(now, it->second.applied)) return false;
-    const bool ok = tcsetattr(fd, TCSANOW, &it->second.applied) == 0;
-    ALPACA_LOG_WARN("Serial",
-                    "Line settings of " + it->second.port +
-                        " were changed by another program while this driver held it; " +
-                        (ok ? std::string("restored them") : "restoring them failed: " + errno_string(errno)));
+    std::string port;
+    bool ok = false;
+    int err = 0;
+    {
+        auto& reg = detail::serial_line_registry();
+        std::lock_guard<std::mutex> lock(reg.mutex);
+        auto it = reg.lines.find(fd);
+        if (it == reg.lines.end()) return false;
+        struct termios now {};
+        if (tcgetattr(fd, &now) != 0) return false;
+        if (detail::same_line_settings(now, it->second.applied)) return false;
+        ok = tcsetattr(fd, TCSANOW, &it->second.applied) == 0;
+        err = errno;
+        port = it->second.port;
+    }
+    // Logged after the unlock so the line registry stays a leaf lock.
+    ALPACA_LOG_WARN("Serial", "Line settings of " + port +
+                                  " were changed by another program while this driver held it; " +
+                                  (ok ? std::string("restored them") : "restoring them failed: " + errno_string(err)));
     return true;
 }
 

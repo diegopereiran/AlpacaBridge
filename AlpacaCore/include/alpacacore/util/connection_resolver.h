@@ -59,8 +59,10 @@ namespace alpacacore::util {
  * endpoint falls through to the resolver only when the lambda throws
  * `StaleEndpoint`, which it does for failures that mean the endpoint is gone
  * or is not this device any more: the serial or HID node no longer exists
- * (`device_node_missing()`), a network connect was refused, or the vendor's
- * identity gate failed (SynScan's echo test). Every other exception
+ * (`device_node_missing()`), another connected device now holds the serial
+ * port (#1202; serial drivers check both with `serial_endpoint_stale()`), a
+ * network connect was refused, or the vendor's identity gate failed (SynScan's
+ * echo test). Every other exception
  * propagates unchanged, because a scan is not free: the QHYCFW3 and Gemini
  * probes open, and DTR-reset, every CP210x or CH340 device on the box, so a
  * wheel that is still homing ("try again in a few seconds") or a handshake
