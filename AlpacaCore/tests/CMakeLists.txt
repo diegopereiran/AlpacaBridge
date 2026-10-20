@@ -181,7 +181,7 @@ if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_gemini AND TARGET alpacacore_wandererastro)
-    # Serial port retune across drivers, open-astro#1202 (reproduction).
+    # Serial port retune across drivers, open-astro#1202.
     list(APPEND TEST_SOURCES test_serial_port_retune_repro.cpp)
 endif()
 if(TARGET alpacacore_astroasis)

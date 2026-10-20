@@ -10,12 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Reproduction of open-astro#1202: a serial port that a connected driver holds
-// can be opened and retuned (baud, VMIN, VTIME) by a second driver, and a
-// retune to a blocking read (VMIN=1) parks the rotator's move monitor in
-// read(), so Disconnect never returns. Both cases assert the FIXED behaviour
-// and carry [!shouldfail] until the slices that fix them remove the tag
-// (slice 2 for the first case, slice 8 for the second).
+// Regression cases for open-astro#1202: a serial port that a connected driver
+// held could be opened and retuned (baud, VMIN, VTIME) by a second driver, and
+// a retune to a blocking read (VMIN=1) parked the rotator's move monitor in
+// read(), so Disconnect never returned. Both cases assert the fixed behaviour
+// (util::SerialLink: registry claim, non-blocking poll()-bounded reads).
 
 #include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
@@ -110,13 +109,8 @@ std::string describe(const Tuning& t) {
 
 }  // namespace
 
-// Falsified by: gemini_protocol_wrapper.cpp:645 (connect_serial) refusing a
-// port a connected driver holds, before the open and tcsetattr, makes the
-// connect throw and leaves the rotator's termios untouched, so the case passes
-// and [!shouldfail] turns it red.
-// Reproduces open-astro#1202 (slice 1); slice 2 removes [!shouldfail].
 TEST_CASE("Serial port retune - second driver cannot retune a connected rotator's port",
-          "[serial][wandererastro][gemini][issue1202][!shouldfail]") {
+          "[serial][wandererastro][gemini][issue1202]") {
     DualProtocolPty fake;
     wanderer::WandererRotatorProtocolWrapper rotator;
     wanderer::RotatorConnectionConfig rcfg;
@@ -152,13 +146,8 @@ TEST_CASE("Serial port retune - second driver cannot retune a connected rotator'
     rotator.disconnect();
 }
 
-// Falsified by: wandererastro_rotator_protocol_wrapper.cpp read_section's
-// ::read (line 112) bounded with poll(), so a VMIN=1 retune cannot park
-// the monitor, makes disconnect() return inside 3 s, so the case passes and
-// [!shouldfail] turns it red.
-// Reproduces open-astro#1202 (slice 1); slice 8 removes [!shouldfail].
 TEST_CASE("Serial port retune - rotator disconnect returns after the link is retuned to VMIN=1",
-          "[serial][wandererastro][issue1202][!shouldfail]") {
+          "[serial][wandererastro][issue1202]") {
     DualProtocolPty fake;
     wanderer::WandererRotatorProtocolWrapper rotator;
     wanderer::RotatorConnectionConfig rcfg;
