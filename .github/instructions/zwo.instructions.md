@@ -11,6 +11,7 @@ SDK locations: `AlpacaCore/external/ZWO/ASI_Camera_SDK/`, `EAF/`, `EFW/`, `CAA/`
 - ROI divisors: width%8, height%2 after binning (see [Camera ROI alignment](../../AGENTS.md#camera-roi-alignment-all-camera-vendors)).
 - Dew heater is exposed as an Alpaca Switch device (not a camera action) and is camera-dependent. It binds its camera by Auto, serial or index ([shared rule](../../AGENTS.md#camera-attached-thermal-switches-pick-their-camera-zwo-touptek-player-one)); the listing opens every camera because `ASIGetControlCaps` and `ASIGetSerialNumber` need an open camera.
 - ST4 pulse guiding should be enabled only when the SDK reports `has_st4_port`.
+- AM mount `:GMGE` / `:SMGE` longitude is west-positive; `SiteInfo`, ASCOM and persisted configuration are east-positive. Convert both reads and writes in the protocol wrapper only. Confirmed on AM5 USB during issue #1096 validation: reversing the wire sign brought the mount's `:GS` into agreement with GPS-based sidereal time; API site readback alone did not detect the mismatch.
 - PulseGuide: do not apply permanent RA/Dec offsets based on expected guide motion. If synthetic offsets are needed, keep them temporary and clear after the pulse completes to avoid double-counting mount motion.
 - The ZWO and QHY SDKs both statically link libusb, causing duplicate symbol issues. The ZWO vendor `CMakeLists.txt` handles this — do not link both vendor static libs into the same binary without resolving the conflict.
 

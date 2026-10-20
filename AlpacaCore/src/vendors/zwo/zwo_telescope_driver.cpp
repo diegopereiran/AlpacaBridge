@@ -2109,7 +2109,7 @@ public:
                 }
                 // open-astro#720: every checkpoint below lets a cancel-and-join
                 // wait for at most the one round trip in flight.
-                if (!synchronize_mount_time_and_site_for_goto(false)) {
+                if (!synchronize_mount_time_and_site_for_goto()) {
                     abandon();
                     return;
                 }
@@ -2162,23 +2162,12 @@ public:
                                 "GOTO rejected with " +
                                     std::string(is_ms_time_site_not_synchronized_error(ex) ? "e7" : "e5") +
                                     "; synchronizing site/time and retrying once");
-                            if (!synchronize_mount_time_and_site_for_goto(false)) {
+                            if (!synchronize_mount_time_and_site_for_goto()) {
                                 abandon();
                                 return;
                             }
                             continue;
                         }
-                        if (attempt == 1 && is_ms_target_under_horizon_error(ex)) {
-                            ALPACA_LOG_WARN(
-                                "ZWO",
-                                "GOTO still rejected with e5 after normal sync; retrying with inverted longitude sign");
-                            if (!synchronize_mount_time_and_site_for_goto(true)) {
-                                abandon();
-                                return;
-                            }
-                            continue;
-                        }
-
                         if (is_ms_time_site_not_synchronized_error(ex)) {
                             ALPACA_LOG_WARN(
                                 "ZWO",
@@ -2606,7 +2595,7 @@ private:
 
     // Returns false, having sent nothing more, once goto_cancel_ is set
     // (open-astro#720): the GOTO setup thread then exits.
-    bool synchronize_mount_time_and_site_for_goto(bool invert_longitude_sign) {
+    bool synchronize_mount_time_and_site_for_goto() {
         auto& protocol = ZWOMountProtocolWrapper::instance();
 
         std::optional<SiteInfo> site_to_write;
@@ -2636,20 +2625,14 @@ private:
         }
 
         if (site_to_write.has_value()) {
-            SiteInfo normalized = site_to_write.value();
-            if (invert_longitude_sign) {
-                normalized.longitude_degrees = -normalized.longitude_degrees;
-            }
             if (goto_cancel_.load()) {
                 return false;
             }
-            protocol.set_site_info(normalized);
-            if (!invert_longitude_sign) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                site_latitude_deg_ = site_to_write->latitude_degrees;
-                site_longitude_deg_ = site_to_write->longitude_degrees;
-                site_coords_valid_ = true;
-            }
+            protocol.set_site_info(site_to_write.value());
+            std::lock_guard<std::mutex> lock(mutex_);
+            site_latitude_deg_ = site_to_write->latitude_degrees;
+            site_longitude_deg_ = site_to_write->longitude_degrees;
+            site_coords_valid_ = true;
         }
 
         const auto now = std::chrono::system_clock::now();
@@ -2681,12 +2664,16 @@ private:
         }
         auto& protocol = ZWOMountProtocolWrapper::instance();
         const auto now = std::chrono::steady_clock::now();
+        std::optional<StatusInfo> status;
         try {
-            const StatusInfo status = protocol.get_status();
+            status = protocol.get_status();
             std::lock_guard<std::mutex> lock(mutex_);
-            cached_status_ = status;
-            cached_status_at_ = now;
-            tracking_state_cached_ = !status.no_tracking;
+            // A failed position read must not hide motion; only completion waits for coordinates.
+            if (!status->stop_or_tracking) {
+                cached_status_ = status.value();
+                cached_status_at_ = now;
+            }
+            tracking_state_cached_ = !status->no_tracking;
             tracking_state_valid_ = true;
             tracking_state_at_ = now;
         } catch (const std::exception&) {
@@ -2700,6 +2687,12 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             cached_equatorial_ = eq;
             cached_equatorial_at_ = now;
+            // Publish arrival only with its position; a failed/paused read must not complete the slew.
+            // All status readers, including AtHome and AlignmentMode, retain the prior status until then.
+            if (status.has_value()) {
+                cached_status_ = status.value();
+                cached_status_at_ = now;
+            }
         } catch (const std::exception&) {
         }
         if (poll_pause_.load()) return;

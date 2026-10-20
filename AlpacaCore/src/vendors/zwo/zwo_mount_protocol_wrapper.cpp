@@ -1573,6 +1573,8 @@ SiteInfo ZWOMountProtocolWrapper::get_site_info() {
         throw AlpacaException("Unable to parse site coordinates", AlpacaError::DriverException);
     }
 
+    // ZWO wire longitude is west-positive; SiteInfo follows ASCOM's east-positive convention.
+    info.longitude_degrees = -info.longitude_degrees;
     return info;
 }
 
@@ -1585,7 +1587,7 @@ void ZWOMountProtocolWrapper::set_site_info(const SiteInfo& info) {
     }
 
     const std::string lat = format_angle_star(info.latitude_degrees, 2);
-    const std::string lon = format_angle_star(info.longitude_degrees, 3);
+    const std::string lon = format_angle_star(-info.longitude_degrees, 3);
 
     const std::string response = trim_copy(send_command(":SMGE" + lat + "&" + lon, false));
     throw_if_mount_error(response, ":SMGE");
