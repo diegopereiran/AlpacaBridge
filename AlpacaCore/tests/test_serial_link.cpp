@@ -50,7 +50,8 @@ std::string unique_path(const char* tag) {
 
 }  // namespace
 
-TEST_CASE("Serial port claim - a connected link refuses a second link and a probe", "[serial][serial_link][issue1202]") {
+TEST_CASE("Serial port claim - a connected link refuses a second link and a probe",
+          "[serial][serial_link][issue1202]") {
     const std::string path = unique_path("link");
     auto first = SerialPortClaim::acquire(path, SerialClaimKind::Link, "Gemini PDH");
     REQUIRE(first);
@@ -58,8 +59,8 @@ TEST_CASE("Serial port claim - a connected link refuses a second link and a prob
 
     SerialPortHolder holder;
     const auto t0 = std::chrono::steady_clock::now();
-    auto second = SerialPortClaim::acquire(path, SerialClaimKind::Link, "WandererRotator", std::chrono::seconds(5),
-                                           &holder);
+    auto second =
+        SerialPortClaim::acquire(path, SerialClaimKind::Link, "WandererRotator", std::chrono::seconds(5), &holder);
     auto probe = SerialPortClaim::acquire(path, SerialClaimKind::Probe, "Gemini flat panel", std::chrono::seconds(5));
     // A link-held port is refused at once, never waited for.
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(1));
@@ -95,8 +96,8 @@ TEST_CASE("Serial port claim - waiting for a probe is bounded", "[serial][serial
     REQUIRE(first);
     SerialPortHolder holder;
     const auto t0 = std::chrono::steady_clock::now();
-    auto second =
-        SerialPortClaim::acquire(path, SerialClaimKind::Probe, "Gemini focuser", std::chrono::milliseconds(200), &holder);
+    auto second = SerialPortClaim::acquire(path, SerialClaimKind::Probe, "Gemini focuser",
+                                           std::chrono::milliseconds(200), &holder);
     const auto waited = std::chrono::steady_clock::now() - t0;
     CHECK_FALSE(second);
     CHECK(waited >= std::chrono::milliseconds(150));
@@ -108,8 +109,8 @@ TEST_CASE("Serial port claim - waiting for a probe is bounded", "[serial][serial
 TEST_CASE("Serial port claim - moves transfer ownership and a symlink names the same port",
           "[serial][serial_link][issue1202]") {
     alpacacore::test::PtyPair pty("claim-move");
-    const auto link_path = std::filesystem::temp_directory_path() /
-                           ("serial-link-test-" + std::to_string(::getpid()) + "-by-id");
+    const auto link_path =
+        std::filesystem::temp_directory_path() / ("serial-link-test-" + std::to_string(::getpid()) + "-by-id");
     std::error_code ec;
     std::filesystem::remove(link_path, ec);
     std::filesystem::create_symlink(pty.slave_path(), link_path, ec);
@@ -124,8 +125,8 @@ TEST_CASE("Serial port claim - moves transfer ownership and a symlink names the 
     }
     // The moved-from claim's destructor released nothing.
     CHECK(is_serial_port_in_use(pty.slave_path()));
-    CHECK_FALSE(SerialPortClaim::acquire(pty.slave_path(), SerialClaimKind::Probe, "Celestron",
-                                         std::chrono::milliseconds(0)));
+    CHECK_FALSE(
+        SerialPortClaim::acquire(pty.slave_path(), SerialClaimKind::Probe, "Celestron", std::chrono::milliseconds(0)));
     outer = SerialPortClaim();
     CHECK_FALSE(is_serial_port_in_use(pty.slave_path()));
     std::filesystem::remove(link_path, ec);
