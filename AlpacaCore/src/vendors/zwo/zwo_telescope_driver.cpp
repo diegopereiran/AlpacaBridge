@@ -633,7 +633,12 @@ public:
 
         if (connected) {
             if (!protocol.connect(connection_info_)) {
-                throw AlpacaException("Failed to connect to ZWO mount", AlpacaError::NotConnected);
+                // The wrapper's reason (a port another device holds, #1202)
+                // goes to the operator.
+                const std::string reason = protocol.last_connect_error();
+                throw AlpacaException(
+                    reason.empty() ? "Failed to connect to ZWO mount" : "Failed to connect to ZWO mount: " + reason,
+                    AlpacaError::NotConnected);
             }
             // Publish connected_ immediately (inside the lock) so a concurrent
             // Connected=true request takes the no-op path below instead of

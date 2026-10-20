@@ -67,6 +67,8 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_telescope.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_zwo_async_slew_failure.cpp)
+    # AM mount serial-port ownership over a pty (issue #1202).
+    list(APPEND TEST_SOURCES test_zwo_mount_serial_ownership.cpp)
 endif()
 
 if(TARGET alpacacore_qhy)
@@ -112,6 +114,8 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_goto_landing.cpp)
     # Getters and DeviceState served from the polled snapshot (issue #1247).
     list(APPEND TEST_SOURCES test_synscan_telescope_snapshot.cpp)
+    # Serial-port ownership over a pty handset (issue #1202).
+    list(APPEND TEST_SOURCES test_synscan_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
@@ -225,6 +229,8 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_async_slew_failure.cpp)
     # Focus motor on its own USB port (issue #896).
     list(APPEND TEST_SOURCES test_celestron_focuser.cpp test_celestron_focuser_concurrency_stress.cpp)
+    # Serial-port ownership over a pty handset (issue #1202).
+    list(APPEND TEST_SOURCES test_celestron_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
