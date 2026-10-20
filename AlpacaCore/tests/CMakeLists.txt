@@ -91,6 +91,8 @@ if(TARGET alpacacore_qhy)
     list(APPEND TEST_SOURCES test_qhy_cfw3_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_qhy_cfw3_filterwheel_deferred_connect.cpp)
+    # Serial-port ownership of the CFW3 and Q-Focuser links (issue #1202).
+    list(APPEND TEST_SOURCES test_qhy_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)
@@ -161,6 +163,8 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_telescope_deferred_connect.cpp)
     # Serial link loss and relink over a pty fake (decision 0009, issue #1241).
     list(APPEND TEST_SOURCES test_onstep_link_loss.cpp)
+    # Serial-port ownership over a pty (issue #1202).
+    list(APPEND TEST_SOURCES test_onstep_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
