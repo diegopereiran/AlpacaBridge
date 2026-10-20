@@ -175,6 +175,8 @@ if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_focuser_deferred_connect.cpp)
     # Getters served from a util::StateSnapshot (open-astro#1229).
     list(APPEND TEST_SOURCES test_gemini_focuser_snapshot.cpp)
+    # Serial-port ownership through util::SerialLink (issue #1202).
+    list(APPEND TEST_SOURCES test_gemini_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
