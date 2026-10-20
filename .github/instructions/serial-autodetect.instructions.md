@@ -10,10 +10,37 @@ the matching shared file, not in a vendor file.
 
 ### Serial / socket I/O: always use the shared helpers (`util/serial_io.h`)
 
-[Decision 0017](../../docs/decisions/0017-serial-port-ownership.md) makes `util::SerialLink` the one way a
-wrapper opens a serial port. It is in force on `stable/5.0`; on `main` the port is #1448, and
-every serial wrapper here is a defect against that record until it lands. The text below
-describes `main`'s current wrappers and is replaced by the `SerialLink` rules in #1448.
+**Open every serial port with `util::SerialLink` (`util/serial_link.h`, issue #1202).** Many vendors ship
+the same CH340 adapter, so one vendor's auto-detect probe matches every other vendor's device. When only
+some wrappers used the in-use registry, a Gemini flat panel scan opened the connected Gemini PDH's port at
+its own baud rate and the hub stayed faulted until restart, and a port retuned to `VMIN=1` by another
+program parked a WandererRotator monitor and an OnStep drain in `n_tty_read`, hanging Disconnect.
+`SerialLink::open(path, kind, owner, configure, &error)` claims the port (`util/serial_port_registry.h`),
+takes `TIOCEXCL`, applies the line settings and keeps the fd **non-blocking**; `close()` releases all three.
+Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
+
+- **The connected link** opens with `SerialClaimKind::Link`. A port another connected device holds is
+  refused with a message that names the holder; put it in the connect refusal.
+- **A probe** opens with `SerialClaimKind::Probe` for exactly the probe's duration. Before probing,
+  `enumerate_*_ports()` classifies each candidate with `util::serial_candidate_use(path, owner)`: a port held
+  by another kind of device is skipped without being opened, and a port held by a connected device of the
+  same kind stays in the results at its scan position without being probed, so an auto-detect index still
+  names the same device while its sibling is connected. Probes that collide on a port take turns (the claim
+  waits, bounded by `kSerialProbeClaimWait`); they never skip each other.
+- **One owner name per wrapper**, shared by its probe and its link (`"Gemini focuser"`): it is what the
+  sibling test compares and what a refused operator reads.
+- **Reads go through `util::tty_read(fd, buf, n, timeout_ms)` and writes through `util::tty_write_all()`.**
+  Both are `poll()`-bounded. `VMIN`/`VTIME` do nothing on the non-blocking fd, so a retune cannot park a
+  reader, and a bare `read()` returns `EAGAIN` at once. A read timeout also checks the line settings and puts
+  back any another program changed. A streaming reader whose link-health latch trips calls
+  `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
+- `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
+  fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment or a
+  pre-#1202 `mark_serial_port_*` call anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the
+  two helper headers. The `write_all`/`clear_nonblocking` advice below now applies to sockets and to
+  non-tty fds only.
+- A by-id name does not identify a CH340 device (they carry no serial number): the connect-time handshake
+  is what proves which device is on a port, so every serial driver must check its handshake reply.
 
 POSIX serial and socket code has several easy-to-get-wrong patterns that must not
 be hand-rolled in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only,
