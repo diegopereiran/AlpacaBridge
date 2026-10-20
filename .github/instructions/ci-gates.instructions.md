@@ -55,7 +55,10 @@ author must do. Read the docstring before changing a gate.
   `ci_preflight.sh` together; keep the cppcheck `--suppress` lists identical; give each new CI job id
   a description in parentheses in the roster bullet above; a new `SUPPORTED-DRIVERS.md` vendor
   heading needs its README brand item, the recounted brand word and a
-  `SUPPORTED_HEADING_TO_README_BRAND` entry in the same PR; keep `SUPPORTED-DRIVERS.md`'s
+  `SUPPORTED_HEADING_TO_README_BRAND` entry in the same PR; give a new decision record the
+  sections and Rules lines `docs/decisions/README.md` describes, and add an Adoption row when a
+  driver starts naming a module's symbol (`TaskClock`, `AsyncOperation`, `StateSnapshot`,
+  `kLinkStalenessBound`, `UtcOffset`, a `Locked*` decorator) (checks 22 and 23); keep `SUPPORTED-DRIVERS.md`'s
   `## Updated` date no older than the README badge date; give each workflow cache a key prefix no
   other key starts with; keep `AGENTS.md` under its 15,000-byte budget; keep every error-code
   value written in `AGENTS.md`, the ascom-contract and testing instructions or `driver-build.md`
