@@ -40,6 +40,7 @@ set(TEST_SOURCES
     test_async_operation.cpp
     test_connection_resolver.cpp
     test_serial_by_id_scan.cpp
+    test_serial_link.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
     test_telescope_driver_watchdog.cpp
@@ -60,6 +61,8 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_telescope.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_zwo_async_slew_failure.cpp)
+    # AM mount serial-port ownership over a pty (issue #1202).
+    list(APPEND TEST_SOURCES test_zwo_mount_serial_ownership.cpp)
 endif()
 
 if(TARGET alpacacore_qhy)
@@ -82,6 +85,8 @@ if(TARGET alpacacore_qhy)
     list(APPEND TEST_SOURCES test_qhy_cfw3_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_qhy_cfw3_filterwheel_deferred_connect.cpp)
+    # Serial-port ownership of the CFW3 and Q-Focuser links (issue #1202).
+    list(APPEND TEST_SOURCES test_qhy_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_telescope.cpp)
@@ -97,6 +102,8 @@ if(TARGET alpacacore_synscan)
     # Precise e/z replies decode the upper 24 bits of each field (issue #785).
     list(APPEND TEST_SOURCES test_synscan_precise_position.cpp)
     list(APPEND TEST_SOURCES test_synscan_goto_landing.cpp)
+    # Serial-port ownership over a pty handset (issue #1202).
+    list(APPEND TEST_SOURCES test_synscan_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
@@ -124,6 +131,8 @@ if(TARGET alpacacore_ioptron)
     # Auto-detect resolves at connect time (issue #659): mount and iEAF.
     list(APPEND TEST_SOURCES test_ioptron_telescope_deferred_connect.cpp
         test_ioptron_ieaf_focuser_deferred_connect.cpp)
+    # Serial-port ownership of the mount, iEAF and iEFW links (issue #1202).
+    list(APPEND TEST_SOURCES test_ioptron_serial_ownership.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
@@ -139,6 +148,8 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_onstep_telescope_deferred_connect.cpp)
+    # Serial-port ownership over a pty (issue #1202).
+    list(APPEND TEST_SOURCES test_onstep_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_weewx)
     # ObservingConditions [stress] coverage over an unreachable URL, #271.
@@ -151,12 +162,18 @@ if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_gemini_focuser_deferred_connect.cpp)
+    # Serial-port ownership through util::SerialLink (issue #1202).
+    list(APPEND TEST_SOURCES test_gemini_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
          test_wandererastro_filterwheel.cpp test_wandererastro_box_switch.cpp)
     # cover/wheel/box over the pty streamer fake + fail-fast rotator [stress], #271
     list(APPEND TEST_SOURCES test_wandererastro_concurrency_stress.cpp)
+endif()
+if(TARGET alpacacore_gemini AND TARGET alpacacore_wandererastro)
+    # Serial port retune across drivers, open-astro#1202.
+    list(APPEND TEST_SOURCES test_serial_port_retune_repro.cpp)
 endif()
 if(TARGET alpacacore_astroasis)
     list(APPEND TEST_SOURCES test_astroasis_focuser.cpp test_astroasis_concurrency_stress.cpp)
@@ -186,6 +203,8 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_telescope_deferred_connect.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_celestron_async_slew_failure.cpp)
+    # Serial-port ownership over a pty handset (issue #1202).
+    list(APPEND TEST_SOURCES test_celestron_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)

@@ -118,12 +118,15 @@ it is never reachable through `router.cpp` or the web UI.
   implementation) hung every slew/site/time write until timeout and was the root cause of the
   first several ConformU failures (`SlewToCoordinatesAsync`, site/time writes).
   `kSetAckTimeoutMs = 1000` bounds the failure case only; real acks arrive in well under 100ms.
-- **Serial `VTIME` must be 1 (100ms), not higher**: an earlier version copied Gemini's one-time
-  probe `VTIME=20` (2s) into the production `connect_serial()` path, causing every blocking read
+- **The serial per-read window must be 100 ms, not higher** (`util::tty_read(..., 100)` since
+  #1202; it was `VTIME=1` on a blocking fd before): an earlier version copied Gemini's one-time
+  probe `VTIME=20` (2s) into the production `connect_serial()` path, causing every read
   to cost up to 2 real seconds — most visibly a ~2s stall on `PulseGuide` and pushing `AbortSlew`
   (5 sequential blind commands) toward ConformU's 1.0s STANDARD timeout. `send_command_blind()`'s
-  stale-input drain window is `50ms` (one VTIME cycle) for the same reason — `120ms` (2+ cycles)
-  pushed `AbortSlew` to 1.04s, just over budget.
+  stale-input drain window is `50ms` (half a read window) for the same reason — `120ms` (2+ windows)
+  pushed `AbortSlew` to 1.04s, just over budget. The fd is non-blocking (`util::SerialLink`), so a
+  port another program retunes to `VMIN=1` can no longer park the drain after a blind command
+  (the TeSeek HM-17 hang reported on #1202).
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
   immediately (optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
   letting the next status poll pick up real completion), matching iOptron's pattern. A first
