@@ -126,6 +126,7 @@ TEST_CASE("Serial port retune - second driver cannot retune a connected rotator'
     REQUIRE(before.vtime == 0);
 
     bool second_connect_succeeded = false;
+    std::string refusal;
     gemini::GeminiProtocolWrapper focuser;
     gemini::ConnectionConfig gcfg;  // default 9600 baud, VTIME 10
     gcfg.serial_port = fake.slave_path();
@@ -133,6 +134,7 @@ TEST_CASE("Serial port retune - second driver cannot retune a connected rotator'
         focuser.connect(gcfg);
         second_connect_succeeded = true;
     } catch (const std::exception& e) {
+        refusal = e.what();
         WARN("second driver connect threw: " << e.what());
     }
     const Tuning after = read_tuning(fake.keepalive_fd());
@@ -142,6 +144,9 @@ TEST_CASE("Serial port retune - second driver cannot retune a connected rotator'
 
     // Fixed behaviour: the second driver is refused and the rotator's link is untouched.
     CHECK_FALSE(second_connect_succeeded);
+    // The operator learns which device holds the port (the registry claim), not
+    // only that the open was busy (TIOCEXCL).
+    CHECK(refusal.find("WandererRotator") != std::string::npos);
     CHECK(after.baud == before.baud);
     CHECK(after.vmin == before.vmin);
     CHECK(after.vtime == before.vtime);
