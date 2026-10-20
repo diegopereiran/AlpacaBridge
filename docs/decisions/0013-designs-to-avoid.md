@@ -62,11 +62,23 @@ Instead: write the first Dome or SafetyMonitor driver for a named device, throug
 
 What it is: an abstract byte-stream interface between every serial or socket protocol wrapper and its file descriptor, so that tests replace the transport in process instead of through a pseudo-terminal or a fake server.
 
-Why rejected: the serial and socket wrappers are already tested end to end through pty fakes (`PtyPair` and `pty_write_bounded()` in `AlpacaCore/tests/fake_pty_write.h`) and fake servers, which exercise the real `termios`, `poll()` and timeout code a `ByteChannel` would bypass. The pty fakes' known failure, a worker that hangs in a blocking `write()` (#424), was fixed in the fakes with a bounded, non-blocking write (#443), and their pty setup has one owner, `PtyPair` (#387); no production layer was added. A `ByteChannel` would put a second I/O path into every wrapper for a test-only need.
+Why rejected: the serial and socket wrappers are already tested end to end through pty fakes (`PtyPair` and `pty_write_bounded()` in `AlpacaCore/tests/fake_pty_write.h`) and fake servers, which exercise the real `termios`, `poll()` and timeout code a `ByteChannel` would bypass. The pty fakes' known failure, a worker that hangs in a blocking `write()` (#424), was fixed in the fakes with a bounded, non-blocking write (PR #443, which fixed #424), and their pty setup has one owner, `PtyPair` (#387); no production layer was added. A `ByteChannel` would put a second I/O path into every wrapper for a test-only need.
 
 Instead: keep pty fakes and fake servers for serial and socket drivers, and the per-library seams of [decision 0015](0015-sdk-seams.md) for vendor SDKs. Fix a flaky pty fake in the fake.
 
 Reopen when: pty timing is still the source of test flakes after the fakes are fixed. Then write a record that supersedes this section, with the flake evidence.
+
+## Rules
+
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. No universal `VendorAdapter` interface across vendors (section 1). Scope: `AlpacaCore/include/alpacacore/**`, `AlpacaCore/src/**`. Checked by: review.
+2. No universal telescope driver parameterised by protocol (section 2). Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
+3. No vendor protocol class derived from another vendor's (section 3). Scope: `AlpacaCore/include/alpacacore/vendor/**`, `AlpacaCore/src/vendors/**`. Checked by: review.
+4. No JSON type in AlpacaCore (section 4). Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review.
+5. No base class per shared helper; `AsyncConnectable` is the only one (section 5). Scope: `AlpacaCore/include/alpacacore/**`. Checked by: review.
+6. No shared Dome or SafetyMonitor implementation before a named device needs it (section 6). Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
+7. No production `ByteChannel` between the serial and socket wrappers and their file descriptors (section 7). Scope: `AlpacaCore/src/vendors/**`, `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review.
 
 ## Alternatives rejected
 
