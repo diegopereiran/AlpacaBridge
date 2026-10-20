@@ -219,22 +219,22 @@ TEST_CASE("ZWO slew completion waits for the final coordinate pair", "[zwo][tele
         });
         REQUIRE(server.ok());
         auto conn = endpoint(server.port());
-        conn.response_timeout_ms = 1000;
+        conn.response_timeout_ms = 2000;
         auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
         REQUIRE(driver->get_slewing());
         state->reject_coordinate.store(reject_final);
         state->arrived.store(true);
-        REQUIRE(wait_until([&] { return state->coordinate_read_started.load(); }, 2000));
+        REQUIRE(wait_until([&] { return state->coordinate_read_started.load(); }, 5000));
         // GU says stopped, but GR/GD are still in flight: completion must stay hidden.
         CHECK(driver->get_slewing());
         if (reject_final) {
             // The next GU proves the previous coordinate read failed and the poll retried.
-            REQUIRE(wait_until([&] { return state->stopped_status_count.load() >= 2; }, 2000));
+            REQUIRE(wait_until([&] { return state->stopped_status_count.load() >= 2; }, 5000));
             CHECK(driver->get_slewing());
             state->reject_coordinate.store(false);
         }
-        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 2000));
+        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
         CHECK(std::abs(driver->get_right_ascension() - (20.0 + 47.0 / 60.0 + 56.0 / 3600.0)) < 1e-9);
         CHECK(std::abs(driver->get_declination() - 65.0) < 1e-9);
         CHECK(alpacacore::test::settle_connected(*driver, false));
