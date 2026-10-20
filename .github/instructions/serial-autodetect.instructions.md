@@ -61,24 +61,15 @@ included inside the existing `#ifndef _WIN32` branches):
   reader at 100% CPU; a stuck-blocking connect socket hangs for the full ~127s TCP
   timeout). Both helpers check both `fcntl` calls and return false on failure.
 
-Apply these on **both** the auto-detect probe path **and** the production
-connect/open path — the fd is typically opened `O_NONBLOCK`, so `connect_serial()`
-must `clear_nonblocking()` after `tcsetattr` (not just the probe), or reads ignore
-`VMIN`/`VTIME` and `write_all` fails on `EAGAIN`. Use the **same abort-on-failure
-pattern** (`close(fd); return false/""`) at every call site.
-
-**Exception — Sky-Watcher direct serial.** On the **connected link**, that driver
-deliberately keeps the fd **non-blocking** and bounds its reads and writes with `poll()`
-instead, because some USB CDC-ACM virtual COM ports do not honour `VMIN`/`VTIME` and a
-blocking `read()` on a board that went quiet parks forever in `n_tty_read`, wedging the
-driver. There `connect_serial()` calls `set_nonblocking()`, `settle_serial`/`exchange_serial`
-reads go through a `poll(POLLIN)`-bounded helper, and frame sends go through a
-`poll(POLLOUT)`-bounded write (not `write_all`, which would fail fast on an `EAGAIN` before
-the first byte). Do **not** "fix" that back to `clear_nonblocking` — see the Sky-Watcher
-scoped instructions. The auto-detect *probe* path, `probe_skywatcher_port`, keeps its fd
-non-blocking and bounds each read with `poll(POLLIN)` against its 1500 ms budget the same way,
-and so does the SynScan echo guard it runs first at 115200 (`exchange_synscan_echo_on_fd` in
-`util/synscan_handset_probe.h`), so a silent candidate on such an adapter cannot hang the scan.
+On a serial port these apply only through `SerialLink`'s own helpers: a tty fd is
+non-blocking, so its reads go through `util::tty_read()` and its writes through
+`util::tty_write_all()`, never a bare `read()`, `write_all()` or `clear_nonblocking()`.
+`write_all`, `send_all` and the `fcntl` helpers remain the rule for sockets and other
+fds. The non-blocking, `poll()`-bounded shape started as the Sky-Watcher driver's
+exception (some USB CDC-ACM ports ignore `VMIN`/`VTIME`, and a blocking `read()` on a
+board that went quiet parked forever in `n_tty_read`); #1202 made it the rule for every
+serial driver, probes included. Sky-Watcher keeps its own `poll()`-bounded loops because
+they are the path through its `serial_read_`/`serial_write_` test seams.
 
 ### Auto-detect failure message (`util/auto_detect.h`)
 
