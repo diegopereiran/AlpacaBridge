@@ -85,10 +85,13 @@ struct SerialRegistry {
     std::condition_variable released;
     std::map<std::string, SerialPortHolder> holders;
 };
-// Function-local static avoids static-init-order issues.
+// Never destroyed: a wrapper living in a function-local static singleton (the
+// iOptron mount) releases its claim from its own destructor at exit, which can
+// run after a destroyed registry's. Leaking one map and mutex avoids the
+// static-destruction-order question entirely.
 inline SerialRegistry& serial_registry() {
-    static SerialRegistry r;
-    return r;
+    static auto* r = new SerialRegistry();  // NOLINT(cppcoreguidelines-owning-memory)
+    return *r;
 }
 }  // namespace detail
 
