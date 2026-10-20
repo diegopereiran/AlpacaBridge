@@ -69,6 +69,13 @@ struct AltAz {
     double azimuth_degrees = 0.0;
 };
 
+// The firmware's horizon and overhead limits (:Gh#, :Go#), whole degrees.
+// OnStepX accepts -30..30 and 60..90; 90 overhead means no overhead limit.
+struct AltitudeLimits {
+    double horizon_degrees = 0.0;
+    double overhead_degrees = 90.0;
+};
+
 /**
  * @brief Mount status decoded from the :GU# extended status string.
  *
@@ -83,6 +90,13 @@ struct MountStatus {
     bool is_slewing = false;
     bool is_parked = false;
     bool is_at_home = false;
+    // 'g' in :GU#: a guide move is running (OnStepX guide.active(): a
+    // :Mn#/:Ms#/:Me#/:Mw# move, so a MoveAxis, and also a home or spiral
+    // guide; not a pulse guide). Firmware without the letter never sets it.
+    bool is_guide_active = false;
+    // 'G': a pulse guide is running. While it runs OnStepX drops 'g' even
+    // when a MoveAxis is still running on the other axis.
+    bool is_pulse_guide_active = false;
     int side_of_pier = -1;
     std::string raw_status;
 };
@@ -188,6 +202,13 @@ public:
      * Sends :GA# and :GZ#.
      */
     AltAz get_alt_az();
+
+    /**
+     * @brief Get the horizon and overhead limits.
+     *
+     * Sends :Gh# and :Go#.
+     */
+    AltitudeLimits get_altitude_limits();
 
     /**
      * @brief Get mount status (tracking/slewing/parked/home/pier side).

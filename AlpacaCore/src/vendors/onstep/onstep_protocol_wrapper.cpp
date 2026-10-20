@@ -224,6 +224,8 @@ MountStatus parse_status(const std::string& raw) {
     status.is_slewing = raw.find('N') == std::string::npos;
     status.is_at_home = raw.find('H') != std::string::npos;
     status.is_parked = raw.find('P') != std::string::npos;
+    status.is_guide_active = raw.find('g') != std::string::npos;
+    status.is_pulse_guide_active = raw.find('G') != std::string::npos;
     // OnStepX writes the mount type first ('E' GEM, 'K' fork, 'A' alt-az,
     // 'L' alt-alt), then the pier side: 'T' east, 'W' west, 'o' none. 'E' is
     // therefore always present on a GEM and says nothing about the pier
@@ -853,6 +855,18 @@ public:
         altaz.altitude_degrees = alt.value();
         altaz.azimuth_degrees = az.value();
         return altaz;
+    }
+
+    AltitudeLimits get_altitude_limits() {
+        auto horizon = parse_sexagesimal(send_command(":Gh#", true, 0));
+        auto overhead = parse_sexagesimal(send_command(":Go#", true, 0));
+        if (!horizon.has_value() || !overhead.has_value()) {
+            throw AlpacaException("Invalid OnStep altitude limit response");
+        }
+        AltitudeLimits limits;
+        limits.horizon_degrees = horizon.value();
+        limits.overhead_degrees = overhead.value();
+        return limits;
     }
 
     MountStatus get_status() {
@@ -1527,6 +1541,8 @@ std::optional<int> OnStepProtocolWrapper::get_mount_coords_mode() { return pimpl
 Position OnStepProtocolWrapper::get_position() { return pimpl_->get_position(); }
 
 AltAz OnStepProtocolWrapper::get_alt_az() { return pimpl_->get_alt_az(); }
+
+AltitudeLimits OnStepProtocolWrapper::get_altitude_limits() { return pimpl_->get_altitude_limits(); }
 
 MountStatus OnStepProtocolWrapper::get_status() { return pimpl_->get_status(); }
 

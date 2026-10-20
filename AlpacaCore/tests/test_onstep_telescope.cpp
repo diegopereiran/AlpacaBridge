@@ -20,6 +20,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -521,6 +524,341 @@ TEST_CASE("OnStep Telescope Driver - MoveAxis at rate 0 reports a stop it could 
     }
     CHECK(driver->get_slewing());  // the mount may still be moving
 
+    driver->set_connected(false);
+}
+
+namespace {
+
+// #1378: a fake OnStepX for the MoveAxis re-send. Counts every :Me# sent and
+// answers :GU# with or without 'g' (a guide-style move is running).
+struct MoveAxisFake {
+    std::shared_ptr<std::mutex> mutex = std::make_shared<std::mutex>();
+    std::shared_ptr<std::string> sent = std::make_shared<std::string>();
+    std::shared_ptr<std::atomic<bool>> guide_active = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<bool>> pulse_guide = std::make_shared<std::atomic<bool>>(false);
+    // :GA# in tenths of a degree, and the :Gh#/:Go# limits in degrees.
+    std::shared_ptr<std::atomic<int>> altitude_tenths = std::make_shared<std::atomic<int>>(450);
+    std::shared_ptr<std::atomic<int>> horizon = std::make_shared<std::atomic<int>>(0);
+    std::shared_ptr<std::atomic<int>> overhead = std::make_shared<std::atomic<int>>(90);
+    alpacacore::test::FakeMountServer server;
+
+    explicit MoveAxisFake(bool firmware_sends_g)
+        : server([m = mutex, sent = sent, g = guide_active, pg = pulse_guide, alt = altitude_tenths, hz = horizon,
+                  oh = overhead, firmware_sends_g](const std::string& chunk) {
+              {
+                  std::lock_guard<std::mutex> lock(*m);
+                  *sent += chunk;
+              }
+              if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
+                  return std::string("1");
+              }
+              if (chunk.rfind(":GA", 0) == 0) {
+                  const int tenths = alt->load();
+                  const int whole = std::abs(tenths) / 10;
+                  const int minutes = (std::abs(tenths) % 10) * 6;
+                  char reply[32];
+                  std::snprintf(reply, sizeof(reply), "%c%02d*%02d:00#", tenths < 0 ? '-' : '+', whole, minutes);
+                  return std::string(reply);
+              }
+              if (chunk.rfind(":GZ", 0) == 0) {
+                  return std::string("180*00:00#");
+              }
+              if (chunk.rfind(":Gh", 0) == 0) {
+                  char reply[16];
+                  std::snprintf(reply, sizeof(reply), "%+d*#", hz->load());
+                  return std::string(reply);
+              }
+              if (chunk.rfind(":Go", 0) == 0) {
+                  char reply[16];
+                  std::snprintf(reply, sizeof(reply), "%02d*#", oh->load());
+                  return std::string(reply);
+              }
+              if (chunk.rfind(":GU", 0) == 0) {
+                  if (pg->load()) {
+                      return std::string("nNpG#");  // OnStepX drops 'g' while a pulse guide runs
+                  }
+                  return std::string(firmware_sends_g && g->load() ? "nNpg#" : "nNp#");
+              }
+              // Blind move and stop commands draw no reply.
+              if (chunk.rfind(":M", 0) == 0 || chunk.rfind(":Q", 0) == 0 || chunk.rfind(":R", 0) == 0) {
+                  return std::string();
+              }
+              return std::string("0#");
+          }) {}
+
+    std::size_t count(const std::string& needle) const {
+        std::lock_guard<std::mutex> lock(*mutex);
+        std::size_t n = 0;
+        for (auto pos = sent->find(needle); pos != std::string::npos; pos = sent->find(needle, pos + 1)) {
+            ++n;
+        }
+        return n;
+    }
+
+    std::unique_ptr<alpacacore::TelescopeDriver> connect() {
+        alpacacore::vendor::onstep::ConnectionInfo conn;
+        conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+        conn.host = "127.0.0.1";
+        conn.tcp_port = server.port();
+        conn.response_timeout_ms = 50;
+        return alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    }
+};
+
+// Restores the process-wide re-send interval when a test ends.
+struct ResendIntervalGuard {
+    explicit ResendIntervalGuard(std::chrono::milliseconds interval)
+        : saved(alpacacore::vendor::onstep::detail::move_axis_resend_interval()) {
+        alpacacore::vendor::onstep::detail::set_move_axis_resend_interval(interval);
+    }
+    ~ResendIntervalGuard() { alpacacore::vendor::onstep::detail::set_move_axis_resend_interval(saved); }
+    ResendIntervalGuard(const ResendIntervalGuard&) = delete;
+    ResendIntervalGuard& operator=(const ResendIntervalGuard&) = delete;
+    std::chrono::milliseconds saved;
+};
+
+}  // namespace
+
+// #1378 (review): OnStepX drops 'g' while a pulse guide runs ('G'), even
+// with a MoveAxis still running, so 'G' must not end the move. Those ticks
+// send nothing; the re-send resumes once 'g' is back.
+TEST_CASE("OnStep Telescope Driver - a pulse guide does not end a running MoveAxis", "[onstep][telescope][unit]") {
+    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    fake.guide_active->store(true);
+    driver->move_axis(0, 1.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));  // the re-send has seen 'g'
+    fake.pulse_guide->store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));  // a tick that read 'g' before finishes its send
+    const auto at_pulse = fake.count(":Me#");
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(fake.count(":Me#") == at_pulse);
+    CHECK(driver->get_slewing());
+
+    fake.pulse_guide->store(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(fake.count(":Me#") > at_pulse);
+    CHECK(driver->get_slewing());
+
+    driver->move_axis(0, 0.0);
+    driver->set_connected(false);
+}
+
+// #1378 (review): Tracking patches the status cache without a :GU# read, so
+// the 'g' it keeps is from before the move and must not end the move.
+TEST_CASE("OnStep Telescope Driver - a Tracking write right after MoveAxis does not end the move",
+          "[onstep][telescope][unit]") {
+    const ResendIntervalGuard interval(std::chrono::seconds(30));  // no re-send read in this test
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    // A first move teaches the driver that this firmware sends 'g': a :GU#
+    // read past the 2 s cache, while the move runs.
+    fake.guide_active->store(true);
+    driver->move_axis(0, 1.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    REQUIRE(driver->get_slewing());
+    fake.guide_active->store(false);
+    driver->move_axis(0, 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    (void)driver->get_tracking();                                  // a :GU# without 'g' is now in the cache
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // and stale
+
+    fake.guide_active->store(true);
+    driver->move_axis(0, 1.0);
+    driver->set_tracking(true);  // marks the stale cache fresh without a :GU# read
+    CHECK(driver->get_slewing());
+
+    driver->move_axis(0, 0.0);
+    driver->set_connected(false);
+}
+
+// #1378 (review): OnStepX stops an equatorial mount at the horizon and
+// overhead limits only on the crossing, so a re-send must never go out within
+// 1 degree of either limit, or past it. 90 overhead means no overhead limit.
+TEST_CASE("OnStep Telescope Driver - the MoveAxis re-send stays clear of the altitude limits",
+          "[onstep][telescope][unit]") {
+    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    fake.guide_active->store(true);
+    fake.horizon->store(10);
+    fake.overhead->store(80);
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const auto resends_at = [&](int altitude_tenths, int overhead) {
+        fake.altitude_tenths->store(altitude_tenths);
+        fake.overhead->store(overhead);
+        const auto before = fake.count(":Mn#");
+        driver->move_axis(1, 1.0);
+        const auto landed = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (fake.count(":Mn#") == before && std::chrono::steady_clock::now() < landed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));  // the start lands first
+        }
+        const auto started = fake.count(":Mn#");
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        const auto resends = fake.count(":Mn#") - started;
+        driver->move_axis(1, 0.0);
+        return resends;
+    };
+
+    CHECK(resends_at(450, 80) > 0);   // well inside both limits
+    CHECK(resends_at(105, 80) == 0);  // 0.5 deg above the horizon limit
+    CHECK(resends_at(50, 80) == 0);   // below the horizon limit
+    CHECK(resends_at(795, 80) == 0);  // 0.5 deg under the overhead limit
+    CHECK(resends_at(895, 90) > 0);   // overhead limit off
+    CHECK(resends_at(450, 0) == 0);   // an overhead reply out of range sends nothing
+
+    driver->set_connected(false);
+}
+
+// #1378 (review): OnStepX times each axis on its own, so a MoveAxis on one
+// axis must not push the other axis's re-send back: not when it starts later,
+// and not when a joystick-style client updates it faster than the interval.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis on one axis does not delay the other axis's re-send",
+          "[onstep][telescope][unit]") {
+    const ResendIntervalGuard interval(std::chrono::milliseconds(600));
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    fake.guide_active->store(true);
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->move_axis(0, 1.0);  // axis 0 due at 600 ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    driver->move_axis(1, 1.0);  // a new body; axis 0 is still due at 600 ms, not 1000
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    CHECK(fake.count(":Me#") >= 2);
+
+    // Axis 1 updated every 300 ms for 2.4 s: axis 0 keeps its own 600 ms rhythm.
+    const auto before = fake.count(":Me#");
+    for (int i = 0; i < 8; ++i) {
+        driver->move_axis(1, 1.0 + 0.1 * i);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    CHECK(fake.count(":Me#") - before >= 2);  // about 3; 2 leaves room for a slow runner
+
+    driver->move_axis(0, 0.0);
+    driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
+// #1378: OnStepX ends a :Me# move after GUIDE_TIME_LIMIT (10 s by default),
+// so a running MoveAxis must be re-sent until the client stops it, and never
+// after.
+TEST_CASE("OnStep Telescope Driver - a running MoveAxis is re-sent until it is stopped", "[onstep][telescope][unit]") {
+    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    fake.guide_active->store(true);
+    driver->move_axis(0, 1.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    CHECK(fake.count(":Me#") >= 3);  // the start plus at least two re-sends
+
+    driver->move_axis(0, 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // a send already on the wire lands
+    const auto after_stop = fake.count(":Me#");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(fake.count(":Me#") == after_stop);
+    CHECK_FALSE(driver->get_slewing());
+
+    driver->set_connected(false);
+}
+
+// #1378: once :GU# has shown 'g', its absence means OnStepX ended the move (a
+// limit, or its time limit), so Slewing must read false and the re-send must
+// stop.
+TEST_CASE("OnStep Telescope Driver - Slewing drops when OnStepX ends a MoveAxis by itself",
+          "[onstep][telescope][unit]") {
+    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    fake.guide_active->store(true);
+    driver->move_axis(1, -1.0);
+    // Wait for a re-send: its tick read a :GU# with 'g' first.
+    const auto started = fake.count(":Ms#");
+    const auto seen_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (fake.count(":Ms#") == started && std::chrono::steady_clock::now() < seen_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    REQUIRE(fake.count(":Ms#") > started);
+    REQUIRE(driver->get_slewing());
+    fake.guide_active->store(false);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    CHECK_FALSE(driver->get_slewing());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // a send already on the wire lands
+    const auto after_end = fake.count(":Ms#");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(fake.count(":Ms#") == after_end);
+
+    driver->set_connected(false);
+}
+
+// #1378 (review): a stop from a hand controller or another app, or a horizon
+// limit, ends the move on the mount. The re-send must see that on its own,
+// with no client polling Slewing, and must not start the move again, not even
+// when the mount shows a move again later (the hand controller's own).
+TEST_CASE("OnStep Telescope Driver - the MoveAxis re-send never restarts a move the mount ended",
+          "[onstep][telescope][unit]") {
+    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    fake.guide_active->store(true);
+    driver->move_axis(0, 1.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    REQUIRE(fake.count(":Me#") >= 2);  // re-sending while the mount shows the move
+
+    fake.guide_active->store(false);  // stopped at the mount
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    const auto after_end = fake.count(":Me#");
+    fake.guide_active->store(true);  // a move the hand controller started
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(fake.count(":Me#") == after_end);
+    fake.guide_active->store(false);
+    CHECK_FALSE(driver->get_slewing());
+
+    driver->set_connected(false);
+}
+
+// #1378: a move the mount does not show ('g') is never re-sent: firmware
+// without the letter, or a move the firmware let lapse (its time limit, or
+// the 5 s cap while its soft limits are off). Slewing stays true until the
+// client stops the move, as before.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis the mount does not show is never re-sent",
+          "[onstep][telescope][unit]") {
+    const ResendIntervalGuard interval(std::chrono::milliseconds(50));
+    MoveAxisFake fake(false);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->move_axis(0, -1.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    CHECK(fake.count(":Mw#") == 1);  // the start only
+    CHECK(driver->get_slewing());
+
+    driver->move_axis(0, 0.0);
+    CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
 

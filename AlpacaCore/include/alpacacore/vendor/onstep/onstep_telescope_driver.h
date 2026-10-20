@@ -56,6 +56,11 @@ namespace detail {
 // Process-wide; tests restore the default afterwards.
 void set_relink_motion_preserve_window(std::chrono::milliseconds window);
 std::chrono::milliseconds relink_motion_preserve_window();
+// open-astro#1378: how often a running MoveAxis is re-sent so OnStepX's guide
+// time limit does not end it (default 7 s; a test shortens it). Process-wide;
+// tests restore the default afterwards.
+void set_move_axis_resend_interval(std::chrono::milliseconds interval);
+std::chrono::milliseconds move_axis_resend_interval();
 }  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep
