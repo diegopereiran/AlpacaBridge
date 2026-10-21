@@ -8351,6 +8351,59 @@ int main() {
         EXPECT(alpacahttp::test_catalog::adopted_device_numbers().empty());
         unregister();
     }
+    {
+        // case: two configuredevice calls sending one unused GUID do not both keep it (#1471)
+        // The first call is held inside its driver's construction, after it chose
+        // the GUID and before it stored the entry; the second call must still see
+        // the GUID as taken.
+        const ScopedCwd scratch;
+        struct Gate {
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool entered = false;
+            bool released = false;
+        };
+        auto gate = std::make_shared<Gate>();
+        alpacahttp::Router router([gate](alpacacore::catalog::DeviceCatalog& c) {
+            c.add(alpacahttp::test_catalog::make_schema());
+            c.add(alpacacore::catalog::Factory{
+                alpacahttp::test_catalog::kKey, [gate](const alpacacore::catalog::DeviceConfig&, int n) {
+                    if (n == 9483) {
+                        std::unique_lock<std::mutex> lock(gate->mutex);
+                        gate->entered = true;
+                        gate->cv.notify_all();
+                        gate->cv.wait(lock, [&] { return gate->released; });
+                    }
+                    return std::unique_ptr<alpacacore::AlpacaDriver>(
+                        new alpacahttp::test_catalog::StubFocuser(n, "gated"));
+                }});
+        });
+        const std::string guid = alpacacore::util::generate_unique_id();
+        const auto body = [&](int number) {
+            return nlohmann::json{
+                {"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", number}, {"uniqueId", guid}};
+        };
+        std::thread first([&] { api_attempt(router, body(9483), "Focuser"); });
+        {
+            std::unique_lock<std::mutex> lock(gate->mutex);
+            gate->cv.wait(lock, [&] { return gate->entered; });
+        }
+        const auto second = api_attempt(router, body(9484), "Focuser");
+        {
+            std::lock_guard<std::mutex> lock(gate->mutex);
+            gate->released = true;
+        }
+        gate->cv.notify_all();
+        first.join();
+        EXPECT(second.ok);
+        const std::string first_id = listed_entry(router, "Focuser", 9483).value("UniqueID", std::string());
+        const std::string second_id = listed_entry(router, "Focuser", 9484).value("UniqueID", std::string());
+        EXPECT(first_id == guid);
+        EXPECT(second_id != guid);
+        EXPECT(alpacacore::util::is_unique_id(second_id));
+        remove_device(router, "zzz", "focuser", 9483);
+        remove_device(router, "zzz", "focuser", 9484);
+    }
 
     // open-astro#664 Part C: the router consults the catalog and has no vendor
     // arm left, so every outcome below is the catalog path.

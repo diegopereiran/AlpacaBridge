@@ -7072,17 +7072,27 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        // Decision 0018: keep a GUID the client sends back
+        // Decision 0018: keep a GUID the client sends back (the web UI's edit
+        // removes the entry first, so its own GUID is free again) unless another
+        // entry holds it, or another configuredevice call chose it and has not
+        // stored its entry yet; otherwise mint one. The choice is reserved until
+        // this call stores its entry or fails.
         {
-            std::set<std::string> taken;
-            {
-                std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-                for (const auto& entry : persisted_devices_) {
-                    if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
-                }
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            std::set<std::string> taken = reserved_unique_ids_;
+            for (const auto& entry : persisted_devices_) {
+                if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
             }
             config["uniqueId"] = choose_unique_id(config, taken);
+            reserved_unique_ids_.insert(config["uniqueId"].get<std::string>());
         }
+        struct UniqueIdReservation {
+            std::function<void()> release;
+            ~UniqueIdReservation() { release(); }
+        } reservation{[this, unique_id = config["uniqueId"].get<std::string>()] {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            reserved_unique_ids_.erase(unique_id);
+        }};
 
         std::string error_message;
         nlohmann::json learned_config = nlohmann::json::object();
