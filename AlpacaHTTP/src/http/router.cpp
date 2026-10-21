@@ -8772,7 +8772,12 @@ void Router::load_persisted_devices() {
     }
     if (assigned_unique_ids) {
         util::log_info("Assigned a persisted UniqueID to the stored devices that had none (decision 0018)");
-        save_persisted_devices();
+        if (!save_persisted_devices() && !first_unique_ids.empty()) {
+            // The next start would mint other GUIDs and prune whatever moved onto
+            // these, so nothing moves until the file can keep them.
+            util::log_warning("Could not store the new UniqueIDs; saved rotator offsets stay under their old IDs");
+            first_unique_ids.clear();
+        }
     }
     // A removed rotator's offset goes here, not at removal: the web UI's edit
     // removes and re-adds the entry with the same GUID (decisions 0008, 0018).

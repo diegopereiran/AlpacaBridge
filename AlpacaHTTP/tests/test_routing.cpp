@@ -8352,6 +8352,24 @@ int main() {
         unregister();
     }
     {
+        // case: a start that cannot store the new GUIDs asks nobody to adopt (#1473)
+        // Moving an offset onto a GUID the device file never kept would orphan it:
+        // the next start mints another GUID and prunes the moved one.
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        {
+            std::ofstream out(std::filesystem::path("config") / "registered_devices.json", std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9482}}})
+                       .dump();
+        }
+        std::filesystem::permissions("config", std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+        alpacahttp::test_catalog::adopted_device_numbers().clear();
+        { alpacahttp::Router read_only(alpacahttp::test_catalog::add_schema_and_factory); }
+        std::filesystem::permissions("config", std::filesystem::perms::owner_all);
+        EXPECT(alpacahttp::test_catalog::adopted_device_numbers().empty());
+        alpacacore::management::DeviceRegistry::instance().unregister_device(alpacacore::DeviceType::Focuser, 9482);
+    }
+    {
         // case: two configuredevice calls sending one unused GUID do not both keep it (#1471)
         // The first call is held inside its driver's construction, after it chose
         // the GUID and before it stored the entry; the second call must still see
