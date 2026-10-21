@@ -69,9 +69,17 @@ public:
 
     // Decision 0018: the router calls this at the upgrade start only, so the
     // offset saved under the device-number ID moves to the device that held that
-    // number then.
+    // number then. A client that connected first has read 0 from the GUID key,
+    // so a connected driver takes the moved offset too. Lock order:
+    // transition_mutex_, sync_mutex_, state_mutex_.
     void adopt_legacy_state() override {
-        (void)util::RotatorSyncOffsetStore::load_or_adopt(get_unique_id(), fallback_unique_id());
+        std::lock_guard<std::mutex> transition(transition_mutex_);
+        std::lock_guard<std::mutex> serial(sync_mutex_);
+        const double offset = util::RotatorSyncOffsetStore::load_or_adopt(get_unique_id(), fallback_unique_id());
+        if (connected_.load()) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            sync_offset_ = offset;
+        }
     }
 
     std::string get_description() const override { return "WandererAstro WandererRotator Mini Rotator Driver"; }

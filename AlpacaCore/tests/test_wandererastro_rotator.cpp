@@ -279,6 +279,22 @@ TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro
     restarted->set_connected(false);
 }
 
+// A client may connect before the router's upgrade-start adopt runs; the adopt
+// then refreshes Position, not only the file (review of #1493).
+TEST_CASE("WandererAstro Rotator Driver - adopt_legacy_state while connected refreshes Position",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->assign_unique_id(alpacacore::util::generate_unique_id());
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 0.0);
+    driver->adopt_legacy_state();
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
+}
+
 // Two Syncs at once must leave the stored offset and Position agreeing: one
 // Sync's save and in-memory write may not straddle the other's, or a restart
 // moves Position to the offset the file kept (review of #1493). The first Sync

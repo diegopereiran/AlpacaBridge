@@ -260,6 +260,23 @@ TEST_CASE("ZWO CAA Rotator Driver - adopt_legacy_state moves an offset saved und
     CHECK(driver->get_position() == 30.0);
 }
 
+// A client may connect before the router's upgrade-start adopt runs; the adopt
+// then refreshes Position, not only the file (review of #1493).
+TEST_CASE("ZWO CAA Rotator Driver - adopt_legacy_state while connected refreshes Position",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("ZWO_CAA_ID_" + std::to_string(sdk.id), 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->assign_unique_id(alpacacore::util::generate_unique_id());
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 10.0);
+    driver->adopt_legacy_state();
+    CHECK(driver->get_position() == 30.0);
+}
+
 // Falsified by: zwo_rotator_driver.cpp get_mechanical_position() dropping the
 // 360 - degree inversion for Reverse (reads 100 instead of 260).
 TEST_CASE("ZWO CAA Rotator Driver - Reverse un-applies the SDK inversion", "[zwo][rotator][unit][fake-sdk]") {

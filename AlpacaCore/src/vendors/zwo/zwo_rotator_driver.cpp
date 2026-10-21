@@ -90,10 +90,22 @@ public:
     // Decision 0018: the router calls this at the upgrade start only. Before a
     // connect the fallback is the SDK-ID or device-number ID, the key a CAA
     // without a serial saved under; a serial-keyed offset waits for the connect.
+    // A client that connected first has read 0 from the GUID key, so a
+    // connected driver takes the moved offset too. transition_mutex_ keeps a
+    // connect or disconnect out of the window; the move and the write run under
+    // mutex_, as sync() saves and writes, so a concurrent Sync cannot land
+    // between them.
     void adopt_legacy_state() override {
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         const std::string assigned = assigned_unique_id();
-        if (!assigned.empty()) {
-            (void)util::RotatorSyncOffsetStore::load_or_adopt(assigned, fallback_unique_id());
+        if (assigned.empty()) {
+            return;
+        }
+        const std::string legacy_key = fallback_unique_id();
+        std::lock_guard<std::mutex> lock(mutex_);
+        const double offset = util::RotatorSyncOffsetStore::load_or_adopt(assigned, legacy_key);
+        if (connected_.load()) {
+            sync_offset_ = offset;
         }
     }
 
