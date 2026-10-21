@@ -75,7 +75,9 @@ public:
     /// Capture nodes whose card name contains "iGuider", in /dev/video order.
     virtual std::vector<IGuiderDeviceInfo> enumerate() = 0;
 
-    /// Opens a capture node and checks it can capture and stream. Returns a handle.
+    /// Opens a capture node and checks it can capture and stream and that its
+    /// card name says iGuider (a pinned node another camera moved onto is refused).
+    /// Returns a handle.
     virtual int open(const std::string& path) = 0;
 
     /// Stops any stream and closes the handle. Unknown handles are ignored.

@@ -189,6 +189,15 @@ int IGuiderV4L2Wrapper::open(const std::string& path) {
         ::close(fd);
         throw AlpacaException(path + " is not a V4L2 streaming capture device", AlpacaError::DriverException);
     }
+    // A pinned node can be re-pointed at another UVC camera by a replug
+    // (decision 0009, point 6): refuse it here, by name, not at the first frame.
+    if (!contains_iguider(reinterpret_cast<const char*>(cap.card))) {
+        const std::string card(reinterpret_cast<const char*>(cap.card));
+        ::close(fd);
+        throw AlpacaException(path + " is not an iOptron iGuider (V4L2 card \"" + card +
+                                  "\"); check the device path in the web UI, or leave it blank to scan",
+                              AlpacaError::DriverException);
+    }
     auto device = std::make_shared<Device>();
     device->fd = fd;
     device->path = path;

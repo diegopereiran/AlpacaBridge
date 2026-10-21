@@ -511,6 +511,21 @@ TEST_CASE("iOptron iGuider Camera Driver - A failed connect closes the camera", 
         require_alpaca_error([&] { rig.camera->set_connected(true); }, AlpacaError::DriverException);
         CHECK(rig.fake.open_handles() == 0);
     }
+    SECTION("an explicit path that another UVC camera now holds") {
+        // A replug can move another camera onto a pinned node (decision 0009
+        // point 6): the card name is checked at open, not at the first frame.
+        Rig rig("/dev/video0");
+        rig.fake.devices[0].card = "Integrated Webcam: Integrated W";
+        try {
+            rig.camera->set_connected(true);
+            FAIL("Expected AlpacaException");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == AlpacaError::DriverException);
+            CHECK(std::string(e.what()).find("not an iOptron iGuider") != std::string::npos);
+        }
+        CHECK(rig.fake.open_handles() == 0);
+        CHECK(rig.fake.stream_starts == 0);
+    }
 }
 
 TEST_CASE("iOptron iGuider Camera Driver - Dropped frames do not cut the first-frame wait short",
