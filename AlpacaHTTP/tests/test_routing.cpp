@@ -9479,6 +9479,12 @@ int main() {
         }
         for (const auto& line : wrong) std::cerr << "  " << line << "\n";
         EXPECT(wrong.empty());
+        // A known method with its parameter missing is the same answer: 200 + InvalidValue (#1476).
+        const auto missing = route_request(router, "PUT", "/api/v1/focuser/9476/move", "{\"ClientID\":1}");
+        EXPECT(missing.status_code() == 200);
+        const auto missing_json = nlohmann::json::parse(missing.body(), nullptr, false);
+        EXPECT(!missing_json.is_discarded() && missing_json.value("ErrorNumber", -1) == 0x401);
+        EXPECT(missing_json.value("ErrorMessage", "").find("Missing parameter: Position") != std::string::npos);
         registry.unregister_device(alpacacore::DeviceType::Telescope, kNum);
         registry.unregister_device(alpacacore::DeviceType::Camera, kNum);
         registry.unregister_device(alpacacore::DeviceType::Switch, kNum);
