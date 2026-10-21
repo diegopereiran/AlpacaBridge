@@ -499,7 +499,8 @@ TEST_CASE("iOptron iGuider Camera Driver - A failed connect closes the camera", 
         CHECK(rig.camera->get_connected());
     }
     SECTION("no first frame") {
-        Rig rig;
+        alpacacore::test::FakeTaskClock clock;  // frozen: the read count ends the wait at once
+        Rig rig("", clock);
         rig.fake.stalled = true;
         require_alpaca_error([&] { rig.camera->set_connected(true); }, AlpacaError::DriverException);
         CHECK(rig.fake.open_handles() == 0);
@@ -510,6 +511,17 @@ TEST_CASE("iOptron iGuider Camera Driver - A failed connect closes the camera", 
         require_alpaca_error([&] { rig.camera->set_connected(true); }, AlpacaError::DriverException);
         CHECK(rig.fake.open_handles() == 0);
     }
+}
+
+TEST_CASE("iOptron iGuider Camera Driver - Dropped frames do not cut the first-frame wait short",
+          "[ioptron][iguider][camera][unit]") {
+    Rig rig;
+    // More instant drops than the 3 s budget holds 200 ms reads: the wait is
+    // bounded by the clock, so the frame after them still connects.
+    rig.fake.drop_frames = 40;
+    rig.camera->set_connected(true);
+    CHECK(rig.camera->get_connected());
+    CHECK(rig.fake.drop_frames == 0);
 }
 
 TEST_CASE("iOptron iGuider Camera Driver - An explicit path skips the scan", "[ioptron][iguider][camera][unit]") {

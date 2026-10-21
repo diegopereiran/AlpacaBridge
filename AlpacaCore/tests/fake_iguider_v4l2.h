@@ -80,6 +80,9 @@ public:
     /// Explicit hook (decision 0015, point 5): open() sleeps this long.
     std::chrono::milliseconds open_delay{0};
     std::chrono::milliseconds frame_interval{5};
+    /// Atomic: this many reads return no frame at once, as the wrapper does for
+    /// an incomplete or error-flagged buffer (it drops it without waiting).
+    std::atomic<int> drop_frames{0};
 
     // ---- Counters (atomic, safe to read while the driver runs) -------------
 
@@ -161,6 +164,10 @@ public:
         check(handle);
         // Harsher than "no frame": the wrapper throws when it is not streaming.
         if (!streaming_) fail("is not streaming");
+        if (drop_frames > 0) {
+            --drop_frames;
+            return false;
+        }
         std::this_thread::sleep_for(std::min(timeout, frame_interval));
         if (stalled) return false;
         if (luma.size() != static_cast<std::size_t>(kWidth) * kHeight) {

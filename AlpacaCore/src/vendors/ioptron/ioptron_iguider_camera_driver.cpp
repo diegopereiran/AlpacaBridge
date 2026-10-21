@@ -701,10 +701,15 @@ private:
     void wait_for_first_frame(int handle, const std::string& path) {
         std::vector<std::uint8_t> luma;
         const auto deadline = clock_.now() + kFirstFrameTimeout;
-        // Also bounded by count: a frozen test clock never reaches the deadline.
-        constexpr int kMaxReads = static_cast<int>(kFirstFrameTimeout / kReadTimeout);
-        for (int reads = 0; reads < kMaxReads && clock_.now() < deadline; ++reads) {
+        // Also bounded by a count of reads the clock did not move across, so a
+        // frozen test clock cannot spin forever. Only those count: a dropped
+        // frame returns at once, and counting it would cut the 3 s budget short.
+        constexpr int kMaxFrozenReads = static_cast<int>(kFirstFrameTimeout / kReadTimeout);
+        int frozen_reads = 0;
+        while (frozen_reads < kMaxFrozenReads && clock_.now() < deadline) {
+            const auto before = clock_.now();
             if (v4l2_.read_frame(handle, luma, kReadTimeout)) return;
+            if (clock_.now() == before) ++frozen_reads;
         }
         throw AlpacaException("iGuider at " + path +
                                   " opened but sent no frames within 3 s. Re-plug it into a USB port on the computer "
