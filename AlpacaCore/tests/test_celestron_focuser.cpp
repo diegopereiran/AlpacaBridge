@@ -16,8 +16,8 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
 #include <algorithm>

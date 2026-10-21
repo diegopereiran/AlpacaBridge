@@ -19,6 +19,7 @@
 #include <chrono>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::vendor::celestron {
@@ -32,7 +33,9 @@ enum class AuxLinkSpeed : std::uint8_t { Baud115200, Baud9600 };
 /// Per-driver serial link to a Celestron CGX/CGX-L direct AUX interface.
 class CelestronCgxProtocol final {
 public:
-    CelestronCgxProtocol() = default;
+    /// @param owner The device name a refused operator reads while this link
+    ///              holds its port (decision 0017): the mount or the focuser.
+    explicit CelestronCgxProtocol(std::string owner = "Celestron CGX mount") : owner_(std::move(owner)) {}
     ~CelestronCgxProtocol();
 
     CelestronCgxProtocol(const CelestronCgxProtocol&) = delete;
@@ -71,6 +74,7 @@ private:
     void wait_for_locked(short events, std::chrono::steady_clock::time_point deadline);
     std::vector<std::uint8_t> read_frame_locked(std::chrono::steady_clock::time_point deadline);
 
+    const std::string owner_;
     mutable std::mutex mutex_;
     int serial_fd_ = -1;
     std::atomic<std::uint64_t> session_generation_{0};

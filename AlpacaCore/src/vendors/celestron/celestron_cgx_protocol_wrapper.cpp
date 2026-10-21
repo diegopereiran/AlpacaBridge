@@ -114,7 +114,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
     const speed_t baud = speed == AuxLinkSpeed::Baud9600 ? B9600 : B115200;
     std::string error;
     util::SerialLink link = util::SerialLink::open(
-        port_path, util::SerialClaimKind::Link, "Celestron CGX mount",
+        port_path, util::SerialClaimKind::Link, owner_,
         [baud](struct termios& settings) {
             ::cfmakeraw(&settings);
             settings.c_cflag &= ~(PARENB | CSTOPB | CSIZE | CRTSCTS);
