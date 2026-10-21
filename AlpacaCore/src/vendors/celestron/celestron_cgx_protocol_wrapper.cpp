@@ -105,13 +105,16 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
         return;
     }
     disconnect_locked();
-    if (!util::try_mark_serial_port_open(registry_path)) {
+    // Refused at once, whoever holds it, as before the RAII claim (#1202).
+    util::SerialPortClaim claim =
+        util::SerialPortClaim::acquire(registry_path, util::SerialClaimKind::Link, "Celestron CGX mount",
+                                       std::chrono::milliseconds(0));
+    if (!claim) {
         throw AlpacaException("Celestron CGX USB port is already in use: " + port_path, AlpacaError::InvalidOperation);
     }
 
     const int fd = ::open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd < 0) {
-        util::mark_serial_port_closed(registry_path);
         throw_link_error("cannot open " + port_path + ": " + util::errno_string(errno));
     }
 
@@ -146,6 +149,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
         }
 
         registered_port_path_ = registry_path;
+        claim_ = std::move(claim);
         receive_buffer_.clear();
         serial_fd_ = fd;
         ++session_generation_;
@@ -153,7 +157,6 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
     } catch (...) {
         if (exclusive) (void)::ioctl(fd, TIOCNXCL);
         ::close(fd);
-        util::mark_serial_port_closed(registry_path);
         registered_port_path_.clear();
         throw;
     }
@@ -351,7 +354,7 @@ void CelestronCgxProtocol::disconnect_locked() {
         ::close(serial_fd_);
         serial_fd_ = -1;
     }
-    util::mark_serial_port_closed(registered_port_path_);
+    claim_.release();
     registered_port_path_.clear();
     receive_buffer_.clear();
     desynchronized_ = false;
