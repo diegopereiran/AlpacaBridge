@@ -8773,7 +8773,7 @@ void Router::load_persisted_devices() {
                                   util::escape_for_log(error_message, error_message.size()));
             } else if (!learned_config.empty()) {
                 // #914: what the registration learned about the device (a ZWO
-                // camera's serial, model name, UniqueID) goes back into the
+                // camera's serial and model name) goes back into the
                 // stored entry, so the next start binds by it.
                 const auto learned_key = persisted_key(entry);
                 bool stored = false;
