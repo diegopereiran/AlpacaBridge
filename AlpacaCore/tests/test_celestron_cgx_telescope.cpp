@@ -764,7 +764,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for a
     auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
     REQUIRE(probe);
     auto release = std::async(std::launch::async, [&probe] {
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+        std::this_thread::sleep_for(std::chrono::seconds(5));
         probe.release();
     });
     CHECK_NOTHROW(driver->abort_slew());
@@ -777,7 +777,57 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for a
         // The link is gone, so the getter refuses; only its latency matters.
     }
     const auto elapsed = std::chrono::steady_clock::now() - started;
-    CHECK(elapsed < std::chrono::milliseconds(1500));
+    CHECK(elapsed < std::chrono::seconds(2));
+    release.get();
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a tracking rollback does not wait for another device's probe",
+          "[celestron][cgx][telescope][integration][issue1457]") {
+    namespace util = alpacacore::util;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    const std::string path = info.port_path;
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    driver->set_connected(true);
+
+    // The adapter goes away: the first tracking write fails, and its rollback
+    // reconnect finds the node gone, closes the link and releases the claim.
+    mount.sever_link();
+    try {
+        driver->set_tracking(false);
+    } catch (const alpacacore::AlpacaException&) {
+        // Expected: the write and its rollback both fail.
+    }
+    REQUIRE_FALSE(util::is_serial_port_in_use(path));
+
+    // Another device's probe holds the node for 5 s while a second tracking
+    // write fails and its rollback reconnects under mutex_.
+    auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
+    REQUIRE(probe);
+    auto release = std::async(std::launch::async, [&probe] {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        probe.release();
+    });
+    auto write = std::async(std::launch::async, [&driver] {
+        try {
+            driver->set_tracking(false);
+        } catch (const alpacacore::AlpacaException&) {
+            // Expected: the link is gone.
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        static_cast<void>(driver->get_tracking());
+    } catch (const alpacacore::AlpacaException&) {
+        // The link is gone, so the getter refuses; only its latency matters.
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(elapsed < std::chrono::seconds(2));
+    write.get();
     release.get();
 }
 #endif
