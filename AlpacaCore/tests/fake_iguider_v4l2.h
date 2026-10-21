@@ -73,7 +73,9 @@ public:
     std::set<std::string> throw_from;
     /// Atomic: while true, read_frame() delivers nothing.
     std::atomic<bool> stalled{false};
-    /// Atomic: while true, every call fails as a removed camera does (ENODEV).
+    /// Atomic: while true, enumerate() finds nothing and every other call but
+    /// close() fails as a removed camera does (ENODEV, thrown as
+    /// IGuiderDeviceGone like the wrapper).
     std::atomic<bool> unplugged{false};
     /// Explicit hook (decision 0015, point 5): open() sleeps this long.
     std::chrono::milliseconds open_delay{0};
@@ -190,7 +192,10 @@ private:
     }
 
     void hit(const std::string& name) {
-        if (unplugged && name != "enumerate") fail(name + " failed: No such device");
+        if (unplugged && name != "enumerate") {
+            throw vendor::ioptron::IGuiderDeviceGone("iGuider " + name + " failed: No such device",
+                                                     AlpacaError::DriverException);
+        }
         if (throw_from.count(name) != 0) fail(name + " failed (scripted)");
     }
 

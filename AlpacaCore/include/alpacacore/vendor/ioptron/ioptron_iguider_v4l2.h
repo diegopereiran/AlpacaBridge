@@ -19,6 +19,8 @@
 // and the tests inject FakeIGuiderV4L2. Protocol notes and sources:
 // AlpacaCore/external/iOptron/iGuider-protocol.md.
 
+#include <alpacacore/util/error_handling.h>
+
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -44,6 +46,17 @@ struct IGuiderDeviceInfo {
 };
 
 /**
+ * A seam call failed because the camera is gone: EIO, ENXIO, ENODEV or EBADF
+ * on its fd (decision 0009, point 2a). Still an AlpacaException with the
+ * DriverException number, so a caller that does not know about it sees the
+ * failure it saw before; the stream worker catches it to drop the link.
+ */
+class IGuiderDeviceGone : public AlpacaException {
+public:
+    using AlpacaException::AlpacaException;
+};
+
+/**
  * The V4L2 operations the iGuider driver needs, by handle.
  *
  * Calls on one handle come from one thread at a time: connect runs them before
@@ -51,7 +64,8 @@ struct IGuiderDeviceInfo {
  * after the worker is joined. The production wrapper still serialises each
  * handle's calls itself (decision 0015).
  *
- * Every failure throws AlpacaException(DriverException) with the errno text.
+ * Every failure throws AlpacaException(DriverException) with the errno text,
+ * as IGuiderDeviceGone when the errno says the camera is gone.
  */
 class IGuiderV4L2 {
 public:

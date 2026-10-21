@@ -45,8 +45,13 @@ int xioctl(int fd, unsigned long request, void* arg) {
     return r;
 }
 
+// These errno values on the fd mean the camera is gone (decision 0009, point 2a).
+bool camera_gone(int err) { return err == EIO || err == ENXIO || err == ENODEV || err == EBADF; }
+
 [[noreturn]] void throw_errno(const std::string& what, int err) {
-    throw AlpacaException("iGuider " + what + " failed: " + util::errno_string(err), AlpacaError::DriverException);
+    const std::string message = "iGuider " + what + " failed: " + util::errno_string(err);
+    if (camera_gone(err)) throw IGuiderDeviceGone(message, AlpacaError::DriverException);
+    throw AlpacaException(message, AlpacaError::DriverException);
 }
 
 bool contains_iguider(const char* card) {

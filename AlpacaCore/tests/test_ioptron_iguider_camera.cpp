@@ -17,6 +17,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/version.h>
 
@@ -402,6 +403,11 @@ TEST_CASE("iOptron iGuider Camera Driver - A stalled stream latches a link fault
     // The exposure has passed its deadline too: it fails instead of hanging.
     require_alpaca_error([&] { (void)c.get_image_ready(); }, AlpacaError::DriverException);
     require_alpaca_error([&] { c.start_exposure(0.01, true); }, AlpacaError::DriverException);
+    // The settings refuse while faulted too (decision 0009, rule 1).
+    require_alpaca_error([&] { (void)c.get_gain(); }, AlpacaError::DriverException);
+    require_alpaca_error([&] { c.set_gain(1); }, AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)c.get_num_x(); }, AlpacaError::DriverException);
+    require_alpaca_error([&] { c.set_start_x(0); }, AlpacaError::DriverException);
     // Static metadata keeps answering.
     CHECK(c.get_camera_x_size() == 1280);
     CHECK(wait_until([&] { return rig.fake.stream_starts >= 2; }));  // the stream was restarted
@@ -412,18 +418,59 @@ TEST_CASE("iOptron iGuider Camera Driver - A stalled stream latches a link fault
     expose(c, 0.01);
 }
 
-TEST_CASE("iOptron iGuider Camera Driver - An unplugged camera latches a fault", "[ioptron][iguider][camera][unit]") {
+TEST_CASE("iOptron iGuider Camera Driver - An unplugged camera is a lost link", "[ioptron][iguider][camera][unit]") {
     Rig rig;
     auto& c = *rig.camera;
     c.set_connected(true);
 
     rig.fake.unplugged = true;
+    // ENODEV on the fd is a loss at once, not a fault (decision 0009, point 2a).
+    REQUIRE(wait_until([&] { return !c.get_connected(); }));
+    CHECK(c.get_link_fault().find("No such device") != std::string::npos);  // kept until Connect or Disconnect
+    CHECK(rig.fake.open_handles() == 0);                                    // the transport is closed
+    CHECK(c.get_device_state().empty());
+    require_alpaca_error([&] { (void)c.get_camera_state(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)c.get_camera_x_size(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { c.start_exposure(0.01, true); }, AlpacaError::NotConnected);
+
+    SECTION("a Connect after the replug relinks") {
+        rig.fake.unplugged = false;
+        c.set_connected(true);
+        CHECK(c.get_connected());
+        CHECK(c.get_link_fault().empty());
+        CHECK(rig.fake.opens == 2);
+        expose(c, 0.01);
+    }
+    SECTION("a Connect while still unplugged fails and stays down") {
+        require_alpaca_error([&] { c.set_connected(true); }, AlpacaError::DriverException);
+        CHECK_FALSE(c.get_connected());
+        CHECK(rig.fake.open_handles() == 0);
+    }
+    SECTION("a Disconnect clears the fault text") {
+        c.set_connected(false);
+        CHECK_FALSE(c.get_connected());
+        CHECK(c.get_link_fault().empty());
+    }
+}
+
+TEST_CASE("iOptron iGuider Camera Driver - A fault standing past the staleness bound is a lost link",
+          "[ioptron][iguider][camera][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    Rig rig("", clock);
+    auto& c = *rig.camera;
+    c.set_connected(true);
+    REQUIRE(rig.fake.wait_for_frames(3, std::chrono::seconds(2)));
+
+    rig.fake.stalled = true;
+    clock.advance(std::chrono::seconds(11));
     REQUIRE(wait_until([&] { return !c.get_link_fault().empty(); }));
-    CHECK(c.get_link_fault().find("No such device") != std::string::npos);
-    CHECK(c.get_camera_state() == CameraState::Error);
-    c.set_connected(false);  // still disconnects cleanly
-    CHECK_FALSE(c.get_connected());
-    CHECK(c.get_link_fault().empty());
+    CHECK(c.get_connected());  // younger than the bound: a fault, not a loss
+
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    REQUIRE(wait_until([&] { return !c.get_connected(); }));
+    CHECK(c.get_link_fault().find("no frame") != std::string::npos);
+    CHECK(rig.fake.open_handles() == 0);
+    CHECK(c.get_device_state().empty());
 }
 
 TEST_CASE("iOptron iGuider Camera Driver - A failed connect closes the camera", "[ioptron][iguider][camera][unit]") {

@@ -98,8 +98,9 @@ an Aptina AR0130, unconfirmed, so SensorName is reported empty.
    150 ms (PR #2012). Our connect waits up to 3 s for that frame.
 3. **Stalls.** The Windows driver restarts the stream when no frame arrives for 10 s. Our
    driver latches a link fault after 10 s without a frame (CameraState Error, StartExposure
-   refused), restarts the stream, and clears the fault on the next frame. INDI instead fails
-   the exposure and stops, because its restart could loop.
+   refused), restarts the stream, and clears the fault on the next frame. A fault that stands
+   for 30 s, or an unplug (ENODEV), drops `Connected` until the client connects again
+   (decision 0009). INDI instead fails the exposure and stops, because its restart could loop.
 
 ## Confirmed on the Pi rig (2026-10-21)
 

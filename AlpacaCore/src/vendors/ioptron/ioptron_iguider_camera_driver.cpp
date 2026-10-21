@@ -25,11 +25,18 @@
 // V4L2 call from the end of connect until disconnect joins it. mutex_ is a
 // short state lock and is never held across a V4L2 call; connect does its I/O
 // under transition_mutex_ only (decision 0016).
+//
+// Link loss (decision 0009): a stall or V4L2 error latches a fault, which the
+// next frame clears. The link is LOST at once when the camera is gone (an
+// unplug: IGuiderDeviceGone), or when a fault has stood for
+// util::kLinkStalenessBound; the worker then closes the camera and stops, and
+// only the client's Connect relinks.
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
@@ -44,6 +51,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -86,6 +94,8 @@ constexpr int kSettleFrames = 4;
 // No frame for this long latches a link fault and restarts the stream (the
 // vendor driver and INDI both use 10 s).
 constexpr auto kStallTimeout = std::chrono::seconds(10);
+static_assert(kStallTimeout < util::kLinkStalenessBound,
+              "decision 0009: the loss bound must exceed the latch threshold");
 // After a V4L2 failure, wait this long before restarting the stream.
 constexpr auto kRetryInterval = std::chrono::seconds(1);
 // An exposure with no frame this long after its last possible frame fails.
@@ -180,7 +190,7 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
-    bool get_connected() const override { return connected_.load(); }
+    bool get_connected() const override { return connected_.load() && !link_lost_.load(); }
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
     bool get_connecting() const override { return connection_task_active(); }
@@ -194,6 +204,9 @@ public:
         // The connect does seconds of V4L2 I/O; this serialises a sync
         // disconnect against it, which the base gates cannot see (#528).
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
+        // Only the client's Connect relinks a lost link: it tears the dead
+        // session down and connects afresh (decision 0009, point 4).
+        if (connected && connected_.load() && link_lost_.load()) stop_and_close();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // Base gates BEFORE the idempotency check (async_connectable.h).
@@ -268,21 +281,25 @@ public:
     int get_num_x() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        ensure_link_locked();
         return roi_.num_x;
     }
     int get_num_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        ensure_link_locked();
         return roi_.num_y;
     }
     int get_start_x() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        ensure_link_locked();
         return roi_.start_x;
     }
     int get_start_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        ensure_link_locked();
         return roi_.start_y;
     }
     // The window is checked against the sensor at StartExposure (ASCOM); a
@@ -309,6 +326,7 @@ public:
     int get_gain() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        ensure_link_locked();
         return gain_;
     }
 
@@ -320,6 +338,7 @@ public:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        ensure_link_locked();
         gain_ = gain;  // the stream worker writes it before its next frame
     }
 
@@ -368,9 +387,7 @@ public:
             throw AlpacaException("Subframe StartX/StartY + NumX/NumY exceeds the 1280x960 sensor",
                                   AlpacaError::InvalidValue);
         }
-        if (!link_fault_.empty()) {
-            throw AlpacaException("iGuider communications compromised: " + link_fault_, AlpacaError::DriverException);
-        }
+        ensure_link_locked();
         const std::size_t step = iguider_exposure_step(duration);
         const double taken = kIGuiderDurations[step];
         // The frames the settle waits out run at the exposure being replaced.
@@ -422,6 +439,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         latch_exposure_timeout_locked();
+        ensure_link_locked();
         throw_exposure_failure_locked();
         return image_ready_;
     }
@@ -432,6 +450,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             latch_exposure_timeout_locked();
+            ensure_link_locked();
             throw_exposure_failure_locked();
             if (!image_ready_ || !last_image_) {
                 throw AlpacaException::asked_too_early("Image not ready");
@@ -450,6 +469,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         latch_exposure_timeout_locked();
+        ensure_link_locked();
         if (!exposure_pending_) return image_ready_ ? 100.0 : 0.0;
         const double total = exposure_duration_ + kReadoutMarginSeconds;
         const double elapsed = std::chrono::duration<double>(clock_.now() - request_time_).count();
@@ -496,6 +516,7 @@ private:
         util::TaskClock::clock::time_point last_frame{};
         bool awaiting_first_frame = false;  // after a restart: hold the controls until a frame lands
         bool needs_restart = false;
+        std::optional<util::TaskClock::clock::time_point> fault_since;  // when the standing fault latched
     };
 
     IGuiderV4L2& v4l2_;
@@ -504,6 +525,10 @@ private:
     const std::string configured_path_;
 
     std::atomic<bool> connected_{false};
+    // Decision 0009: set under mutex_ by the stream worker when the link is
+    // lost, cleared by the next connect. connected_ stays the session flag, so
+    // a Disconnect still tears the session down.
+    std::atomic<bool> link_lost_{false};
     mutable std::mutex mutex_;  // short state lock; never held across a V4L2 call
     std::mutex transition_mutex_;
 
@@ -512,7 +537,7 @@ private:
     int gain_ = kGainMin;
     std::int32_t desired_ticks_ = kIGuiderTicks.front();
     Roi roi_;
-    std::string link_fault_;  // latched stream fault; empty while frames flow
+    std::string link_fault_;  // latched stream fault; empty while frames flow, kept after a loss
 
     // The exposure in flight, guarded by mutex_.
     mutable bool exposure_pending_ = false;
@@ -536,8 +561,15 @@ private:
     util::AsyncOperation stream_;
 
     void ensure_connected() const {
-        if (!connected_.load()) {
+        if (!connected_.load() || link_lost_.load()) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        }
+    }
+
+    // A faulted link refuses reads and writes (decision 0009, rule 1). Caller holds mutex_.
+    void ensure_link_locked() const {
+        if (!link_fault_.empty()) {
+            throw AlpacaException("iGuider communications compromised: " + link_fault_, AlpacaError::DriverException);
         }
     }
 
@@ -565,6 +597,7 @@ private:
         }
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
+        ensure_link_locked();
         roi_.*member = value;
     }
 
@@ -588,6 +621,7 @@ private:
         desired_ticks_ = kIGuiderTicks.front();
         roi_ = Roi{};
         link_fault_.clear();
+        link_lost_.store(false);
         exposure_pending_ = false;
         ++exposure_token_;
         exposure_failure_.clear();
@@ -714,14 +748,21 @@ private:
                 if (v4l2_.read_frame(handle, luma, kReadTimeout)) {
                     on_frame(luma, s);
                 } else if (clock_.now() - s.last_frame >= kStallTimeout) {
-                    latch_link_fault("no frame for " + std::to_string(kStallTimeout.count()) + " s");
+                    latch_link_fault("no frame for " + std::to_string(kStallTimeout.count()) + " s", s);
                     s.needs_restart = true;
                     s.last_frame = clock_.now();  // one restart per stall period
                 }
+            } catch (const IGuiderDeviceGone& e) {
+                lose_link(handle, e.what());
+                return;
             } catch (const std::exception& e) {
-                latch_link_fault(e.what());
+                latch_link_fault(e.what(), s);
                 s.needs_restart = true;
                 if (!ctx.wait_for(kRetryInterval)) return;
+            }
+            if (s.fault_since && clock_.now() - *s.fault_since >= util::kLinkStalenessBound) {
+                lose_link(handle, get_link_fault());
+                return;
             }
         }
     }
@@ -767,6 +808,7 @@ private:
         const auto arrival = clock_.now();
         s.last_frame = arrival;
         s.awaiting_first_frame = false;
+        s.fault_since.reset();
         ++s.frames_since_change;
         clear_link_fault();
 
@@ -797,12 +839,33 @@ private:
         exposure_failure_.clear();
     }
 
-    void latch_link_fault(const std::string& reason) {
+    void latch_link_fault(const std::string& reason, StreamState& s) {
+        if (!s.fault_since) s.fault_since = clock_.now();
         std::lock_guard<std::mutex> lock(mutex_);
         if (link_fault_.empty()) {
             ALPACA_LOG_ERROR(kLog, "iGuider stream fault: " + reason + "; restarting the stream");
         }
         link_fault_ = reason;
+    }
+
+    // Decision 0009, point 3: Connected reads false and every member throws
+    // NotConnected until the client's Connect; the fault text stays for the
+    // management listing until then. The worker closes its own handle (it is
+    // the only V4L2 caller); a Disconnect that already took handle_ closes it.
+    void lose_link(int handle, const std::string& reason) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (handle_ != handle) return;  // a Disconnect is tearing the session down
+            handle_ = -1;
+            link_fault_ = reason;
+            if (exposure_pending_) {
+                exposure_pending_ = false;
+                ++exposure_token_;
+            }
+            link_lost_.store(true);
+        }
+        ALPACA_LOG_ERROR(kLog, "iGuider link lost: " + reason + "; connect again to resume");
+        close_quietly(handle);
     }
 
     void clear_link_fault() {
