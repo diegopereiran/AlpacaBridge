@@ -102,9 +102,20 @@ struct Roi {
     int num_y = kHeight;
 };
 
+// Whether the subframe lies on the sensor. Subtracts rather than adds: the
+// setters accept any StartX/StartY >= 0 and NumX/NumY >= 1, so start + num can
+// overflow int (StartX = INT_MAX, NumX = 1 wrapped negative and passed).
+bool roi_fits(const Roi& roi) {
+    return roi.start_x >= 0 && roi.start_y >= 0 && roi.num_x >= 1 && roi.num_y >= 1 &&
+           roi.start_x <= kWidth - roi.num_x && roi.start_y <= kHeight - roi.num_y;
+}
+
 ImageArray crop_luma(const std::vector<std::uint8_t>& luma, const Roi& roi) {
     if (luma.size() != static_cast<std::size_t>(kWidth) * kHeight) {
         util::throw_invalid_camera_image("iGuider frame has the wrong size");
+    }
+    if (!roi_fits(roi)) {
+        util::throw_invalid_camera_image("iGuider subframe lies outside the sensor");
     }
     ImageArray image;
     image.width = roi.num_x;
@@ -353,7 +364,7 @@ public:
         std::shared_ptr<const ImageArray> retired_image;
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        if (roi_.start_x + roi_.num_x > kWidth || roi_.start_y + roi_.num_y > kHeight) {
+        if (!roi_fits(roi_)) {
             throw AlpacaException("Subframe StartX/StartY + NumX/NumY exceeds the 1280x960 sensor",
                                   AlpacaError::InvalidValue);
         }
@@ -655,7 +666,9 @@ private:
     void wait_for_first_frame(int handle, const std::string& path) {
         std::vector<std::uint8_t> luma;
         const auto deadline = clock_.now() + kFirstFrameTimeout;
-        while (clock_.now() < deadline) {
+        // Also bounded by count: a frozen test clock never reaches the deadline.
+        constexpr int kMaxReads = static_cast<int>(kFirstFrameTimeout / kReadTimeout);
+        for (int reads = 0; reads < kMaxReads && clock_.now() < deadline; ++reads) {
             if (v4l2_.read_frame(handle, luma, kReadTimeout)) return;
         }
         throw AlpacaException("iGuider at " + path +

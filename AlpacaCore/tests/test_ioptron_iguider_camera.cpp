@@ -197,6 +197,21 @@ TEST_CASE("iOptron iGuider Camera Driver - Value range validation", "[ioptron][i
     rig.camera->set_start_y(900);
     rig.camera->set_num_y(61);
     require_alpaca_error([&] { rig.camera->start_exposure(0.01, true); }, iv);
+    // StartX + NumX must not overflow past the check: INT_MAX + 1 wrapped
+    // negative and passed, and the crop then read 2 GB past the frame.
+    constexpr int kIntMax = std::numeric_limits<int>::max();
+    rig.camera->set_start_y(0);
+    rig.camera->set_num_y(960);
+    rig.camera->set_start_x(kIntMax);
+    rig.camera->set_num_x(1);
+    require_alpaca_error([&] { rig.camera->start_exposure(0.01, true); }, iv);
+    rig.camera->set_start_x(0);
+    rig.camera->set_num_x(kIntMax);
+    require_alpaca_error([&] { rig.camera->start_exposure(0.01, true); }, iv);
+    rig.camera->set_num_x(1280);
+    rig.camera->set_start_y(kIntMax);
+    rig.camera->set_num_y(kIntMax);
+    require_alpaca_error([&] { rig.camera->start_exposure(0.01, true); }, iv);
     CHECK(rig.camera->get_camera_state() == CameraState::Idle);
 }
 

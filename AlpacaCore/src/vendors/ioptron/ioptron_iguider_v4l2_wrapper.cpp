@@ -294,7 +294,8 @@ bool IGuiderV4L2Wrapper::read_frame(int handle, std::vector<std::uint8_t>& luma,
     } while (ready == -1 && errno == EINTR);
     if (ready == -1) throw_errno("poll", errno);
     if (ready == 0) return false;
-    if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 && (pfd.revents & POLLIN) == 0) {
+    const bool poll_error = (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 && (pfd.revents & POLLIN) == 0;
+    if (poll_error) {
         // uvcvideo reports a removed camera this way; the dequeue below names it.
         ALPACA_LOG_DEBUG(kLog, "poll revents " + std::to_string(pfd.revents) + " on " + device->path);
     }
@@ -303,8 +304,13 @@ bool IGuiderV4L2Wrapper::read_frame(int handle, std::vector<std::uint8_t>& luma,
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf.memory = V4L2_MEMORY_MMAP;
     if (xioctl(device->fd, VIDIOC_DQBUF, &buf) == -1) {
-        if (errno == EAGAIN) return false;
-        throw_errno("VIDIOC_DQBUF", errno);
+        if (errno != EAGAIN) throw_errno("VIDIOC_DQBUF", errno);
+        // An error with nothing to dequeue would return at once on every call:
+        // fail instead, so the caller latches a fault rather than spinning.
+        if (poll_error) {
+            throw AlpacaException("iGuider poll reported an error with no frame ready", AlpacaError::DriverException);
+        }
+        return false;
     }
 
     const std::size_t expected = static_cast<std::size_t>(device->width) * static_cast<std::size_t>(device->height) * 2;
