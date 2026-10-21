@@ -12,7 +12,7 @@
 
 #pragma once
 
-#include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol.h>
 
 #include <atomic>
@@ -76,8 +76,7 @@ private:
     std::atomic<std::uint64_t> session_generation_{0};
     std::atomic<bool> healthy_{false};
     bool desynchronized_ = false;
-    std::string registered_port_path_;
-    util::SerialPortClaim claim_;  // registry claim on registered_port_path_
+    util::SerialLink link_;  // the claim, TIOCEXCL and the fd; serial_fd_ is link_.fd() while open
     std::vector<std::uint8_t> receive_buffer_;
 };
 

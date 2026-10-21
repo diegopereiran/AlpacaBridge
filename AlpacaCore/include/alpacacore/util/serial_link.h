@@ -60,6 +60,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -240,6 +241,15 @@ inline void make_raw_8n1(struct termios& tty, speed_t baud) {
     tty.c_iflag &= ~static_cast<tcflag_t>(IXON | IXOFF | IXANY);
 }
 
+/// Whether SerialLink::open() fails when the kernel refuses TIOCEXCL. Best
+/// effort logs a warning and keeps the port (the default); Required refuses
+/// it, for a link that must not share its tty (the Celestron CGX, decision
+/// 0011). The general rule is open on #1440.
+enum class SerialExclusive : std::uint8_t {
+    BestEffort,
+    Required,
+};
+
 /**
  * @brief A serial port this process owns: registry claim + fd + TIOCEXCL.
  *
@@ -272,11 +282,13 @@ public:
      * @param error Receives the operator-facing reason on failure. A probe
      *              refused because a connected driver holds the port gets an
      *              error too; probes normally just skip that port.
+     * @param exclusive Required makes a refused TIOCEXCL a failure.
      * @return an open link, or a closed one on failure (nothing held).
      */
     static SerialLink open(const std::string& path, SerialClaimKind kind, const std::string& owner,
                            const SerialLineConfigure& configure, std::string* error = nullptr,
-                           std::chrono::milliseconds probe_wait = kSerialProbeClaimWait) {
+                           std::chrono::milliseconds probe_wait = kSerialProbeClaimWait,
+                           SerialExclusive exclusive = SerialExclusive::BestEffort) {
         SerialLink link;
         auto fail = [&](const std::string& why) {
             if (error != nullptr) *error = why;
@@ -296,6 +308,9 @@ public:
             return fail(why);
         }
         if (::ioctl(link.fd_, TIOCEXCL) != 0) {
+            if (exclusive == SerialExclusive::Required) {
+                return fail("Could not lock serial port " + path + " for exclusive use: " + errno_string(errno));
+            }
             ALPACA_LOG_WARN("Serial", "Could not lock " + path + " for exclusive use (" + errno_string(errno) +
                                           "); another program can still open it");
         }
