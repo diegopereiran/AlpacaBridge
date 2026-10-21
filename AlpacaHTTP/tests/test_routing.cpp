@@ -8364,19 +8364,18 @@ int main() {
             bool released = false;
         };
         auto gate = std::make_shared<Gate>();
-        alpacahttp::Router router([gate](alpacacore::catalog::DeviceCatalog& c) {
+        const auto gated_create = [gate](const alpacacore::catalog::DeviceConfig&, int n) {
+            if (n == 9483) {
+                std::unique_lock<std::mutex> lock(gate->mutex);
+                gate->entered = true;
+                gate->cv.notify_all();
+                gate->cv.wait(lock, [&] { return gate->released; });
+            }
+            return std::unique_ptr<alpacacore::AlpacaDriver>(new alpacahttp::test_catalog::StubFocuser(n, "gated"));
+        };
+        alpacahttp::Router router([&](alpacacore::catalog::DeviceCatalog& c) {
             c.add(alpacahttp::test_catalog::make_schema());
-            c.add(alpacacore::catalog::Factory{
-                alpacahttp::test_catalog::kKey, [gate](const alpacacore::catalog::DeviceConfig&, int n) {
-                    if (n == 9483) {
-                        std::unique_lock<std::mutex> lock(gate->mutex);
-                        gate->entered = true;
-                        gate->cv.notify_all();
-                        gate->cv.wait(lock, [&] { return gate->released; });
-                    }
-                    return std::unique_ptr<alpacacore::AlpacaDriver>(
-                        new alpacahttp::test_catalog::StubFocuser(n, "gated"));
-                }});
+            c.add(alpacacore::catalog::Factory{alpacahttp::test_catalog::kKey, gated_create});
         });
         const std::string guid = alpacacore::util::generate_unique_id();
         const auto body = [&](int number) {
