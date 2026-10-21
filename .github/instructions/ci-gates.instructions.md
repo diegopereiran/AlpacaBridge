@@ -25,11 +25,11 @@ labeled PR fails the review job in seconds ("Actor does not have write permissio
 To onboard a new fork contributor, add their username to that list — do **not** grant
 them collaborator/write access; the `safe-to-review` label stays the per-PR trust gate.
 
-The bot reviews only a head whose CI build and test jobs passed (`build-test`,
-`build-vendors`, `sanitizers`, `sanitizers-tsan`): the job's first step waits up to 45
-minutes for them and fails before the agent runs when one is red, so a red push costs no
-review. The step matches the jobs' `name:` in `ci.yml`, so renaming one of those jobs means
-updating its list in the same PR (the step fails at once with "never reported" otherwise).
+The bot reviews only a head whose CI build and test jobs passed: the job's first step
+("Wait for the CI build and test jobs", which owns the list) waits up to 45 minutes for them
+and fails before the agent runs when one is red, so a red push costs no review. The step
+matches those jobs' `name:` in `ci.yml`, so renaming one means updating the list in the same
+PR (the step fails at once with "never reported" otherwise).
 `/pr-checker` and `/submit-pr` read that failure as poll exit `4`, a CI fix, not a broken
 review workflow.
 
