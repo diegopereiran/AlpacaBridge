@@ -517,6 +517,7 @@ private:
         bool awaiting_first_frame = false;  // after a restart: hold the controls until a frame lands
         bool needs_restart = false;
         std::optional<util::TaskClock::clock::time_point> fault_since;  // when the standing fault latched
+        bool restart_logged = false;                                    // one INFO restart line per fault
     };
 
     IGuiderV4L2& v4l2_;
@@ -768,7 +769,12 @@ private:
     }
 
     void restart_stream(int handle, StreamState& s) {
-        ALPACA_LOG_INFO(kLog, "Restarting the iGuider stream");
+        if (s.restart_logged) {
+            ALPACA_LOG_DEBUG(kLog, "Restarting the iGuider stream again");
+        } else {
+            ALPACA_LOG_INFO(kLog, "Restarting the iGuider stream");
+            s.restart_logged = true;
+        }
         v4l2_.stop_stream(handle);
         v4l2_.set_control(handle, IGuiderControl::ExposureAbsolute, kIGuiderTicks.front());
         v4l2_.start_stream(handle, kWidth, kHeight);
@@ -809,6 +815,7 @@ private:
         s.last_frame = arrival;
         s.awaiting_first_frame = false;
         s.fault_since.reset();
+        s.restart_logged = false;
         ++s.frames_since_change;
         clear_link_fault();
 
