@@ -47,6 +47,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iomanip>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -2215,21 +2216,21 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 client_tx_id = body_client_tx;
             }
 
-            std::optional<std::string> new_location;
-            if (body.contains("Location")) {
-                new_location = body["Location"].get<std::string>();
-            } else if (body.contains("location")) {
-                new_location = body["location"].get<std::string>();
-            }
-
-            std::optional<std::string> new_profile_name;
-            if (body.contains("ProfileName")) {
-                new_profile_name = body["ProfileName"].get<std::string>();
-            } else if (body.contains("profileName")) {
-                new_profile_name = body["profileName"].get<std::string>();
-            } else if (body.contains("profile_name")) {
-                new_profile_name = body["profile_name"].get<std::string>();
-            }
+            // #1476: a wrong-type field is an invalid value (400), never a
+            // type_error from get<std::string>(). The first spelling present wins.
+            const auto read_string_field = [&body](std::initializer_list<const char*> keys) {
+                std::optional<std::string> value;
+                for (const char* key : keys) {
+                    if (!body.contains(key)) continue;
+                    if (!body[key].is_string()) throw_invalid_value(std::string("Invalid value for ") + key);
+                    value = body[key].get<std::string>();
+                    break;
+                }
+                return value;
+            };
+            const std::optional<std::string> new_location = read_string_field({"Location", "location"});
+            const std::optional<std::string> new_profile_name =
+                read_string_field({"ProfileName", "profileName", "profile_name"});
 
             std::optional<bool> new_sync_clock;
             for (const char* key :
@@ -2421,7 +2422,12 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         alpaca_response.value = desc;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        const auto error_code = util::exception_to_error_code(e);
+        const bool is_write = request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT;
+        // A JSON type_error in a write is a field the server cannot interpret,
+        // whatever field a later change adds without its own type check.
+        const bool type_mismatch = dynamic_cast<const nlohmann::json::type_error*>(&e) != nullptr;
+        const auto error_code =
+            is_write && type_mismatch ? util::ErrorCode::INVALID_VALUE : util::exception_to_error_code(e);
         AlpacaResponse alpaca_response =
             make_error_response(client_tx_id, server_tx_id, error_code, util::exception_to_error_message(e));
         response.set_body(alpaca_response);
@@ -2429,7 +2435,6 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         // cannot interpret, answered 400 like the AllowedHosts refusal. A valid
         // write that fails (persist error, management driver) stays HTTP 200.
         // A client can trigger the 400, so it logs at DEBUG (ADR 0007 rule 9).
-        const bool is_write = request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT;
         if (is_write && error_code == util::ErrorCode::INVALID_VALUE) {
             util::log_debug("Refused description write: " + util::escape_for_log(e.what()));
             response.set_status(400, "Bad Request");

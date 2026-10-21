@@ -9516,6 +9516,9 @@ int main() {
             {"not json", 0x401},
             {"{}", 0x402},
             {"{\"HostCheckEnabled\":\"maybe\"}", 0x401},
+            {"{\"Location\":42}", 0x401},
+            {"{\"ProfileName\":null}", 0x401},
+            {"{\"profile_name\":[]}", 0x401},
         };
         for (const char* verb : {"PUT", "POST"}) {
             for (const auto& bad : cases) {
