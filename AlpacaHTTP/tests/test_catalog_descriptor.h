@@ -92,7 +92,7 @@ public:
     int get_device_number() const override { return number_; }
     std::string get_name() const override { return name_; }
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Focuser; }
-    std::string get_unique_id() const override { return "zzz-focuser-" + std::to_string(number_); }
+    std::string fallback_unique_id() const override { return "zzz-focuser-" + std::to_string(number_); }
     std::string get_description() const override { return "test descriptor stub"; }
     std::string get_driver_info() const override { return "test descriptor stub"; }
     std::string get_driver_version() const override { return "0.0.1"; }

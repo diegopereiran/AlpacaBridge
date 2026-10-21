@@ -10,6 +10,8 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/rotator_sync_offset_store.h>
+#include <alpacacore/util/unique_id.h>
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/catalog/builtin_catalog.h>
@@ -395,6 +397,25 @@ struct PersistedKey {
     std::string device_type{};  // lowercase
     int device_number = -1;
 };
+
+// Decision 0018: the persisted UniqueID of a configured device. A stored or
+// client-sent value is kept when it is a version 4 UUID that no other entry
+// holds (the web UI edits a device by removing and re-adding it, sending the
+// GUID back); anything else gets a fresh one.
+std::string stored_unique_id(const nlohmann::json& entry) {
+    const auto it = entry.find("uniqueId");
+    if (it == entry.end() || !it->is_string()) return {};
+    const std::string value = it->get<std::string>();
+    return alpacacore::util::is_unique_id(value) ? value : std::string();
+}
+
+std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::string>& taken) {
+    std::string value = stored_unique_id(entry);
+    while (value.empty() || taken.count(value) != 0) {
+        value = alpacacore::util::generate_unique_id();
+    }
+    return value;
+}
 
 std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     if (!entry.is_object()) {
@@ -2581,7 +2602,7 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
                 device["DeviceName"] = entry.value("vendor", "unknown") + " (failed to load)";
                 device["DeviceType"] = ptype;
                 device["DeviceNumber"] = pnum;
-                device["UniqueID"] = "";
+                device["UniqueID"] = stored_unique_id(entry);  // decision 0018
                 device["Vendor"] = entry.value("vendor", "");
                 device["Config"] = entry;
                 device["LoadError"] = true;
@@ -7082,6 +7103,20 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
+        // Decision 0018: keep a GUID the client sends back (the web UI's edit
+        // removes the entry first, so its own GUID is free again) unless another
+        // entry holds it; otherwise mint one.
+        {
+            std::set<std::string> taken;
+            {
+                std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+                for (const auto& entry : persisted_devices_) {
+                    if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
+                }
+            }
+            config["uniqueId"] = choose_unique_id(config, taken);
+        }
+
         std::string error_message;
         nlohmann::json learned_config = nlohmann::json::object();
         if (!register_device_from_config(config, error_message, ConfigSource::Api, &learned_config)) {
@@ -8415,6 +8450,13 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                     (*learned_config)[field] = nullptr;
                 }
             }
+            // Decision 0018: the configured device's persisted GUID is its UniqueID.
+            std::string unique_id = stored_unique_id(config);
+            if (unique_id.empty()) {
+                unique_id = alpacacore::util::generate_unique_id();
+                if (learned_config != nullptr) (*learned_config)["uniqueId"] = unique_id;
+            }
+            bound.driver->assign_unique_id(unique_id);
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(bound.driver)))) {
                 util::log_info("Registered " + vendor_label(*view) + " " + device_type_str);
                 return true;
@@ -8499,6 +8541,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     copy_if_present("siteElevation");
     copy_if_present("learnSiteFromClient");  // open-astro#444
     copy_if_present("syncTimeOnConnect");
+    // Decision 0018: the server-owned GUID, for every device type.
+    if (const std::string unique_id = stored_unique_id(config); !unique_id.empty()) {
+        sanitized["uniqueId"] = unique_id;
+    }
 
     return sanitized;
 }
@@ -8687,6 +8733,8 @@ void Router::load_persisted_devices() {
     // the loaded devices afterwards so the lock is never held across
     // driver-registry calls (which may block on hardware).
     nlohmann::json payload = nlohmann::json::array();
+    bool assigned_unique_ids = false;
+    std::set<std::string> live_unique_ids;
     {
         std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
         if (persisted_devices_loaded_) {
@@ -8713,13 +8761,35 @@ void Router::load_persisted_devices() {
             }
 
             persisted_devices_.clear();
-            for (const auto& entry : payload) {
-                persisted_devices_.push_back(sanitize_device_config(entry));
+            // Decision 0018: every stored entry gets a GUID once (the upgrade, or a
+            // hand-edited file), and a duplicated one is replaced in the later entry.
+            std::set<std::string> taken;
+            for (auto& entry : payload) {
+                nlohmann::json sanitized = sanitize_device_config(entry);
+                const std::string unique_id = choose_unique_id(sanitized, taken);
+                if (stored_unique_id(sanitized) != unique_id) {
+                    assigned_unique_ids = true;
+                    if (entry.is_object()) entry["uniqueId"] = unique_id;
+                    sanitized["uniqueId"] = unique_id;
+                }
+                taken.insert(unique_id);
+                persisted_devices_.push_back(std::move(sanitized));
             }
+            live_unique_ids = std::move(taken);
         } catch (const std::exception& e) {
             util::log_error("Failed to load registered devices: " + std::string(e.what()));
             return;
         }
+    }
+    if (assigned_unique_ids) {
+        util::log_info("Assigned a persisted UniqueID to the stored devices that had none (decision 0018)");
+        save_persisted_devices();
+    }
+    // A removed rotator's offset goes here, not at removal: the web UI's edit
+    // removes and re-adds the entry with the same GUID (decisions 0008, 0018).
+    if (const std::size_t pruned = alpacacore::util::RotatorSyncOffsetStore::prune_unknown_unique_ids(live_unique_ids);
+        pruned > 0) {
+        util::log_info("Removed " + std::to_string(pruned) + " sync offset(s) of rotators no longer configured");
     }
 
     for (const auto& entry : payload) {
