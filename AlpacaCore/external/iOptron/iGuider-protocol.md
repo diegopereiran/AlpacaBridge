@@ -15,7 +15,7 @@ The decompiled vendor driver and its installer are not committed.
    special cases, in particular PR #2012 (2024-03-08), whose author sniffed the Windows
    driver on the USB bus, and issue #1722.
 3. **Our probe** of a unit on 2026-10-20 (VMware arm64 VM, kernel 6.12, `v4l2-ctl`). Frames
-   could not be captured there (see "Not yet confirmed").
+   could not be captured there; see "Confirmed on the Pi rig (2026-10-21)" for the frames.
 
 ## Device
 
