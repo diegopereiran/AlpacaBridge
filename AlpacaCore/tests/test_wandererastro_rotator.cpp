@@ -279,6 +279,43 @@ TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro
     restarted->set_connected(false);
 }
 
+// Two Syncs at once must leave the stored offset and Position agreeing: one
+// Sync's save and in-memory write may not straddle the other's, or a restart
+// moves Position to the offset the file kept (review of #1493). The first Sync
+// is held between its save and its in-memory write while the second runs.
+TEST_CASE("WandererAstro Rotator Driver - Concurrent Syncs leave the file and Position agreeing",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    using alpacacore::util::RotatorSyncOffsetStore;
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    std::atomic<bool> first_saved{false};
+    std::atomic<bool> release{false};
+    std::atomic<int> saves{0};
+    RotatorSyncOffsetStore::set_after_save_hook_for_testing([&] {
+        if (saves.fetch_add(1) == 0) {
+            first_saved.store(true);
+            while (!release.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    });
+    std::thread first([&] { driver->sync(10.0); });
+    while (!first_saved.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::thread second([&] { driver->sync(20.0); });
+    // Without serialisation the second Sync saves and publishes in this window.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    release.store(true);
+    first.join();
+    second.join();
+    RotatorSyncOffsetStore::set_after_save_hook_for_testing({});
+    CHECK(RotatorSyncOffsetStore::load(driver->get_unique_id()) == driver->get_position());
+    driver->set_connected(false);
+}
+
 // Decision 0008 (#1473): IRotatorV4 requires the offset to persist, so a Sync
 // that cannot store it fails and the previous offset stays.
 TEST_CASE("WandererAstro Rotator Driver - Sync that cannot save throws and keeps the offset",

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <set>
 #include <string>
 
@@ -35,6 +36,11 @@ public:
     // Test seam: replace the process-wide default path; an empty string restores
     // the built-in default. Returns the previous override (empty if none).
     static std::string set_default_path(const std::string& path);
+
+    // Test seam: called after every save() returns its result, with no store
+    // lock held, so a test can hold one Sync between its save and its in-memory
+    // write. Empty by default; tests clear it afterwards.
+    static void set_after_save_hook_for_testing(std::function<void()> hook);
 
     // Offset for @p key, or 0 when there is no usable entry.
     static double load(const std::string& key);

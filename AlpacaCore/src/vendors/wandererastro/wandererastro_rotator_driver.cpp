@@ -287,6 +287,7 @@ public:
         const double mechanical = protocol_.get_state().mechanical_angle;
         const double target = normalize_angle(position);
         const double new_offset = normalize_angle(target - mechanical);
+        std::lock_guard<std::mutex> serial(sync_mutex_);
         // IRotatorV4: the offset must persist. A Sync that cannot store it has
         // failed, so it throws and keeps the previous offset (decision 0008).
         if (!util::RotatorSyncOffsetStore::save(get_unique_id(), new_offset)) {
@@ -356,6 +357,10 @@ private:
     bool has_target_position_ = false;
 
     std::mutex transition_mutex_;  // serializes set_connected() connect/disconnect transitions
+    // Serializes sync() from its save through its in-memory write, so the stored
+    // offset and sync_offset_ always come from the same Sync. Taken before
+    // state_mutex_; never held by a getter, so a slow save never stalls one.
+    std::mutex sync_mutex_;
 };
 
 std::unique_ptr<RotatorDriver> create_wandererastro_rotator(int device_number, const std::string& serial_port,

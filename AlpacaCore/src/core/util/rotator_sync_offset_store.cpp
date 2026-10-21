@@ -34,6 +34,11 @@ std::mutex& store_mutex() {
     return m;
 }
 
+std::function<void()>& after_save_hook() {
+    static std::function<void()> hook;
+    return hook;
+}
+
 std::string& path_override() {
     static std::string p;
     return p;
@@ -194,9 +199,8 @@ void write_all_locked(const std::string& path, const std::map<std::string, doubl
     std::filesystem::rename(tmp, p);
 }
 
-}  // namespace
-
-bool RotatorSyncOffsetStore::save(const std::string& key, double offset_degrees) {
+// save() without the test hook.
+bool save_entry(const std::string& key, double offset_degrees) {
     std::lock_guard<std::mutex> lock(store_mutex());
     const std::string path = effective_path_locked();
     if (!std::isfinite(offset_degrees)) {
@@ -214,6 +218,24 @@ bool RotatorSyncOffsetStore::save(const std::string& key, double offset_degrees)
     } catch (...) {
         return false;
     }
+}
+
+}  // namespace
+
+void RotatorSyncOffsetStore::set_after_save_hook_for_testing(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(store_mutex());
+    after_save_hook() = std::move(hook);
+}
+
+bool RotatorSyncOffsetStore::save(const std::string& key, double offset_degrees) {
+    const bool saved = save_entry(key, offset_degrees);
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(store_mutex());
+        hook = after_save_hook();
+    }
+    if (hook) hook();
+    return saved;
 }
 
 double RotatorSyncOffsetStore::load_or_adopt(const std::string& key, const std::string& legacy_key) {
