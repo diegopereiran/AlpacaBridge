@@ -79,8 +79,8 @@ Checks to make before waiting on anything:
    gh api -X PUT repos/open-astro/AlpacaBridge/pulls/<N>/update-branch
    ```
    **Check the result before polling for a verdict**: `update-branch` returns HTTP 422 on a
-   merge conflict, and a chain that ignores that then waits 30 minutes for a verdict that never
-   comes (PRs #270 and #272 both stalled this way on 2026-09-10). GitHub recomputes
+   merge conflict, and a chain that ignores that then waits out the full poll budget for a verdict
+   that never comes (PRs #270 and #272 both stalled this way on 2026-09-10). GitHub recomputes
    mergeability asynchronously, so the first read after the call is usually `UNKNOWN`; poll
    until it settles and treat a timeout as a conflict, never as "fine":
    ```bash
@@ -199,7 +199,8 @@ Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `B
 produce a verdict for this head (the newest run failed, succeeded without publishing one, or
 the job was skipped or every run was cancelled); the message says which and carries the run URL where there is one.
 `4` = CI red, review skipped: the review job waits for CI's build and test jobs and fails before
-the agent runs when one is red (its error annotation starts with `CI `). Every
+the agent runs when one is red (its error annotation starts with `CI `). A job someone cancelled
+by hand reads as red too: re-run that current-head run (`gh run rerun <run-id> --failed`) instead of changing code. Every
 non-zero exit prints nothing on stdout, so a chained `poll && merge` never reaches the merge.
 `date -d` is GNU; the skills run on the Linux dev VM.
 
@@ -319,7 +320,7 @@ For **every** Defect, in this order:
      since #1251; the core binary is `AlpacaHTTP/build/AlpacaCore/tests/alpacacore_tests`, and
      `AlpacaCore/build` is deleted, not built) holds the ASan+UBSan vendors-OFF binary
      rather than gate 4's vendors-ON one -- since #588 the sanitized pass is the last of the
-     three `run_all_tests.sh` invocations (`ci_preflight.sh:477`, after zizmor) and
+     three `run_all_tests.sh` invocations (the `sanitizers` section of `ci_preflight.sh`, after zizmor) and
      `run_all_tests.sh` `rm -rf`s its build tree on entry. `ci_preflight.sh` sets no
      `-e`, so it reaches that pass whether or not an earlier gate failed. (Under
      `RUN_SANITIZERS=0` the pass is skipped and `AlpacaHTTP/build` does still hold gate 4's
