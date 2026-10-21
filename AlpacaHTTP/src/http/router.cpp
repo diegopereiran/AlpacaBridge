@@ -2460,7 +2460,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             util::log_debug("Refused description write: " + util::escape_for_log(e.what()));
             response.set_status(400, "Bad Request");
         } else {
-            util::log_error("Error getting description: " + std::string(e.what()));
+            util::log_error(std::string(is_write ? "Error writing description: " : "Error getting description: ") +
+                            e.what());
         }
     }
 

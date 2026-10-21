@@ -9483,10 +9483,11 @@ int main() {
             }
             // A whole number written as 0.0 stays accepted, as the query path accepts "0".
             const std::string whole = std::string("{\"") + probe.param + "\":0.0,\"Value\":0}";
-            const auto ok =
-                nlohmann::json::parse(route_request(router, "PUT", probe.path, whole).body(), nullptr, false);
-            if (ok.is_discarded() || ok.value("ErrorNumber", -1) == 0x401) {
-                wrong.push_back(std::string(probe.path) + " " + probe.param + "=0.0 refused as InvalidValue");
+            const auto ok_response = route_request(router, "PUT", probe.path, whole);
+            const auto ok = nlohmann::json::parse(ok_response.body(), nullptr, false);
+            if (ok_response.status_code() != 200 || ok.is_discarded() || ok.value("ErrorNumber", -1) != 0) {
+                wrong.push_back(std::string(probe.path) + " " + probe.param + "=0.0 not accepted (ErrorNumber " +
+                                std::to_string(ok.is_discarded() ? -2 : ok.value("ErrorNumber", -1)) + ")");
             }
         }
         for (const auto& line : wrong) std::cerr << "  " << line << "\n";
