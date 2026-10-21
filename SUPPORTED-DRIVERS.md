@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-20
+## Updated 2026-10-21
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -845,7 +845,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | AM3 | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM3/) |
-| AM5 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
+| AM5 | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM5/) |
 | AM5N | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM5N/) |
 | AM7 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 
@@ -855,6 +855,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Protocol**: ZWO Mount Serial Communication Protocol (see `AlpacaCore/external/ZWO/AM/ZWO_Mount_Protocol.md`)
 - **Connection**: Serial over USB, network (TCP), or **auto-detect**. **Tested and working with USB and WiFi**. PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections. `connectionType: auto` probes USB serial ports and the mount's WiFi AP (`192.168.4.1:4030`) at connect time and connects to whichever ZWO mount answers (AM3/AM5/AM5N/AM7).
 - **Tested firmware**: Driver tested on ZWO **firmware 1.8.8\***. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
+- **AM5 validated** (ConformU 4.5.2, firmware 1.8.6, Linux arm64, USB, 2026-10-20 on a `stable/5.0` build before the serial port ownership change #1202): 0 errors, 0 warnings, 0 issues, 0 timing issues. The run covers the east-positive longitude conversion, the arrival publication with final coordinates, and the removal of the mirrored-longitude retry.
 - **AM5N validated** (ConformU 4.4.0, Linux arm64, USB): 0 errors, 0 issues, 0 timing issues. Park requires the mount to have been homed; the driver infers park completion from a stationary mount when :hP does not physically move it. Setting Tracking=true while parked throws `InvalidWhileParked`. The park-state cache in the poll thread is left un-pinned during active parks so the completion inference is not defeated.
 - **WiFi characteristics**: the same driver connects and operates over the mount's WiFi AP (`192.168.4.1:4030`) with auto-detect. ConformU over WiFi reports 0 errors but a few STANDARD (1.0 s) members (Park, FindHome, guide-rate writes) land at ~1.03–1.09 s because each operation costs several serial round-trips at WiFi latency — a link-speed characteristic, not a driver defect. USB is the ConformU-validated transport; WiFi is verified functional for normal use.
 
