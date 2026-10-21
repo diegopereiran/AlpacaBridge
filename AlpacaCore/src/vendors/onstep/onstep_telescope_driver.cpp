@@ -20,6 +20,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -290,7 +291,7 @@ public:
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             site_info_valid_ = false;
-            last_utc_valid_ = false;
+            utc_offset_.clear();
             client_disagreement_warned_ = false;
             firmware_reports_guide_move_ = false;
             target_ra_set_ = false;
@@ -813,7 +814,8 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!last_utc_valid_) {
+        if (!utc_offset_.valid()) {
+            std::chrono::system_clock::time_point seeded;
             try {
                 TimeInfo info = OnStepProtocolWrapper::instance().get_time();
                 using namespace std::chrono;
@@ -824,12 +826,11 @@ public:
                 auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
                 auto offset = duration_cast<system_clock::duration>(
                     std::chrono::duration<double, std::ratio<3600>>(info.utc_offset_hours));
-                last_utc_set_ = local_time - offset;
+                seeded = local_time - offset;
             } catch (...) {  // NOLINT(bugprone-empty-catch)
-                last_utc_set_ = std::chrono::system_clock::now();
+                seeded = std::chrono::system_clock::now();
             }
-            last_utc_set_monotonic_ = clock_.now();
-            last_utc_valid_ = true;
+            utc_offset_.set(seeded, clock_.now());
         }
         return current_utc_time_locked();
     }
@@ -1407,6 +1408,7 @@ private:
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         pulse_guiding_active_ = false;
+        utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
     }
 
     // open-astro#521: OnStepX keeps running a GOTO while the serial link is
@@ -1717,22 +1719,22 @@ private:
 
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         OnStepProtocolWrapper::instance().set_time(info);
-        last_utc_set_ = utc;
-        last_utc_set_monotonic_ = clock_.now();
-        last_utc_valid_ = true;
+        utc_offset_.set(utc, clock_.now());
         // The mount now runs on the client's clock and so does the LST above;
         // on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("OnStep", client_minus_host, client_disagreement_warned_);
     }
 
+    // The lazy re-seed below can now also follow a disconnect, which clears
+    // utc_offset_. That is harmless: every caller is guarded by NotConnected.
     std::chrono::system_clock::time_point current_utc_time_locked() const {
-        if (!last_utc_valid_) {
-            last_utc_set_ = std::chrono::system_clock::now();
-            last_utc_set_monotonic_ = clock_.now();
-            last_utc_valid_ = true;
+        const auto now = clock_.now();
+        if (const auto utc = utc_offset_.current(now)) {
+            return *utc;
         }
-        auto elapsed = clock_.now() - last_utc_set_monotonic_;
-        return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+        const auto seeded = std::chrono::system_clock::now();
+        utc_offset_.set(seeded, now);
+        return seeded;
     }
 
     // Decision 0005: every wait, sleep and deadline of this driver (#1378),
@@ -1790,9 +1792,9 @@ private:
     mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
     double site_elevation_m_;
 
-    mutable std::chrono::system_clock::time_point last_utc_set_;
-    mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
-    mutable bool last_utc_valid_ = false;
+    // Decision 0014: the UTCDate a client wrote (or the seed) and the task-clock
+    // time since. Cleared on connect and disconnect. Under mutex_.
+    mutable util::UtcOffset utc_offset_;
 
     mutable bool slewing_cached_ = false;
     mutable std::chrono::steady_clock::time_point slew_force_until_;

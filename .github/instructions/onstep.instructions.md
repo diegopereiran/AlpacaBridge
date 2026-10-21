@@ -111,13 +111,14 @@ it is never reachable through `router.cpp` or the web UI.
     `create_onstep_telescope()` / `create_onstep_telescope_with_site()`, default the real clock),
     the re-send slot waits through it, and the other deadlines read it too: the 2 s status and
     position cache ages, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
-    sleeps, the elapsed time since a UTCDate write (decision 0014), and the #521 relink outage:
+    sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
+    connect and on disconnect), and the #521 relink outage:
     the driver hands its clock to the process-wide wrapper at connect
     (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
     when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
     clock. The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
     `advance()` it (7 s per re-send tick, 2.1 s past a cache, 250 ms steps through a synchronous
-    slew, 2 s past the relink window).
+    slew, 2 s past the relink window, 60 s past a UTCDate write).
   - **Only while the mount shows the move.** Each tick reads `:GU#` first and re-sends only when
     that read shows `g` (a guide-style move runs, either axis). A move the firmware let lapse stays
     ended: its time limit, or the 5 s `GUIDE_TIME_NO_LIMITS` cap it applies while its soft limits

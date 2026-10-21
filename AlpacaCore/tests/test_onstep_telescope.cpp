@@ -316,6 +316,45 @@ TEST_CASE("OnStep Telescope Driver - a far-off client UTCDate is logged once per
     driver->set_connected(false);
 }
 
+// The UTCDate readback is the client's value plus the time elapsed since the
+// write, read from the driver's TaskClock (decision 0014), so the case moves
+// it with advance() and never sleeps.
+TEST_CASE(
+    "OnStep Telescope Driver - a written UTCDate reads back advanced by the task clock and is dropped on reconnect",
+    "[onstep][telescope][unit][utc-offset]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) {
+        if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
+            return std::string("1");
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    // An hour from the host, so the re-seed after a reconnect cannot equal it.
+    const auto written = std::chrono::system_clock::now() + std::chrono::hours(1);
+    driver->set_utc_date(written);
+    CHECK(driver->get_utc_date() == written);  // the fake clock has not moved
+
+    clock.advance(std::chrono::seconds(60));
+    (void)clock.wait_for_woken_settled(std::chrono::seconds(2));
+    CHECK(driver->get_utc_date() == written + std::chrono::seconds(60));
+
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto reseeded = driver->get_utc_date();
+    const auto gap = reseeded > written ? reseeded - written : written - reseeded;
+    CHECK(gap > std::chrono::minutes(30));
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep Telescope Driver - a slow mount ack does not turn an accurate client clock into a warning",
           "[onstep][telescope][unit]") {
     // The offset is sampled BEFORE the mount write (review round 2 on #471):
