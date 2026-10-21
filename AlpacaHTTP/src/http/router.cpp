@@ -509,6 +509,37 @@ int parse_int_value(const std::string& raw, const std::string& param_name) {
     }
 }
 
+// A JSON-body integer parameter (#1476): accepted only as a whole number
+// inside int, given as a JSON integer, a JSON number with no fraction (0.0),
+// or a string parse_int_value() accepts. The query and form paths already
+// refuse "0.5" and values outside int; before this, the JSON path truncated
+// 0.5 to 0 and wrapped 2^32 to 0 in all six device dispatchers.
+int json_int_value(const nlohmann::json& value, const std::string& param_name) {
+    constexpr auto kMin = static_cast<long long>(std::numeric_limits<int>::min());
+    constexpr auto kMax = static_cast<long long>(std::numeric_limits<int>::max());
+    if (value.is_number_unsigned()) {
+        const auto v = value.get<std::uint64_t>();
+        if (v > static_cast<std::uint64_t>(kMax)) throw_invalid_value("Invalid value for parameter: " + param_name);
+        return static_cast<int>(v);
+    }
+    if (value.is_number_integer()) {
+        const auto v = value.get<std::int64_t>();
+        if (v < kMin || v > kMax) throw_invalid_value("Invalid value for parameter: " + param_name);
+        return static_cast<int>(v);
+    }
+    if (value.is_number_float()) {
+        const double d = value.get<double>();
+        if (!std::isfinite(d) || d != std::trunc(d) || d < static_cast<double>(kMin) || d > static_cast<double>(kMax)) {
+            throw_invalid_value("Invalid value for parameter: " + param_name);
+        }
+        return static_cast<int>(d);
+    }
+    if (value.is_string()) {
+        return parse_int_value(value.get<std::string>(), param_name);
+    }
+    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+}
+
 bool parse_bool_value(const std::string& raw, const std::string& param_name) {
     std::string lowered = to_lower_copy(raw);
     if (lowered == "true" || lowered == "1") {
@@ -2162,6 +2193,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     "Missing request body"
                 );
                 response.set_body(err);
+                response.set_status(400, "Bad Request");  // #1476: a write it cannot interpret (ADR 0007)
                 return response;
             }
 
@@ -2173,6 +2205,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     "Invalid JSON payload"
                 );
                 response.set_body(err);
+                response.set_status(400, "Bad Request");  // #1476
                 return response;
             }
 
@@ -2257,6 +2290,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     "Request must include a 'Location', 'ProfileName', 'SyncSystemClockFromClients', "
                     "'HostCheckEnabled' or 'AllowedHosts' property");
                 response.set_body(err);
+                response.set_status(400, "Bad Request");  // #1476
                 return response;
             }
 
@@ -2387,13 +2421,24 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         alpaca_response.value = desc;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting description: " + std::string(e.what()));
+        const auto error_code = util::exception_to_error_code(e);
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
+            error_code,
             util::exception_to_error_message(e)
         );
         response.set_body(alpaca_response);
+        // #1476: an invalid field value in a write is a request the server
+        // cannot interpret, answered 400 like the AllowedHosts refusal. A valid
+        // write that fails (persist error, management driver) stays HTTP 200.
+        // A client can trigger the 400, so it logs at DEBUG (ADR 0007 rule 9).
+        const bool is_write = request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT;
+        if (is_write && error_code == util::ErrorCode::INVALID_VALUE) {
+            util::log_debug("Refused description write: " + util::escape_for_log(e.what()));
+            response.set_status(400, "Bad Request");
+        } else {
+            util::log_error("Error getting description: " + std::string(e.what()));
+        }
     }
 
     return response;
@@ -2405,6 +2450,16 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // #1486: the Management API defines this path for GET only.
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for configureddevices endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
     }
 
     try {
@@ -3576,16 +3631,7 @@ Response Router::dispatch_telescope_method(
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, param_name)) {
-                        if (val->is_number_integer()) {
-                            return val->get<int>();
-                        }
-                        if (val->is_number()) {
-                            return static_cast<int>(val->get<double>());
-                        }
-                        if (val->is_string()) {
-                            return parse_int_value(val->get<std::string>(), param_name);
-                        }
-                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                        return json_int_value(*val, param_name);
                     }
                 }
             }
@@ -4501,28 +4547,10 @@ Response Router::dispatch_camera_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5087,28 +5115,10 @@ Response Router::dispatch_switch_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5353,28 +5363,10 @@ Response Router::dispatch_filterwheel_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5500,28 +5492,10 @@ Response Router::dispatch_focuser_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -6127,28 +6101,10 @@ Response Router::dispatch_covercalibrator_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -6563,6 +6519,16 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // #1486: the Management API defines this path for GET only.
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for apiversions endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
     }
 
     try {
