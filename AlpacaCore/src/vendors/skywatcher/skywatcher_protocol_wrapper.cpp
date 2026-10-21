@@ -1743,7 +1743,6 @@ void SkyWatcherProtocolWrapper::set_task_clock(util::TaskClock& clock) { pimpl_-
 
 bool SkyWatcherProtocolWrapper::link_alive() { return pimpl_->link_alive(); }
 
-
 std::string SkyWatcherProtocolWrapper::link_fault() { return pimpl_->link_fault(); }
 
 bool SkyWatcherProtocolWrapper::link_faulted() { return !pimpl_->link_fault().empty(); }
