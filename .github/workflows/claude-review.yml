@@ -35,6 +35,7 @@ jobs:
       pull-requests: write
       id-token: write
       checks: read
+      actions: read
     steps:
       # Review only a head whose build and test jobs passed: a red build would
       # otherwise pay for a full review the next push throws away. The names
@@ -82,10 +83,16 @@ jobs:
               echo "CI build and test jobs passed on ${HEAD_SHA}."
               exit 0
             fi
-            # Every other job on this head has finished and a required name is
-            # still absent: it was renamed in ci.yml, or never ran.
-            others_running="$(jq '[.[] | select(.name != "review" and .status != "completed")] | length' <<<"${runs}")"
-            others_done="$(jq '[.[] | select(.name != "review" and .status == "completed")] | length' <<<"${runs}")"
+            # Every other ci.yml job on this head has finished and a required
+            # name is still absent: it was renamed in ci.yml. Only ci.yml's own
+            # check suites count: a pull_request_target workflow
+            # (decision-records) finishes in seconds on a fork PR whose CI still
+            # waits for approval, and must not read as "CI finished".
+            ci_suites="$(gh api --paginate "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&per_page=100" \
+              --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | .check_suite_id' \
+              | jq -s .)" || ci_suites='[]'
+            others_running="$(jq --argjson s "${ci_suites}" '[.[] | select(.check_suite.id | IN($s[])) | select(.status != "completed")] | length' <<<"${runs}")"
+            others_done="$(jq --argjson s "${ci_suites}" '[.[] | select(.check_suite.id | IN($s[])) | select(.status == "completed")] | length' <<<"${runs}")"
             if [ "${#missing[@]}" -gt 0 ] && [ "${others_running}" = 0 ] && [ "${others_done}" -gt 0 ]; then
               printf '::error::CI finished on %s but these jobs never reported (renamed in ci.yml?): %s\n' \
                 "${HEAD_SHA}" "$(IFS=';'; echo "${missing[*]}")"
