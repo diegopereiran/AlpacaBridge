@@ -7,9 +7,9 @@
 # /submit-pr skill calls this; it is also runnable by hand.
 #
 # The default run is the QUICK set: every gate that needs no build (clang-format,
-# the Python gates, the beta VERSION split, shellcheck, the web UI JavaScript and
-# zizmor), in about a minute. The build and test gates (both run_all_tests.sh
-# passes, clang-tidy, cppcheck and the ASan+UBSan pass) run only with
+# the Python gates, the beta VERSION split, cppcheck, shellcheck, the web UI
+# JavaScript and zizmor), in about a minute. The build and test gates (both
+# run_all_tests.sh passes, clang-tidy and the ASan+UBSan pass) run only with
 # PREFLIGHT_FULL=1 and are reported [SKIP] otherwise. CI runs every one of them on
 # each PR, and the review bot waits for those CI jobs before it reviews, so a red
 # build costs CI minutes, not a review round.
@@ -548,8 +548,6 @@ section "cppcheck (changed files)"
 if [ "${#SRC_CPP_FILES[@]}" -eq 0 ]; then
   echo "No changed C/C++ source files -- skipping."
   record SKIP "cppcheck (no source changes)"
-elif ! full_only "cppcheck"; then
-  echo "Skipped in the quick run."
 elif ensure_tool cppcheck cppcheck; then
   if cppcheck \
       --enable=warning,performance,portability \

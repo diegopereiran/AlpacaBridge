@@ -87,7 +87,9 @@ jobs:
             # name is still absent: it was renamed in ci.yml. Only ci.yml's own
             # check suites count: a pull_request_target workflow
             # (decision-records) finishes in seconds on a fork PR whose CI still
-            # waits for approval, and must not read as "CI finished".
+            # waits for approval, and must not read as "CI finished". A failed
+            # lookup leaves ci_suites empty, so a rename then surfaces as the
+            # 45-minute timeout instead of at once; that errs toward waiting.
             ci_suites="$(gh api --paginate "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&per_page=100" \
               --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | .check_suite_id' \
               | jq -s .)" || ci_suites='[]'
