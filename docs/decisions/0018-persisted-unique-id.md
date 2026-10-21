@@ -18,7 +18,7 @@ Decided 2026-10-21 on issue #1470 (item 1): every configured device gets a GUID 
 - **The server owns it.** A `uniqueId` a client sends to `configuredevice` is ignored: a new entry gets a fresh GUID and an edited entry keeps its stored one. `sanitize_device_config` keeps the field for every device type.
 - **Every reader sees the same value.** The router passes the stored GUID to the driver it constructs, and `get_unique_id()` returns it, so `configureddevices`, logs and the rotator offset store all use one ID. A device that failed to load is listed with its stored GUID, not an empty string.
 - **Hardware identity stays separate.** A serial number or SDK index still selects which physical device a driver binds to. It no longer forms the `UniqueID`.
-- **Upgrade.** On the first start of a version with this rule, every entry without a `uniqueId` gets one and the config is written back once. The ZWO camera's stored `ZWO_UID_` value is replaced like any other ID. The same step renames each rotator sync offset entry from the old ID to the new GUID.
+- **Upgrade.** On the first start of a version with this rule, every entry without a `uniqueId` gets one and the config is written back once. The ZWO camera's stored `ZWO_UID_` value is replaced like any other ID. The same step renames each rotator sync offset entry from the old ID to the new GUID, which is why issue #1471 lands before issue #1473 ([decision 0008](0008-rotator-sync-offset-persistence.md), Consequences).
 
 ## Rules
 

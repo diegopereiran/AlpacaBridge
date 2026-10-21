@@ -15,7 +15,7 @@ Decided 2026-10-21 on issue #1470 (item 5): allow Connect without a site, and re
 ## Decision
 
 - **Connect does not need a site.** `Connected=true` and Platform 7 `Connect` succeed without one and send the mount no command whose meaning depends on the hemisphere.
-- **The site getters throw until set.** `SiteLatitude` and `SiteLongitude` throw `InvalidOperation` until they are set by the device config or a client write. `SiteElevation` follows the same rule.
+- **The site getters throw until set.** `SiteLatitude` and `SiteLongitude` throw `InvalidOperation` until they are set by the device config or a client write. `SiteElevation` throws `InvalidOperation` until elevation itself is set; it does not wait for the coordinates.
 - **Members that depend on the hemisphere or longitude throw until both are set.** They throw `InvalidOperation`, naming the missing setting. The set covers every member whose answer or motion goes through `hemisphere_south_locked()` or uses the longitude: `RightAscension`, `Declination`, `SiderealTime`, the slew and sync members, `Tracking=true`, `MoveAxis`, `PulseGuide`, and `RightAscensionRate` and `DeclinationRate`. Members that do not depend on the site (`Connected`, capabilities, `AtPark`, `Slewing`, `AbortSlew`, `Tracking` reads) keep answering.
 - **`DeviceState` omits what throws**, as the base class already does, so a connected mount with no site reports a short list.
 - **Writing the second coordinate makes the mount usable** without a reconnect.
