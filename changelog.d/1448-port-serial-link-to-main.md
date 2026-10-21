@@ -1,0 +1,5 @@
+### Fixed
+- **Celestron CGX direct USB: the port opens through SerialLink like every other serial driver** (AlpacaCore, issue #1448): a connect to a port another connected device holds is refused with that device's name, a connect waits out another device's auto-detect probe on its port instead of being refused, and the port claim, the exclusive lock and the open file live and die together. The CGX link still requires the exclusive lock: `util::SerialLink::open()` gains an opt-in `SerialExclusive::Required`, and every other driver keeps the best-effort default.
+
+### Changed (docs)
+- **Decision 0017 is adopted on main** (`docs/decisions/0017-serial-port-ownership.md`, issue #1448): every serial wrapper row moves from planned to adopted, the SynScan handset probe gets its own row, rule 1 names `scripts/check_serial_port_ownership.py`, and rule 5 states the `poll()` bound that Sky-Watcher's and the CGX's own read and write loops also meet. The serial rules move from `AGENTS.md` into `.github/instructions/serial-autodetect.instructions.md` on main.

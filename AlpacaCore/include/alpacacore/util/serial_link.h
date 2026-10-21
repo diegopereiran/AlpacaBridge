@@ -28,7 +28,8 @@
 // effect on a non-blocking fd, so a retune to VMIN=1/VTIME=0 cannot park a
 // reader in n_tty_read and hang Disconnect or service stop (the #1202
 // WandererRotator and OnStep hangs). Some USB CDC-ACM ports ignore VTIME
-// anyway (the Sky-Watcher rule in AGENTS.md); this makes that the only shape.
+// anyway (the Sky-Watcher rule in the serial-autodetect instructions); this
+// makes that the only shape.
 //
 // When a read times out, tty_read() checks the line settings against the
 // ones SerialLink recorded and puts them back if another program changed
