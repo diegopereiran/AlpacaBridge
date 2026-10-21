@@ -41,7 +41,12 @@ public:
     CelestronCgxProtocol(const CelestronCgxProtocol&) = delete;
     CelestronCgxProtocol& operator=(const CelestronCgxProtocol&) = delete;
 
-    void connect_serial(const std::string& port_path, AuxLinkSpeed speed = AuxLinkSpeed::Baud115200);
+    /// @param probe_wait How long the port claim waits out another device's
+    ///                   auto-detect probe on the port. A reconnect made under
+    ///                   a driver lock passes zero, so it fails at once instead
+    ///                   of blocking that lock's getters (#1457).
+    void connect_serial(const std::string& port_path, AuxLinkSpeed speed = AuxLinkSpeed::Baud115200,
+                        std::chrono::milliseconds probe_wait = util::kSerialProbeClaimWait);
     void disconnect();
     /// Clears a desynchronized link on the port already held: flushes stale input
     /// and accepts exchanges again. Never opens a port, so a racing disconnect

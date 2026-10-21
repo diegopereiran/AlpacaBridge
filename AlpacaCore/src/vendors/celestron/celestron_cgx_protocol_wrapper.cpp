@@ -78,7 +78,8 @@ int poll_timeout_ms(std::chrono::steady_clock::time_point deadline) {
 
 CelestronCgxProtocol::~CelestronCgxProtocol() { disconnect(); }
 
-void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkSpeed speed) {
+void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkSpeed speed,
+                                          std::chrono::milliseconds probe_wait) {
     if (port_path.empty()) {
         throw_link_error("a serial port path is required");
     }
@@ -122,7 +123,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
             ::cfsetispeed(&settings, baud);
             ::cfsetospeed(&settings, baud);
         },
-        &error, util::kSerialProbeClaimWait, util::SerialExclusive::Required);
+        &error, probe_wait, util::SerialExclusive::Required);
     if (!link) {
         if (util::serial_port_holder(port_path)) {
             throw AlpacaException("Celestron CGX USB: " + error, AlpacaError::InvalidOperation);
