@@ -87,6 +87,16 @@ public:
         return unique_id_locked();
     }
 
+    // Decision 0018: the router calls this at the upgrade start only. Before a
+    // connect the fallback is the SDK-ID or device-number ID, the key a CAA
+    // without a serial saved under; a serial-keyed offset waits for the connect.
+    void adopt_legacy_state() override {
+        const std::string assigned = assigned_unique_id();
+        if (!assigned.empty()) {
+            (void)util::RotatorSyncOffsetStore::load_or_adopt(assigned, fallback_unique_id());
+        }
+    }
+
     std::string get_description() const override {
         return "ZWO CAA Rotator Driver";
     }
@@ -484,13 +494,16 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("ZWO", "CAA type unavailable: " + std::string(e.what()));
         }
-        // Persisted Sync offset, keyed by the GUID (decision 0018); the first
-        // connect after the upgrade moves the one saved under the serial-based
-        // ID, which needs the serial read just above.
+        // Persisted Sync offset, keyed by the GUID (decision 0018). An offset
+        // saved under the serial-based ID moves here, since the serial read just
+        // above names the body. One saved under an SDK-ID or device-number ID
+        // names only a slot, so adopt_legacy_state() moves it at the upgrade
+        // start and a connect never does.
         const std::string legacy_key = unique_id_for(serial, rotator_id);
         const std::string assigned = assigned_unique_id();
-        const double sync_offset =
-            util::RotatorSyncOffsetStore::load_or_adopt(assigned.empty() ? legacy_key : assigned, legacy_key);
+        const std::string key = assigned.empty() ? legacy_key : assigned;
+        const double sync_offset = serial.empty() ? util::RotatorSyncOffsetStore::load(key)
+                                                  : util::RotatorSyncOffsetStore::load_or_adopt(key, legacy_key);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             rotator_info_ = info;

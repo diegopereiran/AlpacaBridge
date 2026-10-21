@@ -50,13 +50,9 @@ public:
     // still returns the offset and leaves the legacy entry in place.
     static double load_or_adopt(const std::string& key, const std::string& legacy_key);
 
-    // Removes the entry for @p key. Returns false only when the file could not
-    // be rewritten.
-    static bool erase(const std::string& key);
-
     // Removes every GUID-shaped key (util::is_unique_id) that is not in
     // @p live_unique_ids: the offsets of removed rotators. Driver-built legacy
-    // keys are left for load_or_adopt(). Returns how many entries went.
+    // keys are left alone. Returns how many entries went.
     static std::size_t prune_unknown_unique_ids(const std::set<std::string>& live_unique_ids);
 };
 

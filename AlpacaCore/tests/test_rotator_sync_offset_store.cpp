@@ -113,16 +113,6 @@ TEST_CASE("Rotator sync offset store - load_or_adopt moves a legacy entry to the
     CHECK(RotatorSyncOffsetStore::load_or_adopt("guid-b", "guid-b") == 2.0);
 }
 
-TEST_CASE("Rotator sync offset store - erase removes one entry", "[rotator][sync-offset][unit]") {
-    alpacacore::test::TempSyncOffsetDir dir;
-    REQUIRE(RotatorSyncOffsetStore::save("A", 1.0));
-    REQUIRE(RotatorSyncOffsetStore::save("B", 2.0));
-    CHECK(RotatorSyncOffsetStore::erase("A"));
-    CHECK(RotatorSyncOffsetStore::load("A") == 0.0);
-    CHECK(RotatorSyncOffsetStore::load("B") == 2.0);
-    CHECK(RotatorSyncOffsetStore::erase("missing"));
-}
-
 TEST_CASE("Rotator sync offset store - prune drops GUID keys no device holds and keeps the rest",
           "[rotator][sync-offset][unit]") {
     alpacacore::test::TempSyncOffsetDir dir;
@@ -134,7 +124,7 @@ TEST_CASE("Rotator sync offset store - prune drops GUID keys no device holds and
     CHECK(RotatorSyncOffsetStore::prune_unknown_unique_ids({live}) == 1);
     CHECK(RotatorSyncOffsetStore::load(live) == 1.0);
     CHECK(RotatorSyncOffsetStore::load(removed) == 0.0);
-    // A driver-built legacy key waits for load_or_adopt(), so prune keeps it.
+    // Prune removes only GUID keys; a driver-built legacy key is left as it is.
     CHECK(RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_3") == 3.0);
     CHECK(RotatorSyncOffsetStore::prune_unknown_unique_ids({live}) == 0);
 }

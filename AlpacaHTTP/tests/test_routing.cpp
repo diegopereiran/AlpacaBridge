@@ -8316,7 +8316,40 @@ int main() {
         { alpacahttp::Router started; }
         EXPECT(RotatorSyncOffsetStore::load(configured) == 12.5);
         EXPECT(RotatorSyncOffsetStore::load(removed) == 0.0);
-        EXPECT(RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_3") == 3.0);  // waits for its rotator's connect
+        EXPECT(RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_3") == 3.0);  // not a GUID key: never pruned
+    }
+    {
+        // case: a start asks only the entries it gives a first GUID to adopt their old state (#1473)
+        // An entry that already holds a GUID was configured after the upgrade, maybe
+        // on the number of a device removed earlier; it must not take over what that
+        // device saved under its driver-built ID (decisions 0008 and 0018).
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        {
+            std::ofstream out(std::filesystem::path("config") / "registered_devices.json", std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9480}},
+                                          {{"vendor", "zzz"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9481},
+                                           {"uniqueId", alpacacore::util::generate_unique_id()}}})
+                       .dump();
+        }
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        const auto unregister = [&] {
+            registry.unregister_device(alpacacore::DeviceType::Focuser, 9480);
+            registry.unregister_device(alpacacore::DeviceType::Focuser, 9481);
+        };
+        alpacahttp::test_catalog::adopted_device_numbers().clear();
+        {
+            alpacahttp::Router started(alpacahttp::test_catalog::add_schema_and_factory);
+            EXPECT(alpacahttp::test_catalog::adopted_device_numbers() == std::vector<int>{9480});
+        }
+        unregister();
+        // The first start stored both GUIDs, so a second start asks nobody.
+        alpacahttp::test_catalog::adopted_device_numbers().clear();
+        { alpacahttp::Router again(alpacahttp::test_catalog::add_schema_and_factory); }
+        EXPECT(alpacahttp::test_catalog::adopted_device_numbers().empty());
+        unregister();
     }
 
     // open-astro#664 Part C: the router consults the catalog and has no vendor

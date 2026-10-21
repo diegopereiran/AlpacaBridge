@@ -39,6 +39,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>

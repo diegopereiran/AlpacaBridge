@@ -83,6 +83,16 @@ public:
     }
 
     /**
+     * @brief Move state saved under the driver-built ID to the assigned GUID
+     * (decision 0018). The router calls this once, after registration, at the
+     * start that gives a stored entry its first GUID: the upgrade. Never at
+     * connect and never for a device added later, so a device configured on a
+     * reused device number cannot take over what the old one saved under that
+     * number. Default: nothing to move.
+     */
+    virtual void adopt_legacy_state() {}
+
+    /**
      * @brief Get the device description.
      */
     virtual std::string get_description() const = 0;

@@ -67,6 +67,13 @@ public:
         return "WANDERERASTRO_ROTATOR_" + std::to_string(device_number_);
     }
 
+    // Decision 0018: the router calls this at the upgrade start only, so the
+    // offset saved under the device-number ID moves to the device that held that
+    // number then.
+    void adopt_legacy_state() override {
+        (void)util::RotatorSyncOffsetStore::load_or_adopt(get_unique_id(), fallback_unique_id());
+    }
+
     std::string get_description() const override { return "WandererAstro WandererRotator Mini Rotator Driver"; }
 
     std::string get_driver_info() const override { return "AlpacaCore WandererAstro Rotator Driver"; }
@@ -146,10 +153,10 @@ public:
             protocol_.connect(effective);
             {
                 // The Sync offset persists across reconnects and restarts (IRotatorV4).
-                // Keyed by the persisted GUID (decision 0018); the first connect after
-                // the upgrade moves the offset saved under the device-number ID.
-                const double saved_offset =
-                    util::RotatorSyncOffsetStore::load_or_adopt(get_unique_id(), fallback_unique_id());
+                // Keyed by the persisted GUID (decision 0018). The offset saved under
+                // the device-number ID is moved by adopt_legacy_state(), never here: a
+                // rotator added later on the same number must not inherit it.
+                const double saved_offset = util::RotatorSyncOffsetStore::load(get_unique_id());
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 sync_offset_ = saved_offset;
                 target_position_ = 0.0;

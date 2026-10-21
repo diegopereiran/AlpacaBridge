@@ -7072,9 +7072,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        // Decision 0018: keep a GUID the client sends back (the web UI's edit
-        // removes the entry first, so its own GUID is free again) unless another
-        // entry holds it; otherwise mint one.
+        // Decision 0018: keep a GUID the client sends back
         {
             std::set<std::string> taken;
             {
@@ -8704,6 +8702,9 @@ void Router::load_persisted_devices() {
     nlohmann::json payload = nlohmann::json::array();
     bool assigned_unique_ids = false;
     std::set<std::string> live_unique_ids;
+    // Entries this start gives their first GUID (the upgrade, or a hand-edited
+    // file): only their drivers adopt state saved under a driver-built ID.
+    std::set<std::string> first_unique_ids;
     {
         std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
         if (persisted_devices_loaded_) {
@@ -8736,6 +8737,7 @@ void Router::load_persisted_devices() {
             for (auto& entry : payload) {
                 nlohmann::json sanitized = sanitize_device_config(entry);
                 const std::string unique_id = choose_unique_id(sanitized, taken);
+                if (stored_unique_id(sanitized).empty()) first_unique_ids.insert(unique_id);
                 if (stored_unique_id(sanitized) != unique_id) {
                     assigned_unique_ids = true;
                     if (entry.is_object()) entry["uniqueId"] = unique_id;
@@ -8806,6 +8808,23 @@ void Router::load_persisted_devices() {
             }
         } catch (const std::exception& e) {
             util::log_error("Failed to load persisted device: " + std::string(e.what()));
+        }
+    }
+
+    // Decision 0018: state a driver saved under its own ID moves to the GUID
+    // here, once, for the devices that held their number before this start. A
+    // device configured later keeps a GUID from the start and never adopts, so
+    // it cannot inherit what a removed device saved under the same number.
+    if (!first_unique_ids.empty()) {
+        for (const auto& device : alpacacore::management::DeviceRegistry::instance().get_all_devices()) {
+            if (first_unique_ids.count(device->get_unique_id()) == 0) {
+                continue;
+            }
+            try {
+                device->adopt_legacy_state();
+            } catch (const std::exception& e) {
+                util::log_warning("Could not move the saved state of " + device->get_unique_id() + ": " + e.what());
+            }
         }
     }
 }

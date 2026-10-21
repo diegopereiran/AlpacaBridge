@@ -299,9 +299,11 @@ TEST_CASE("WandererAstro Rotator Driver - Sync that cannot save throws and keeps
     driver->set_connected(false);
 }
 
-// Decision 0018 (#1471): keyed by the assigned GUID, a connect moves the offset
-// saved under the device-number ID before the upgrade.
-TEST_CASE("WandererAstro Rotator Driver - Connect adopts the offset saved under the old ID",
+// Decision 0018 (#1471): keyed by the assigned GUID. The offset saved under the
+// device-number ID moves only when the router asks, at the start that gives the
+// stored entry its first GUID; a connect never moves it, so a rotator added later
+// on the same device number cannot inherit it.
+TEST_CASE("WandererAstro Rotator Driver - Connect does not adopt the offset saved under the old ID",
           "[wandererastro][rotator][sync-offset][unit]") {
     alpacacore::test::TempSyncOffsetDir dir;
     REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
@@ -309,11 +311,26 @@ TEST_CASE("WandererAstro Rotator Driver - Connect adopts the offset saved under 
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
     const std::string guid = alpacacore::util::generate_unique_id();
     driver->assign_unique_id(guid);
-    CHECK(driver->get_unique_id() == guid);
     driver->set_connected(true);
-    CHECK(driver->get_position() == 30.0);
+    CHECK(driver->get_position() == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_0") == 30.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("WandererAstro Rotator Driver - adopt_legacy_state moves the offset saved under the old ID",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->adopt_legacy_state();
     CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 30.0);
     CHECK(alpacacore::util::RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_0") == 0.0);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
     driver->set_connected(false);
 }
 

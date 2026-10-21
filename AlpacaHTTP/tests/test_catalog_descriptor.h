@@ -86,6 +86,12 @@ inline catalog::Schema make_schema() {
     return s;
 }
 
+// The device numbers whose stub was asked to adopt_legacy_state(), in order.
+inline std::vector<int>& adopted_device_numbers() {
+    static std::vector<int> numbers;
+    return numbers;
+}
+
 class StubFocuser final : public alpacacore::AlpacaDriver {
 public:
     StubFocuser(int number, std::string name) : number_(number), name_(std::move(name)) {}
@@ -105,6 +111,7 @@ public:
     std::string command_blind(std::string_view, bool) override { return "ok"; }
     bool command_bool(std::string_view, bool) override { return true; }
     std::string command_string(std::string_view, bool) override { return "ok"; }
+    void adopt_legacy_state() override { adopted_device_numbers().push_back(number_); }
 
 private:
     int number_;

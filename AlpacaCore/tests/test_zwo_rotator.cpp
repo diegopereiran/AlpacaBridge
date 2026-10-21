@@ -221,6 +221,45 @@ TEST_CASE("ZWO CAA Rotator Driver - Connect adopts the offset saved under the se
     CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 0.0);
 }
 
+// A CAA without a serial saved its offset under an SDK-ID key, which names a
+// slot, not a body. Only the router's call at the start that gives the stored
+// entry its first GUID moves it; a connect never does, so a rotator added later
+// cannot inherit it (decision 0018).
+TEST_CASE("ZWO CAA Rotator Driver - Connect does not adopt an offset saved under an ID-based key",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    const std::string legacy = "ZWO_CAA_ID_" + std::to_string(sdk.id);
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save(legacy, 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 20.0);
+}
+
+TEST_CASE("ZWO CAA Rotator Driver - adopt_legacy_state moves an offset saved under an ID-based key",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    const std::string legacy = "ZWO_CAA_ID_" + std::to_string(sdk.id);
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save(legacy, 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->adopt_legacy_state();
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 20.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 0.0);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+}
+
 // Falsified by: zwo_rotator_driver.cpp get_mechanical_position() dropping the
 // 360 - degree inversion for Reverse (reads 100 instead of 260).
 TEST_CASE("ZWO CAA Rotator Driver - Reverse un-applies the SDK inversion", "[zwo][rotator][unit][fake-sdk]") {

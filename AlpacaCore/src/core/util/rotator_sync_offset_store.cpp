@@ -247,25 +247,6 @@ double RotatorSyncOffsetStore::load_or_adopt(const std::string& key, const std::
     }
 }
 
-bool RotatorSyncOffsetStore::erase(const std::string& key) {
-    std::lock_guard<std::mutex> lock(store_mutex());
-    const std::string path = effective_path_locked();
-    try {
-        auto m = read_all(path);
-        if (m.erase(key) == 0) {
-            return true;
-        }
-        write_all_locked(path, m);
-        return true;
-    } catch (const std::exception& e) {
-        ALPACA_LOG_WARN("RotatorSyncOffset",
-                        std::string("Could not remove a sync offset from ") + path + ": " + e.what());
-        return false;
-    } catch (...) {
-        return false;
-    }
-}
-
 std::size_t RotatorSyncOffsetStore::prune_unknown_unique_ids(const std::set<std::string>& live_unique_ids) {
     std::lock_guard<std::mutex> lock(store_mutex());
     const std::string path = effective_path_locked();
