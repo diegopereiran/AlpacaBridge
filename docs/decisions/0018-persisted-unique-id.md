@@ -45,6 +45,7 @@ The rules a change is checked against. Each names where it applies and what chec
 - Every existing device reports a new `UniqueID` once, after the upgrade. A client that stored the old ID sees a new device and must be pointed at it once. The changelog entry for issue #1471 goes under Breaking changes.
 - Restoring an old config backup brings back the GUIDs it held; copying one config to a second host gives both hosts the same GUIDs, so a cloned SD card should be re-configured.
 - A management client that edits a device by removing and re-adding it without sending the GUID back gets a new one; the web UI sends it.
+- A client that sends the GUID of a device removed earlier gets it back, since no stored entry holds it; before the next start prunes it, a rotator configured that way also reads the removed rotator's offset. It takes a deliberate client.
 - The ZWO camera's catalog no longer generates `ZWO_UID_` values. The direct factories that unit tests use still do, for the fallback.
 - An offset saved under a device-number or SDK-ID old ID whose rotator was not configured, or did not load, at the upgrade start is never moved and stays in the file; pruning removes only GUID keys no entry holds.
 
