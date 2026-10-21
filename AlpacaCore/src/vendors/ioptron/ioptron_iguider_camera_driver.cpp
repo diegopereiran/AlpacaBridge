@@ -124,7 +124,7 @@ ImageArray crop_luma(const std::vector<std::uint8_t>& luma, const Roi& roi) {
 
 }  // namespace
 
-class IGuiderCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
+class IGuiderCameraDriver final : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
@@ -141,11 +141,17 @@ public:
         // Blocks new connection tasks, then joins the in-flight one: MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        if (connected_.load()) {
-            try {
-                set_connected(false);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN(kLog, "Error during destruction: " + std::string(e.what()));
+        // The teardown itself, not set_connected(false): no virtual call from a
+        // destructor (clang-analyzer VirtualCall). No connection task is left
+        // to record or consume a disconnect, so the base gates have no work.
+        {
+            std::lock_guard<std::mutex> transition_lock(transition_mutex_);
+            if (connected_.load()) {
+                try {
+                    stop_and_close();
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN(kLog, "Error during destruction: " + std::string(e.what()));
+                }
             }
         }
         // A failed connect never starts the worker; this joins one in any other case.
