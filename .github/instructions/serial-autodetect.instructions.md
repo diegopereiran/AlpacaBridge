@@ -68,8 +68,13 @@ non-blocking, so its reads go through `util::tty_read()` and its writes through
 fds. The non-blocking, `poll()`-bounded shape started as the Sky-Watcher driver's
 exception (some USB CDC-ACM ports ignore `VMIN`/`VTIME`, and a blocking `read()` on a
 board that went quiet parked forever in `n_tty_read`); #1202 made it the rule for every
-serial driver, probes included. Sky-Watcher keeps its own `poll()`-bounded loops because
-they are the path through its `serial_read_`/`serial_write_` test seams.
+serial driver, probes included. Two links keep their own `poll()`-bounded loops on the
+same non-blocking fd: Sky-Watcher, because they are the path through its
+`serial_read_`/`serial_write_` test seams, and the Celestron CGX AUX link (mount and
+focuser), whose `read()`/`write()` run only after its own `poll()` on the exchange deadline
+([decision 0017](../../docs/decisions/0017-serial-port-ownership.md) rule 5). Neither
+restores retuned line settings on a timeout the way `tty_read()` does; the CGX link opens
+with `SerialExclusive::Required`, so no other program can open its port to retune it.
 
 ### Auto-detect failure message (`util/auto_detect.h`)
 
