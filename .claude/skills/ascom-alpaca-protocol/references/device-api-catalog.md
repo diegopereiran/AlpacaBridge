@@ -33,7 +33,7 @@ Common requirements:
 - Connection transitions must follow the async rules; do not expose vendor startup delay.
 - `DeviceState` item names and value types must match their individual properties. Omit unavailable items rather than inventing values.
 - `DeviceState` returns every operational value the device definitively knows, may omit unknown ones, and must not raise an error because a value is unknown. When no value is known it returns an empty list with no `TimeStamp`.
-- The `TimeStamp` item is optional. When present it is an ISO-8601 string recording when the values were measured, not when the response was sent.
+- The `TimeStamp` item is optional. When present it is an ISO-8601 string recording when the values were measured. AlpacaBridge's base classes stamp it when the response is built (`device_state_timestamp()` in `alpacadriver.h`), which approximates the measurement time; a driver that serves values from a snapshot can pass the snapshot's measurement time instead, as Sky-Watcher does.
 - Metadata endpoints may remain available while disconnected when the Master Interface permits it.
 
 ## Camera
@@ -242,7 +242,7 @@ Total: **65**.
 - Rates are offsets or absolute values according to each member's definition; do not reuse vendor units blindly.
 - `UTCDate`, site data, and sync behavior must not silently corrupt the mount's pointing model.
 - `SiderealTime` is local apparent sidereal time and must be calculated from the mount's own source of `UTCDate` and from `SiteLongitude`, so a client can explain the value from those two reads. A mount with a better time source may refuse `UTCDate` writes with `PropertyNotImplemented`.
-- `AbortSlew` is non-blocking in ITelescopeV4: it returns at once with `Slewing=true` until motion has stopped, and clients watch `Slewing`. It must throw `ParkedException` (`InvalidWhileParked`, `0x408`) while parked, not a generic driver error.
+- `AbortSlew` is non-blocking in ITelescopeV4: it returns at once with `Slewing=true` until motion has stopped, and clients watch `Slewing`. It must throw `ParkedException` (`InvalidWhileParked`, `0x408`) while parked (`AtPark` true), not a generic driver error. `AbortSlew` during a park that is still moving is legal and stops it (see the Park rule in `.github/instructions/ascom-contract.instructions.md`).
 - ConformU telescope testing can command aggressive motion; follow repository safety rules and use a bare mount where required.
 
 ## Counting check
