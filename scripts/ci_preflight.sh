@@ -140,6 +140,11 @@ ensure_tool() {
     echo ">> ${cmd} missing and PREFLIGHT_NO_INSTALL=1 -- not installing."
     return 1
   fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    # macOS and other non-Debian hosts: never reach sudo for a tool apt cannot install.
+    echo ">> ${cmd} missing and there is no apt-get here -- install ${pkg} yourself."
+    return 1
+  fi
   echo ">> Installing ${pkg} (provides ${cmd})..."
   apt_update_once
   sudo apt-get install -y --no-install-recommends "${pkg}" >/dev/null 2>&1
@@ -171,6 +176,11 @@ ensure_zizmor() {
     return 0
   fi
   if [ "${PREFLIGHT_NO_INSTALL:-0}" = "1" ]; then
+    return 1
+  fi
+  # The pinned download is the Linux aarch64 build, the one CI runs.
+  if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "aarch64" ]; then
+    echo ">> zizmor missing; the pinned download is for Linux aarch64 only -- install zizmor ${ZIZMOR_VER} yourself." >&2
     return 1
   fi
   mkdir -p "${cache_dir}"
