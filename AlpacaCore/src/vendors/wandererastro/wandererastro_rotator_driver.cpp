@@ -63,7 +63,9 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Rotator; }
 
-    std::string fallback_unique_id() const override { return "WANDERERASTRO_ROTATOR_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override {
+        return "WANDERERASTRO_ROTATOR_" + std::to_string(device_number_);
+    }
 
     std::string get_description() const override { return "WandererAstro WandererRotator Mini Rotator Driver"; }
 
@@ -281,9 +283,10 @@ public:
         // IRotatorV4: the offset must persist. A Sync that cannot store it has
         // failed, so it throws and keeps the previous offset (decision 0008).
         if (!util::RotatorSyncOffsetStore::save(get_unique_id(), new_offset)) {
-            throw AlpacaException("WandererAstro rotator: Sync could not save the offset, so it was not applied. "
-                                  "Check that the service can write config/rotator_sync_offsets.json.",
-                                  AlpacaError::DriverException);
+            throw AlpacaException(
+                "WandererAstro rotator: Sync could not save the offset, so it was not applied. "
+                "Check that the service can write config/rotator_sync_offsets.json.",
+                AlpacaError::DriverException);
         }
         protocol_.clear_completion_missing();
         std::lock_guard<std::mutex> lock(state_mutex_);

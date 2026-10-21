@@ -339,9 +339,10 @@ public:
         // IRotatorV4: the offset must persist. A Sync that cannot store it has
         // failed, so it throws and keeps the previous offset (decision 0008).
         if (!util::RotatorSyncOffsetStore::save(store_key_locked(), new_offset)) {
-            throw AlpacaException("ZWO CAA: Sync could not save the offset, so it was not applied. "
-                                  "Check that the service can write config/rotator_sync_offsets.json.",
-                                  AlpacaError::DriverException);
+            throw AlpacaException(
+                "ZWO CAA: Sync could not save the offset, so it was not applied. "
+                "Check that the service can write config/rotator_sync_offsets.json.",
+                AlpacaError::DriverException);
         }
         sync_offset_ = new_offset;
         target_position_ = target;

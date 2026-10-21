@@ -345,7 +345,8 @@ PersistedAttempt persisted_attempt(
     alpacahttp::Router startup_router(extend_catalog);
     {
         const auto listed = listed_entry(startup_router, device_type, device_number);
-        result.config = listed.is_null() ? nlohmann::json() : without_unique_id(listed.value("Config", nlohmann::json()));
+        result.config =
+            listed.is_null() ? nlohmann::json() : without_unique_id(listed.value("Config", nlohmann::json()));
         result.name = listed.is_null() ? std::string() : listed.value("DeviceName", "");
     }
     result.listed = !result.config.is_null();
@@ -8252,19 +8253,14 @@ int main() {
         const std::string held = alpacacore::util::generate_unique_id();
         {
             std::ofstream out(file, std::ios::trunc);
-            out << nlohmann::json::array({{{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9474}},
-                                          {{"vendor", "zzz"},
-                                           {"deviceType", "focuser"},
-                                           {"deviceNumber", 9475},
-                                           {"uniqueId", "ZWO_UID_00112233445566ff"}},
-                                          {{"vendor", "zzz"},
-                                           {"deviceType", "focuser"},
-                                           {"deviceNumber", 9476},
-                                           {"uniqueId", held}},
-                                          {{"vendor", "zzz"},
-                                           {"deviceType", "focuser"},
-                                           {"deviceNumber", 9477},
-                                           {"uniqueId", held}}})
+            out << nlohmann::json::array(
+                       {{{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9474}},
+                        {{"vendor", "zzz"},
+                         {"deviceType", "focuser"},
+                         {"deviceNumber", 9475},
+                         {"uniqueId", "ZWO_UID_00112233445566ff"}},
+                        {{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9476}, {"uniqueId", held}},
+                        {{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9477}, {"uniqueId", held}}})
                        .dump();
         }
         std::vector<std::string> first_ids;
@@ -8280,8 +8276,8 @@ int main() {
                 first_ids.push_back(id);
                 distinct.insert(id);
             }
-            EXPECT(distinct.size() == 4);   // the duplicated GUID is replaced in the later entry
-            EXPECT(first_ids[2] == held);   // the first holder keeps a valid GUID
+            EXPECT(distinct.size() == 4);  // the duplicated GUID is replaced in the later entry
+            EXPECT(first_ids[2] == held);  // the first holder keeps a valid GUID
             for (int i = 0; i < 4; ++i) {
                 const auto row = listed_failed_entry(first, "focuser", 9474 + i);
                 EXPECT(!row.is_null());

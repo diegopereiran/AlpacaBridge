@@ -258,7 +258,8 @@ bool RotatorSyncOffsetStore::erase(const std::string& key) {
         write_all_locked(path, m);
         return true;
     } catch (const std::exception& e) {
-        ALPACA_LOG_WARN("RotatorSyncOffset", std::string("Could not remove a sync offset from ") + path + ": " + e.what());
+        ALPACA_LOG_WARN("RotatorSyncOffset",
+                        std::string("Could not remove a sync offset from ") + path + ": " + e.what());
         return false;
     } catch (...) {
         return false;

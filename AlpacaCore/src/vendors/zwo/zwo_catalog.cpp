@@ -180,8 +180,8 @@ BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int
                 std::string("Invalid value for ") + kZwoCamSerial.key + ": another ZWO camera already uses it";
             return result;
         }
-        ALPACA_LOG_WARN("ZWO", std::string("Ignoring duplicate ZWO camera ") + kZwoCamSerial.key +
-                                   " in the stored entry");
+        ALPACA_LOG_WARN("ZWO",
+                        std::string("Ignoring duplicate ZWO camera ") + kZwoCamSerial.key + " in the stored entry");
         configured_serial.clear();
         binding.identity.serial.clear();
         cleared_duplicate_serial = true;

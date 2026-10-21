@@ -10,8 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/util/rotator_sync_offset_store.h>
-#include <alpacacore/util/unique_id.h>
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/catalog/builtin_catalog.h>
@@ -23,7 +21,9 @@
 #include <alpacacore/util/hardware_config_refusal.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/unique_id.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/router.h>

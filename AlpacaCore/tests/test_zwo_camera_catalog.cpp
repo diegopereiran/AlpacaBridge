@@ -129,8 +129,7 @@ TEST_CASE("ZWO camera catalog - ignores a uniqueId in the config and in its peer
     // entries is no duplicate for bind, and nothing about it is learned or refused.
     DeviceConfig with_uid = camera_config(1);
     with_uid.set("uniqueId", std::string("ZWO_UID_00112233445566ff"));
-    const BindResult result =
-        bind(rig, with_uid, 4, Source::Api, {peer(8, std::nullopt, "ZWO_UID_00112233445566ff")});
+    const BindResult result = bind(rig, with_uid, 4, Source::Api, {peer(8, std::nullopt, "ZWO_UID_00112233445566ff")});
     REQUIRE(result.driver != nullptr);
     CHECK_FALSE(result.rejection.has_value());
     CHECK_FALSE(learned(result, "uniqueId").has_value());
