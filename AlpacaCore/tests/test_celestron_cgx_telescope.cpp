@@ -1734,7 +1734,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - continuity settling and cleanup 
         }
         CHECK_FALSE(driver->get_connected());
         alpacacore::test::set_cgx_connected(*driver, clock, true);
-        CHECK(driver->get_at_home());
+        CHECK(driver->get_declination() > 89.99);
         CHECK(clock.wait_count() == waits + 6);
     }
     CHECK(clock.wait_count() >= waits + 3);
