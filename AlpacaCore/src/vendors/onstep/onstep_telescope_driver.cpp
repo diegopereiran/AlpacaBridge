@@ -1323,6 +1323,10 @@ private:
                 if (!ctx.wait_for(wait)) {
                     return;
                 }
+                // The tick holds mutex_ across its serial exchanges (:GU#, the
+                // altitude reads, the re-send), as every OnStep path does, so a
+                // getter can wait for it. Decision 0016 rule 1 calls that a
+                // defect; moving OnStep's I/O off mutex_ is #1449.
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (ctx.stop_reason() != util::StopReason::None || !connected_) {
                     return;
