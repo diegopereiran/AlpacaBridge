@@ -7075,12 +7075,20 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         // Decision 0018: keep a GUID the client sends back (the web UI's edit
         // removes the entry first, so its own GUID is free again) unless another
         // entry holds it, or another configuredevice call chose it and has not
-        // stored its entry yet; otherwise mint one. The choice is reserved until
-        // this call stores its entry or fails.
+        // stored its entry yet; otherwise mint one. The entry this call replaces
+        // (same vendor, type and number, as add_or_replace_persisted_device()
+        // matches) is not another entry. The choice is reserved until this call
+        // stores its entry or fails.
         {
             std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
             std::set<std::string> taken = reserved_unique_ids_;
+            const auto replaced = persisted_key(config);
             for (const auto& entry : persisted_devices_) {
+                const auto key = persisted_key(entry);
+                if (replaced && key && key->vendor == replaced->vendor && key->device_type == replaced->device_type &&
+                    key->device_number == replaced->device_number) {
+                    continue;
+                }
                 if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
             }
             config["uniqueId"] = choose_unique_id(config, taken);

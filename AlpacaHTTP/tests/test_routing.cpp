@@ -8403,6 +8403,31 @@ int main() {
         remove_device(router, "zzz", "focuser", 9483);
         remove_device(router, "zzz", "focuser", 9484);
     }
+    {
+        // case: re-configuring a stored entry at its own number keeps the GUID it sends back (#1471)
+        // A script that fixes a failed-to-load entry by configuring the same number
+        // again, without removing it first, replaces that entry, so the entry's own
+        // GUID is not taken by another one.
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        const std::string held = alpacacore::util::generate_unique_id();
+        {
+            std::ofstream out(file, std::ios::trunc);
+            out << nlohmann::json::array(
+                       {{{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9487}, {"uniqueId", held}}})
+                       .dump();
+        }
+        alpacahttp::Router stored;  // no zzz descriptor at load, so the entry fails to load
+        EXPECT(listed_entry(stored, "Focuser", 9487).is_null());
+        alpacahttp::test_catalog::add_schema_and_factory(stored.catalog());
+        const auto again = api_attempt(
+            stored, {{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9487}, {"uniqueId", held}},
+            "Focuser");
+        EXPECT(again.ok);
+        EXPECT(listed_entry(stored, "Focuser", 9487).value("UniqueID", std::string()) == held);
+        remove_device(stored, "zzz", "focuser", 9487);
+    }
 
     // open-astro#664 Part C: the router consults the catalog and has no vendor
     // arm left, so every outcome below is the catalog path.
