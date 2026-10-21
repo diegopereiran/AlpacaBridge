@@ -149,7 +149,10 @@ while :; do
     # The review job waits for CI's build and test jobs first and fails before the
     # agent runs when one is red; its error annotation starts with "CI ". That is a CI
     # failure to fix and push, not a broken review workflow.
-    CI_RED=$(gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message' 2>/dev/null | grep -m1 -E '^CI (is red|finished|did not finish)')
+    # One retry: a transient API error would otherwise turn a CI-red run into exit 3.
+    CI_RED=$( { gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message' \
+                || { sleep 5; gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message'; }; } \
+              2>/dev/null | grep -m1 -E '^CI (is red|finished|did not finish)')
     if [ -n "$CI_RED" ]; then
       echo "CI RED for head $SHA, review skipped: $CI_RED" >&2; exit 4
     fi

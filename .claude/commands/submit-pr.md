@@ -307,7 +307,7 @@ Knobs:
 
 It can also exit non-zero before any check runs, when `PREFLIGHT_BASE` (or the default base) cannot be resolved (`ERROR: cannot resolve the diff base '<base>' to a commit.` or `ERROR: no merge-base between the diff base '<base>' and HEAD.`); report that error and the base it tried, not a failing check, and fix the base as the message says.
 
-**Gate:** the script exits non-zero if any check it ran failed or the diff base could not be resolved. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` appears when a check is not applicable (no matching files changed), when the quick run left a build gate to CI, when `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled, or when `RUN_SANITIZERS=0` opted out of the ASan+UBSan pass. Surface a tool or opt-out skip so the user knows CI will still enforce that gate.
+**Gate:** the script exits non-zero if any check it ran failed or the diff base could not be resolved. If it does, **STOP** — do not push, do not open the PR. Report the failing check(s) to the user and let them fix it, then re-run. A `[SKIP]` appears when a check is not applicable (no matching files changed), when the quick run left a build gate to CI, when `PREFLIGHT_NO_INSTALL=1` left a tool uninstalled, or when `RUN_SANITIZERS=0` opted out of the ASan+UBSan pass in a full run (the quick run skips that pass anyway). Surface a tool or opt-out skip so the user knows CI will still enforce that gate.
 
 ## Step 5 — Push the branch
 
@@ -455,7 +455,10 @@ while :; do
     # The review job waits for CI's build and test jobs first and fails before the
     # agent runs when one is red; its error annotation starts with "CI ". That is a CI
     # failure to fix and push, not a broken review workflow.
-    CI_RED=$(gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message' 2>/dev/null | grep -m1 -E '^CI (is red|finished|did not finish)')
+    # One retry: a transient API error would otherwise turn a CI-red run into exit 3.
+    CI_RED=$( { gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message' \
+                || { sleep 5; gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message'; }; } \
+              2>/dev/null | grep -m1 -E '^CI (is red|finished|did not finish)')
     if [ -n "$CI_RED" ]; then
       echo "CI RED for head $SHA, review skipped: $CI_RED" >&2; exit 4
     fi
