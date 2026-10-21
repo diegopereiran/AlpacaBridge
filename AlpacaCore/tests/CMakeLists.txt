@@ -141,6 +141,9 @@ if(TARGET alpacacore_ioptron)
     # Auto-detect resolves at connect time (issue #659): mount and iEAF.
     list(APPEND TEST_SOURCES test_ioptron_telescope_deferred_connect.cpp
         test_ioptron_ieaf_focuser_deferred_connect.cpp)
+    # iGuider guide camera (UVC over V4L2) and its [stress] registration, over
+    # FakeIGuiderV4L2.
+    list(APPEND TEST_SOURCES test_ioptron_iguider_camera.cpp test_ioptron_iguider_concurrency_stress.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
