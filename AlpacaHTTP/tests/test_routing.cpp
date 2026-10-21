@@ -9471,7 +9471,8 @@ int main() {
             }
             // A whole number written as 0.0 stays accepted, as the query path accepts "0".
             const std::string whole = std::string("{\"") + probe.param + "\":0.0,\"Value\":0}";
-            const auto ok = nlohmann::json::parse(route_request(router, "PUT", probe.path, whole).body(), nullptr, false);
+            const auto ok =
+                nlohmann::json::parse(route_request(router, "PUT", probe.path, whole).body(), nullptr, false);
             if (ok.is_discarded() || ok.value("ErrorNumber", -1) == 0x401) {
                 wrong.push_back(std::string(probe.path) + " " + probe.param + "=0.0 refused as InvalidValue");
             }
@@ -9488,8 +9489,8 @@ int main() {
     {
         // case: apiversions and configureddevices refuse a verb other than GET with 405 (#1486)
         alpacahttp::Router router;
-        for (const std::string path : {"/management/apiversions", "/management/v1/configureddevices",
-                                       "/management/configureddevices"}) {
+        for (const std::string path :
+             {"/management/apiversions", "/management/v1/configureddevices", "/management/configureddevices"}) {
             EXPECT(route_request(router, "GET", path).status_code() == 200);
             for (const char* verb : {"PUT", "POST", "DELETE"}) {
                 const auto response = route_request(router, verb, path, "{}");

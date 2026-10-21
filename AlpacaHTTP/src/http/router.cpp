@@ -2422,11 +2422,8 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
         const auto error_code = util::exception_to_error_code(e);
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            error_code,
-            util::exception_to_error_message(e)
-        );
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, error_code, util::exception_to_error_message(e));
         response.set_body(alpaca_response);
         // #1476: an invalid field value in a write is a request the server
         // cannot interpret, answered 400 like the AllowedHosts refusal. A valid
