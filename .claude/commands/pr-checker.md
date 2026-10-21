@@ -111,16 +111,16 @@ Checks to make before waiting on anything:
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
-Never foreground-sleep. Run this with `run_in_background` and a 75-minute deadline (the review job first
+Never foreground-sleep. Run this with `run_in_background` and a 80-minute deadline (the review job first
 waits up to 45 minutes for CI's build and test jobs, then reviews):
 
 ```bash
-PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-4500} ))
+PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-4800} ))
 # A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
 # new check-run; a first look inside that window classifies the OLD run as final. So a
 # real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
 # is only valid when nothing was just re-triggered, and looks at once.
-if [ "${BUDGET:-4500}" -gt 0 ]; then sleep "$TICK"; fi
+if [ "${BUDGET:-4800}" -gt 0 ]; then sleep "$TICK"; fi
 while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
   # cancelled attempt cannot hide the finished one). Everything is fetched with
@@ -153,9 +153,14 @@ while :; do
     CI_RED=$( { gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message' \
                 || { sleep 5; gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message'; }; } \
               2>/dev/null | grep -m1 -E '^CI (is red|finished|did not finish)')
-    if [ -n "$CI_RED" ]; then
-      echo "CI RED for head $SHA, review skipped: $CI_RED" >&2; exit 4
-    fi
+    case "$CI_RED" in
+      "CI did not finish"*)
+        # Nothing to fix: CI is waiting for approval (fork PR) or a runner. Approve or wait,
+        # then re-run the review with the relabel trick (Step 1.2).
+        echo "CI NOT FINISHED for head $SHA, review timed out waiting: $CI_RED" >&2; exit 5 ;;
+      ?*)
+        echo "CI RED for head $SHA, review skipped: $CI_RED" >&2; exit 4 ;;
+    esac
     case "$RUN_STATE" in
       success*)
         # The PR edits the review workflow and the action skipped it (the assert step
@@ -191,7 +196,7 @@ while :; do
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
 done
-echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-4500} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-4800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
 
 Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `BUDGET=0`, just
@@ -199,8 +204,13 @@ Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `B
 produce a verdict for this head (the newest run failed, succeeded without publishing one, or
 the job was skipped or every run was cancelled); the message says which and carries the run URL where there is one.
 `4` = CI red, review skipped: the review job waits for CI's build and test jobs and fails before
-the agent runs when one is red (its error annotation starts with `CI `). A job someone cancelled
-by hand reads as red too: re-run that current-head run (`gh run rerun <run-id> --failed`) instead of changing code. Every
+the agent runs when one is red, or when one of them never reported because it was renamed in
+`ci.yml` (its error annotation starts with `CI is red` or `CI finished`). A job someone cancelled
+by hand reads as red too: re-run that current-head CI run (`gh run rerun <run-id> --failed`)
+instead of changing code, then re-run the review with the relabel trick from Step 1.2, because
+the failed review run stays the newest one. `5` = CI did not finish within the wait step's 45
+minutes (a fork PR whose CI waits for a maintainer's approval, or a long arm64 queue): nothing
+is red and nothing is fixed. Approve or wait for CI, then re-run the review with the relabel trick. Every
 non-zero exit prints nothing on stdout, so a chained `poll && merge` never reaches the merge.
 `date -d` is GNU; the skills run on the Linux dev VM.
 
@@ -225,7 +235,8 @@ on and never merges: exit `2` (workflow-editing PR skipped by the action) is a *
 exit `3` (review run failed) means read the run log, apply the relabel trick from Step 1.2 if it
 is the permission skip, and otherwise treat it as a broken workflow (**Hard stop** after two);
 exit `4` (CI red, review skipped) is a fix round with CI's failure as the only Defect: fix it,
-push, poll. It never counts toward the broken-workflow hard stop.
+push, poll; exit `5` (CI did not finish) is a wait: approve or wait for CI, relabel, poll.
+Neither counts toward the broken-workflow hard stop.
 
 ### `⚠️ Issues found`
 
@@ -533,7 +544,7 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - The review action skipped a workflow-editing PR (poll exit `2`): hand it back for eyeball
   review. A PR that edits `claude-review.yml` is never merged on an empty verdict.
 - The review workflow itself is broken (two consecutive full-budget timeouts, or two failed runs
-  that are not exit `4`, after the relabel tricks) — report the run URL.
+  that are not exit `4` or `5`, after the relabel tricks) — report the run URL.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
 which PR was left and why.

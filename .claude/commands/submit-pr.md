@@ -290,13 +290,14 @@ The script prints a `[PASS]/[FAIL]/[SKIP]` summary. The quick set, in order:
 1. **clang-format** changed lines (CI `format`)
 2. **Python gates**: Unicode / Trojan-Source scan (CI `unicode`), stress registration, `Falsified by` and PR template (when `PR_BODY_FILE` is set), ConformU reports, docs drift, connect-error hook, layering, contract sweep (each its CI job of the same name)
 3. **Beta VERSION split** (`cmake -P` only, no configure; CI `build-test` step)
-4. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
-5. **javascript** — `node --check` of web UI JS AND `node --test AlpacaHTTP/tests/web/*.test.js` (the file form -- the directory form breaks on Node 22), if either `AlpacaHTTP/web/*.js` or `AlpacaHTTP/tests/web/*.js` changed (CI `javascript`)
-6. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
+4. **cppcheck** changed files (CI `cppcheck`)
+5. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
+6. **javascript** — `node --check` of web UI JS AND `node --test AlpacaHTTP/tests/web/*.test.js` (the file form -- the directory form breaks on Node 22), if either `AlpacaHTTP/web/*.js` or `AlpacaHTTP/tests/web/*.js` changed (CI `javascript`)
+7. **zizmor** — only if `.github/workflows/*` changed (CI `zizmor`)
 
-The build and test gates are reported `[SKIP] ... (quick run; PREFLIGHT_FULL=1 runs it, CI always does)`: both `run_all_tests.sh` passes (CI `build-test`, `build-vendors`), clang-tidy, cppcheck and the ASan+UBSan pass (CI `sanitizers`). `PREFLIGHT_FULL=1` runs them too on an arm64 Linux host; they are full rebuilds and the slow part. `build-vendors` in CI builds instrumented for gcov with atomic counters and the full pre-flight does not, so a test that only fails instrumented can pass locally and fail CI.
+The build and test gates are reported `[SKIP] ... (quick run; PREFLIGHT_FULL=1 runs it, CI always does)`: both `run_all_tests.sh` passes (CI `build-test`, `build-vendors`), clang-tidy and the ASan+UBSan pass (CI `sanitizers`). `PREFLIGHT_FULL=1` runs them too on an arm64 Linux host; they are full rebuilds and the slow part. `build-vendors` in CI builds instrumented for gcov with atomic counters and the full pre-flight does not, so a test that only fails instrumented can pass locally and fail CI.
 
-It **auto-installs** a missing tool so its gate actually runs: `shellcheck`/`clang-format`/`nodejs` (and, in a full run, `clang-tidy`/`cppcheck`) via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The quick set also runs on macOS with its stock bash 3.2; there the apt installs do not apply, so pass `PREFLIGHT_NO_INSTALL=1` and a missing tool reports `[SKIP]`.
+It **auto-installs** a missing tool so its gate actually runs: `shellcheck`/`clang-format`/`cppcheck`/`nodejs` (and, in a full run, `clang-tidy`) via `sudo apt-get`, and `zizmor` as a pinned, checksum-verified release binary cached under `~/.cache` (no sudo). The quick set also runs on macOS with its stock bash 3.2; there the apt installs do not apply, so pass `PREFLIGHT_NO_INSTALL=1` and a missing tool reports `[SKIP]`.
 
 Knobs:
 - `PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh` — fork contributors whose PR base is the upstream remote.
@@ -415,18 +416,18 @@ head SHA that was not cancelled or skipped has completed (a failed run counts: t
 fail after the verdict was posted), none is still queued or running, and the newest bot verdict
 was updated after that run started. Commit dates are not used: a commit's committer date is when it
 was made locally, so a verdict on the previous head can be newer than it. The block below applies that
-rule every three minutes (`TICK`) within a 75-minute budget (the review job first waits up to 45 minutes for CI's build and test jobs), first look after one tick so a
+rule every three minutes (`TICK`) within a 80-minute budget (the review job first waits up to 45 minutes for CI's build and test jobs), first look after one tick so a
 run just re-triggered on the same head has appeared; `BUDGET=0` gives a single immediate look
 when nothing was just re-triggered (do NOT foreground-sleep; run
 it with `run_in_background`). It is the same block as `/pr-checker` Step 2:
 
 ```bash
-PR=<number>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-4500} ))
+PR=<number>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-4800} ))
 # A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
 # new check-run; a first look inside that window classifies the OLD run as final. So a
 # real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
 # is only valid when nothing was just re-triggered, and looks at once.
-if [ "${BUDGET:-4500}" -gt 0 ]; then sleep "$TICK"; fi
+if [ "${BUDGET:-4800}" -gt 0 ]; then sleep "$TICK"; fi
 while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
   # cancelled attempt cannot hide the finished one). Everything is fetched with
@@ -459,9 +460,14 @@ while :; do
     CI_RED=$( { gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message' \
                 || { sleep 5; gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message'; }; } \
               2>/dev/null | grep -m1 -E '^CI (is red|finished|did not finish)')
-    if [ -n "$CI_RED" ]; then
-      echo "CI RED for head $SHA, review skipped: $CI_RED" >&2; exit 4
-    fi
+    case "$CI_RED" in
+      "CI did not finish"*)
+        # Nothing to fix: CI is waiting for approval (fork PR) or a runner. Approve or wait,
+        # then re-run the review with the relabel trick (Step 1.2).
+        echo "CI NOT FINISHED for head $SHA, review timed out waiting: $CI_RED" >&2; exit 5 ;;
+      ?*)
+        echo "CI RED for head $SHA, review skipped: $CI_RED" >&2; exit 4 ;;
+    esac
     case "$RUN_STATE" in
       success*)
         # The PR edits the review workflow and the action skipped it (the assert step
@@ -497,13 +503,13 @@ while :; do
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
 done
-echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-4500} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-4800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
 
 **Exit `1` from a `BUDGET=0` pre-check is not a timeout.** Right after `gh pr create` or a push
 there is no `review` check-run yet, so the single look finds nothing and exits `1` with "after
 0 min": that means **no verdict yet**, start the real poll. Only an exit `1` from the full
-75-minute budget is a stall. **Skip the pre-check when the bot was just re-triggered on the same
+80-minute budget is a stall. **Skip the pre-check when the bot was just re-triggered on the same
 head** (the maintainer just applied `safe-to-review`, or you just ran `update-branch`): for a
 few seconds the only check-run is the old skipped or cancelled one, and the pre-check would
 report it as final. Start the real poll instead; its first look comes after one tick.
@@ -511,8 +517,11 @@ Exit `2` (the action skipped a workflow-editing PR) and exit `3` (no run will pr
 verdict: the newest run failed, succeeded without publishing one, the job was skipped, or every run was cancelled) both
 mean there is no verdict to act on: tell the user, and for exit `3` read the run log first. Exit `4`
 (CI red, review skipped: the review job waits for CI's build and test jobs and stops before the
-agent runs when one fails) is a CI failure on this head: fix it and push; the next push gets the
-review. It is not a broken review workflow. If the poll times out, surface
+agent runs when one fails or was renamed in `ci.yml`) is a CI failure on this head: fix it and
+push; the next push gets the review. Exit `5` (CI did not finish within the wait step's 45
+minutes: a fork PR whose CI waits for approval, or a long runner queue) has nothing to fix:
+approve or wait for CI, then remove and re-add `safe-to-review` to re-run the review. Neither
+is a broken review workflow. If the poll times out, surface
 the stall to the user and check the workflow (`gh run list --workflow=claude-review.yml --limit 3`)
 instead of restarting the loop blindly. `date -d` is GNU; the skills run on the Linux dev VM.
 
