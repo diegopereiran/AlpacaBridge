@@ -63,7 +63,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Rotator; }
 
-    std::string get_unique_id() const override { return "WANDERERASTRO_ROTATOR_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "WANDERERASTRO_ROTATOR_" + std::to_string(device_number_); }
 
     std::string get_description() const override { return "WandererAstro WandererRotator Mini Rotator Driver"; }
 
@@ -144,7 +144,10 @@ public:
             protocol_.connect(effective);
             {
                 // The Sync offset persists across reconnects and restarts (IRotatorV4).
-                const double saved_offset = util::RotatorSyncOffsetStore::load(get_unique_id());
+                // Keyed by the persisted GUID (decision 0018); the first connect after
+                // the upgrade moves the offset saved under the device-number ID.
+                const double saved_offset =
+                    util::RotatorSyncOffsetStore::load_or_adopt(get_unique_id(), fallback_unique_id());
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 sync_offset_ = saved_offset;
                 target_position_ = 0.0;
@@ -274,13 +277,19 @@ public:
         ensure_connected();
         const double mechanical = protocol_.get_state().mechanical_angle;
         const double target = normalize_angle(position);
+        const double new_offset = normalize_angle(target - mechanical);
+        // IRotatorV4: the offset must persist. A Sync that cannot store it has
+        // failed, so it throws and keeps the previous offset (decision 0008).
+        if (!util::RotatorSyncOffsetStore::save(get_unique_id(), new_offset)) {
+            throw AlpacaException("WandererAstro rotator: Sync could not save the offset, so it was not applied. "
+                                  "Check that the service can write config/rotator_sync_offsets.json.",
+                                  AlpacaError::DriverException);
+        }
         protocol_.clear_completion_missing();
         std::lock_guard<std::mutex> lock(state_mutex_);
-        sync_offset_ = normalize_angle(target - mechanical);
+        sync_offset_ = new_offset;
         target_position_ = target;
         has_target_position_ = true;
-        // Best effort: a storage failure logs a WARNING and never fails Sync.
-        util::RotatorSyncOffsetStore::save(get_unique_id(), sync_offset_);
     }
 
 private:

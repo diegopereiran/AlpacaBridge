@@ -11,6 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
+#include <alpacacore/util/unique_id.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -20,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <thread>
@@ -274,6 +277,44 @@ TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro
     CHECK(restarted->get_position() == 30.0);
     CHECK(restarted->get_mechanical_position() == 0.0);
     restarted->set_connected(false);
+}
+
+// Decision 0008 (#1473): IRotatorV4 requires the offset to persist, so a Sync
+// that cannot store it fails and the previous offset stays.
+TEST_CASE("WandererAstro Rotator Driver - Sync that cannot save throws and keeps the offset",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    driver->sync(30.0);
+    REQUIRE(driver->get_position() == 30.0);
+
+    // A regular file where the store's directory should be: every save fails.
+    const auto blocker = dir.file().parent_path().parent_path() / "blocker";
+    { std::ofstream(blocker) << "x"; }
+    alpacacore::util::RotatorSyncOffsetStore::set_default_path((blocker / "offsets.json").string());
+    require_alpaca_error([&] { driver->sync(50.0); }, alpacacore::AlpacaError::DriverException);
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
+}
+
+// Decision 0018 (#1471): keyed by the assigned GUID, a connect moves the offset
+// saved under the device-number ID before the upgrade.
+TEST_CASE("WandererAstro Rotator Driver - Connect adopts the offset saved under the old ID",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    CHECK(driver->get_unique_id() == guid);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 30.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_0") == 0.0);
+    driver->set_connected(false);
 }
 
 // #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its

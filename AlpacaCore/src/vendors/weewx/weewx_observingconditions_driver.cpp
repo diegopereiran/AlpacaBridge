@@ -333,7 +333,7 @@ public:
         return DeviceType::ObservingConditions;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         return "WEEWX_OC_" + std::to_string(device_number_);
     }
 

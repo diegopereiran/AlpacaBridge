@@ -167,7 +167,7 @@ public:
         return DeviceType::Telescope;
     }
     
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         if (mount_info_.model_code.empty()) {
             return "iOptron_" + std::to_string(device_number_);
         }

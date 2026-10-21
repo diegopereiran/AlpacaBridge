@@ -82,7 +82,7 @@ public:
         return DeviceType::Rotator;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return unique_id_locked();
     }
@@ -332,14 +332,20 @@ public:
         status_cache_.invalidate();  // the offset is taken against the live angle
         double mechanical = read_status().degree;
         double target = normalize_angle(position);
+        const double new_offset = normalize_angle(target - mechanical);
         // Write sync_offset_ under the same mutex_ that every reader takes —
         // the pre-lock write raced get_position()/to_mechanical_angle (M12).
         std::lock_guard<std::mutex> lock(mutex_);
-        sync_offset_ = normalize_angle(target - mechanical);
+        // IRotatorV4: the offset must persist. A Sync that cannot store it has
+        // failed, so it throws and keeps the previous offset (decision 0008).
+        if (!util::RotatorSyncOffsetStore::save(store_key_locked(), new_offset)) {
+            throw AlpacaException("ZWO CAA: Sync could not save the offset, so it was not applied. "
+                                  "Check that the service can write config/rotator_sync_offsets.json.",
+                                  AlpacaError::DriverException);
+        }
+        sync_offset_ = new_offset;
         target_position_ = target;
         has_target_position_ = true;
-        // Best effort: a storage failure logs a WARNING and never fails Sync.
-        util::RotatorSyncOffsetStore::save(unique_id_locked(), sync_offset_);
     }
 
 private:
@@ -378,6 +384,14 @@ private:
 
     // Caller holds mutex_.
     std::string unique_id_locked() const { return unique_id_for(serial_number_, rotator_id_); }
+
+    // The offset-store key: the persisted GUID (decision 0018), or the
+    // serial-based ID when none was assigned. Takes no lock of its own beyond
+    // the base accessor, so it is safe under mutex_.
+    std::string store_key_locked() const {
+        const std::string assigned = assigned_unique_id();
+        return assigned.empty() ? unique_id_locked() : assigned;
+    }
 
     std::string unique_id_for(const std::string& serial, std::optional<int> rotator_id) const {
         if (!serial.empty()) {
@@ -469,8 +483,13 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("ZWO", "CAA type unavailable: " + std::string(e.what()));
         }
-        // Persisted Sync offset, keyed by the serial read just above.
-        const double sync_offset = util::RotatorSyncOffsetStore::load(unique_id_for(serial, rotator_id));
+        // Persisted Sync offset, keyed by the GUID (decision 0018); the first
+        // connect after the upgrade moves the one saved under the serial-based
+        // ID, which needs the serial read just above.
+        const std::string legacy_key = unique_id_for(serial, rotator_id);
+        const std::string assigned = assigned_unique_id();
+        const double sync_offset =
+            util::RotatorSyncOffsetStore::load_or_adopt(assigned.empty() ? legacy_key : assigned, legacy_key);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             rotator_info_ = info;
