@@ -48,7 +48,7 @@ constexpr const char* kLogTag = "QHY";
  *
  * The goto's arrival wait (about 1 s per slot travelled) runs on a joinable
  * member thread so the Position PUT returns within the STANDARD budget;
- * disconnect and the destructor cancel and join it (AGENTS.md: never detach
+ * disconnect and the destructor cancel and join it (driver-lifecycle.instructions.md: never detach
  * a thread that touches `this`).
  */
 class QhyCfw3FilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
@@ -91,7 +91,7 @@ public:
     int get_interface_version() const override { return 3; }
 
     // VRS firmware date from the connect handshake; web UI only, never
-    // DriverInfo. Dedicated narrow mutex (AGENTS.md): the management poll must
+    // DriverInfo. Dedicated narrow mutex (driver-lifecycle.instructions.md): the management poll must
     // not queue behind a multi-second connect holding the driver mutex.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -142,6 +142,14 @@ public:
             util::connect_resolved(
                 config_, connection_resolved_, connection_resolver_,
                 [this, &info](const Cfw3ConnectionConfig& cfg) {
+                    // A saved serial entry with no port (#508 item 1) is registered so it
+                    // stays listed; refuse here rather than opening "".
+                    if (cfg.serial_port.empty()) {
+                        throw AlpacaException(
+                            "QHY CFW3 connectionType \"serial\" requires portPath: set the serial port in the "
+                            "device settings (or use 'auto').",
+                            AlpacaError::NotConnected);
+                    }
                     try {
                         info = protocol_.connect(cfg);
                     } catch (const AlpacaException& e) {

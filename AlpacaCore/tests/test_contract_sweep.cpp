@@ -56,10 +56,20 @@
 
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
+
+#include "fake_zwo_caa_sdk.h"
+#include "fake_zwo_eaf_sdk.h"
+#include "fake_zwo_efw_sdk.h"
+#include "fake_zwo_sdk.h"
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
+#include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
+
+#include "fake_celestron_cgx_mount.h"
+#include "fake_celestron_focuser.h"
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
@@ -81,10 +91,13 @@
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
+#include "fake_iguider_v4l2.h"
 #include "fake_ioptron_ieaf.h"
 #include "fake_ioptron_mount.h"
+#include "locked_iguider_v4l2.h"
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
@@ -94,6 +107,12 @@
 #include "fake_gemini_flatpanel.h"
 #include "fake_gemini_focuser.h"
 #include "fake_gemini_pdh.h"
+#endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+#include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
+
+#include "fake_astroasis_hid.h"
+#include "locked_astroasis_hid_transport.h"
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
@@ -105,21 +124,32 @@
 #include "fake_qhy_sdk.h"
 #include "locked_qhy_sdk.h"
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#include <alpacacore/vendor/altair/altair_camera_driver.h>
+#endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 
 #include "fake_touptek_sdk.h"
 #include "locked_touptek_sdk.h"
 #endif
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-#include <alpacacore/vendor/playerone/playerone_camera_driver.h>
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+#include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 
-#include "fake_playerone_sdk.h"
+#include "fake_touptek_powerbox_sdk.h"
+#include "locked_touptek_powerbox_sdk.h"
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 
 #include "fake_svbony_sdk.h"
+#endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+#include <alpacacore/vendor/playerone/playerone_camera_driver.h>
+#include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
+
+#include "fake_playerone_pw_sdk.h"
+#include "fake_playerone_sdk.h"
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
@@ -161,7 +191,7 @@ int thrown_code(const std::function<void()>& fn) {
 using Probe = std::pair<std::string, std::function<void()>>;
 
 // Out-of-range arguments that must be rejected with InvalidValue before the
-// connection check (AGENTS.md ASCOM contract precedence).
+// connection check (driver-lifecycle.instructions.md ASCOM contract precedence).
 std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
     std::vector<Probe> p;
     switch (type) {
@@ -239,7 +269,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             // Write probe on the id the registry entry names (never scanned from CanWrite, which throws
             // NotConnected on most switches while disconnected and used to drop the probe silently).
             // iOptron's iMate switch 0 is a read-only pass-through that throws NotImplemented before the
-            // connection check (AGENTS.md), which is why the id is named per entry.
+            // connection check (driver-lifecycle.instructions.md), which is why the id is named per entry.
             const int writable = entry.switch_writable_id;
             p.push_back({"set_switch(writable id)", [&s, writable] { s.set_switch(writable, false); }});
             break;
@@ -285,6 +315,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
             p.push_back({"get_gain", [&] { (void)c.get_gain(); }});
             p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
+            p.push_back({"get_camera_state", [&] { (void)c.get_camera_state(); }});
+            p.push_back({"get_percent_completed", [&] { (void)c.get_percent_completed(); }});
             p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
             p.push_back({"get_cooler_on", [&] { (void)c.get_cooler_on(); }});
             p.push_back({"get_cooler_power", [&] { (void)c.get_cooler_power(); }});
@@ -528,6 +560,7 @@ struct Tier2Host {
     // handshake at once), so it states why and the source here; the case then asserts only that the first
     // sample after connect() is Connecting or Connected. Never left empty for such a row.
     const char* connecting_unobservable = nullptr;
+    int target_unset_error = err::ValueNotSet;
 };
 
 using Clock = std::chrono::steady_clock;
@@ -630,8 +663,8 @@ Hosted connected_host(const Tier2Host& h) {
             CHECK(o.first_sample_connecting);
             CHECK(o.saw_connecting);
             // On rows whose get_connected() blocks behind the connect (async_connectable.h) this check cannot fail:
-            // that read only returns after the hold. It is load-bearing on 9 of the 19 rows (red with the holds
-            // set to 0); the PR body lists them.
+            // that read only returns after the hold. It is load-bearing on the rows whose get_connected() does
+            // not block (red with the holds set to 0), OnStep among them since #910.
             CHECK_FALSE(o.connected_early);
         }
         CHECK(Clock::now() - t0 < std::chrono::seconds(30));
@@ -655,19 +688,18 @@ Hosted connected_host(const Tier2Host& h) {
     CHECK(hosted.driver->get_last_connect_error() == reason);
 }
 
-// Case 2, telescope rows only. AGENTS.md (TargetRightAscension and TargetDeclination are independent):
-// each getter throws ValueNotSet until that property itself is written. Issue #655 says
-// InvalidOperation; every driver and every per-vendor test uses ValueNotSet (0x402), so that is the rule.
+// Case 2, telescope rows only. New implementations follow Master Interfaces 1.0.27
+// (InvalidOperation); legacy drivers retain ValueNotSet until their separate migration.
 [[maybe_unused]] void case_t2_target_flags(const Tier2Host& h) {
     // Registered over telescope hosts only (kind TEL below); the guard case pins that.
     REQUIRE(h.type == DeviceType::Telescope);
     Hosted hosted = connected_host(h);
     auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
-    CHECK(thrown_code([&] { (void)t.get_target_right_ascension(); }) == err::ValueNotSet);
-    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == err::ValueNotSet);
+    CHECK(thrown_code([&] { (void)t.get_target_right_ascension(); }) == h.target_unset_error);
+    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == h.target_unset_error);
     t.set_target_right_ascension(5.5);
     CHECK(t.get_target_right_ascension() == 5.5);
-    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == err::ValueNotSet);
+    CHECK(thrown_code([&] { (void)t.get_target_declination(); }) == h.target_unset_error);
     t.set_target_declination(20.25);
     CHECK(t.get_target_right_ascension() == 5.5);
     CHECK(t.get_target_declination() == 20.25);
@@ -694,6 +726,25 @@ Hosted connected_host(const Tier2Host& h) {
     const bool has_timestamp =
         std::any_of(state.begin(), state.end(), [](const alpacacore::DeviceState& s) { return s.name == "TimeStamp"; });
     CHECK(has_timestamp);
+}
+
+// Case 5, camera rows only. ImageArray before any exposure is the ICameraV4 InvalidOperation, flagged
+// asked_too_early so the router logs it at DEBUG rather than ERROR (issue #1167).
+[[maybe_unused]] void case_t2_image_array_asked_too_early(const Tier2Host& h) {
+    // Registered over camera hosts only (kind CAM below); the guard case pins that.
+    REQUIRE(h.type == DeviceType::Camera);
+    Hosted hosted = connected_host(h);
+    auto& camera = dynamic_cast<alpacacore::CameraDriver&>(*hosted.driver);
+    bool thrown = false;
+    try {
+        (void)camera.get_image_array();
+    } catch (const alpacacore::AlpacaException& e) {
+        thrown = true;
+        INFO(h.id << " ImageArray before any exposure: '" << e.what() << "'");
+        CHECK(e.error_code() == err::InvalidOperation);
+        CHECK(e.is_asked_too_early());
+    }
+    CHECK(thrown);
 }
 
 template <class Fake, class Make>
@@ -800,6 +851,98 @@ Tier2Host tier2_host_zwo_telescope() {
             return zwo::create_zwo_telescope(0, info);
         });
 }
+
+Tier2Host tier2_host_zwo_camera() {
+    Tier2Host h{"zwo_camera", "zwo", "camera", "fake_zwo_sdk.h", DeviceType::Camera, "zwo_camera", {}, true, {}, ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOSDK>();
+        if (hold) {
+            sdk->before_call = [](const std::string& name) {
+                if (name == "open_camera") std::this_thread::sleep_for(kHold);
+            };
+        }
+        return host_over(sdk, [](alpacacore::test::FakeZWOSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOSDK>();
+        sdk->fail_open = true;
+        return host_over(sdk, [](alpacacore::test::FakeZWOSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, fake);
+        });
+    };
+    return h;
+}
+
+// The EFW, EAF and CAA fakes share one recipe: open_delay holds the connect open, fail_open fails it.
+Tier2Host tier2_host_zwo_filterwheel() {
+    Tier2Host h{"zwo_filterwheel",
+                "zwo",
+                "filterwheel",
+                "fake_zwo_efw_sdk.h",
+                DeviceType::FilterWheel,
+                "zwo_filterwheel",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOEFWSDK>();
+        if (hold) sdk->open_delay = kHold;
+        return host_over(sdk, [](alpacacore::test::FakeZWOEFWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, fake.id, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOEFWSDK>();
+        sdk->fail_open = true;
+        return host_over(sdk, [](alpacacore::test::FakeZWOEFWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, fake.id, fake);
+        });
+    };
+    return h;
+}
+
+Tier2Host tier2_host_zwo_focuser() {
+    Tier2Host h{"zwo_focuser", "zwo", "focuser", "fake_zwo_eaf_sdk.h", DeviceType::Focuser, "zwo_focuser", {},
+                true,          {},    ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOEAFSDK>();
+        if (hold) sdk->open_delay = kHold;
+        return host_over(sdk, [](alpacacore::test::FakeZWOEAFSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, fake.id, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOEAFSDK>();
+        sdk->fail_open = true;
+        return host_over(sdk, [](alpacacore::test::FakeZWOEAFSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, fake.id, fake);
+        });
+    };
+    return h;
+}
+
+Tier2Host tier2_host_zwo_rotator() {
+    Tier2Host h{"zwo_rotator", "zwo", "rotator", "fake_zwo_caa_sdk.h", DeviceType::Rotator, "zwo_rotator", {},
+                true,          {},    ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOCAASDK>();
+        if (hold) sdk->open_delay = kHold;
+        return host_over(sdk, [](alpacacore::test::FakeZWOCAASDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_caa_rotator(0, fake.id, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOCAASDK>();
+        sdk->fail_open = true;
+        return host_over(sdk, [](alpacacore::test::FakeZWOCAASDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_caa_rotator(0, fake.id, fake);
+        });
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -817,6 +960,63 @@ Tier2Host tier2_host_celestron_telescope() {
             info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
             return cel::create_celestron_telescope(0, info);
         });
+}
+
+Tier2Host tier2_host_celestron_cgx_telescope() {
+    namespace cel = alpacacore::vendor::celestron;
+    auto fake = std::make_shared<alpacacore::test::FakeCelestronCgxMount>();
+    const auto make = [fake](int device_number) -> std::unique_ptr<AlpacaDriver> {
+        cel::CelestronCgxConnectionInfo info;
+        info.port_path = fake->slave_path();
+        info.site_latitude_degrees = 45.0;
+        info.site_longitude_degrees = -75.0;
+        return cel::create_celestron_cgx_telescope(device_number, info);
+    };
+    Tier2Host host{
+        "celestron_telescope_cgx",
+        "celestron",
+        "telescope",
+        "fake_celestron_cgx_mount.h",
+        DeviceType::Telescope,
+        "celestron_telescope_cgx",
+        [fake, make](bool) -> Hosted { return {fake, make(0)}; },
+        false,
+        [fake, make]() -> Hosted {
+            fake->corrupt_next_reply_checksum();
+            return {fake, make(0)};
+        },
+        "",
+        "Firmware replies are immediate; Connecting may complete before its first poll (fake protocol timing)",
+        err::InvalidOperation};
+    return host;
+}
+
+// FakeCelestronFocuser over a pty (recipe of test_celestron_focuser.cpp, issue #896).
+Tier2Host tier2_host_celestron_focuser() {
+    Tier2Host h{"celestron_focuser",
+                "celestron",
+                "focuser",
+                "fake_celestron_focuser.h",
+                DeviceType::Focuser,
+                "celestron_focuser",
+                {},
+                false,
+                {},
+                "",
+                "The fake answers every AUX frame at once and has no hold knob; Connecting may complete before "
+                "its first poll (fake_celestron_focuser.h)"};
+    h.connectable = [](bool) {
+        auto fake = std::make_shared<alpacacore::test::FakeCelestronFocuser>();
+        return host_over(fake, [](const alpacacore::test::FakeCelestronFocuser& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::celestron::create_celestron_focuser(0, f.slave_path());
+        });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::celestron::create_celestron_focuser(0, kAbsentPort);
+        return hosted;
+    };
+    return h;
 }
 #endif
 
@@ -978,6 +1178,74 @@ Tier2Host tier2_host_ioptron_focuser() {
         hosted.driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, kAbsentPort);
         return hosted;
     };
+    return h;
+}
+// FakeIGuiderV4L2 behind LockedIGuiderV4L2 (recipe of test_ioptron_iguider_camera.cpp), both in one holder: the
+// driver keeps a reference to the seam.
+struct IGuiderV4L2Hold {
+    alpacacore::test::FakeIGuiderV4L2 fake;
+    alpacacore::test::LockedIGuiderV4L2 v4l2{fake};
+};
+
+Tier2Host tier2_host_iguider_camera() {
+    Tier2Host h{"iguider_camera",
+                "iguider",
+                "camera",
+                "fake_iguider_v4l2.h",
+                DeviceType::Camera,
+                "iguider_camera",
+                {},
+                true,
+                {},
+                ""};
+    const auto make = [](IGuiderV4L2Hold& s) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::ioptron::create_iguider_camera(0, "", s.v4l2);
+    };
+    h.connectable = [make](bool hold) {
+        auto s = std::make_shared<IGuiderV4L2Hold>();
+        if (hold) s->fake.open_delay = kHold;  // fake_iguider_v4l2.h: the explicit open() hook
+        return host_over(s, make);
+    };
+    h.failing = [make]() {
+        auto s = std::make_shared<IGuiderV4L2Hold>();
+        s->fake.devices.clear();  // no iGuider attached: the connect fails at the scan
+        return host_over(s, make);
+    };
+    return h;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+// FakeHidTransport behind the Locked decorator, over the by-path factory's driver. The fake answers every
+// exchange at once, so the handshake cannot be held open.
+Tier2Host tier2_host_astroasis_focuser() {
+    Tier2Host h{"astroasis_focuser",
+                "astroasis",
+                "focuser",
+                "fake_astroasis_hid.h",
+                DeviceType::Focuser,
+                "astroasis_focuser",
+                {},
+                false,
+                {},
+                ""};
+    h.connecting_unobservable =
+        "FakeHidTransport answers the handshake in-process with no delay knob (fake_astroasis_hid.h write(), "
+        "astroasis_protocol_wrapper.cpp connect())";
+    auto make = [](bool dead) {
+        auto state = std::make_shared<alpacacore::test::FakeHidState>();
+        state->dead = dead;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::astroasis::create_astroasis_focuser(
+            0, "/dev/hidraw-fake",
+            std::make_unique<alpacacore::test::LockedAstroasisHidTransport>(
+                std::make_unique<alpacacore::test::FakeHidTransport>(state)));
+        hosted.fake = state;
+        return hosted;
+    };
+    h.connectable = [make](bool) { return make(false); };
+    // Reads time out, as a pulled cable does: the handshake gets no reply and connect fails.
+    h.failing = [make]() { return make(true); };
     return h;
 }
 #endif
@@ -1198,6 +1466,81 @@ Tier2Host tier2_host_touptek_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ALTAIR
+// Recipe of altair_concurrency_stress.cpp: the touptek_camera host through the
+// Altair factory, over the same fake.
+Tier2Host tier2_host_altair_camera() {
+    Tier2Host h{"altair_camera",
+                "altair",
+                "camera",
+                "fake_touptek_sdk.h",
+                DeviceType::Camera,
+                "altair_camera",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk_hold = std::make_shared<ToupTekSdkHold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera_by_id") std::this_thread::sleep_for(kHold);
+            };
+        }
+        return host_over(sdk_hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::altair::create_altair_camera(0, 0, s.sdk);
+        });
+    };
+    h.failing = []() {
+        auto hold = std::make_shared<ToupTekSdkHold>();
+        hold->fake.throw_from.insert("open_camera_by_id");  // fake_touptek_sdk.h fault injection
+        return host_over(hold, [](ToupTekSdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::altair::create_altair_camera(0, 0, s.sdk);
+        });
+    };
+    return h;
+}
+#endif
+
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+// The StellaVita power box: open_delay holds the connect open, fail_open fails it. The fake and its
+// Locked decorator live in one holder, because the driver keeps a reference to the box.
+struct StellaVitaHold {
+    alpacacore::test::FakeTouptekPowerboxSDK fake;
+    alpacacore::test::LockedTouptekPowerboxSDK box{fake};
+};
+
+Tier2Host tier2_host_touptek_switch() {
+    Tier2Host h{"touptek_switch",
+                "touptek",
+                "switch",
+                "fake_touptek_powerbox_sdk.h",
+                DeviceType::Switch,
+                "touptek_switch",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold_open) {
+        auto hold = std::make_shared<StellaVitaHold>();
+        if (hold_open) hold->fake.open_delay = kHold;
+        return host_over(hold, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::touptek::create_touptek_switch(
+                0, alpacacore::vendor::touptek::default_stellavita_config(), s.box);
+        });
+    };
+    h.failing = []() {
+        auto hold = std::make_shared<StellaVitaHold>();
+        hold->fake.fail_open = true;
+        return host_over(hold, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::touptek::create_touptek_switch(
+                0, alpacacore::vendor::touptek::default_stellavita_config(), s.box);
+        });
+    };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 Tier2Host tier2_host_playerone_camera() {
     Tier2Host h{"playerone_camera",
@@ -1226,17 +1569,54 @@ Tier2Host tier2_host_playerone_camera() {
     };
     return h;
 }
+
+Tier2Host tier2_host_playerone_filterwheel() {
+    Tier2Host h{"playerone_filterwheel",
+                "playerone",
+                "filterwheel",
+                "fake_playerone_pw_sdk.h",
+                DeviceType::FilterWheel,
+                "playerone_filterwheel",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakePlayerOnePWSDK>();
+        if (hold) sdk->set_open_delay(kHold);
+        return host_over(sdk, [](alpacacore::test::FakePlayerOnePWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakePlayerOnePWSDK>();
+        sdk->set_no_wheels(true);
+        return host_over(sdk, [](alpacacore::test::FakePlayerOnePWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0, fake);
+        });
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SVBONY
 Tier2Host tier2_host_svbony_camera() {
-    Tier2Host h{"svbony_camera", "svbony", "camera", "fake_svbony_sdk.h", DeviceType::Camera, "svbony_camera", {},
-                false,           {},       ""};
-    h.connectable = [](bool) {
-        return host_over(std::make_shared<alpacacore::test::FakeSVBSDK>(),
-                         [](alpacacore::test::FakeSVBSDK& sdk) -> std::unique_ptr<AlpacaDriver> {
-                             return alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
-                         });
+    Tier2Host h{"svbony_camera",
+                "svbony",
+                "camera",
+                "fake_svbony_sdk.h",
+                DeviceType::Camera,
+                "svbony_camera",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeSVBSDK>();
+        if (hold) sdk->set_open_delay(kHold);
+        return host_over(sdk, [](alpacacore::test::FakeSVBSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+        });
     };
     h.failing = []() {
         auto sdk = std::make_shared<alpacacore::test::FakeSVBSDK>();
@@ -1245,9 +1625,6 @@ Tier2Host tier2_host_svbony_camera() {
             return alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
         });
     };
-    h.connecting_unobservable =
-        "the fake's SDK calls complete immediately, so Connect may settle before the first "
-        "Connecting sample; the async lifecycle is still exercised";
     return h;
 }
 #endif
@@ -1394,15 +1771,16 @@ Tier2Host tier2_host_wandererastro_switch() {
 // One X(id, kind) per hosted roster row, under the vendor's guard. kind decides which cases the row is
 // registered for, so no case is registered where it would assert nothing: TEL = telescope (target flags and
 // InvalidValue apply), PRB = other type with static out-of-range probes (InvalidValue applies), NPR = a type
-// with no such probe (invalid_probe_reason_for() in contract_sweep.h states why; the guard case pins it).
+// with no such probe (invalid_probe_reason_for() in contract_sweep.h states why; the guard case pins it),
+// CAM = a camera, which has no such probe either and also gets the ImageArray case.
 // clang-format off
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS2_ZWO(X) X(zwo_telescope, TEL)
+#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, CAM) X(zwo_filterwheel, PRB) X(zwo_focuser, NPR) X(zwo_rotator, PRB)
 #else
 #define CS2_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS2_CELESTRON(X) X(celestron_telescope, TEL)
+#define CS2_CELESTRON(X) X(celestron_telescope, TEL) X(celestron_cgx_telescope, TEL) X(celestron_focuser, NPR)
 #else
 #define CS2_CELESTRON(X)
 #endif
@@ -1422,7 +1800,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SKYWATCHER(X)
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CS2_IOPTRON(X) X(ioptron_telescope, TEL) X(ioptron_focuser, NPR)
+#define CS2_IOPTRON(X) X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(iguider_camera, CAM)
 #else
 #define CS2_IOPTRON(X)
 #endif
@@ -1431,28 +1809,43 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_GEMINI(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+#define CS2_ASTROASIS(X) X(astroasis_focuser, NPR)
+#else
+#define CS2_ASTROASIS(X)
+#endif
 #ifdef ALPACACORE_ENABLE_QHY
-#define CS2_QHY(X) X(qhy_camera, NPR) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
+#define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
 #else
 #define CS2_QHY(X)
 #endif
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+#define CS2_TOUPTEK_STELLAVITA(X) X(touptek_switch, PRB)
+#else
+#define CS2_TOUPTEK_STELLAVITA(X)
+#endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-#define CS2_TOUPTEK(X) X(touptek_camera, NPR)
+#define CS2_TOUPTEK(X) X(touptek_camera, CAM) CS2_TOUPTEK_STELLAVITA(X)
 #else
 #define CS2_TOUPTEK(X)
 #endif
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-#define CS2_PLAYERONE(X) X(playerone_camera, NPR)
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CS2_ALTAIR(X) X(altair_camera, CAM)
 #else
-#define CS2_PLAYERONE(X)
+#define CS2_ALTAIR(X)
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
-#define CS2_SVBONY(X) X(svbony_camera, NPR)
+#define CS2_SVBONY(X) X(svbony_camera, CAM)
 #else
 #define CS2_SVBONY(X)
 #endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+#define CS2_PLAYERONE(X) X(playerone_camera, CAM) X(playerone_filterwheel, PRB)
+#else
+#define CS2_PLAYERONE(X)
+#endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
-#define CS2_GPHOTO(X) X(gphoto_camera, NPR)
+#define CS2_GPHOTO(X) X(gphoto_camera, CAM)
 #else
 #define CS2_GPHOTO(X)
 #endif
@@ -1468,11 +1861,13 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_ONSTEP(X) \
     CS2_SKYWATCHER(X) \
     CS2_IOPTRON(X) \
+    CS2_ASTROASIS(X) \
     CS2_GEMINI(X) \
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
-    CS2_PLAYERONE(X) \
+    CS2_ALTAIR(X) \
     CS2_SVBONY(X) \
+    CS2_PLAYERONE(X) \
     CS2_GPHOTO(X) \
     CS2_WANDERERASTRO(X)
 // clang-format on
@@ -1513,20 +1908,30 @@ CONTRACT_SWEEP_ENTRIES(CS_T1_CAN)
     TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { body(tier2_host_##id()); }
 #define CS2_CONNECTING(id, kind) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
 #define CS2_STATE(id, kind) CS2_CASE(id, "connected DeviceState has TimeStamp", case_t2_device_state_connected)
-// Target flags: telescopes only. InvalidValue: every kind except NPR.
+// Target flags: telescopes only. InvalidValue: every kind except NPR and CAM.
 #define CS2_TARGETS(id, kind) CS2_TARGETS_##kind(id)
 #define CS2_TARGETS_TEL(id) CS2_CASE(id, "target flags until set", case_t2_target_flags)
 #define CS2_TARGETS_PRB(id)
 #define CS2_TARGETS_NPR(id)
+#define CS2_TARGETS_CAM(id)
 #define CS2_INVALID(id, kind) CS2_INVALID_##kind(id)
 #define CS2_INVALID_TEL(id) CS2_CASE(id, "InvalidValue wins while connected", case_t2_invalid_value_connected)
 #define CS2_INVALID_PRB(id) CS2_INVALID_TEL(id)
 #define CS2_INVALID_NPR(id)
+#define CS2_INVALID_CAM(id)
+// ImageArray before an exposure: cameras only.
+#define CS2_IMAGE(id, kind) CS2_IMAGE_##kind(id)
+#define CS2_IMAGE_CAM(id) \
+    CS2_CASE(id, "ImageArray before any exposure is asked too early", case_t2_image_array_asked_too_early)
+#define CS2_IMAGE_TEL(id)
+#define CS2_IMAGE_PRB(id)
+#define CS2_IMAGE_NPR(id)
 
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_CONNECTING)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_TARGETS)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_INVALID)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_IMAGE)
 #endif
 
 #ifndef _WIN32
@@ -1564,6 +1969,10 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
     CS2_ENABLED("ioptron")
+    CS2_ENABLED("iguider")  // the iGuider camera's own catalog vendor, built by the iOptron option
+#endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+    CS2_ENABLED("astroasis")
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
     CS2_ENABLED("gemini")
@@ -1574,11 +1983,14 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #ifdef ALPACACORE_ENABLE_TOUPTEK
     CS2_ENABLED("touptek")
 #endif
-#ifdef ALPACACORE_ENABLE_PLAYERONE
-    CS2_ENABLED("playerone")
+#ifdef ALPACACORE_ENABLE_ALTAIR
+    CS2_ENABLED("altair")
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
     CS2_ENABLED("svbony")
+#endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+    CS2_ENABLED("playerone")
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
     CS2_ENABLED("gphoto")
@@ -1593,6 +2005,10 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
     using Row = std::tuple<std::string, std::string, std::string>;
     std::multiset<Row> from_roster;
     for (const auto& row : kFakeConnectableRoster) {
+#ifndef ALPACACORE_TOUPTEK_STELLAVITA
+        // The StellaVita switch is compiled only with libgpiod, so a ToupTek build without it has no such host.
+        if (std::string(row.fake_header) == "fake_touptek_powerbox_sdk.h") continue;
+#endif
         if (enabled.count(row.vendor) != 0) from_roster.emplace(row.vendor, row.device_type, row.fake_header);
     }
     std::multiset<Row> from_hosts;
@@ -1610,13 +2026,15 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
         // The registration kind must match the host, so no case is registered where it asserts nothing.
         const std::string& kind = kinds[i];
         CHECK((kind == "TEL") == (h.type == DeviceType::Telescope));
+        CHECK((kind == "CAM") == (h.type == DeviceType::Camera));
+        const bool no_probe_kind = kind == "NPR" || kind == "CAM";
         const bool states_no_probe =
             std::string(alpacacore::test::contract::invalid_probe_reason_for(h.type)).size() > 0;
-        CHECK(states_no_probe == (kind == "NPR"));
+        CHECK(states_no_probe == no_probe_kind);
         if (h.connectable) {
             Hosted probe_host = h.connectable(false);
             REQUIRE(probe_host.driver != nullptr);
-            CHECK(invalid_value_probes(*probe_host.driver, h.type).empty() == (kind == "NPR"));
+            CHECK(invalid_value_probes(*probe_host.driver, h.type).empty() == no_probe_kind);
         }
         CHECK((h.can_hold_connect ||
                (h.connecting_unobservable != nullptr && std::string(h.connecting_unobservable).size() > 0)));
@@ -1687,8 +2105,8 @@ TEST_CASE("Contract sweep - every available catalog descriptor has a registry en
 // The reverse direction, which the gate's ORPHAN ENTRY rule no longer covers for catalog vendors: a
 // registry entry whose vendor has descriptors or factories names one of them. A vendor counts by its
 // factories too, so dropping its whole schema registration leaves its entries checked, not skipped.
-// No vendor builds some device types through the catalog and others through a router arm today; one
-// that does lists its router pairs here.
+// ZWO's camera was the last pair of a catalog vendor still built by a router arm (open-astro#999), so
+// every entry of a catalog vendor is expected to have a descriptor.
 TEST_CASE("Contract sweep - every registry entry of a catalog vendor has a descriptor",
           "[contract][contract-sweep-guard]") {
     alpacacore::catalog::DeviceCatalog catalog;

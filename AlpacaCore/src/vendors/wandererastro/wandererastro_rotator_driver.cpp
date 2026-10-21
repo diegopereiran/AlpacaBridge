@@ -134,6 +134,13 @@ public:
                 ALPACA_LOG_INFO("WandererAstro", "Auto-detected " + port.model + " at " + port.port_path);
                 effective.serial_port = port.port_path;
             }
+            // A saved serial entry with no port (#508 item 1) is registered so it stays listed;
+            // refuse here, in words an operator can act on, instead of opening "".
+            if (effective.serial_port.empty()) {
+                throw AlpacaException(
+                    "WandererAstro rotator: portPath is required when connectionType is 'serial' (or use 'auto').",
+                    AlpacaError::NotConnected);
+            }
             protocol_.connect(effective);
             {
                 // The Sync offset persists across reconnects and restarts (IRotatorV4).
@@ -222,7 +229,7 @@ public:
     }
 
     void set_target_position(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         std::lock_guard<std::mutex> lock(state_mutex_);
         target_position_ = normalize_angle(position);
@@ -236,20 +243,20 @@ public:
 
     void move(double position) override {
         // IRotator.Move: relative offset from the current Position.
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         const double current = get_position();
         start_move_to(normalize_angle(current + position));
     }
 
     void move_absolute(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         start_move_to(normalize_angle(position));
     }
 
     void move_mechanical(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         const double mechanical_target = normalize_angle(position);
         const double mechanical_current = protocol_.get_state().mechanical_angle;
@@ -263,7 +270,7 @@ public:
         // IRotatorV4 Sync is an explicit driver-side offset between Position and
         // MechanicalPosition — no hardware command is involved (the device-level
         // "set zero" would destroy the mechanical coordinate instead).
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         const double mechanical = protocol_.get_state().mechanical_angle;
         const double target = normalize_angle(position);

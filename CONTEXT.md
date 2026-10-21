@@ -26,7 +26,7 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
 - **Persisted config**: an entry loaded from `registered_devices.json` at startup
   (`ConfigSource::Persisted`). A validation failure is normalized with a warning and
   the device is still registered, so it stays listed and editable in the web UI and
-  refuses to connect until fixed (`Router::reject_invalid_config()`, #380).
+  refuses to connect until fixed (each descriptor's `Schema::normalize`, applied by `DeviceCatalog::normalize`, #380).
 - Avoid: "saved config" for both, or "invalid config" without saying which source;
   the same fault has two different outcomes.
 
@@ -48,10 +48,16 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
   link is faulted; the client, not the driver, decides whether to reconnect.
 - **Link health**: whether the transport is delivering (`util::StreamLinkHealth`,
   `util::PolledLinkHealth`). A faulted link makes reads and writes throw
-  `DriverException` ("communications compromised"), not `NotConnected`. A removed
-  device node is the exception: it is a lost connection, not a fault (#445).
-- Avoid: "disconnected" for a faulted link, or `NotConnected` for a link that is
-  merely silent.
+  `DriverException` ("communications compromised"), not `NotConnected`.
+- **Lost link**: in a driver that has adopted
+  [decision 0009](docs/decisions/0009-link-loss-and-relink-policy.md), a link is lost
+  when the transport is gone or when a fault has stood past `util::kLinkStalenessBound`
+  (30 s). `Connected` then reads false and operations throw `NotConnected` until the
+  client connects again. Each driver's row in that record's Adoption table says which
+  evidence it acts on at once (for example a removed device node, #445) and which it
+  leaves to the bound.
+- Avoid: "disconnected" for a faulted link, or `NotConnected` for a link that has been
+  silent for less than the staleness bound.
 
 ## Fake evidence vs rig evidence
 
