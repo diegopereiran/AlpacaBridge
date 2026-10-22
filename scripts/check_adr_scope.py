@@ -25,8 +25,8 @@ Two modes:
            review-comment.md. Every listed rule needs a checklist line
            `- <record file> rule <n>: pass|defect|n/a: <reason>`, a rule may
            not get two verdicts, and a defect line needs the "Issues found"
-           sign-off as the last line (bold, italics or a closing period
-           around it still count). Any finding exits 1, so nothing posts.
+           sign-off as the last line (bold, italics or a closing period or
+           exclamation mark around it still count). Any finding exits 1, so nothing posts.
 
 Usage:
     check_adr_scope.py --list [--root DIR] < paths

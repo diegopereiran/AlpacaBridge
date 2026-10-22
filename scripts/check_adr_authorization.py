@@ -103,26 +103,50 @@ def permission_lookup(repo):
     return permission_of
 
 
-def records_lookup(repo):
-    """sha -> {path: blob sha} under docs/decisions/ at that commit, or None when it cannot be resolved."""
+def records_lookup(repo, run=subprocess.run):
+    """sha -> {path: object sha} for every entry under docs/decisions/ at that commit, or None.
+
+    The whole subtree, not only its direct files: a record added in a
+    subdirectory, a symlink or a submodule entry must differ from its absence.
+    None (the authorization does not count) when the commit cannot be resolved,
+    a call fails, or the tree listing is truncated.
+    """
     cache = {}
+    parent, name = DECISION_PREFIX.rstrip("/").rsplit("/", 1)
+
+    def api(path):
+        r = run(["gh", "api", "repos/%s/%s" % (repo, path)], capture_output=True, text=True)
+        if r.returncode != 0:
+            return "404" if "404" in r.stderr else None
+        try:
+            return json.loads(r.stdout)
+        except ValueError:
+            return None
+
+    def snapshot(sha):
+        commit = api("commits/%s" % sha)
+        full = commit.get("sha", "") if isinstance(commit, dict) else ""
+        if not re.fullmatch(r"[0-9a-f]{40}", full):
+            return None
+        listing = api("contents/%s?ref=%s" % (parent, full))
+        if listing == "404":
+            return {}  # no docs/ directory at that commit, so no record at all
+        if not isinstance(listing, list):
+            return None
+        directory = next((e for e in listing if isinstance(e, dict) and e.get("name") == name), None)
+        if directory is None:
+            return {}
+        if directory.get("type") != "dir":
+            return None
+        tree = api("git/trees/%s?recursive=1" % directory.get("sha", ""))
+        if not isinstance(tree, dict) or tree.get("truncated") or not isinstance(tree.get("tree"), list):
+            return None
+        return {DECISION_PREFIX + e["path"]: e.get("sha") for e in tree["tree"]
+                if isinstance(e, dict) and e.get("type") != "tree" and e.get("path")}
 
     def records_at(sha):
         if sha not in cache:
-            r = subprocess.run(["gh", "api", "repos/%s/commits/%s" % (repo, sha), "--jq", ".sha"],
-                               capture_output=True, text=True)
-            full = r.stdout.strip() if r.returncode == 0 else ""
-            if not re.fullmatch(r"[0-9a-f]{40}", full):
-                cache[sha] = None
-                return None
-            r = subprocess.run(["gh", "api", "repos/%s/contents/%s?ref=%s" % (repo, DECISION_PREFIX.rstrip("/"), full),
-                                "--jq", '.[] | select(.type == "file") | "\\(.path) \\(.sha)"'],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                # 404: the commit has no docs/decisions/ directory, so no record at all.
-                cache[sha] = {} if "404" in r.stderr else None
-            else:
-                cache[sha] = dict(line.split(" ", 1) for line in r.stdout.splitlines() if " " in line)
+            cache[sha] = snapshot(sha)
         return cache[sha]
 
     return records_at
@@ -206,6 +230,45 @@ def self_test():
     expect(state == "failure", "an older authorization by a reader still does not count")
     state, _ = decide(rec, head, [("writer", "ADR authorized fedcba9")], permission_of, lambda sha: None)
     expect(state == "failure", "when the head's records cannot be read, only the head sha authorizes")
+
+    # records_lookup over a fake GitHub API: a record added in a subdirectory after the
+    # authorization must not read as unchanged (#1517 review).
+    old_full, head_full = "a" * 40, "b" * 40
+    trees = {old_full: {"0005-task-clock.md": "b1"},
+             head_full: {"0005-task-clock.md": "b1", "sub/0020-new.md": "n1"}}
+
+    def fake_gh(args, **_kw):
+        class R:
+            returncode, stdout, stderr = 0, "", ""
+        r, url = R(), args[2]
+        ref = url.split("ref=")[-1] if "ref=" in url else None
+        if "/commits/" in url:
+            full = next((f for f in trees if f.startswith(url.rsplit("/", 1)[-1])), None)
+            body = {"sha": full} if full else None
+        elif "/contents/docs?" in url:
+            body = [{"name": "decisions", "path": "docs/decisions", "sha": "tree-" + ref, "type": "dir"}]
+        elif "/git/trees/tree-" in url:
+            sha = url.split("/git/trees/tree-")[1].split("?")[0]
+            body = {"truncated": sha == truncated_at, "tree": [{"path": n, "sha": v, "type": "blob"} for n, v in trees[sha].items()]
+                    + [{"path": d, "sha": "d", "type": "tree"} for d in {n.split("/")[0] for n in trees[sha] if "/" in n}]}
+        else:
+            body = None
+        if body is None:
+            r.returncode, r.stderr = 1, "gh: Not Found (HTTP 404)"
+            return r
+        r.stdout = json.dumps(body)
+        return r
+
+    truncated_at = None
+    lookup = records_lookup("o/r", run=fake_gh)
+    nested = rec + ["docs/decisions/sub/0020-new.md"]
+    state, _ = decide(nested, head_full, [("writer", "ADR authorized aaaaaaa")], permission_of, lookup)
+    expect(state == "failure", "a record added in a subdirectory after the authorization needs a new one")
+    state, _ = decide(rec, head_full, [("writer", "ADR authorized aaaaaaa")], permission_of, lookup)
+    expect(state == "success", "the API lookup keeps an authorization whose records are unchanged")
+    expect(records_lookup("o/r", run=fake_gh)("c" * 7) is None, "a commit the API cannot find has no snapshot")
+    truncated_at = old_full
+    expect(records_lookup("o/r", run=fake_gh)(old_full) is None, "a truncated tree listing has no snapshot")
 
     for f in failures:
         print("FAIL: " + f)
