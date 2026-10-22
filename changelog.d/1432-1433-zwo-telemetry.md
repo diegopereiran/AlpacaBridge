@@ -4,6 +4,7 @@
 ### Fixed
 
 - **ZWO AM review corrections**: discard queued late replies before serial/TCP commands, preserve healthy connections through long or queued guide pulses without refreshing telemetry age, keep Connected lock-free, and wake motion workers outside the state lock on link loss.
+- **ZWO AM connect warm-up**: a management health read cannot expire an unfinished handshake against an old telemetry deadline. Failed handshakes release their transient health state so offline configuration remains writable. Fake-clock tests also cover cached TrackingRate/UTCDate reads, failed initial TrackingRate measurement and the 30 s mount-time refresh.
 - **ZWO AM: property reads no longer wait for mount telemetry** (AlpacaCore, issues #1432, #1433): serve measured snapshots, retain coordinate-before-arrival ordering, evaluate Park in the poll, and bound telemetry failures without suppressing safety-stop traffic; for changed error behavior, see Breaking changes.
 - **ZWO AM: a missing post-pulse position reply no longer delays the next guide pulse** (AlpacaCore): bound best-effort pulse reconciliation independently of the main link timeout; found during real AM5 validation.
 - **ZWO AM5 revalidated over USB and native handset Wi-Fi** (AlpacaCore): separate ConformU 4.5.2 runs on Linux arm64 passed with no errors, warnings, issues or timing violations; the Wi-Fi run used a USB Wi-Fi dongle with the mount's USB cable disconnected. Separate stationary proxy checks verified fault/recovery, bounded link loss, safety stops and explicit reconnect.

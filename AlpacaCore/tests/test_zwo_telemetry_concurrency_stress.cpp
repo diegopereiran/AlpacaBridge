@@ -59,6 +59,9 @@ struct Rig {
     std::atomic<bool> withhold_ra{false};
     std::atomic<bool> delay_ra{false}, delay_dec{false};
     std::atomic<bool> late_reply_ready{false};
+    std::atomic<bool> bad_tracking_rate{false};
+    std::atomic<bool> hold_identity{false}, identity_entered{false}, release_identity{false};
+    std::atomic<int> tracking_queries{0}, time_queries{0}, time_year{0};
     std::atomic<int> pulse_commands{0};
     std::atomic<int> gu{0}, gr{0}, gd{0}, stops{0}, writes{0}, gotos{0};
     test::FakeMountServer server{[this, pending = std::string{}](const std::string& chunk) mutable {
@@ -99,11 +102,20 @@ struct Rig {
                 response += command == ":MS#" ? "0#" : "1#";
             } else if (command == ":Ggr#")
                 response += "0.5#";
-            else if (command == ":GVP#")
+            else if (command == ":GVP#") {
+                if (hold_identity.load()) {
+                    identity_entered.store(true);
+                    while (!release_identity.load()) std::this_thread::yield();
+                }
                 response += "AM5N#";
-            else if (command == ":GT#")
-                response += "0#";
-            else if (command == ":GA#")
+            } else if (command == ":GT#") {
+                ++tracking_queries;
+                response += bad_tracking_rate.load() ? "bad#" : "0#";
+            } else if (command == ":GMTI#" || command == ":GL#" || command == ":GC#") {
+                ++time_queries;
+                const int year = time_year.load();
+                response += year == 0 ? "bad#" : "01/02/" + std::to_string(year) + "&03:04:05&+00:00#";
+            } else if (command == ":GA#")
                 response += horizontal_error.load() ? "e1#" : "+45*00:00#";
             else if (command == ":GZ#")
                 response += horizontal_error.load() ? "e1#" : "180*00:00#";
@@ -128,6 +140,7 @@ struct Rig {
     }
     ~Rig() {
         release_status.store(true);
+        release_identity.store(true);
         driver.reset();
     }
     void connect() {
@@ -524,5 +537,85 @@ TEST_CASE("ZWO a late pulse reconciliation reply cannot poison the next poll",
     CHECK(rig.driver->get_right_ascension() == 12.0);
     CHECK(rig.driver->get_declination() == expected_dec);
     CHECK(rig.driver->get_link_fault().empty());
+}
+
+TEST_CASE("ZWO TrackingRate is cached and a failed connect measurement stays unavailable",
+          "[zwo][telescope][telemetry][getter-stall]") {
+    const bool failed = GENERATE(false, true);
+    Rig rig;
+    rig.bad_tracking_rate.store(failed);
+    rig.connect();
+    const int queries = rig.tracking_queries.load();
+    REQUIRE(queries > 0);
+    for (int read = 0; read < 3; ++read) {
+        if (failed)
+            error([&] { rig.driver->get_tracking_rate(); }, AlpacaError::DriverException, "not available");
+        else
+            CHECK(rig.driver->get_tracking_rate() == 0);
+        CHECK(rig.tracking_queries.load() == queries);
+    }
+    rig.driver->set_tracking_rate(2);
+    CHECK(rig.driver->get_tracking_rate() == 2);
+    CHECK(rig.tracking_queries.load() == queries);
+}
+
+TEST_CASE("ZWO UTCDate getters never read the link and the poll refreshes mount time",
+          "[zwo][telescope][telemetry][getter-stall]") {
+    Rig rig(1000);  // The wire reader paces each character; a complete GMTI reply exceeds 100 ms.
+    rig.connect();
+    const int queries = rig.time_queries.load();
+    const auto before = std::chrono::system_clock::now();
+    const auto host = rig.driver->get_utc_date();
+    CHECK(host >= before);
+    CHECK(host <= std::chrono::system_clock::now());
+    rig.driver->get_device_state();
+    CHECK(rig.time_queries.load() == queries);
+    const auto mount_time = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 3h + 4min + 5s;
+    const auto client_time = mount_time - 24h;
+    rig.driver->set_utc_date(client_time);
+    rig.tick(1s);
+    CHECK(rig.driver->get_utc_date() == client_time + 1s);
+    CHECK(rig.time_queries.load() == queries);
+    rig.time_year.store(20);
+    rig.tick(28s);
+    CHECK(rig.time_queries.load() == queries);
+    rig.tick(1s);
+    REQUIRE(rig.time_queries.load() == queries + 1);
+    CHECK(rig.driver->get_utc_date() == mount_time);
+    rig.time_year.store(21);
+    rig.tick(29s);
+    CHECK(rig.driver->get_utc_date() == mount_time + 29s);
+    CHECK(rig.time_queries.load() == queries + 1);
+    rig.tick(1s);
+    CHECK(rig.driver->get_utc_date() == mount_time + 366 * 24h);
+    CHECK(rig.time_queries.load() == queries + 2);
+}
+
+TEST_CASE("ZWO a management health read cannot expire the connect warmup", "[zwo][telescope][telemetry]") {
+    const bool sever_transport = GENERATE(false, true);
+    Rig rig;
+    rig.hold_identity.store(true);
+    rig.driver->connect();
+    REQUIRE(eventually([&] { return rig.identity_entered.load(); }));
+    rig.clock.advance(31s);
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(rig.driver->get_link_fault().empty());
+    if (sever_transport) {
+        // shutdown takes effect immediately; the held responder cannot leave until released below.
+        (void)rig.server.drop_connections();
+        CHECK_FALSE(rig.driver->get_link_fault().empty());
+    }
+    rig.release_identity.store(true);
+    // Also release the failed-handshake retry timer on the red path before joining the async connect.
+    if (rig.clock.wait_for_waiters(1, 1s)) rig.clock.advance(1s);
+    REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    CHECK(rig.driver->get_connected() == !sever_transport);
+    CHECK(rig.driver->get_link_fault().empty());
+    if (sever_transport) {
+        CHECK_FALSE(rig.driver->get_last_connect_error().empty());
+        CHECK_NOTHROW(rig.driver->set_site_elevation(123.0));
+        CHECK_NOTHROW(rig.driver->set_target_right_ascension(6.0));
+        CHECK_NOTHROW(rig.driver->set_utc_date(std::chrono::system_clock::now()));
+    }
 }
 #endif

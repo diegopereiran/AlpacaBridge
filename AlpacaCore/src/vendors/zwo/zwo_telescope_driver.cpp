@@ -655,9 +655,9 @@ public:
             }
             try {
                 // Publish the open link internally; getters wait for the end of the initial telemetry attempt.
-                connected_.store(true);
                 caches_ready_.store(false);
                 reset_session_state_for_connect();
+                connected_.store(true);
 
                 std::string mount_info;
                 try {
@@ -737,6 +737,8 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     snapshot_.reset();
+                    health_.reset();
+                    loss_reason_.clear();
                 }
                 protocol.cancel_pending_io();
                 stop_poll_thread();
@@ -2480,9 +2482,10 @@ private:
         if (!connected_.load()) return;
         const bool transport_lost = ZWOMountProtocolWrapper::instance().link_lost();
         // An intentional guide pause is not silence from the link; allow a full poll deadline afterward.
-        const bool expired = health_.faulted()
-                                 ? health_.fault_stale(now)
-                                 : now - std::max(last_mandatory_at_, pulse_guiding_end_) >= util::kLinkStalenessBound;
+        const bool expired =
+            caches_ready_.load() &&
+            (health_.faulted() ? health_.fault_stale(now)
+                               : now - std::max(last_mandatory_at_, pulse_guiding_end_) >= util::kLinkStalenessBound);
         if (!transport_lost && !expired) return;
         loss_reason_ = link_fault_locked();
         if (loss_reason_.empty())
