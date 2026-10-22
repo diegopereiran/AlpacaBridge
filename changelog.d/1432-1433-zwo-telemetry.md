@@ -3,3 +3,4 @@
 
 ### Fixed
 - **ZWO AM: property reads no longer wait for mount telemetry** (AlpacaCore, issues #1432, #1433): serve measured snapshots, retain coordinate-before-arrival ordering, evaluate Park in the poll, and bound telemetry failures without suppressing safety-stop traffic; for changed error behavior, see Breaking changes.
+- **ZWO AM: a missing post-pulse position reply no longer delays the next guide pulse** (AlpacaCore): bound best-effort pulse reconciliation independently of the main link timeout; found during real AM5 validation.

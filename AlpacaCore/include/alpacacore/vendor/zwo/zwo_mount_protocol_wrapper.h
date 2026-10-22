@@ -132,7 +132,7 @@ public:
 
     std::string get_mount_info();
 
-    EquatorialCoordinates get_current_equatorial();
+    EquatorialCoordinates get_current_equatorial(int timeout_ms_override = 0);
     HorizontalCoordinates get_current_horizontal();
 
     EquatorialCoordinates get_target_equatorial();

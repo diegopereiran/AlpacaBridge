@@ -1141,6 +1141,8 @@ private:
         const int bytes_received = recv(socket_handle_, &ch, 1, 0);
         return bytes_received == 1;
 #else
+        // The protocol I/O lock owns the exchange; SO_RCVTIMEO bounds each receive to 200 ms.
+        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
         const ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);
         if (bytes_received == 0) link_lost_.store(true);
         if (bytes_received < 0) note_transport_error();
@@ -1232,16 +1234,16 @@ std::string ZWOMountProtocolWrapper::get_mount_info() {
     return trim_copy(std::move(response));
 }
 
-EquatorialCoordinates ZWOMountProtocolWrapper::get_current_equatorial() {
+EquatorialCoordinates ZWOMountProtocolWrapper::get_current_equatorial(int timeout_ms_override) {
     EquatorialCoordinates out;
 
-    const std::string ra_response = send_command(":GR");
+    const std::string ra_response = send_command(":GR", true, timeout_ms_override);
     throw_if_mount_error(ra_response, ":GR");
     if (!parse_hms(ra_response, out.ra_hours)) {
         throw AlpacaException("Invalid RA response from ZWO mount", AlpacaError::DriverException);
     }
 
-    const std::string dec_response = send_command(":GD");
+    const std::string dec_response = send_command(":GD", true, timeout_ms_override);
     throw_if_mount_error(dec_response, ":GD");
     if (!parse_angle_triplet(dec_response, true, out.dec_degrees)) {
         throw AlpacaException("Invalid Dec response from ZWO mount", AlpacaError::DriverException);

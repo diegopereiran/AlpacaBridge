@@ -716,7 +716,8 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     tracking_rate_cached_ = tracking_rate;
                     tracking_rate_valid_ = true;
-                } catch (const std::exception&) {
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                    // TrackingRate stays unavailable until a successful client write.
                 }
 
                 try {
@@ -2658,7 +2659,8 @@ private:
                 frame.pier_side = (direction == 'E' || direction == 'e')   ? 1
                                   : (direction == 'W' || direction == 'w') ? 0
                                                                            : -1;
-            } catch (const std::exception&) {
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Optional fallback failure leaves SideOfPier unavailable, not healthy or guessed.
             }
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2781,7 +2783,8 @@ private:
         if (!pulse_cancel_.load() && task.generation == pulse_generation_.load()) {
             const auto token = snapshot_.begin_poll();
             try {
-                const EquatorialCoordinates eq = protocol.get_current_equatorial();
+                // Best-effort reconciliation must not hold up the next queued pulse for a full link timeout.
+                const EquatorialCoordinates eq = protocol.get_current_equatorial(250);
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_.load() || pulse_cancel_.load() || task.generation != pulse_generation_.load() ||
                     token != snapshot_.begin_poll())

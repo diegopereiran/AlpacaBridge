@@ -56,6 +56,8 @@ struct Rig {
     std::atomic<bool> silent{false}, hold_status{false}, status_entered{false}, release_status{false};
     std::atomic<bool> park_error{false};
     std::atomic<bool> horizontal_error{false};
+    std::atomic<bool> withhold_ra{false};
+    std::atomic<int> pulse_commands{0};
     std::atomic<int> gu{0}, gr{0}, gd{0}, stops{0}, writes{0}, gotos{0};
     test::FakeMountServer server{[this, pending = std::string{}](const std::string& chunk) mutable {
         pending += chunk;
@@ -73,10 +75,12 @@ struct Rig {
                 if (!silent.load()) response += bad_status.load() ? "e1#" : (was_moving ? "G#" : "NG#");
             } else if (command == ":GR#") {
                 ++gr;
-                if (!silent.load()) response += bad_ra.load() ? "bad#" : "12:00:00#";
+                if (!silent.load() && !withhold_ra.load()) response += bad_ra.load() ? "bad#" : "12:00:00#";
             } else if (command == ":GD#") {
                 ++gd;
                 if (!silent.load()) response += bad_dec.load() ? "bad#" : "+45*00:00#";
+            } else if (command.starts_with(":Mg")) {
+                ++pulse_commands;
             } else if (command == ":Q#" || command == ":Qe#" || command == ":Qw#") {
                 ++stops;
             } else if (command.starts_with(":S") || command == ":MS#") {
@@ -449,5 +453,24 @@ TEST_CASE("ZWO fault recovery races disconnect without reviving a frame", "[zwo]
         CHECK(guard.unexpected_count() == 0);
         CHECK(guard.total_calls() > 0);
     }
+}
+
+TEST_CASE("ZWO a silent pulse reconciliation cannot delay the next guide command",
+          "[zwo][telescope][telemetry][pulseguide]") {
+    Rig rig(5000);
+    rig.connect();
+    rig.driver->pulse_guide(0, 100);
+    REQUIRE(eventually([&] { return rig.pulse_commands.load() == 1; }));
+    REQUIRE(rig.clock.wait_for_waiters(2, 5s));
+    rig.driver->pulse_guide(1, 100);
+    rig.withhold_ra.store(true);
+    const int pairs = rig.gr.load();
+    rig.clock.advance(100ms);
+    REQUIRE(eventually([&] { return rig.gr.load() > pairs; }));
+    const auto begin = std::chrono::steady_clock::now();
+    while (rig.pulse_commands.load() < 2 && std::chrono::steady_clock::now() - begin < 1s) {
+        std::this_thread::yield();
+    }
+    CHECK(rig.pulse_commands.load() == 2);
 }
 #endif
