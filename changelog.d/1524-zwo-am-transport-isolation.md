@@ -1,0 +1,2 @@
+### Fixed
+- **ZWO AM telescope entries own independent transports** (AlpacaCore, issue #1524): connecting, cancelling, losing or disconnecting one configured telescope no longer replaces or closes another entry's link, including a disconnect sent to an entry that never connected; serial port claims remain exclusive. Two entries configured with the same physical TCP endpoint still address the same mount; multi-AM hardware qualification remains separate from fake isolation coverage.
