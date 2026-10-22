@@ -2442,6 +2442,64 @@ struct RefractionFake {
 
 }  // namespace
 
+// Decision 0016: get_device_firmware() takes only firmware_mutex_, which the
+// connect held across its :GVP#/:GVN# round trips, so a hook called during
+// the handshake waited for the serial reads (the contract sweep's hook bound
+// failed on a loaded CI runner). The fake holds its :GVP# reply until
+// released; the hook must return before that.
+TEST_CASE("OnStep Telescope Driver - the firmware hook does not wait for the connect's version reads",
+          "[onstep][telescope][unit]") {
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool released = false;
+    std::atomic<bool> gvp_asked{false};
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) -> std::string {
+        if (chunk.rfind(":GVP", 0) == 0) {
+            gvp_asked = true;
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            gate_cv.wait(lock, [&] { return released; });
+            return "On-Step#";
+        }
+        if (chunk.rfind(":GVN", 0) == 0) return "10.23a#";
+        if (chunk.rfind(":GU", 0) == 0) return "nNpEo180#";
+        if (chunk.rfind(":S", 0) == 0) return "1";
+        return "0#";
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 10000;  // the held reply must not time out first
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    const auto release = [&] {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        released = true;
+        gate_cv.notify_all();
+    };
+
+    std::thread connector([&] { (void)alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(20)); });
+    const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!gvp_asked && std::chrono::steady_clock::now() < give_up) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(gvp_asked);
+    // Releases the reply after 2 s, so a hook that waits still returns.
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        release();
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    (void)driver->get_device_firmware();
+    const auto took = std::chrono::steady_clock::now() - t0;
+    release();
+    releaser.join();
+    connector.join();
+    CHECK(took < std::chrono::seconds(1));
+    CHECK(driver->get_device_firmware().value_or("") == "On-Step 10.23a");
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep Telescope Driver - DoesRefraction follows the OnStepX coordinate mode", "[onstep][telescope][unit]") {
     auto fake = std::make_shared<RefractionFake>();
     std::string version = "10.23a";

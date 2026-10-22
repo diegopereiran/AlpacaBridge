@@ -360,16 +360,21 @@ public:
             tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
+            // The two reads run without firmware_mutex_: get_device_firmware()
+            // takes only that lock and must not wait for a serial round trip
+            // (decision 0016). Only the store is under it.
             std::string firmware_version;
+            std::string firmware;
+            try {
+                std::string product = protocol.get_product_name();
+                firmware_version = protocol.get_version_number();
+                firmware = product + (firmware_version.empty() ? "" : (" " + firmware_version));
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                firmware.clear();
+            }
             {
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                try {
-                    std::string product = protocol.get_product_name();
-                    firmware_version = protocol.get_version_number();
-                    firmware_cache_ = product + (firmware_version.empty() ? "" : (" " + firmware_version));
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    firmware_cache_.clear();
-                }
+                firmware_cache_ = firmware;
             }
 
             // OnStepX applies refraction to the RA/Dec it reports unless it was
