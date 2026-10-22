@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -720,12 +721,22 @@ public:
         }
 
         connected_ = ok;
+        link_lost_.store(false);
+        closing_.store(false);
         return ok;
     }
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+    }
+
+    bool link_lost() const { return link_lost_.load(); }
+    void cancel_pending_io() { closing_.store(true); }
+
+    void try_disconnect() {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (lock.owns_lock()) disconnect_locked();
     }
 
     bool is_connected() const {
@@ -742,7 +753,7 @@ public:
                              bool require_hash_terminator,
                              int timeout_ms_override) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_) {
+        if (!connected_ || closing_.load()) {
             throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
         }
 
@@ -758,6 +769,7 @@ public:
         }
 
         if (!write_data(full_command)) {
+            note_transport_error();
             throw AlpacaException("Failed to send command to ZWO mount");
         }
 
@@ -776,7 +788,7 @@ public:
 
     void send_command_blind(const std::string& command) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_) {
+        if (!connected_ || closing_.load()) {
             throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
         }
 
@@ -792,6 +804,7 @@ public:
         }
 
         if (!write_data(full_command)) {
+            note_transport_error();
             throw AlpacaException("Failed to send command to ZWO mount");
         }
 
@@ -805,6 +818,15 @@ public:
     }
 
 private:
+    void note_transport_error() {
+#ifndef _WIN32
+        if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF || errno == ENOTSOCK ||
+            errno == ENOTCONN || errno == ECONNRESET || errno == EPIPE) {
+            link_lost_.store(true);
+        }
+#endif
+    }
+
     void disconnect_locked() {
         if (!connected_) {
             return;
@@ -1056,6 +1078,7 @@ private:
         auto last_char_time = start;
 
         while (true) {
+            if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
             char ch = '\0';
             bool got_char = false;
             if (connection_type_ == ConnectionType::Serial) {
@@ -1063,6 +1086,7 @@ private:
             } else {
                 got_char = read_network_char(ch);
             }
+            if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
 
             if (got_char) {
                 last_char_time = std::chrono::steady_clock::now();
@@ -1106,7 +1130,9 @@ private:
         return false;
 #else
         // Up to 100 ms for a character, the read window this link always had.
-        return util::tty_read(serial_fd_, &ch, 1, 100) == 1;
+        const auto count = util::tty_read(serial_fd_, &ch, 1, 100);
+        if (count < 0) note_transport_error();
+        return count == 1;
 #endif
     }
 
@@ -1116,6 +1142,8 @@ private:
         return bytes_received == 1;
 #else
         const ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);
+        if (bytes_received == 0) link_lost_.store(true);
+        if (bytes_received < 0) note_transport_error();
         return bytes_received == 1;
 #endif
     }
@@ -1144,6 +1172,8 @@ private:
 private:
     mutable std::mutex mutex_;
     bool connected_;
+    std::atomic<bool> link_lost_{false};
+    std::atomic<bool> closing_{false};
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
 
@@ -1167,6 +1197,10 @@ ZWOMountProtocolWrapper& ZWOMountProtocolWrapper::instance() {
     static ZWOMountProtocolWrapper wrapper;
     return wrapper;
 }
+
+bool ZWOMountProtocolWrapper::link_lost() const { return pimpl_->link_lost(); }
+void ZWOMountProtocolWrapper::cancel_pending_io() { pimpl_->cancel_pending_io(); }
+void ZWOMountProtocolWrapper::try_disconnect() { pimpl_->try_disconnect(); }
 
 bool ZWOMountProtocolWrapper::connect(const ConnectionInfo& info) {
     return pimpl_->connect(info);
@@ -1328,6 +1362,7 @@ void ZWOMountProtocolWrapper::abort_motion() {
 StatusInfo ZWOMountProtocolWrapper::get_status() {
     StatusInfo status;
     status.raw = trim_copy(send_command(":GU", false));
+    if (status.raw.empty()) throw AlpacaException("No ZWO mount status response", AlpacaError::DriverException);
     throw_if_mount_error(status.raw, ":GU");
 
     status.no_tracking = status.raw.find('n') != std::string::npos;
