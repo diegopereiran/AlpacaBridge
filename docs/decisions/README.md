@@ -40,10 +40,10 @@ does not count.
 included, needs two things before it can merge:
 
 - A repository collaborator with write, maintain or admin permission comments
-  `ADR authorized <sha>` on the PR, on a line of its own, naming a commit of
-  the PR, normally the current head. The authorization holds for later pushes
-  while every record file the PR changes keeps the content it had at that
-  commit; a push that edits, adds or removes one needs a new authorization,
+  `ADR authorized <sha>` on the PR, on a line of its own, naming a commit,
+  normally the current head. The authorization holds for later pushes while
+  every record file the PR changes keeps the content it had at that commit; a
+  push that edits one, adds one or deletes one needs a new authorization,
   and a push that changes only code or tests does not. The author may
   authorize their own PR. `scripts/check_adr_authorization.py` posts the result
   as the `adr-authorization` commit status (`.github/workflows/decision-records.yml`).

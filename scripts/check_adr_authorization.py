@@ -9,12 +9,14 @@ posted, as a PR comment or a review, a line that reads exactly
 
     ADR authorized <head sha>
 
-where <head sha> is a commit of the PR (7 to 40 hex digits of it), normally the
-head at the time. Naming the commit binds the authorization to the content of
+where <head sha> names a commit (7 to 40 hex digits of it), normally the PR
+head at the time; any commit GitHub resolves counts, since only its record
+content is compared. Naming the commit binds the authorization to the content of
 the records: it holds for a later head as long as every decision-record path the
 PR changes has the same content (git blob) at that head as at the named commit,
 so a push that only changes code or tests needs no new authorization, and a push
-that edits, adds or removes one of those records does. The comparison is by
+that changes the content of one of those records (an edit, a new record, or the
+deletion of a record the PR still changes) does. The comparison is by
 content, not by a diff between the two commits, so a merge of the base branch
 or a rebase that leaves the records alone keeps the authorization. A named
 commit GitHub cannot resolve does not count. The author may authorize their own
@@ -117,7 +119,7 @@ def records_lookup(repo, run=subprocess.run):
     def api(path):
         r = run(["gh", "api", "repos/%s/%s" % (repo, path)], capture_output=True, text=True)
         if r.returncode != 0:
-            return "404" if "404" in r.stderr else None
+            return "404" if "(HTTP 404)" in r.stderr else None
         try:
             return json.loads(r.stdout)
         except ValueError:
@@ -269,6 +271,15 @@ def self_test():
     expect(records_lookup("o/r", run=fake_gh)("c" * 7) is None, "a commit the API cannot find has no snapshot")
     truncated_at = old_full
     expect(records_lookup("o/r", run=fake_gh)(old_full) is None, "a truncated tree listing has no snapshot")
+    truncated_at = None
+
+    def flaky_gh(args, **kw):
+        r = fake_gh(args, **kw)
+        if "/contents/docs?" in args[2]:
+            r.returncode, r.stdout, r.stderr = 1, "", "gh: error connecting to api.github.com: 404 bytes read"
+        return r
+    expect(records_lookup("o/r", run=flaky_gh)(old_full) is None,
+           "an API error that only mentions 404 is not a missing docs/ directory")
 
     for f in failures:
         print("FAIL: " + f)

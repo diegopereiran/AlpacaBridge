@@ -2,7 +2,7 @@
 #
 # A PR that changes a file under docs/decisions/ needs a repository
 # collaborator (write, maintain or admin) to comment `ADR authorized <sha>`,
-# naming a PR commit at which the PR's record files had their current content.
+# naming a commit (normally the head) at which the PR's record files had their current content.
 # scripts/check_adr_authorization.py decides and posts the result as the
 # commit status `adr-authorization` on the PR head, which the ruleset requires.
 #
