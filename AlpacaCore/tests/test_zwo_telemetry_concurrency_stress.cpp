@@ -57,6 +57,8 @@ struct Rig {
     std::atomic<bool> park_error{false};
     std::atomic<bool> horizontal_error{false};
     std::atomic<bool> withhold_ra{false};
+    std::atomic<bool> delay_ra{false}, delay_dec{false};
+    std::atomic<bool> late_reply_ready{false};
     std::atomic<int> pulse_commands{0};
     std::atomic<int> gu{0}, gr{0}, gd{0}, stops{0}, writes{0}, gotos{0};
     test::FakeMountServer server{[this, pending = std::string{}](const std::string& chunk) mutable {
@@ -75,9 +77,17 @@ struct Rig {
                 if (!silent.load()) response += bad_status.load() ? "e1#" : (was_moving ? "G#" : "NG#");
             } else if (command == ":GR#") {
                 ++gr;
+                if (delay_ra.exchange(false)) {
+                    std::this_thread::sleep_for(650ms);  // Transport latency, not a driver timer.
+                    late_reply_ready.store(true);
+                }
                 if (!silent.load() && !withhold_ra.load()) response += bad_ra.load() ? "bad#" : "12:00:00#";
             } else if (command == ":GD#") {
                 ++gd;
+                if (delay_dec.exchange(false)) {
+                    std::this_thread::sleep_for(650ms);  // Transport latency, not a driver timer.
+                    late_reply_ready.store(true);
+                }
                 if (!silent.load()) response += bad_dec.load() ? "bad#" : "+45*00:00#";
             } else if (command.starts_with(":Mg")) {
                 ++pulse_commands;
@@ -216,8 +226,8 @@ TEST_CASE("ZWO mandatory telemetry alone controls fault recovery and loss", "[zw
         rig.tick(29999ms);
         CHECK(rig.driver->get_connected());
         rig.clock.advance(1ms);
-        CHECK_FALSE(rig.driver->get_connected());
         error([&] { rig.driver->get_slewing(); }, AlpacaError::NotConnected);
+        CHECK_FALSE(rig.driver->get_connected());
         CHECK(rig.driver->get_device_state().empty());
         CHECK(rig.driver->get_link_fault() == fault);
         rig.bad_status.store(false);
@@ -247,6 +257,7 @@ TEST_CASE("ZWO stalled poll keeps getters responsive but cannot preserve a frame
     rig.clock.advance(29749ms);
     CHECK(rig.driver->get_connected());
     rig.clock.advance(1ms);
+    error([&] { rig.driver->get_slewing(); }, AlpacaError::NotConnected);
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.driver->get_device_state().empty());
     rig.release_status.store(true);
@@ -306,20 +317,32 @@ TEST_CASE("ZWO Park inference cannot complete without its measured final pair",
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
-TEST_CASE("ZWO a pulse pause is not failed telemetry and cannot renew its age",
+TEST_CASE("ZWO a long pulse pause preserves the link without renewing measurement age",
           "[zwo][telescope][telemetry][pulseguide]") {
     const bool moving = GENERATE(false, true);
     const bool between_status_and_pair = GENERATE(false, true);
+    const bool queued = GENERATE(false, true);
     Rig rig;
     rig.moving.store(moving);
     rig.connect();
     const int pairs = rig.gr.load();
+    const auto measured_stamp = [&] {
+        for (const auto& item : rig.driver->get_device_state())
+            if (item.name == "TimeStamp") return std::get<std::string>(item.value);
+        return std::string{};
+    };
+    const auto before = measured_stamp();
+    REQUIRE_FALSE(before.empty());
     if (between_status_and_pair) {
         rig.hold_status.store(true);
         rig.clock.advance(250ms);
         REQUIRE(eventually([&] { return rig.status_entered.load(); }));
     }
-    rig.driver->pulse_guide(0, 60000);
+    if (queued) {
+        for (int pulse = 0; pulse < 10; ++pulse) rig.driver->pulse_guide(0, 5000);
+    } else {
+        rig.driver->pulse_guide(0, 60000);
+    }
     rig.release_status.store(true);
     REQUIRE(rig.clock.wait_for_woken_settled(5s));
     rig.tick(1s);
@@ -327,12 +350,18 @@ TEST_CASE("ZWO a pulse pause is not failed telemetry and cannot renew its age",
     CHECK(rig.driver->get_connected());
     CHECK(rig.driver->get_link_fault().empty());
     CHECK(rig.driver->get_slewing() == moving);
-    rig.tick(29999ms - rig.clock.now().time_since_epoch());
+    rig.tick(40000ms - rig.clock.now().time_since_epoch());
     CHECK(rig.driver->get_connected());
-    rig.clock.advance(1ms);
-    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(rig.driver->get_link_fault().empty());
+    CHECK(rig.driver->get_slewing() == moving);
+    CHECK(rig.gr.load() == pairs);
+    // Wall UTC did not advance with the fake clock: an older stamp proves the age was not renewed.
+    CHECK(measured_stamp() < before);
+    REQUIRE(rig.server.drop_connections());
+    // Even during the pause, a failed guide write or an explicit exchange observes transport loss.
+    CHECK_THROWS_AS(rig.driver->command_string(":GVP", false), AlpacaException);
     error([&] { rig.driver->get_slewing(); }, AlpacaError::NotConnected);
-    CHECK(rig.driver->get_device_state().empty());
+    CHECK_FALSE(rig.driver->get_connected());
 }
 
 TEST_CASE("ZWO a polled Park error remains on both completion properties", "[zwo][telescope][telemetry][arrival]") {
@@ -472,5 +501,28 @@ TEST_CASE("ZWO a silent pulse reconciliation cannot delay the next guide command
         std::this_thread::yield();
     }
     CHECK(rig.pulse_commands.load() == 2);
+}
+
+TEST_CASE("ZWO a late pulse reconciliation reply cannot poison the next poll",
+          "[zwo][telescope][telemetry][pulseguide]") {
+    const bool dec = GENERATE(false, true);
+    Rig rig(5000);
+    rig.connect();
+    rig.driver->pulse_guide(0, 100);
+    const auto expected_dec = rig.driver->get_declination();
+    REQUIRE(eventually([&] { return rig.pulse_commands.load() == 1; }));
+    REQUIRE(rig.clock.wait_for_waiters(2, 5s));
+    rig.delay_ra.store(!dec);
+    rig.delay_dec.store(dec);
+    rig.clock.advance(100ms);
+    REQUIRE(eventually([&] { return rig.late_reply_ready.load(); }));
+    std::this_thread::sleep_for(50ms);  // Let the late transport reply reach the socket before the next exchange.
+    // Fence the transport: its next response must belong to this command, not the late coordinate.
+    CHECK(rig.driver->command_string(":GVP", false) == "AM5N");
+    rig.tick(1s);
+    CHECK_FALSE(rig.driver->get_slewing());
+    CHECK(rig.driver->get_right_ascension() == 12.0);
+    CHECK(rig.driver->get_declination() == expected_dec);
+    CHECK(rig.driver->get_link_fault().empty());
 }
 #endif

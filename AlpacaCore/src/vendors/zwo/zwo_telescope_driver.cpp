@@ -329,7 +329,6 @@ public:
 
     bool get_connected() const override {
         // The handshake must finish before Connected is visible; a failed warm-up leaves telemetry unavailable.
-        update_link_state();
         return connected_.load() && caches_ready_.load();
     }
 
@@ -447,6 +446,7 @@ public:
         // takes for the short state publish only (decision 0016).
         auto& protocol = ZWOMountProtocolWrapper::instance();
         auto reset_session_state_for_connect = [&](bool keep_telemetry_caches = false) {
+            std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
             std::lock_guard<std::mutex> lock(mutex_);
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -478,13 +478,10 @@ public:
                 tracking_state_at_ = std::chrono::steady_clock::time_point{};
             }
             poll_pause_.store(false);
-            {
-                std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
-                pulse_queue_.clear();
-                pulse_queue_end_ = std::chrono::steady_clock::time_point{};
-                pulse_thread_stop_.store(false);
-                pulse_cancel_.store(false);
-            }
+            pulse_queue_.clear();
+            pulse_queue_end_ = std::chrono::steady_clock::time_point{};
+            pulse_thread_stop_.store(false);
+            pulse_cancel_.store(false);
             park_command_active_ = false;
             park_command_started_ = std::chrono::steady_clock::time_point{};
             park_motion_seen_ = false;
@@ -1696,14 +1693,9 @@ public:
         task.generation = pulse_generation_.load();
 
         {
-            // open-astro#714: mutex_ before pulse_mutex_, the order the
-            // Connected=true refresh uses when it clears the queue. Taking
-            // them the other way round deadlocked a guiding client against a
-            // second client's Connect. One critical section keeps the queue
-            // end, the offsets and pulse_guiding_end_ in step for any reader
-            // that holds mutex_.
-            std::lock_guard<std::mutex> state_lock(mutex_);
+            // Match the connect reset's pulse -> state order (#714); state remains the leaf.
             std::lock_guard<std::mutex> lock(pulse_mutex_);
+            std::lock_guard<std::mutex> state_lock(mutex_);
             const auto now = clock_.now();
             const auto start_time = std::max(pulse_queue_end_, now);
             pulse_queue_end_ = start_time + std::chrono::milliseconds(effective_duration);
@@ -2483,12 +2475,14 @@ private:
 
     void update_link_state() const {
         if (!connected_.load()) return;
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         const auto now = clock_.now();
         if (!connected_.load()) return;
         const bool transport_lost = ZWOMountProtocolWrapper::instance().link_lost();
-        const bool expired =
-            health_.faulted() ? health_.fault_stale(now) : now - last_mandatory_at_ >= util::kLinkStalenessBound;
+        // An intentional guide pause is not silence from the link; allow a full poll deadline afterward.
+        const bool expired = health_.faulted()
+                                 ? health_.fault_stale(now)
+                                 : now - std::max(last_mandatory_at_, pulse_guiding_end_) >= util::kLinkStalenessBound;
         if (!transport_lost && !expired) return;
         loss_reason_ = link_fault_locked();
         if (loss_reason_.empty())
@@ -2498,18 +2492,20 @@ private:
         link_lost_at_.note(now);
         snapshot_.reset();
         poll_stop_.store(true);
+        pulse_cancel_.store(true);
+        pulse_thread_stop_.store(true);
+        goto_cancel_.store(true);
+        ZWOMountProtocolWrapper::instance().cancel_pending_io();
+        lock.unlock();  // The state lock is a leaf; wake the motion workers outside it.
         {
+            // Pair with each wait's predicate check before notifying, without changing a newer connect's flags.
             std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
-            pulse_cancel_.store(true);
-            pulse_thread_stop_.store(true);
+            pulse_cv_.notify_all();
         }
         {
             std::lock_guard<std::mutex> goto_lock(goto_mutex_);
-            goto_cancel_.store(true);
+            goto_cv_.notify_all();
         }
-        pulse_cv_.notify_all();
-        goto_cv_.notify_all();
-        ZWOMountProtocolWrapper::instance().cancel_pending_io();
     }
 
     template <typename T>
@@ -2536,6 +2532,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         const auto reading = snapshot_.read();
         if (!reading) return std::nullopt;
+        // A moving GU-only warm-up frame has no mandatory pair yet; retain its own measured age.
         return clock_.now() - reading->value.mandatory_at.value_or(reading->measured_at);
     }
 
@@ -2788,7 +2785,7 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!connected_.load() || pulse_cancel_.load() || task.generation != pulse_generation_.load() ||
                     token != snapshot_.begin_poll())
-                    return;
+                    return;  // IsPulseGuiding uses the published deadline, not this worker's hold loop.
                 if (cached_equatorial_.has_value()) {
                     // Compute the expected final position from the pre-pulse base + offset.
                     double target_ra = std::fmod(cached_equatorial_->ra_hours + ra_offset_hours_, 24.0);
@@ -3018,7 +3015,7 @@ private:
     // use-after-free if the driver dies mid-teardown; driver-lifecycle.instructions.md rule).
     std::thread disconnect_thread_;
     // Serializes set_connected() bodies (sync PUT / async task / refresh) so
-    // poll_thread_/pulse_thread_/disconnect_thread_ join+assign and their
+    // poll_operation_ start/join, pulse_thread_/disconnect_thread_ join+assign and their
     // stop flags can never interleave between two bodies. Taken after the
     // base pending-disconnect gates; never taken by any worker-thread body.
     std::mutex set_connected_mutex_;

@@ -736,7 +736,11 @@ public:
 
     void try_disconnect() {
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-        if (lock.owns_lock()) disconnect_locked();
+        if (lock.owns_lock())
+            disconnect_locked();
+        else
+            ALPACA_LOG_INFO("ZWO",
+                            "Transport close deferred until Connect/Disconnect: an exchange still owns the link");
     }
 
     bool is_connected() const {
@@ -768,6 +772,7 @@ public:
             full_command.push_back('#');
         }
 
+        discard_pending_input();
         if (!write_data(full_command)) {
             note_transport_error();
             throw AlpacaException("Failed to send command to ZWO mount");
@@ -803,6 +808,7 @@ public:
             full_command.push_back('#');
         }
 
+        discard_pending_input();
         if (!write_data(full_command)) {
             note_transport_error();
             throw AlpacaException("Failed to send command to ZWO mount");
@@ -818,6 +824,38 @@ public:
     }
 
 private:
+    void discard_pending_input() {
+        // A short reconciliation timeout can leave its late reply queued for the next command.
+        if (connection_type_ == ConnectionType::Serial) {
+#ifdef _WIN32
+            if (!PurgeComm(serial_handle_, PURGE_RXCLEAR))
+                throw AlpacaException("Failed to discard ZWO mount serial input");
+#else
+            if (tcflush(serial_fd_, TCIFLUSH) != 0) {
+                note_transport_error();
+                throw AlpacaException("Failed to discard ZWO mount serial input");
+            }
+#endif
+            return;
+        }
+        char discarded[256];
+#ifdef _WIN32
+        u_long available = 0;
+        while (ioctlsocket(socket_handle_, FIONREAD, &available) == 0 && available > 0) {
+            if (recv(socket_handle_, discarded, static_cast<int>(std::min<u_long>(available, sizeof(discarded))), 0) <=
+                0)
+                break;
+        }
+#else
+        ssize_t count;
+        do {
+            count = recv(socket_fd_, discarded, sizeof(discarded), MSG_DONTWAIT);
+        } while (count > 0 || (count < 0 && errno == EINTR));
+        if (count == 0) link_lost_.store(true);
+        if (count < 0) note_transport_error();
+#endif
+    }
+
     void note_transport_error() {
 #ifndef _WIN32
         if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF || errno == ENOTSOCK ||

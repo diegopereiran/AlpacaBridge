@@ -2,6 +2,8 @@
 - **ZWO AM: unreliable telemetry now raises an error instead of returning indefinitely stale state** (AlpacaCore, issues #1432, #1433): missing initial measurements and three failed mandatory polls return DriverException; persistent faults or stalled polling become NotConnected and require an explicit reconnect. **After upgrading:** clients must handle unavailable/compromised telemetry and reconnect after link loss; saved device settings are unchanged.
 
 ### Fixed
+
+- **ZWO AM review corrections**: discard queued late replies before serial/TCP commands, preserve healthy connections through long or queued guide pulses without refreshing telemetry age, keep Connected lock-free, and wake motion workers outside the state lock on link loss.
 - **ZWO AM: property reads no longer wait for mount telemetry** (AlpacaCore, issues #1432, #1433): serve measured snapshots, retain coordinate-before-arrival ordering, evaluate Park in the poll, and bound telemetry failures without suppressing safety-stop traffic; for changed error behavior, see Breaking changes.
 - **ZWO AM: a missing post-pulse position reply no longer delays the next guide pulse** (AlpacaCore): bound best-effort pulse reconciliation independently of the main link timeout; found during real AM5 validation.
 - **ZWO AM5 revalidated over USB and native handset Wi-Fi** (AlpacaCore): separate ConformU 4.5.2 runs on Linux arm64 passed with no errors, warnings, issues or timing violations; the Wi-Fi run used a USB Wi-Fi dongle with the mount's USB cable disconnected. Separate stationary proxy checks verified fault/recovery, bounded link loss, safety stops and explicit reconnect.
