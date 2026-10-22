@@ -1164,11 +1164,13 @@ public:
     // superseded the running body, so the move would end at the firmware's
     // time limit while Slewing read true: stop this axis and report it, as a
     // MoveAxis that did not happen. Nothing is stopped when a newer MoveAxis
-    // went out meanwhile (the generation moved on); after a disconnect the
-    // stops fail and the message says so. The other axis keeps moving,
-    // without a re-send until the next MoveAxis.
+    // went out meanwhile (the generation moved on), or when AbortSlew, a GOTO,
+    // Park, FindHome or a disconnect ended the move meanwhile (the axis no
+    // longer reads as moving): its stops would end that newer command. After
+    // a link drop the stops fail and the message says so. The other axis keeps
+    // moving, without a re-send until the next MoveAxis.
     void stop_move_without_resend_locked(int axis, std::uint64_t generation, const AlpacaException& refusal) {
-        if (move_axis_generation_.current() != generation) {
+        if (move_axis_generation_.current() != generation || !manual_axis_slewing_[axis]) {
             throw refusal;
         }
         std::string message = std::string("MoveAxis could not keep the move going (") + refusal.what() + ")";

@@ -1016,6 +1016,40 @@ TEST_CASE("OnStep Telescope Driver - a refused re-send whose stop fails too leav
     driver->set_connected(false);
 }
 
+// #1458: an AbortSlew that ended the move while the refused start was still
+// in the slot owns the motion: the refused call reports the refusal as it
+// came and sends no stops of its own, which could end a newer GOTO or Park.
+TEST_CASE("OnStep Telescope Driver - a refused re-send stops nothing after an AbortSlew", "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // The slot calls the spawn hook under its own lock, which AbortSlew's
+    // cancel() needs: the AbortSlew runs on its own thread, and the hook
+    // fails the start once its stops went out. It still holds the driver
+    // lock then, so it finishes before MoveAxis looks at the axis again.
+    std::thread abort;
+    alpacacore::vendor::onstep::set_move_axis_resend_spawn_for_testing(
+        *driver, [&](const std::function<void()>&) -> std::thread {
+            abort = std::thread([&driver] { driver->abort_slew(); });
+            (void)(fake.logged(":Qe#", 1) && fake.logged(":Qw#", 1) && fake.logged(":Qn#", 1) &&
+                   fake.logged(":Qs#", 1));
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+
+    fake.guide_active->store(true);
+    try {
+        driver->move_axis(0, 1.0);
+        FAIL("MoveAxis returned success although its re-send did not start");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("MoveAxis could not keep") == std::string::npos);
+    }
+    abort.join();
+    REQUIRE(fake.logged(":Qe#", 1));
+    CHECK_FALSE(fake.logged(":Qe#", 2, std::chrono::milliseconds(200)));  // the AbortSlew's stop only
+    driver->set_connected(false);
+}
+
 // #1458: a newer MoveAxis that went out while the refused start was still
 // in the slot owns the motion: the refused call reports the refusal as it
 // came and stops nothing.

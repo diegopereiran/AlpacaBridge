@@ -105,8 +105,8 @@ it is never reachable through `router.cpp` or the web UI.
   the link as alive, #1459). If the slot refuses the new body after the move went out (no thread,
   or replaced bodies still finishing), `MoveAxis` stops that axis (both directions) and throws
   `DriverException` (if those stops fail too, the message says so and `Slewing` stays true; a
-  newer `MoveAxis` that went out meanwhile owns the motion, so the refusal is reported as it came
-  and nothing is stopped); the other axis keeps moving without a re-send until the next `MoveAxis`
+  newer `MoveAxis`, or an `AbortSlew`, GOTO, `Park`, `FindHome` or disconnect that ended the move
+  meanwhile, owns the motion, so the refusal is reported as it came and nothing is stopped); the other axis keeps moving without a re-send until the next `MoveAxis`
   (#1458). The test seam is `set_move_axis_resend_spawn_for_testing()`. Each axis is due 7 s after its `MoveAxis`, then 7 s after the end of each tick
   that was due for it, whether that tick sent or skipped (OnStepX times each axis on its own), so a
   `MoveAxis` on the other axis, which replaces the body, never delays it, and `mutex_` is free
