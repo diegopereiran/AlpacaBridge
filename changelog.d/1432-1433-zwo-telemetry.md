@@ -4,3 +4,4 @@
 ### Fixed
 - **ZWO AM: property reads no longer wait for mount telemetry** (AlpacaCore, issues #1432, #1433): serve measured snapshots, retain coordinate-before-arrival ordering, evaluate Park in the poll, and bound telemetry failures without suppressing safety-stop traffic; for changed error behavior, see Breaking changes.
 - **ZWO AM: a missing post-pulse position reply no longer delays the next guide pulse** (AlpacaCore): bound best-effort pulse reconciliation independently of the main link timeout; found during real AM5 validation.
+- **ZWO AM5 revalidated over USB** (AlpacaCore): ConformU 4.5.2 on Linux arm64 passed with no errors, warnings, issues or timing violations; separate stationary proxy checks verified fault/recovery, bounded link loss, safety stops and explicit reconnect.
