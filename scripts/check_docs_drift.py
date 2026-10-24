@@ -181,7 +181,8 @@ Checks:
      Decision, Rules, Alternatives rejected, Consequences and Links in that
      order (Adoption and How to reverse may sit between them; a superseded
      record needs no Rules and a retired one drops Rules and Adoption; How to
-     reverse is required from record 0020 on), numbered Rules lines that end
+     reverse is required from record 0020 on and in any record that supersedes
+     another), numbered Rules lines that end
      `Scope: `glob`. Checked by: <check>.` with every glob matching a tracked
      file (`**` only in 0013), no except/unless/until/for now on a rule line
      without the `<!-- allowed -->` marker, bare `Checked by: review` rules
@@ -2356,6 +2357,8 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
     findings = []
     numbers = []
     retired = set()
+    superseded_by = {}   # superseding record number -> the record it replaces
+    has_reverse = {}     # record number -> whether it has `## How to reverse`
     for name in sorted(records):
         text = records[name]
         m = DECISION_FILE_RE.match(name)
@@ -2374,6 +2377,8 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
             continue
         if status.group(2) and not any(n.startswith(status.group(2) + "-") for n in records):
             findings.append("%s: superseded by %s, which does not exist" % (where, status.group(2)))
+        if status.group(2):
+            superseded_by.setdefault(status.group(2), name)
         is_retired = status.group(1).startswith("retired")
         if is_retired:
             retired.add(name)
@@ -2383,6 +2388,7 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
         unknown = [t for t in titles if t not in DECISION_SECTIONS + DECISION_OPTIONAL_SECTIONS]
         for t in unknown:
             findings.append("%s: unknown section `## %s` (README.md lists the allowed ones)" % (where, t))
+        has_reverse[m.group(1)] = "How to reverse" in titles
         if is_retired:
             for t in ("Rules", "Adoption"):
                 if t in titles:
@@ -2440,6 +2446,13 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
         elif bare_review < allowed_bare:
             findings.append("%s: %d bare `Checked by: review` rules remain but DECISION_BARE_REVIEW_BASELINE "
                             "allows %d; lower it so the ratchet holds" % (where, bare_review, allowed_bare))
+    # README.md: a record that supersedes another says how to reverse, whatever
+    # its number (the number cut-over above covers only new records).
+    for number, old in sorted(superseded_by.items()):
+        if has_reverse.get(number) is False and int(number) < reverse_required_from:
+            new = next(n for n in records if n.startswith(number + "-"))
+            findings.append("%s/%s: supersedes %s and needs a `## How to reverse` section"
+                            % (DECISION_DIR, new, old))
     numbers.sort()
     if numbers and numbers != list(range(1, len(numbers) + 1)):
         findings.append("%s: record numbers are not 0001..%04d with no gap or repeat: %s"
@@ -3686,6 +3699,12 @@ def self_test():
           and not any("0001-example.md: a record from" in x for x in f))
     f = records(second=good_record.replace("## Links", "## How to reverse\n\nr\n\n## Links"), reverse_from=2)
     check("decision records: How to reverse satisfies the cut-over", f == [])
+    f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0002").replace(
+        "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""),
+        baseline={"0002-second.md": 1})
+    check("decision records: a superseding record below the cut-over without How to reverse is reported",
+          any("0002-second.md: supersedes 0001-example.md and needs a `## How to reverse`" in x for x in f))
     f = records(first=good_record.replace("## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
                                           "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""))
     check("decision records: a missing Rules section is reported", any("missing section `## Rules`" in x for x in f))
@@ -3695,7 +3714,8 @@ def self_test():
     check("decision records: a supersede target that does not exist is reported", any("0009, which does not exist" in x for x in f))
     f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0002").replace(
         "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
-        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""))
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""),
+        second=good_record.replace("## Links", "## How to reverse\n\nr\n\n## Links"), baseline={"0002-second.md": 1})
     check("decision records: a superseded record needs no Rules section", f == [])
     f = records(first=good_record.replace(" Checked by: review.", "."))
     check("decision records: a rule with no `Checked by:` is reported", any("rule line does not end" in x for x in f))
