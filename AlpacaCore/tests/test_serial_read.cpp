@@ -213,7 +213,7 @@ TEST_CASE("read_until - reaching max_len without a stop is Overflow", "[serial][
     CHECK(ok.bytes == "012#");
 }
 
-// Falsified by: serial_read.h read_until_impl() returning Timeout when a read yields fewer bytes than the reply
+// Falsified by: serial_read.h read_until_impl() returning Timeout once the first write's two bytes are kept (a return after bytes.size() == 2)
 TEST_CASE("read_until - a reply split across two writes is assembled", "[serial][serial_read][issue1604]") {
     PtyPair pty("serial_read");
     auto link = open_slave(pty);
@@ -276,7 +276,7 @@ TEST_CASE("read_until_socket - a non-socket fd is LinkDead with ENOTSOCK", "[ser
     CHECK(r.err == ENOTSOCK);
 }
 
-// Falsified by: serial_read.h read_until_socket() passing the tty hangup test instead of the socket one
+// Falsified by: serial_read.h socket_read_byte() turning a poll() timeout (pr == 0) into -1/ETIMEDOUT instead of 0
 TEST_CASE("read_until_socket - terminator, skip, late bytes and deadline", "[serial][serial_read][issue1604]") {
     SocketPair sp;
     feed(sp.b, "\r1\n2#xy");
@@ -296,7 +296,7 @@ TEST_CASE("read_until_socket - terminator, skip, late bytes and deadline", "[ser
     CHECK(t.err == 0);
 }
 
-// Falsified by: serial_link.h tty_read() not retrying poll() after EINTR
+// Falsified by: serial_link.h tty_read() at :161 and serial_read.h read_until_impl() at :143 both not retrying EINTR (either one alone leaves this case green)
 TEST_CASE("read_until - a signal during the wait is retried on a tty", "[serial][serial_read][issue1604]") {
     PtyPair pty("serial_read");
     auto link = open_slave(pty);
