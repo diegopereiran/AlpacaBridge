@@ -2285,12 +2285,13 @@ DECISION_SECTIONS = ("Context", "Decision", "Rules", "Alternatives rejected", "C
 # or a new convention that README.md has to describe first.
 DECISION_OPTIONAL_SECTIONS = ("Adoption", "How to reverse")
 DECISION_RULE_RE = re.compile(
-    r"^(?P<n>\d+)\. (?P<text>.+?) Scope: (?P<scope>`[^`]+`(?:, `[^`]+`)*)\. Checked by: (?P<check>.+)\.$")
+    r"^(?P<n>\d+)\. (?P<text>.+?) Scope: (?P<scope>`[^`]+`(?:, `[^`]+`)*)\. Checked by: (?P<check>.+?)\."
+    r"(?P<allowed> <!-- allowed -->)?$")
 DECISION_INDEX_LINK_RE = re.compile(r"^- \[[^\]]+\]\((\d{4}-[^)]+\.md)\)( \(retired\))?$", re.M)
 # A rule's bound is part of the rule; a carve-out for code that deviates is a
 # defect with an issue, never a clause (README.md, "Rules"). A rule whose bound
-# needs one of these words ends with the marker.
-DECISION_RULE_ALLOWED_MARKER = " <!-- allowed -->"
+# needs one of these words ends with ` <!-- allowed -->` (DECISION_RULE_RE's
+# `allowed` group, so check_adr_scope.py reads a marked rule as any other).
 DECISION_EXCEPTION_WORD_RE = re.compile(r"\b(except|unless|until|for now)\b", re.I)
 # `Checked by: review` names no evidence, so the bot has nothing to apply. New
 # rules write `review (<what to look for>)`; the records below keep the bare
@@ -2407,9 +2408,6 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
         for line in rules.splitlines():
             if not re.match(r"^\d+\. ", line):
                 continue
-            allowed = line.endswith(DECISION_RULE_ALLOWED_MARKER)
-            if allowed:
-                line = line[:-len(DECISION_RULE_ALLOWED_MARKER)]
             rule = DECISION_RULE_RE.match(line)
             if not rule:
                 findings.append("%s: rule line does not end `Scope: `glob`[, `glob`]. Checked by: <check>.`: %s"
@@ -2420,10 +2418,10 @@ def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_R
                 findings.append("%s: rule %s is out of sequence (expected %d)" % (where, rule.group("n"), expected))
             expected = int(rule.group("n")) + 1
             word = DECISION_EXCEPTION_WORD_RE.search(rule.group("text"))
-            if word and not allowed:
+            if word and not rule.group("allowed"):
                 findings.append("%s: rule %s says `%s`; a carve-out is a defect with an issue, not a rule clause "
-                                "(end the line with `%s` when the bound is the rule)"
-                                % (where, rule.group("n"), word.group(1), DECISION_RULE_ALLOWED_MARKER.strip()))
+                                "(end the line with `<!-- allowed -->` when the bound is the rule)"
+                                % (where, rule.group("n"), word.group(1)))
             if rule.group("check") == "review":
                 bare_review += 1
             for glob_pattern in CODE_SPAN_ONLY_RE.findall(rule.group("scope")):
