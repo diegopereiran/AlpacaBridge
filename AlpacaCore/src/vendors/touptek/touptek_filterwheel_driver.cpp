@@ -100,7 +100,7 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Vendor SDK (library) version, surfaced in the web UI only (never in
-    // DriverInfo). Toupcam_Version() returns e.g. "57.27567.20260128".
+    // DriverInfo). Toupcam_Version() returns e.g. "60.31488.20260519".
     std::optional<std::string> get_device_sdk_version() const override {
         auto version = sdk_.get_sdk_version();
         if (version.empty() || version == "unknown") {
