@@ -43,6 +43,7 @@ The rules a change is checked against. Each names where it applies and what chec
 - A boot ID file that cannot be written makes every start look like a new boot, so `off` applies on a service restart too; it is logged.
 - A server start that applies anything holds the GPIO lines, so another program cannot claim them until a client connects and disconnects or the server stops.
 - The RK3568 still reports every port on at the first connect of a boot under `leave`.
+- Editing a device in the web UI (remove, then re-add) while a start holds its lines destroys the driver: `close()` drives a PWM port to its steady level (full on for any duty above 0), and the new driver gets no power-on pass (rule 2). Its ports keep the levels they were left at until a client sets them.
 
 ## How to reverse
 
