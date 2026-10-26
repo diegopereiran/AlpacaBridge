@@ -60,10 +60,10 @@ author must do. Read the docstring before changing a gate.
   review bot gets the in-scope rules from the default branch's `scripts/check_adr_scope.py --list`, run
   over the base branch's records; when a base with records gives no list, the review does not run. The
   prompt carries one `- NNNN-slug.md rule N: VERDICT: reason` line per listed rule (`--skeleton`), and
-  the bot fills each in. `check_adr_scope.py --checklist` fails the job before posting when a line is
-  missing, a rule gets two verdicts, or a defect line sits under the approving sign-off. When a missing
-  line is the only finding, one repair pass adds those lines (`--missing`), `--repair-check` rejects a
-  repair that changes anything else, and `--checklist` runs again (#1655). Once that check passes, the "Fold the
+  the bot fills each in. The bot runs `check_adr_scope.py --checklist` on its own file and fixes what it
+  prints before it ends (its one Bash rule, #1655), and the same check then fails the job before posting
+  when a line is missing, a rule gets two verdicts, or a defect line sits under the approving sign-off.
+  Once that check passes, the "Fold the
   decision-record checklist" step puts the checklist in a `<details>` block under a summary of its
   verdict counts, before the post step.
   See `docs/decisions/README.md` ("Changing a record").
