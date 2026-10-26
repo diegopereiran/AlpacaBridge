@@ -761,6 +761,7 @@ public:
             if (camera_info_valid_ && !camera_info_.has_cooler) {
                 throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
             }
+            cooler_on_ = false;
             if (disconnecting_) {
                 return;
             }
@@ -813,6 +814,13 @@ public:
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
             } running_guard{running_flag};
+            if (on_worker_start_) {
+                try {
+                    on_worker_start_(QHYWorker::CoolerOff);
+                } catch (...) {
+                    return;
+                }
+            }
             std::thread temp_to_join;
             std::shared_ptr<std::atomic<bool>> temp_running_to_join;
             std::string cam_id_for_pwm;
@@ -821,12 +829,8 @@ public:
                 if (!connected_.load() || disconnecting_ || generation != connection_generation_) {
                     return;
                 }
-                if (!cooler_on_) {
-                    return; // already off
-                }
-                cooler_on_ = false;
-                if (!connected_.load()) {
-                    return;
+                if (cooler_on_) {
+                    return;  // a newer ON superseded this queued OFF
                 }
                 temp_thread_stop_->request_stop();
                 temp_running_to_join = temp_thread_running_;
@@ -1369,8 +1373,6 @@ public:
         if (duration <= 0) {
             throw AlpacaException("Invalid pulse guide duration", AlpacaError::InvalidValue);
         }
-
-        std::lock_guard<std::mutex> io_lock(io_mutex_);
 
         uint32_t qhy_dir = alpaca_to_qhy_guide_direction(direction);
         uint16_t dur_ms = static_cast<uint16_t>(std::min(duration, 65535));
