@@ -72,7 +72,9 @@ public:
             errno = EBADF;
             return -1;
         }
-        levels_[offset] = value != 0 ? 1 : 0;
+        const int level = value != 0 ? 1 : 0;
+        if (level_locked(offset) != level) ++level_changes_;
+        levels_[offset] = level;
         ++writes_;
         return 0;
     }
@@ -105,6 +107,12 @@ public:
         std::lock_guard<std::mutex> lock(m_);
         return writes_;
     }
+    // Writes that changed a line's level; a PWM worker's first steady write
+    // re-drives the level the line already has and does not count.
+    int level_changes() const {
+        std::lock_guard<std::mutex> lock(m_);
+        return level_changes_;
+    }
     bool claimed() const {
         std::lock_guard<std::mutex> lock(m_);
         return claimed_;
@@ -124,6 +132,7 @@ private:
     int requests_ = 0;
     int releases_ = 0;
     int writes_ = 0;
+    int level_changes_ = 0;
 };
 
 }  // namespace alpacacore::test

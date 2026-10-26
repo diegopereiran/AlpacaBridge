@@ -272,8 +272,10 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - connecting reports the line le
     CHECK(driver->get_switch(0));               // DC3 pass-through: always on
     CHECK_FALSE(driver->get_switch(1));         // DC1 reads its line, not "on"
     CHECK(driver->get_switch_value(2) == 100);  // DC2 high: a PWM port at full duty
-    CHECK(gpio.writes() == 0);
+    // The DC2 PWM worker may re-drive its steady (high) level once; nothing may change a line.
+    CHECK(gpio.level_changes() == 0);
     CHECK(gpio.level(cfg.ports[1].gpio_line) == 0);
+    CHECK(gpio.level(cfg.ports[2].gpio_line) == 1);
 }
 
 TEST_CASE("iOptron iMate PowerBox Switch Driver - off at server start turns DC1/DC2 off and holds them",
