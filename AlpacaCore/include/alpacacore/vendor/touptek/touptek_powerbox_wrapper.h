@@ -27,9 +27,10 @@ namespace alpacacore::vendor::touptek {
 // Each line is driven either as a boolean (0 = off / low, 1 = on / high) or,
 // when pwm_enabled, as a soft-PWM channel: a per-port worker thread bit-bangs
 // the line at pwm_frequency_hz with a 0-100% duty cycle (same approach as the
-// iOptron iMate PowerBox and ZWO ASIAIR switch). Ports default to "on" so
-// connecting preserves the StellaVita's stock boot-high behaviour and never
-// cuts power to attached gear.
+// iOptron iMate PowerBox and ZWO ASIAIR switch). open() claims each line at
+// the level it holds and reads that level into the cache (issue #300,
+// util::claim_outputs_at_current_level), so a connect never powers a port on
+// or off: a port the boot left high reads on, one left low reads off.
 class TouptekPowerboxWrapper final : public TouptekPowerboxSDK {
 public:
     TouptekPowerboxWrapper(std::string gpio_chip_path, std::vector<StellaVitaPortConfig> ports,
