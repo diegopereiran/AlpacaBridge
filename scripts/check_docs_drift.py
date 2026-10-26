@@ -16,6 +16,10 @@ Counts (check 15's numbers): python3 scripts/check_docs_drift.py --counts
   word, the brand list and a paste-ready README headline, all computed by
   the same functions check 15 gates with, so the /bump-release recount step
   has one command and no second copy of the row filter (#689).
+Badge (check 25's number): python3 scripts/check_docs_drift.py --badge
+  -- prints the authored-line count, the rounded figure and the paste-ready
+  README badge line, computed by the functions check 25 gates with, so the
+  /bump-release badge step has one command (#1465).
 
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
@@ -23,8 +27,8 @@ Checks:
   2. The zizmor pinned version + sha256 are identical between ci.yml and
      ci_preflight.sh.
   3. The cppcheck --suppress list is identical between ci.yml and
-     ci_preflight.sh (AGENTS.md: "Keep the cppcheck --suppress list
-     identical between ci.yml and ci_preflight.sh").
+     ci_preflight.sh (ci-gates instructions, Docs drift bullet: "keep the
+     cppcheck --suppress lists identical").
   4. VERSION matches the version in the README's changelog badge line.
   5. The drivers whose `get_connected()` blocks are exactly the ones
      `async_connectable.h` names as blocking. Measured from the code, not
@@ -39,10 +43,13 @@ Checks:
      true when they were written.
   6. The QHYSDK seam's three parallel lists agree: every pure virtual on the
      interface has a LockedQHYSDK override, every override actually takes the
-     shared mutex through locked() -- except cancel_exposure(), which must
-     take its own cancel_mutex_ and must NOT go through locked() (issue #339:
-     production's cancel skips the per-handle mutex so it can interrupt a
-     download blocked on the same handle) -- and the forward sweep in
+     shared mutex through the one-argument locked() -- except two: cancel_exposure(),
+     which must take its own cancel_mutex_ and must NOT go through locked() (issue
+     #339: production's cancel skips the per-handle mutex so it can interrupt a
+     download blocked on the same handle), and get_sdk_version(), which must use
+     locked(version_mutex_, ...) and not the shared mutex (issue #1646: the hook
+     must not queue behind an in-flight open). A forward written as
+     locked(other_mutex_, ...) fails -- and the forward sweep in
      test_qhy_fake_sdk.cpp drives all of them.
   7. Every relative path referenced in AGENTS.md, CONTEXT.md, README.md (issue
      #693: the most-read file in the repo was in no scan), scoped instructions,
@@ -135,8 +142,8 @@ Checks:
      behind, and never more than MAX_UPDATED_DAYS_AHEAD past the badge, which
      catches a typo'd year without consulting the clock. Pure, so it runs in
      pre-flight; no git state is consulted.
- 17. Every AlpacaError value AGENTS.md and .claude/commands/driver-build.md
-     write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
+ 17. Every AlpacaError value AGENTS.md, the ascom-contract and testing
+     instructions and .claude/commands/driver-build.md write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
      (issue #682): the name must be a constant in `namespace AlpacaError` and
      the hex value must be the one the header defines. Four written forms are
      read: `Name` (0xNNN), Name `0xNNN`, `A` (or `B` ..., both 0xNNN), and an
@@ -144,12 +151,71 @@ Checks:
      the row's name. CamelCase names only, so a protocol constant such as
      MC_AUX_GUIDE 0x26 is not read as a pin; a floor catches an extractor that
      stops matching.
- 18. The first bullet under AGENTS.md's "Continuous Integration and Pre-flight"
-     heading (`- CI (...`) names exactly the job ids under `jobs:` in
+ 18. The first bullet under the "Continuous Integration and Pre-flight" heading
+     of .github/instructions/ci-gates.instructions.md (`- CI (...`) names exactly the job ids under `jobs:` in
      .github/workflows/ci.yml, in both directions and by id, not by count
      (issue #702): it listed 11 of 18 jobs and called `format` `clang-format`.
      The roster is every backticked token in the bullet outside parentheses,
      so each id's description goes in parentheses after it.
+ 19. No vendored shared library under AlpacaCore/external/ is committed as two
+     regular files with the same content in one directory (`libfoo.so` next to
+     `libfoo.so.1.2`): the unversioned name has to be a symlink. `cp -a` in
+     debian/rules copies a regular file as a second full copy, so the ZWO
+     camera SDK shipped twice in every .deb (3.4 MB) from March 2026 until this
+     check. Read from the git index, so a staged fix is seen. The empty blob is
+     skipped: a 0-byte placeholder is not a library copy.
+ 20. No `restore-keys:` prefix in a workflow under .github/workflows/ is a
+     strict prefix of another cache key's prefix (issue #1355). A restore by
+     prefix takes the newest cache whose key starts with it, so the ASan job's
+     `ccache-sanitizers-` restored the TSan job's `ccache-sanitizers-tsan-`
+     cache on every run and missed every compile. A prefix is the key's text
+     before its first `${{`; restoring another job's whole prefix on purpose
+     (clang-tidy reads `ccache-all-vendors-coverage-`) is an equal prefix and
+     is allowed.
+ 21. AGENTS.md stays at or under AGENTS_MD_MAX_BYTES (15,000 bytes). It is
+     loaded whole into every agent session; it grew from 100k to 144k in five
+     weeks after the #523 split because every cross-vendor lesson was appended
+     to it. Shared rules go in the topic files under .github/instructions/ and
+     AGENTS.md carries a one-line pointer.
+ 22. Every decision record in docs/decisions/ has the shape README.md there
+     describes: an NNNN-<slug>.md name with no gap in the numbers, a
+     `Status:` line on line 3 (a superseded record names a record that
+     exists; a retired one names its issue or PR), the sections Context,
+     Decision, Rules, Alternatives rejected, Consequences and Links in that
+     order (Adoption and How to reverse may sit between them; a superseded
+     record needs no Rules and a retired one drops Rules and Adoption; How to
+     reverse is required from record 0020 on and in any record that supersedes
+     another), numbered Rules lines that end
+     `Scope: `glob`. Checked by: <check>.` with every glob matching a tracked
+     file (`**` only in 0013), no except/unless/until/for now on a rule line
+     without the `<!-- allowed -->` marker, bare `Checked by: review` rules
+     held to the per-record ratchet DECISION_BARE_REVIEW_BASELINE, and an
+     index that lists every record once, in order, with `(retired)` on exactly
+     the retired ones. The decision-record gate reads these sections, so a
+     record it cannot parse would pass every pull request.
+ 23. Every `## Adoption` table agrees with the code, both ways: every file
+     the `Scan:` glob matches that names the `Symbol:` (with no `Symbol:`
+     line, every scanned file) has a row; a Symbol column overrides the symbol
+     per row and a blank cell falls back to the `Symbol:` line; comments are blanked before matching; an adopted or partial row's
+     source names its symbol; a planned row's source does not; a partial row names
+     the issue that finishes it. The rosters were prose in five places and
+     three disagreed with the code (PR #1410). Check 7 also resolves a
+     comment that cites a record by number only (`docs/decisions/0008`).
+ 24. The review job's time budget agrees everywhere it is restated: the
+     `timeout-minutes` of the `review` job and the `N * 60` wait deadline in
+     claude-review.yml against the ci-gates instructions (wait, job timeout,
+     poll) and both skills (the "up to N minutes" wait, the `BUDGET:-<seconds>`
+     defaults and the "N-minute budget" prose); the two skills agree with each
+     other, and the poll budget is greater than the job timeout (a poll that
+     ends first reports a healthy run as a stall).
+ 25. The README "Authored code" badge (`NNNk lines`) is within
+     AUTHORED_LINES_TOLERANCE (5%) of the authored-line count computed from
+     the git index (issue #1465). Which tracked files count, and why the
+     rest do not, is written at AUTHORED_LINES_ROOTS and
+     AUTHORED_LINES_EXCLUDED_PREFIXES. The badge shows the count rounded to the
+     nearest 1,000, so an ordinary PR that adds or removes lines never trips the
+     check; only a badge that has fallen behind (or a missing badge) does.
+     /bump-release regenerates it with --badge.
 """
 
 import glob
@@ -382,13 +448,14 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 
 # Driver file basename -> the name the async_connectable.h comment uses for it.
 # Only the drivers that CAN be classified as blocking need an entry; the
-# lock-free majority is not named anywhere, by design. The four
+# lock-free majority is not named anywhere, by design. Two groups are the
+# exception, and both keep their entries although the header's list is empty:
+# the Bisque and iOptron telescopes (lock-free since #910) and the four
 # wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita,
-# ASIAIR, ASIAIR Plus) are the exception: they keep their entries although
-# they answer get_connected() lock-free since #382, because the entry is what
-# lets the gate report MISSING FROM THE BLOCKING LIST if one of their wrappers
-# ever re-locks is_open(). Do not remove them on the STALE BLOCKING-LIST ENTRY
-# advice.
+# ASIAIR, ASIAIR Plus; lock-free since #382). The entry is what lets the gate
+# report MISSING FROM THE BLOCKING LIST if one of them re-locks get_connected()
+# (or a wrapper re-locks is_open()). Do not remove them on the STALE
+# BLOCKING-LIST ENTRY advice.
 # The value is (prose name, which list it belongs to). The list matters: the
 # header names these in TWO sentences, and one name is a prefix of another
 # across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
@@ -400,10 +467,8 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 # its own list.
 DRIVER_PROSE_NAMES = {
     "bisque_telescope_driver.cpp": ("Bisque", "telescopes"),
-    "celestron_telescope_driver.cpp": ("Celestron", "telescopes"),
     "ioptron_telescope_driver.cpp": ("iOptron", "telescopes"),
     "onstep_telescope_driver.cpp": ("OnStep", "telescopes"),
-    "skywatcher_telescope_driver.cpp": ("Sky-Watcher", "telescopes"),
     "ioptron_switch_driver.cpp": ("iOptron iMate PowerBox", "switches"),
     "touptek_switch_driver.cpp": ("ToupTek StellaVita", "switches"),
     "zwo_asiair_switch_driver.cpp": ("ZWO ASIAIR", "switches"),
@@ -414,7 +479,7 @@ DRIVER_PROSE_NAMES = {
 # Both must be found or the check fails loudly: a header rewrite that moves
 # them must not silently turn this gate into a no-op.
 BLOCKING_LIST_SPANS = {
-    "telescopes": ("create that hazard are the", "telescopes."),
+    "telescopes": ("The blocking telescopes (", ")"),
     "switches": ("The wrapper-backed switch drivers (", ")"),
 }
 
@@ -443,11 +508,7 @@ def _blocking_list_spans(header):
 
 def _names_in_span(which, span):
     """The driver names a blocking-list sentence actually lists."""
-    if which == "telescopes":
-        body = span.split("create that hazard are the", 1)[1]
-        body = body.rsplit("telescopes.", 1)[0]
-    else:
-        body = span.split("(", 1)[1].rsplit(")", 1)[0]
+    body = span.split("(", 1)[1].rsplit(")", 1)[0]
     # "A, B, C and D" -> [A, B, C, D]
     parts = []
     for chunk in body.split(","):
@@ -579,12 +640,10 @@ def classify_get_connected_bodies():
     return kinds, failures
 
 
-def check_blocking_get_connected_list():
-    kinds, failures = classify_get_connected_bodies()
-    if not kinds:
-        return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
-
-    header = read("AlpacaCore/include/alpacacore/async_connectable.h")
+def blocking_list_findings(header, kinds):
+    """Check 5's comparison over (async_connectable.h text, {basename: kind}). Pure, so
+    --self-test can drive it."""
+    failures = []
     spans, span_failures = _blocking_list_spans(header)
     failures.extend(span_failures)
     if span_failures:
@@ -620,6 +679,41 @@ def check_blocking_get_connected_list():
                     "driver with that name has a blocking get_connected(). Either it was made "
                     "lock-free and the name must come out, or the name does not match "
                     "DRIVER_PROSE_NAMES." % (which, listed))
+
+    for basename, kind in sorted(kinds.items()):
+        if kind == "lock-free":
+            # The lock-free majority is deliberately unnamed. What matters is
+            # that it is not named as blocking: a driver made lock-free (as
+            # SynScan was by #130) must come OUT of the list.
+            entry = DRIVER_PROSE_NAMES.get(basename)
+            if entry and named(entry):
+                failures.append(
+                    "STALE BLOCKING-LIST ENTRY: %s's get_connected() is lock-free, but "
+                    "async_connectable.h still names '%s' among the drivers that block. Remove it there "
+                    "and from DRIVER_PROSE_NAMES." % (basename, entry[0]))
+            continue
+        entry = DRIVER_PROSE_NAMES.get(basename)
+        if entry is None:
+            failures.append(
+                "UNNAMED BLOCKING DRIVER: %s's get_connected() is %s, so it blocks behind its connect "
+                "sequence, but no prose name is registered for it. Add it to DRIVER_PROSE_NAMES in %s "
+                "and to the list in async_connectable.h -- the router rule and the pending_mutex_ "
+                "ordering both depend on that list being complete." % (basename, kind, Path(__file__).name))
+            continue
+        if not named(entry):
+            failures.append(
+                "MISSING FROM THE BLOCKING LIST: %s's get_connected() is %s, but async_connectable.h's "
+                "%s list does not name '%s'." % (basename, kind, entry[1], entry[0]))
+    return failures
+
+
+def check_blocking_get_connected_list():
+    kinds, failures = classify_get_connected_bodies()
+    if not kinds:
+        return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
+
+    failures.extend(blocking_list_findings(
+        read("AlpacaCore/include/alpacacore/async_connectable.h"), kinds))
 
     # The counts this PR removed must not creep back. A number in front of
     # "telescopes"/"wrapper-backed switch(es)" is exactly the thing nothing
@@ -661,30 +755,6 @@ def check_blocking_get_connected_list():
                 "second source of truth that nothing checks and that has gone stale before "
                 "(issue #381). Refer to the named list instead." % (path, match.group(0)))
 
-    for basename, kind in sorted(kinds.items()):
-        if kind == "lock-free":
-            # The lock-free majority is deliberately unnamed. What matters is
-            # that it is not named as blocking: a driver made lock-free (as
-            # SynScan was by #130) must come OUT of the list.
-            entry = DRIVER_PROSE_NAMES.get(basename)
-            if entry and named(entry):
-                failures.append(
-                    "STALE BLOCKING-LIST ENTRY: %s's get_connected() is lock-free, but "
-                    "async_connectable.h still names '%s' among the drivers that block. Remove it there "
-                    "and from DRIVER_PROSE_NAMES." % (basename, entry[0]))
-            continue
-        entry = DRIVER_PROSE_NAMES.get(basename)
-        if entry is None:
-            failures.append(
-                "UNNAMED BLOCKING DRIVER: %s's get_connected() is %s, so it blocks behind its connect "
-                "sequence, but no prose name is registered for it. Add it to DRIVER_PROSE_NAMES in %s "
-                "and to the list in async_connectable.h -- the router rule and the pending_mutex_ "
-                "ordering both depend on that list being complete." % (basename, kind, Path(__file__).name))
-            continue
-        if not named(entry):
-            failures.append(
-                "MISSING FROM THE BLOCKING LIST: %s's get_connected() is %s, but async_connectable.h's "
-                "%s list does not name '%s'." % (basename, kind, entry[1], entry[0]))
     return failures
 
 
@@ -713,6 +783,59 @@ def _class_body(text, class_name):
     if not match:
         return None
     return text[match.end():_matching_brace(text, match.end() - 1) - 1]
+
+
+QHY_CANCEL_EXEMPT = "cancel_exposure"
+QHY_VERSION_EXEMPT = "get_sdk_version"
+
+
+def _qhy_forward_lock_findings(locked_methods, interface_methods):
+    """The lock each LockedQHYSDK forward takes. Pure, so --self-test can drive it.
+
+    Two methods own a mutex of their own: cancel_exposure (cancel_mutex_,
+    open-astro#339) and get_sdk_version (version_mutex_, open-astro#1646: the
+    hook must not queue behind an in-flight open_camera). Every other forward
+    must take the shared mutex through the one-argument `locked([&] {...})`;
+    `locked(other_mutex_, ...)` skips the shared mutex and is rejected."""
+    failures = []
+    for name in sorted(set(locked_methods) & interface_methods):
+        body = locked_methods[name]
+        shared_named = re.search(r"(?<![\w])mutex_\b", body)
+        if name == QHY_CANCEL_EXEMPT:
+            # Mechanical, not a substring: the body must take the lock_guard on
+            # cancel_mutex_ AND must not go through locked(). A body that does
+            # both (shared mutex plus a mention of cancel_mutex_) is the
+            # inverted shape #339 fixed, and a substring test passed it.
+            # `lock_guard<std::mutex>` or CTAD `lock_guard` both count; any
+            # mention of the shared `mutex_` (locked() or a hand-rolled guard)
+            # is the inverted shape, so it is rejected by name, not by idiom.
+            takes_own = re.search(r"lock_guard\s*(?:<\s*std::mutex\s*>)?\s*\w+\s*\(\s*cancel_mutex_\s*\)", body)
+            touches_shared = "locked(" in body or shared_named
+            if not takes_own or touches_shared:
+                failures.append(
+                    "LockedQHYSDK::cancel_exposure() must take cancel_mutex_ -- its own lock, separate "
+                    "from the shared one, per open-astro#339. Through the shared mutex it queues behind "
+                    "the in-flight call it exists to interrupt; with no mutex at all it becomes the one "
+                    "racy forward in the decorator.")
+            continue
+        if name == QHY_VERSION_EXEMPT:
+            takes_own = re.search(r"\blocked\s*\(\s*version_mutex_\s*,", body)
+            if not takes_own or shared_named or re.search(r"\blocked\s*\(\s*\[", body):
+                failures.append(
+                    "LockedQHYSDK::get_sdk_version() must take version_mutex_ (locked(version_mutex_, ...)) "
+                    "and not the shared mutex_, per open-astro#1646: through the shared mutex the hook "
+                    "queues behind an in-flight open_camera(), which the real wrapper's leaf "
+                    "sdk_version_mutex does not.")
+            continue
+        # Every other forward: the one-argument locked([&] {...}), which takes mutex_.
+        if not re.search(r"\blocked\s*\(\s*\[", body) or re.search(r"\blocked\s*\(\s*[A-Za-z_]", body):
+            failures.append(
+                "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through the one-argument locked([&] {...}). "
+                "The decorator exists only to take the shared mutex -- an unlocked forward (or one that "
+                "passes locked() another mutex) makes the fake racy under a [stress] storm and produces a "
+                "ThreadSanitizer report naming the FAKE, which is the confusion the decorator was built "
+                "to prevent." % name)
+    return failures
 
 
 def check_qhy_seam_lists():
@@ -763,39 +886,12 @@ def check_qhy_seam_lists():
             "LockedQHYSDK::%s() overrides nothing on QHYSDK -- stale forward, or the interface lost a "
             "method." % name)
 
-    # cancel_exposure is the one documented exception (open-astro#339): the real
-    # QHYSDKWrapper::cancel_exposure() deliberately skips the per-handle call
-    # mutex so it can interrupt a GetQHYCCDSingleFrame already blocked on the
-    # same handle, and routing it through the shared mutex here inverted that
-    # invariant. It still takes A mutex -- its own -- so it is not an unlocked
-    # forward and the fake stays non-racy; it just does not queue behind the
-    # call it exists to interrupt.
-    CANCEL_EXEMPT = "cancel_exposure"
-    for name in sorted(set(locked_methods) & interface_methods):
-        body = locked_methods[name]
-        if name == CANCEL_EXEMPT:
-            # Mechanical, not a substring: the body must take the lock_guard on
-            # cancel_mutex_ AND must not go through locked(). A body that does
-            # both (shared mutex plus a mention of cancel_mutex_) is the
-            # inverted shape #339 fixed, and a substring test passed it.
-            # `lock_guard<std::mutex>` or CTAD `lock_guard` both count; any
-            # mention of the shared `mutex_` (locked() or a hand-rolled guard)
-            # is the inverted shape, so it is rejected by name, not by idiom.
-            takes_own = re.search(r"lock_guard\s*(?:<\s*std::mutex\s*>)?\s*\w+\s*\(\s*cancel_mutex_\s*\)", body)
-            touches_shared = "locked(" in body or re.search(r"(?<![\w])mutex_\b", body)
-            if not takes_own or touches_shared:
-                failures.append(
-                    "LockedQHYSDK::cancel_exposure() must take cancel_mutex_ -- its own lock, separate "
-                    "from the shared one, per open-astro#339. Through the shared mutex it queues behind "
-                    "the in-flight call it exists to interrupt; with no mutex at all it becomes the one "
-                    "racy forward in the decorator.")
-            continue
-        if "locked(" not in body:
-            failures.append(
-                "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through locked(). The decorator exists "
-                "only to take the mutex -- an unlocked forward makes the fake racy under a [stress] storm "
-                "and produces a ThreadSanitizer report naming the FAKE, which is the confusion the "
-                "decorator was built to prevent." % name)
+    # Two documented exemptions from the shared mutex, each taking its own
+    # mutex so the fake stays non-racy (rationale in the helper's docstring):
+    # cancel_exposure (open-astro#339) must not queue behind the call it
+    # interrupts, and get_sdk_version (open-astro#1646) must not queue behind
+    # an in-flight open_camera.
+    failures.extend(_qhy_forward_lock_findings(locked_methods, interface_methods))
 
     # The hand-written sweep list in the test.
     sweep = read(QHY_SWEEP_TEST)
@@ -840,7 +936,7 @@ DOUBLE_BACKTICK_SPAN_RE = re.compile(r"``.+?``")
 CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # Tripwire for the span matcher, not a rule about document size: if
 # AGENTS.md is legitimately trimmed below this, lower the floor.
-MIN_AGENTS_MD_PATH_REFS = 40
+MIN_AGENTS_MD_PATH_REFS = 15
 # Tripwire for a docs/agents/ rename, not a target file count.
 MIN_AGENTS_DIR_FILES = 1
 # Tripwire for a .claude/skills/ rename, not a target file count.
@@ -1051,6 +1147,9 @@ def check_agents_md_paths_exist(root=ROOT):
 
 
 MEMORY_COMMENT_PATH_RE = re.compile(r"\bdocs/(?:failures|decisions)/[A-Za-z0-9._-]+\.md\b")
+# A comment may cite a record by number only (`docs/decisions/0008`, PR #1410 audit):
+# the number must name exactly one record.
+MEMORY_COMMENT_ID_RE = re.compile(r"\bdocs/(failures|decisions)/(\d{4})(?!-|\w|\.\w)")
 FIRST_PARTY_COMMENT_EXTENSIONS = {".cpp", ".h", ".js", ".py", ".sh"}
 # The real tree has ~330 candidate files; the self-test fixture has a handful.
 MIN_MEMORY_COMMENT_FILES = 5
@@ -1086,6 +1185,11 @@ def check_memory_comment_paths_exist(root=ROOT):
                 for reference in MEMORY_COMMENT_PATH_RE.findall(line):
                     if not (root / reference).is_file():
                         failures.append("%s:%d references a missing memory record: %s" % (rel, lineno, reference))
+                for directory, number in MEMORY_COMMENT_ID_RE.findall(line):
+                    hits = list((root / "docs" / directory).glob(number + "-*.md"))
+                    if len(hits) != 1:
+                        failures.append("%s:%d cites docs/%s/%s, which names %d records (expected 1)"
+                                        % (rel, lineno, directory, number, len(hits)))
     # Floor, like the other gates: a renamed component directory or a wrong
     # root would otherwise read nothing and report a clean pass.
     if scanned < MIN_MEMORY_COMMENT_FILES:
@@ -1506,9 +1610,13 @@ ROSTER_ARRAY_RE = re.compile(r"kFakeConnectableRoster\[\]\s*=\s*\{(.*?)\n\};", r
 # fake_*.h files that are helpers other fakes and tests build on, not a driver's
 # connect path, so they carry no roster row.
 HELPER_FAKES = {
+    "fake_skywatcher_board.h": "transport-free Sky-Watcher axis model and command handler; the UDP fake in fake_skywatcher_mount.h is the transport the roster connects",
+    "fake_bisque_mount.h": "stateful TheSkyX responder plugged into FakeMountServer for the Bisque task-clock cases",
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
+    "fake_weewx_fetcher.h": "scripted WeeWxFetcher injected through the WeeWX factory overload; no transport of its own to roster",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
+    "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
 }
 
 
@@ -1606,6 +1714,7 @@ def check_router_regexes_static(root=ROOT):
 # vendor landing without a README mention looks like.
 
 SUPPORTED_HEADING_TO_README_BRAND = {
+    "Altair": "Altair",
     "Astroasis": "Astroasis",
     "Celestron": "Celestron",
     "Gemini": "Gemini",
@@ -1926,8 +2035,9 @@ def check_supported_drivers_updated_date(root=ROOT):
 # --- check 17: documented AlpacaError values vs alpaca_errors.h ---------------
 
 ALPACA_ERRORS_H = "AlpacaCore/include/alpacacore/alpaca_errors.h"
-ERROR_CODE_DOCS = ("AGENTS.md", ".claude/commands/driver-build.md")
-# Today's two docs carry ~15 pins; a floor well under that catches an
+ERROR_CODE_DOCS = ("AGENTS.md", ".github/instructions/ascom-contract.instructions.md",
+                   ".github/instructions/testing.instructions.md", ".claude/commands/driver-build.md")
+# The four docs carry ~20 pins today (AGENTS.md none); a floor well under that catches an
 # extractor that stops matching without tripping on an ordinary rewording.
 MIN_ERROR_CODE_PINS = 8
 
@@ -2001,8 +2111,9 @@ def check_error_codes_match_header(root=ROOT):
     return _error_code_findings(read(ALPACA_ERRORS_H, root), {p: read(p, root) for p in ERROR_CODE_DOCS})
 
 
-# --- check 18: AGENTS.md CI job roster vs ci.yml ------------------------------
+# --- check 18: CI job roster vs ci.yml --------------------------------------
 
+CI_ROSTER_DOC = ".github/instructions/ci-gates.instructions.md"
 CI_ROSTER_HEADING = "## Continuous Integration and Pre-flight"
 CI_ROSTER_BULLET = "- CI ("
 _CI_JOBS_BLOCK_RE = re.compile(r"^jobs:[ \t]*\n(.*?)(?=^\S|\Z)", re.MULTILINE | re.DOTALL)
@@ -2061,27 +2172,618 @@ def _ci_roster_findings(ci_text, agents_text):
         return ["found no job ids under `jobs:` in .github/workflows/ci.yml: the parser is stale"]
     bullet = _ci_roster_bullet(agents_text)
     if bullet is None:
-        return ["could not find the '%s...' job roster bullet under '%s' in AGENTS.md"
-                % (CI_ROSTER_BULLET, CI_ROSTER_HEADING)]
+        return ["could not find the '%s...' job roster bullet under '%s' in %s"
+                % (CI_ROSTER_BULLET, CI_ROSTER_HEADING, CI_ROSTER_DOC)]
     named = _BACKTICK_RE.findall(_strip_parenthesized(bullet))
     failures = []
     seen = set()
     for job in named:
         if job in seen:
-            failures.append("AGENTS.md CI roster names '%s' twice" % job)
+            failures.append("%s CI roster names '%s' twice" % (CI_ROSTER_DOC, job))
         seen.add(job)
         if job not in jobs:
-            failures.append("AGENTS.md CI roster names '%s', which does not exist as a job id in "
-                            ".github/workflows/ci.yml (ids: %s)" % (job, ", ".join(jobs)))
+            failures.append("%s CI roster names '%s', which does not exist as a job id in "
+                            ".github/workflows/ci.yml (ids: %s)" % (CI_ROSTER_DOC, job, ", ".join(jobs)))
     for job in jobs:
         if job not in seen:
-            failures.append("ci.yml job '%s' is missing from the AGENTS.md CI roster bullet ('%s...')"
-                            % (job, CI_ROSTER_BULLET))
+            failures.append("ci.yml job '%s' is missing from the %s CI roster bullet ('%s...')"
+                            % (job, CI_ROSTER_DOC, CI_ROSTER_BULLET))
     return failures
 
 
 def check_ci_roster_matches_workflow(root=ROOT):
-    return _ci_roster_findings(read(".github/workflows/ci.yml", root), read("AGENTS.md", root))
+    return _ci_roster_findings(read(".github/workflows/ci.yml", root), read(CI_ROSTER_DOC, root))
+
+
+# Check 19: a vendored `.so` committed twice as regular files. Matches
+# `libfoo.so` and `libfoo.so.1.2.3`, not `libfoo.a` or `libfoo.so.txt`.
+_VENDORED_SO_RE = re.compile(r"^lib[^/]*\.so(\.\d+)*$")
+_GIT_EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+VENDORED_SO_ROOT = "AlpacaCore/external/"
+
+
+def _duplicate_so_findings(entries):
+    """Check 19 over `git ls-files -s` entries as (mode, blob, path). Pure, so
+    --self-test can drive it."""
+    libs = [(mode, blob, path) for mode, blob, path in entries
+            if path.startswith(VENDORED_SO_ROOT) and _VENDORED_SO_RE.match(path.rsplit("/", 1)[-1])]
+    if not libs:
+        return ["found no vendored lib*.so under %s in the git index: the reader is stale" % VENDORED_SO_ROOT]
+    groups = {}
+    for mode, blob, path in libs:
+        if mode in ("100644", "100755") and blob != _GIT_EMPTY_BLOB:
+            groups.setdefault((path.rsplit("/", 1)[0], blob), []).append(path)
+    failures = []
+    for (_, _), paths in sorted(groups.items()):
+        if len(paths) > 1:
+            paths = sorted(paths, key=len)
+            target = paths[-1].rsplit("/", 1)[-1]
+            failures.append("%s are identical regular files; keep %s and make %s symlink(s) to it, "
+                            "or debian/rules' `cp -a` ships every copy"
+                            % (", ".join(paths), target,
+                               ", ".join(q.rsplit("/", 1)[-1] for q in paths[:-1])))
+    return failures
+
+
+def check_vendored_so_not_duplicated(root=ROOT):
+    out = _run_git(["ls-files", "-s", "--", VENDORED_SO_ROOT], root=root).stdout
+    entries = []
+    for line in out.splitlines():
+        meta, _, path = line.partition("\t")
+        mode, blob, _stage = meta.split()
+        entries.append((mode, blob, path))
+    return _duplicate_so_findings(entries)
+
+
+# Check 20: a restore-keys prefix that also matches another cache's keys.
+_CACHE_KEY_RE = re.compile(r"^\s*key:\s*(\S.*?)\s*$")
+_RESTORE_KEYS_RE = re.compile(r"^(\s*)restore-keys:\s*(.*?)\s*$")
+
+
+def _static_prefix(value):
+    """A cache key's text before its first `${{` expression, unquoted."""
+    return value.strip().strip("'\"").split("${{", 1)[0]
+
+
+def _cache_prefix_findings(workflows):
+    """Check 20 over {workflow path: text}. Pure, so --self-test can drive it."""
+    keys = {}       # prefix -> first "path:line" that saves or restores it
+    restores = []   # (prefix, "path:line")
+    for path, text in sorted(workflows.items()):
+        lines = text.splitlines()
+        for n, line in enumerate(lines, 1):
+            m = _CACHE_KEY_RE.match(line)
+            if m:
+                keys.setdefault(_static_prefix(m.group(1)), "%s:%d" % (path, n))
+                continue
+            m = _RESTORE_KEYS_RE.match(line)
+            if not m:
+                continue
+            values = [m.group(2)] if m.group(2) not in ("", "|", ">") else []
+            if not values:
+                for more in lines[n:]:
+                    if more.strip() and len(more) - len(more.lstrip()) <= len(m.group(1)):
+                        break
+                    if more.strip():
+                        values.append(more)
+            restores.extend((_static_prefix(v), "%s:%d" % (path, n)) for v in values)
+    if not keys:
+        return ["found no cache `key:` in .github/workflows/: the reader is stale"]
+    failures = []
+    for prefix, where in restores:
+        for other, other_where in sorted(keys.items()):
+            if prefix and other != prefix and other.startswith(prefix):
+                failures.append("%s restores by the prefix '%s', which also matches the '%s' keys saved at %s: "
+                                "a restore takes the newest match, so this job can get that cache; give one of "
+                                "them a prefix the other does not start with" % (where, prefix, other, other_where))
+    return failures
+
+
+def check_cache_restore_prefixes_distinct(root=ROOT):
+    paths = sorted(glob.glob(str(Path(root) / ".github/workflows/*.yml")))
+    return _cache_prefix_findings({Path(p).relative_to(root).as_posix(): Path(p).read_text(encoding="utf-8")
+                                   for p in paths})
+
+
+
+# Check 21: AGENTS.md size budget.
+AGENTS_MD_MAX_BYTES = 15000
+
+
+def _agents_md_size_findings(size, limit=AGENTS_MD_MAX_BYTES):
+    if size > limit:
+        return ["AGENTS.md is %d bytes, over its %d-byte budget: move the rule into the matching shared topic "
+                "file under .github/instructions/ (see docs/agent-instructions.md) and leave a one-line "
+                "pointer in AGENTS.md" % (size, limit)]
+    return []
+
+
+def check_agents_md_size(root=ROOT):
+    path = Path(root) / "AGENTS.md"
+    if not path.is_file():
+        return ["AGENTS.md is missing"]
+    return _agents_md_size_findings(len(path.read_bytes()))
+
+
+# --- checks 22 and 23: decision records ---------------------------------------
+#
+# The decision records in docs/decisions/ are what the planned decision-record
+# gate compares a pull request against, so their shape has to be machine
+# readable and their adoption rosters have to agree with the code. Before
+# these checks the rosters lived in prose in five places and three of them
+# disagreed with the code (PR #1410).
+
+DECISION_DIR = "docs/decisions"
+DECISION_FILE_RE = re.compile(r"^(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
+DECISION_STATUS_RE = re.compile(r"^Status: (proposed|accepted|superseded by (\d{4})|retired \(#\d+\))$")
+DECISION_SECTIONS = ("Context", "Decision", "Rules", "Alternatives rejected", "Consequences", "Links")
+# Sections a record may add between the required ones; anything else is a typo
+# or a new convention that README.md has to describe first.
+DECISION_OPTIONAL_SECTIONS = ("Adoption", "How to reverse")
+DECISION_RULE_RE = re.compile(
+    r"^(?P<n>\d+)\. (?P<text>.+?) Scope: (?P<scope>`[^`]+`(?:, `[^`]+`)*)\. Checked by: (?P<check>.+?)\."
+    r"(?P<allowed> <!-- allowed -->)?$")
+DECISION_INDEX_LINK_RE = re.compile(r"^- \[[^\]]+\]\((\d{4}-[^)]+\.md)\)( \(retired\))?$", re.M)
+# A rule's bound is part of the rule; a carve-out for code that deviates is a
+# defect with an issue, never a clause (README.md, "Rules"). A rule whose bound
+# needs one of these words ends with ` <!-- allowed -->` (DECISION_RULE_RE's
+# `allowed` group, so check_adr_scope.py reads a marked rule as any other).
+DECISION_EXCEPTION_WORD_RE = re.compile(r"\b(except|unless|until|for now)\b", re.I)
+# `Checked by: review` names no evidence, so the bot has nothing to apply. New
+# rules write `review (<what to look for>)`; the records below keep the bare
+# form they had when the form changed, and this baseline may only fall: lower
+# a record's figure (or drop the record) in the PR that converts its rules.
+DECISION_BARE_REVIEW_BASELINE = {
+    "0001-skywatcher-pointing-clock.md": 1,
+    "0002-server-thread-ownership.md": 1,
+    "0003-docs-drift-gates.md": 1,
+    "0005-task-clock.md": 4,
+    "0006-async-operation-ownership.md": 3,
+    "0007-lan-surface-threat-model.md": 13,
+    "0009-link-loss-and-relink-policy.md": 3,
+    "0011-cgx-logical-reference-continuity.md": 4,
+    "0012-bundled-libgphoto2.md": 1,
+    "0013-designs-to-avoid.md": 7,
+    "0014-utc-offset.md": 2,
+    "0015-sdk-seams.md": 4,
+    "0016-getters-never-wait-on-device-io.md": 5,
+    "0017-serial-port-ownership.md": 8,
+    "0019-connect-without-site.md": 1,
+}
+# The negative catalogue's rules have no natural file scope, so it alone may
+# write `Scope: `**``; anywhere else that scope marks a rule that belongs in
+# the catalogue or in a topic file.
+DECISION_ANY_SCOPE_RECORDS = ("0013-designs-to-avoid.md",)
+# Records from this number on say how to undo themselves (README.md, "How to
+# reverse"); the earlier ones add the section when next touched.
+DECISION_REVERSE_REQUIRED_FROM = 20
+ADOPTION_STATES = ("adopted", "partial", "planned")
+ISSUE_REF_RE = re.compile(r"#\d+")
+CODE_SPAN_ONLY_RE = re.compile(r"`([^`]+)`")
+
+
+def _glob_match(path, pattern):
+    # One glob rule for the repo: a single star stays inside one directory,
+    # ** crosses them. The instruction-structure check owns it.
+    from check_instruction_structure import matches
+    return matches(path, pattern)
+
+
+def _decision_sections(text):
+    """[(title, body)] for every `## ` section, in order."""
+    sections = []
+    current = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = [line[3:].strip(), []]
+            sections.append(current)
+        elif current is not None:
+            current[1].append(line)
+    return [(title, "\n".join(body)) for title, body in sections]
+
+
+def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_REVIEW_BASELINE,
+                              reverse_required_from=DECISION_REVERSE_REQUIRED_FROM):
+    """records: {file name: text}; readme: docs/decisions/README.md text;
+    tracked: repo-relative paths the Rules scope globs are matched against;
+    baseline: {file name: bare `Checked by: review` rules still allowed};
+    reverse_required_from: first record number that needs `## How to reverse`."""
+    findings = []
+    numbers = []
+    retired = set()
+    superseded_by = {}   # superseding record number -> the record it replaces
+    has_reverse = {}     # record number -> whether it has `## How to reverse`
+    for name in sorted(records):
+        text = records[name]
+        m = DECISION_FILE_RE.match(name)
+        if not m:
+            findings.append("%s/%s: the name is not NNNN-<lowercase-slug>.md" % (DECISION_DIR, name))
+            continue
+        numbers.append(int(m.group(1)))
+        lines = text.splitlines()
+        where = "%s/%s" % (DECISION_DIR, name)
+        if not lines or not lines[0].startswith("# "):
+            findings.append("%s: the first line is not a `# ` title" % where)
+        status = DECISION_STATUS_RE.match(lines[2]) if len(lines) > 2 else None
+        if not status:
+            findings.append("%s: line 3 is not `Status: proposed`, `Status: accepted`, "
+                            "`Status: superseded by NNNN` or `Status: retired (#NNNN)`" % where)
+            continue
+        if status.group(2) and not any(n.startswith(status.group(2) + "-") for n in records):
+            findings.append("%s: superseded by %s, which does not exist" % (where, status.group(2)))
+        if status.group(2):
+            superseded_by.setdefault(status.group(2), name)
+        is_retired = status.group(1).startswith("retired")
+        if is_retired:
+            retired.add(name)
+        no_rules = bool(status.group(2)) or is_retired
+        sections = _decision_sections(text)
+        titles = [t for t, _ in sections]
+        unknown = [t for t in titles if t not in DECISION_SECTIONS + DECISION_OPTIONAL_SECTIONS]
+        for t in unknown:
+            findings.append("%s: unknown section `## %s` (README.md lists the allowed ones)" % (where, t))
+        has_reverse[m.group(1)] = "How to reverse" in titles
+        if is_retired:
+            for t in ("Rules", "Adoption"):
+                if t in titles:
+                    findings.append("%s: a retired record drops its `## %s` section" % (where, t))
+        elif int(m.group(1)) >= reverse_required_from and "How to reverse" not in titles:
+            findings.append("%s: a record from %04d on needs a `## How to reverse` section"
+                            % (where, reverse_required_from))
+        required = [t for t in DECISION_SECTIONS if not (t == "Rules" and no_rules)]
+        present = [t for t in titles if t in required]
+        for t in required:
+            if t not in titles:
+                findings.append("%s: missing section `## %s`" % (where, t))
+        if present != [t for t in required if t in present]:
+            findings.append("%s: sections are out of order; expected %s" % (where, ", ".join(required)))
+        for t in set(titles):
+            if titles.count(t) > 1:
+                findings.append("%s: section `## %s` appears %d times" % (where, t, titles.count(t)))
+        rules = dict(sections).get("Rules")
+        if rules is None or is_retired:
+            continue
+        expected = 1
+        bare_review = 0
+        for line in rules.splitlines():
+            if not re.match(r"^\d+\. ", line):
+                continue
+            rule = DECISION_RULE_RE.match(line)
+            if not rule:
+                findings.append("%s: rule line does not end `Scope: `glob`[, `glob`]. Checked by: <check>.`: %s"
+                                % (where, line[:80]))
+                expected += 1
+                continue
+            if int(rule.group("n")) != expected:
+                findings.append("%s: rule %s is out of sequence (expected %d)" % (where, rule.group("n"), expected))
+            expected = int(rule.group("n")) + 1
+            word = DECISION_EXCEPTION_WORD_RE.search(rule.group("text"))
+            if word and not rule.group("allowed"):
+                findings.append("%s: rule %s says `%s`; a carve-out is a defect with an issue, not a rule clause "
+                                "(end the line with `<!-- allowed -->` when the bound is the rule)"
+                                % (where, rule.group("n"), word.group(1)))
+            if rule.group("check") == "review":
+                bare_review += 1
+            for glob_pattern in CODE_SPAN_ONLY_RE.findall(rule.group("scope")):
+                if glob_pattern == "**" and name not in DECISION_ANY_SCOPE_RECORDS:
+                    findings.append("%s: rule %s scope `**` is allowed only in %s; name the files or move "
+                                    "the rule" % (where, rule.group("n"), ", ".join(DECISION_ANY_SCOPE_RECORDS)))
+                elif not any(_glob_match(p, glob_pattern) for p in tracked):
+                    findings.append("%s: rule %s scope `%s` matches no tracked file"
+                                    % (where, rule.group("n"), glob_pattern))
+        if expected == 1:
+            findings.append("%s: `## Rules` has no numbered rule" % where)
+        allowed_bare = baseline.get(name, 0)
+        if bare_review > allowed_bare:
+            findings.append("%s: %d rules say a bare `Checked by: review` but the ratchet allows %d; write "
+                            "`review (<what to look for>)`" % (where, bare_review, allowed_bare))
+        elif bare_review < allowed_bare:
+            findings.append("%s: %d bare `Checked by: review` rules remain but DECISION_BARE_REVIEW_BASELINE "
+                            "allows %d; lower it so the ratchet holds" % (where, bare_review, allowed_bare))
+    # README.md: a record that supersedes another says how to reverse, whatever
+    # its number (the number cut-over above covers only new records).
+    for number, old in sorted(superseded_by.items()):
+        if has_reverse.get(number) is False and int(number) < reverse_required_from:
+            new = next(n for n in records if n.startswith(number + "-"))
+            findings.append("%s/%s: supersedes %s and needs a `## How to reverse` section"
+                            % (DECISION_DIR, new, old))
+    numbers.sort()
+    if numbers and numbers != list(range(1, len(numbers) + 1)):
+        findings.append("%s: record numbers are not 0001..%04d with no gap or repeat: %s"
+                        % (DECISION_DIR, len(numbers), ", ".join("%04d" % n for n in numbers)))
+    index_lines = DECISION_INDEX_LINK_RE.findall(readme)
+    indexed = [n for n, _ in index_lines]
+    for n, suffix in index_lines:
+        if bool(suffix) != (n in retired):
+            findings.append("%s/README.md: the index line for %s %s the `(retired)` suffix"
+                            % (DECISION_DIR, n, "lacks" if n in retired else "carries"))
+    record_names = sorted(n for n in records if DECISION_FILE_RE.match(n))
+    if indexed != record_names:
+        missing = sorted(set(record_names) - set(indexed))
+        extra = sorted(set(indexed) - set(record_names))
+        detail = []
+        if missing:
+            detail.append("not indexed: " + ", ".join(missing))
+        if extra:
+            detail.append("indexed but absent: " + ", ".join(extra))
+        if not detail:
+            detail.append("index order differs from the record numbers")
+        findings.append("%s/README.md: the index does not list every record once, in order (%s)"
+                        % (DECISION_DIR, "; ".join(detail)))
+    return findings
+
+
+def check_decision_records(root=ROOT):
+    directory = Path(root) / DECISION_DIR
+    records = {p.name: p.read_text(encoding="utf-8", errors="replace")
+               for p in directory.glob("*.md") if p.name != "README.md"}
+    if not records:
+        return ["%s holds no decision record: the directory moved or the glob regressed" % DECISION_DIR]
+    tracked, _ = _tracked_paths(Path(root))
+    return _decision_record_findings(records, read("%s/README.md" % DECISION_DIR, Path(root)), tracked)
+
+
+def _adoption_findings(where, body, files):
+    """One record's `## Adoption` section against the files it names.
+
+    files: {repo path: text} for every tracked file (the Scan glob and the
+    Source cells are resolved against it). Comments are blanked before a
+    symbol is matched, so a comment that names one is not adoption."""
+    findings = []
+    code = {}
+
+    def code_of(path):
+        if path not in code:
+            code[path] = _strip_comments(files[path])
+        return code[path]
+
+    scan = re.search(r"^Scan: `([^`]+)`$", body, re.M)
+    symbol = re.search(r"^Symbol: `([^`]+)`$", body, re.M)
+    if not scan:
+        return ["%s: `## Adoption` has no `Scan: `glob`` line" % where]
+    table = [l for l in body.splitlines() if l.startswith("|")]
+    if len(table) < 3:
+        return ["%s: `## Adoption` has no table rows" % where]
+    header = [c.strip() for c in table[0].strip("|").split("|")]
+    for column in ("Driver", "Source", "State", "Issue"):
+        if column not in header:
+            return ["%s: the Adoption table has no `%s` column" % (where, column)]
+    if not symbol and "Symbol" not in header:
+        return ["%s: `## Adoption` names no `Symbol: `name`` line and has no Symbol column" % where]
+    listed = set()
+    for row in table[2:]:
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        if len(cells) != len(header):
+            findings.append("%s: Adoption row has %d cells, the header %d: %s" % (where, len(cells), len(header), row[:60]))
+            continue
+        cell = dict(zip(header, cells))
+        name = cell["Driver"]
+        state = cell["State"]
+        row_symbol = CODE_SPAN_ONLY_RE.findall(cell.get("Symbol", ""))
+        word = row_symbol[0] if row_symbol else (symbol.group(1) if symbol else None)
+        if not word:
+            findings.append("%s: Adoption row %s has no symbol" % (where, name))
+            continue
+        if state not in ADOPTION_STATES:
+            findings.append("%s: Adoption row %s has state %r; use one of %s"
+                            % (where, name, state, ", ".join(ADOPTION_STATES)))
+            continue
+        if state == "partial" and not ISSUE_REF_RE.search(cell["Issue"]):
+            findings.append("%s: Adoption row %s is partial but names no issue that finishes it" % (where, name))
+        sources = CODE_SPAN_ONLY_RE.findall(cell["Source"])
+        if not sources:
+            if state != "planned" or cell["Source"] not in ("—", "-"):
+                findings.append("%s: Adoption row %s names no source file (only a planned row may say —)"
+                                % (where, name))
+            continue
+        pattern = re.compile(r"\b%s\b" % re.escape(word))
+        uses = False
+        for source in sources:
+            listed.add(source)
+            if source not in files:
+                findings.append("%s: Adoption row %s names %s, which is not a tracked AlpacaCore/ or AlpacaHTTP/ "
+                                ".cpp or .h file (the files check 23 reads)" % (where, name, source))
+                continue
+            uses = uses or bool(pattern.search(code_of(source)))
+        if state in ("adopted", "partial") and not uses:
+            findings.append("%s: Adoption row %s is %s but no source names `%s`" % (where, name, state, word))
+        if state == "planned" and uses:
+            findings.append("%s: Adoption row %s is planned but its source already names `%s`; "
+                            "mark it partial or adopted" % (where, name, word))
+    scanned = [p for p in files if _glob_match(p, scan.group(1))]
+    if not scanned:
+        findings.append("%s: Adoption scan `%s` matches no tracked file" % (where, scan.group(1)))
+    for path in sorted(scanned):
+        if path in listed:
+            continue
+        if symbol and not re.search(r"\b%s\b" % re.escape(symbol.group(1)), code_of(path)):
+            continue
+        findings.append("%s: %s %s but has no Adoption row"
+                        % (where, path, ("names `%s`" % symbol.group(1)) if symbol else "is in the scan"))
+    return findings
+
+
+def check_decision_adoption(root=ROOT):
+    root = Path(root)
+    tracked, _ = _tracked_paths(root)
+    files = {}
+    for path in tracked:
+        if path.startswith(("AlpacaCore/", "AlpacaHTTP/")) and not path.startswith("AlpacaCore/external/") \
+                and path.endswith((".cpp", ".h")):
+            full = root / path
+            if full.is_file():
+                files[path] = full.read_text(encoding="utf-8", errors="replace")
+    findings = []
+    adopting = 0
+    for record in sorted((root / DECISION_DIR).glob("0*.md")):
+        body = dict(_decision_sections(record.read_text(encoding="utf-8", errors="replace"))).get("Adoption")
+        if body is None:
+            continue
+        adopting += 1
+        findings.extend(_adoption_findings("%s/%s" % (DECISION_DIR, record.name), body, files))
+    if adopting < MIN_ADOPTION_RECORDS:
+        findings.append("only %d decision record(s) carry an Adoption section (floor %d): a section was renamed "
+                        "or the parser regressed" % (adopting, MIN_ADOPTION_RECORDS))
+    return findings
+
+
+# Records 0005, 0006, 0009, 0010, 0014 and 0015 carry an Adoption table.
+MIN_ADOPTION_RECORDS = 6
+
+
+# --- check 24: review job time budget ------------------------------------------
+
+REVIEW_WORKFLOW = ".github/workflows/claude-review.yml"
+REVIEW_GATES_DOC = ".github/instructions/ci-gates.instructions.md"
+REVIEW_SKILLS = (".claude/commands/pr-checker.md", ".claude/commands/submit-pr.md")
+
+
+def _review_budget_findings(workflow, gates, skills):
+    """Check 24 over the texts ({skill path: text} for skills). Pure, so --self-test can drive it.
+
+    The workflow owns two figures: the review job's `timeout-minutes` and the
+    `N * 60` deadline of its wait step. The ci-gates line and both skills
+    restate them (wait minutes, job minutes, poll budget), and the poll has to
+    outlast the job or a healthy run reads as a stall.
+    """
+    findings = []
+    job = re.search(r"^  review:\n(?:(?!^  \S).*\n)*?    timeout-minutes: (\d+)", workflow, re.M)
+    wait = re.search(r"\+ (\d+) \* 60 \)\)", workflow)
+    if not job or not wait:
+        return ["%s: could not read the review job's timeout-minutes or the wait step's `N * 60` deadline: "
+                "the reader is stale" % REVIEW_WORKFLOW]
+    job_min, wait_min = int(job.group(1)), int(wait.group(1))
+
+    def figures(path, text, pattern, what, scale=1):
+        found = [int(m.group(1)) // scale for m in re.finditer(pattern, text)]
+        if not found:
+            findings.append("%s: found no %s: the reader is stale" % (path, what))
+        return [(path, n) for n in found]
+
+    polls = []
+    expected = []
+    flat = {path: re.sub(r"\s+", " ", text) for path, text in [(REVIEW_GATES_DOC, gates)] + sorted(skills.items())}
+    g = flat[REVIEW_GATES_DOC]
+    expected += [(n, "wait", wait_min) for n in figures(REVIEW_GATES_DOC, g, r"waits up to (\d+) minutes", "wait prose")]
+    expected += [(n, "wait", wait_min) for n in figures(REVIEW_GATES_DOC, g, r"up to (\d+) waiting for CI", "wait figure")]
+    expected += [(n, "job timeout", job_min) for n in figures(REVIEW_GATES_DOC, g, r"`claude-review` \((\d+) min", "job timeout figure")]
+    gate_poll = figures(REVIEW_GATES_DOC, g, r"(\d+)-minute verdict poll", "poll figure")
+    polls += gate_poll
+    for path, text in sorted(flat.items()):
+        if path == REVIEW_GATES_DOC:
+            continue
+        expected += [(n, "wait", wait_min) for n in figures(path, text, r"waits (?:first )?up to (\d+) minutes", "wait prose")]
+        budget = figures(path, text, r"BUDGET:-(\d+)", "`BUDGET:-<seconds>` default", scale=60)
+        prose = figures(path, text, r"(\d+)-minute (?:budget|deadline)", "`N-minute budget` prose")
+        polls += budget + prose
+    for (path, n), what, want in expected:
+        if n != want:
+            findings.append("%s says %d minutes for the %s, but %s says %d" % (path, n, what, REVIEW_WORKFLOW, want))
+    values = sorted({n for _, n in polls})
+    if len(values) > 1:
+        findings.append("the poll budget disagrees across the docs: %s" % "; ".join(
+            "%s says %d minutes" % (path, n) for path, n in sorted(polls)))
+    for path, n in polls:
+        if n <= job_min:
+            findings.append("%s: the %d-minute poll budget must be greater than the review job's %d-minute "
+                            "timeout in %s, or a healthy run reads as a stall" % (path, n, job_min, REVIEW_WORKFLOW))
+    return findings
+
+
+def check_review_budget_agrees(root=ROOT):
+    root = Path(root)
+    try:
+        return _review_budget_findings(
+            (root / REVIEW_WORKFLOW).read_text(encoding="utf-8"),
+            (root / REVIEW_GATES_DOC).read_text(encoding="utf-8"),
+            {p: (root / p).read_text(encoding="utf-8") for p in REVIEW_SKILLS})
+    except OSError as e:
+        return ["could not read %s: %s" % (e.filename, e.strerror)]
+
+
+# --- check 25: README authored-line badge vs the git index (issue #1465) ------
+
+# What counts as authored code. Tracked files only (`git ls-files`), so a local
+# build tree or an ignored file never moves the number. Roots: the two
+# components and scripts/, which hold every first-party source, test and the
+# web UI. Extensions: C/C++ sources and headers, Python, shell and the web UI's
+# JS/HTML/CSS. Blank lines are not counted, so reformatting does not move the
+# figure. Docs, CMake files, data (HEX, rules, yaml, conformu logs) are not code.
+AUTHORED_LINES_ROOTS = ("AlpacaCore/", "AlpacaHTTP/", "scripts/")
+AUTHORED_LINES_EXTENSIONS = frozenset((
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+    ".py", ".sh", ".js", ".html", ".css",
+))
+# Third-party trees: the vendored SDKs and the bundled libgphoto2 both live
+# under AlpacaCore/external/, and counting them would let vendor code dominate
+# the number. Build directories are untracked, so the index already skips them.
+AUTHORED_LINES_EXCLUDED_PREFIXES = ("AlpacaCore/external/",)
+AUTHORED_LINES_ROUND = 1000
+# Fail only when the badge is further than this fraction of the computed count
+# from it. 5% of ~247k lines is ~12k, i.e. months of ordinary churn.
+AUTHORED_LINES_TOLERANCE = 0.05
+MIN_AUTHORED_LINES = 1000  # floor: fewer means the path filter or git listing broke
+
+AUTHORED_BADGE_RE = re.compile(
+    r"\[!\[Authored code\]\(https://img\.shields\.io/badge/Authored%20code-(?P<k>\d+)k%20lines-[A-Za-z0-9]+\.svg\)\]\([^)]*\)")
+
+
+def is_authored_path(path):
+    """True when a tracked path counts toward the authored-line badge."""
+    if not path.startswith(AUTHORED_LINES_ROOTS) or path.startswith(AUTHORED_LINES_EXCLUDED_PREFIXES):
+        return False
+    return Path(path).suffix in AUTHORED_LINES_EXTENSIONS
+
+
+def count_authored_lines(files):
+    """Non-blank lines over {path: text}, for the paths is_authored_path accepts."""
+    return sum(1 for path, text in files.items() if is_authored_path(path)
+               for line in text.splitlines() if line.strip())
+
+
+def _authored_lines_from_index(root=ROOT):
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files"], root=root).stdout.splitlines()
+    files = {}
+    for path in tracked:
+        if is_authored_path(path) and (root / path).is_file():
+            files[path] = read(path, root)
+    return count_authored_lines(files)
+
+
+def authored_badge_line(count):
+    k = int(round(count / AUTHORED_LINES_ROUND))
+    return ("[![Authored code](https://img.shields.io/badge/Authored%%20code-%dk%%20lines-informational.svg)]"
+            "(docs/architecture.md#modules)" % k)
+
+
+def _authored_badge_findings(readme, count):
+    """Check 25 over the README text and the computed count. Pure, so --self-test can drive it."""
+    if count < MIN_AUTHORED_LINES:
+        return ["authored-line count is %d, below the floor %d: the path filter or `git ls-files` listing is broken"
+                % (count, MIN_AUTHORED_LINES)]
+    m = AUTHORED_BADGE_RE.search(readme)
+    if not m:
+        return ["could not find the Authored code badge in README.md; paste: %s" % authored_badge_line(count)]
+    shown = int(m.group("k")) * AUTHORED_LINES_ROUND
+    if abs(shown - count) > AUTHORED_LINES_TOLERANCE * count:
+        return ["README Authored code badge says %dk lines but %d lines are authored (more than %d%% apart); "
+                "run `python3 scripts/check_docs_drift.py --badge` and paste: %s"
+                % (shown // 1000, count, round(AUTHORED_LINES_TOLERANCE * 100), authored_badge_line(count))]
+    return []
+
+
+def check_authored_lines_badge(root=ROOT):
+    return _authored_badge_findings(read("README.md", root), _authored_lines_from_index(root))
+
+
+def print_badge(root=ROOT):
+    count = _authored_lines_from_index(root)
+    m = AUTHORED_BADGE_RE.search(read("README.md", root))
+    print("authored lines: %d" % count)
+    print("rounded: %dk" % int(round(count / AUTHORED_LINES_ROUND)))
+    print("README.md now: %s" % (m.group(0) if m else "(badge not found)"))
+    print("badge: %s" % authored_badge_line(count))
+    return 0
 
 
 CHECKS = [
@@ -2103,7 +2805,15 @@ CHECKS = [
     ("README headline counts match SUPPORTED-DRIVERS.md", check_readme_headline_counts),
     ("SUPPORTED-DRIVERS.md Updated date is not behind the README release date", check_supported_drivers_updated_date),
     ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
-    ("AGENTS.md CI job roster matches ci.yml job ids", check_ci_roster_matches_workflow),
+    ("CI job roster (ci-gates instructions) matches ci.yml job ids", check_ci_roster_matches_workflow),
+    ("Vendored shared libraries are not committed twice", check_vendored_so_not_duplicated),
+    ("Cache restore-keys prefixes match only their own caches", check_cache_restore_prefixes_distinct),
+    ("AGENTS.md stays within its size budget", check_agents_md_size),
+    ("Decision records follow the README shape (status, sections, Rules lines, index)", check_decision_records),
+    ("Decision record Adoption tables match the code", check_decision_adoption),
+    ("Review job timeout, wait and poll budgets agree across the workflow, ci-gates and skills",
+     check_review_budget_agrees),
+    ("README Authored code badge is within tolerance of the tracked line count", check_authored_lines_badge),
 ]
 
 
@@ -2190,6 +2900,42 @@ def self_test():
         assert text.count(old) == count, (old, text.count(old))
         return text.replace(old, new)
 
+    # check 6: the lock each LockedQHYSDK forward takes (open-astro#339, #1646).
+    qhy_ok = {
+        "open_camera": "{ locked([&] { inner_.open_camera(); }); }",
+        "cancel_exposure": "{ std::lock_guard<std::mutex> lk(cancel_mutex_); inner_.cancel_exposure(); }",
+        "get_sdk_version": "{ return locked(version_mutex_, [&] { return inner_.get_sdk_version(); }); }",
+    }
+    qhy_names = set(qhy_ok)
+
+    def qhy_with(name, body):
+        return _qhy_forward_lock_findings(dict(qhy_ok, **{name: body}), qhy_names)
+
+    check("QHY lock check: baseline forwards produce no finding",
+          _qhy_forward_lock_findings(qhy_ok, qhy_names) == [])
+    check("QHY lock check: get_sdk_version through the shared mutex fails",
+          any("get_sdk_version() must take version_mutex_" in x
+              for x in qhy_with("get_sdk_version", "{ return locked([&] { return inner_.get_sdk_version(); }); }")))
+    check("QHY lock check: get_sdk_version with no lock fails",
+          any("get_sdk_version() must take version_mutex_" in x
+              for x in qhy_with("get_sdk_version", "{ return inner_.get_sdk_version(); }")))
+    check("QHY lock check: get_sdk_version naming both mutexes fails",
+          any("get_sdk_version() must take version_mutex_" in x
+              for x in qhy_with("get_sdk_version",
+                                "{ locked([&] {}); return locked(version_mutex_, [&] { return 1; }); }")))
+    check("QHY lock check: another forward on locked(other_mutex_, ...) fails",
+          any("UNLOCKED FORWARD: LockedQHYSDK::open_camera()" in x
+              for x in qhy_with("open_camera", "{ locked(other_mutex_, [&] { inner_.open_camera(); }); }")))
+    check("QHY lock check: another forward on locked(version_mutex_, ...) fails",
+          any("UNLOCKED FORWARD: LockedQHYSDK::open_camera()" in x
+              for x in qhy_with("open_camera", "{ locked(version_mutex_, [&] { inner_.open_camera(); }); }")))
+    check("QHY lock check: an unlocked forward fails",
+          any("UNLOCKED FORWARD: LockedQHYSDK::open_camera()" in x
+              for x in qhy_with("open_camera", "{ inner_.open_camera(); }")))
+    check("QHY lock check: cancel_exposure through locked() fails",
+          any("cancel_exposure() must take cancel_mutex_" in x
+              for x in qhy_with("cancel_exposure", "{ locked([&] { inner_.cancel_exposure(); }); }")))
+
     ci, pf = _SELF_TEST_CI, _SELF_TEST_PREFLIGHT
     baseline = _tsan_findings(ci, pf)
     check("baseline fixtures produce no finding: %r" % baseline, baseline == [])
@@ -2250,6 +2996,11 @@ def self_test():
     check("memory references are found in source comments",
           MEMORY_COMMENT_PATH_RE.findall("// See docs/decisions/0001-example.md") ==
           ["docs/decisions/0001-example.md"])
+    check("memory comment ids: a bare record number is read, a full file name is not",
+          MEMORY_COMMENT_ID_RE.findall("// (docs/decisions/0008).") == [("decisions", "0008")]
+          and MEMORY_COMMENT_ID_RE.findall("// docs/decisions/0008-x.md") == []
+          and MEMORY_COMMENT_ID_RE.findall("// see docs/decisions/0008.") == [("decisions", "0008")]
+          and MEMORY_COMMENT_ID_RE.findall("// docs/decisions/0008.md") == [])
 
     # check_memory_comment_paths_exist over a fixture tree. The root lives
     # under a directory named "build-fixture": the checkout's own ancestors
@@ -2672,6 +3423,23 @@ def self_test():
     check("counts: the summary keeps a declared comma item whole in the paste-ready headline",
           lines[1] == "brands: 4 (Four)" and "Canon, Nikon and Sony DSLRs" in lines[3])
 
+    # check 5 (blocking get_connected() lists) over a literal header and kinds.
+    bl_header = ("// The blocking telescopes () list is empty on purpose.\n"
+                 "// The wrapper-backed switch drivers () list is empty too.\n")
+    bl_kinds = {"bisque_telescope_driver.cpp": "lock-free", "ioptron_telescope_driver.cpp": "lock-free"}
+    check("blocking list: an empty telescopes list with every telescope lock-free reports nothing",
+          blocking_list_findings(bl_header, bl_kinds) == [])
+    f = blocking_list_findings(bl_header, dict(bl_kinds, **{"bisque_telescope_driver.cpp": "driver-mutex"}))
+    check("blocking list: a re-locked Bisque getter against an empty list is MISSING FROM THE BLOCKING LIST",
+          len(f) == 1 and f[0].startswith("MISSING FROM THE BLOCKING LIST") and "'Bisque'" in f[0])
+    f = blocking_list_findings(bl_header.replace("telescopes ()", "telescopes (Bisque and iOptron)"), bl_kinds)
+    check("blocking list: Bisque and iOptron named while lock-free is STALE BLOCKING-LIST ENTRY for each",
+          all(sum(("'%s'" % n) in x and x.startswith("STALE BLOCKING-LIST ENTRY") for x in f) >= 1
+              for n in ("Bisque", "iOptron")))
+    f = blocking_list_findings(bl_header.replace("The blocking telescopes (", "The telescopes ("), bl_kinds)
+    check("blocking list: a header without the telescopes span is BLOCKING-LIST SPAN NOT FOUND",
+          len(f) == 1 and f[0].startswith("BLOCKING-LIST SPAN NOT FOUND"))
+
     # check 4: VERSION vs README badge, with the ~betaN suffix.
     b_readme = "#### [5.0.0~beta2] - 2026-11-01 &middot; [Changelog](CHANGELOG.md)\n"
     check("version badge: a beta VERSION and its beta badge agree",
@@ -2789,7 +3557,7 @@ def self_test():
     check("error codes: an enum the parser cannot read is a finding, not a pass",
           f is not None and any("no AlpacaError constants" in x for x in f))
 
-    # check 18: the AGENTS.md CI job roster vs ci.yml (issue #702).
+    # check 18: the ci-gates CI job roster vs ci.yml (issue #702).
     roster_ci = (
         "on:\n"
         "  pull_request:\n"
@@ -2839,6 +3607,313 @@ def self_test():
     check("ci roster: a ci.yml with no jobs: block is a finding, not a pass",
           f is not None and len(f) == 1 and "no job ids" in f[0])
 
+    zwo = "AlpacaCore/external/ZWO/lib/armv8/"
+    blob_a, blob_b = "a" * 40, "b" * 40
+    so_clean = [
+        ("100755", blob_a, zwo + "libASICamera2.so.1.41"),
+        ("120000", blob_b, zwo + "libASICamera2.so"),
+        ("100644", blob_a, zwo + "libASICamera2.a"),
+    ]
+
+    def dup_so(entries):
+        return attempt("vendored so", lambda: _duplicate_so_findings(entries))
+
+    f = dup_so(so_clean)
+    check("vendored so: a versioned file plus a symlink is clean", f == [])
+    f = dup_so(so_clean[:1] + [("100755", blob_a, zwo + "libASICamera2.so")])
+    check("vendored so: the unversioned name committed as a copy is reported, naming both and the fix",
+          f is not None and len(f) == 1 and "libASICamera2.so," in f[0] and "libASICamera2.so.1.41" in f[0]
+          and "keep libASICamera2.so.1.41" in f[0])
+    f = dup_so(so_clean + [("100755", blob_a, "AlpacaCore/external/ZWO/lib/x64/libASICamera2.so.1.41")])
+    check("vendored so: the same blob in two directories is not a duplicate", f == [])
+    f = dup_so(so_clean + [("100644", _GIT_EMPTY_BLOB, zwo + "libusb.so"),
+                           ("100644", _GIT_EMPTY_BLOB, zwo + "libusb.so.0")])
+    check("vendored so: two empty placeholders are not reported", f == [])
+    f = dup_so([("100755", blob_a, "AlpacaCore/src/libx.so"), ("100755", blob_a, "AlpacaCore/src/libx.so.1")])
+    check("vendored so: an index with no vendored .so is a finding, not a pass",
+          f is not None and len(f) == 1 and "stale" in f[0])
+
+    cache_wf = (
+        "jobs:\n"
+        "  asan:\n"
+        "    steps:\n"
+        "      - uses: actions/cache/restore@x\n"
+        "        with:\n"
+        "          key: ccache-asan-${{ github.sha }}\n"
+        "          restore-keys: ccache-asan-\n"
+        "  tsan:\n"
+        "    steps:\n"
+        "      - uses: actions/cache/restore@x\n"
+        "        with:\n"
+        "          key: ccache-sanitizers-tsan-${{ github.sha }}\n"
+        "          restore-keys: |\n"
+        "            ccache-sanitizers-tsan-\n"
+        "      - uses: actions/cache/save@x\n"
+        "        with:\n"
+        "          key: ccache-sanitizers-tsan-${{ github.sha }}\n"
+        "  tidy:\n"
+        "    steps:\n"
+        "      - uses: actions/cache/restore@x\n"
+        "        with:\n"
+        "          key: ccache-asan-${{ github.sha }}\n"
+        "          restore-keys: ccache-asan-\n"
+        "  cpp:\n"
+        "    steps:\n"
+        "      - uses: actions/cache/restore@x\n"
+        "        with:\n"
+        "          key: cppcheck-${{ runner.os }}-${{ hashFiles('x') }}\n"
+        "          restore-keys: cppcheck-${{ runner.os }}-\n"
+    )
+
+    def cache_prefixes(text, other=None):
+        wf = {"ci.yml": text}
+        if other is not None:
+            wf["nightly.yml"] = other
+        return attempt("cache prefixes", lambda: _cache_prefix_findings(wf))
+
+    f = cache_prefixes(cache_wf)
+    check("cache prefixes: distinct prefixes, a shared equal prefix and expression keys are clean", f == [])
+    m = cache_wf.replace("ccache-asan-", "ccache-sanitizers-")
+    f = cache_prefixes(m)
+    check("cache prefixes: the #1355 shape (ASan prefix starts the TSan keys) is reported with both prefixes",
+          f is not None and len(f) == 2 and all("'ccache-sanitizers-'" in x and "'ccache-sanitizers-tsan-'" in x
+                                                for x in f))
+    f = cache_prefixes(cache_wf.replace("            ccache-sanitizers-tsan-\n", "            ccache-\n"))
+    check("cache prefixes: a block-style restore-keys entry is read",
+          f is not None and len(f) == 2 and all("ci.yml:13 restores by the prefix 'ccache-'" in x for x in f))
+    f = cache_prefixes(cache_wf, other="      - with:\n          key: ccache-asan-nightly-${{ github.sha }}\n")
+    check("cache prefixes: a key in another workflow file counts",
+          f is not None and len(f) == 2 and all("nightly.yml:2" in x for x in f))
+    f = cache_prefixes("jobs:\n  a:\n    steps:\n      - run: echo\n")
+    check("cache prefixes: no key at all is a finding, not a pass", f is not None and len(f) == 1 and "stale" in f[0])
+
+    # check 24: review job time budget.
+    rwf = "jobs:\n  review:\n    runs-on: x\n    timeout-minutes: 90\n    steps:\n      - run: |\n          deadline=$(( $(date +%s) + 45 * 60 ))\n"
+    rgates = ("waits up to 45 minutes for them. `claude-review` (90 min:\n  up to 45 waiting for CI, then up to 45 for the review) "
+              "is outlasted by the 95-minute verdict poll in")
+    rskill = lambda n: "waits up to 45 minutes for CI; a 95-minute budget; DEADLINE=$(( x + ${BUDGET:-%d} ))" % n
+    rskills = {REVIEW_SKILLS[0]: rskill(5700), REVIEW_SKILLS[1]: rskill(5700)}
+
+    def budget(wf=rwf, gates=rgates, skills=rskills):
+        return attempt("review budget", lambda: _review_budget_findings(wf, gates, skills))
+
+    check("review budget: agreeing figures are clean", budget() == [])
+    f = budget(wf=rwf.replace("timeout-minutes: 90", "timeout-minutes: 75"))
+    check("review budget: a changed job timeout is reported against ci-gates",
+          f is not None and any("90 minutes for the job timeout" in x for x in f))
+    f = budget(wf=rwf.replace("45 * 60", "50 * 60"))
+    check("review budget: a changed wait deadline is reported", f is not None and any("for the wait" in x for x in f))
+    f = budget(gates=rgates.replace("95-minute", "80-minute"))
+    check("review budget: a stale ci-gates poll figure is reported", f is not None and any("disagrees" in x for x in f))
+    f = budget(skills={REVIEW_SKILLS[0]: rskill(5700), REVIEW_SKILLS[1]: rskill(4800)})
+    check("review budget: one skill left on the old BUDGET default is reported",
+          f is not None and any("disagrees" in x and "80 minutes" in x for x in f))
+    f = budget(skills={REVIEW_SKILLS[0]: rskill(5700).replace("a 95-minute", "a 80-minute"), REVIEW_SKILLS[1]: rskill(5700)})
+    check("review budget: stale N-minute prose in a skill is reported", f is not None and any("80 minutes" in x for x in f))
+    f = budget(skills={REVIEW_SKILLS[0]: rskill(5700).replace("up to 45", "up to 40"), REVIEW_SKILLS[1]: rskill(5700)})
+    check("review budget: a skill's wait prose is checked", f is not None and any("40 minutes for the wait" in x for x in f))
+    f = budget(wf=rwf.replace("timeout-minutes: 90", "timeout-minutes: 120"))
+    check("review budget: a poll budget not above the job timeout is reported",
+          f is not None and any("must be greater" in x for x in f))
+    f = budget(wf="jobs:\n  other:\n    timeout-minutes: 5\n")
+    check("review budget: an unreadable workflow is a finding, not a pass", f is not None and len(f) == 1 and "stale" in f[0])
+
+    # check 21: AGENTS.md size budget.
+    check("agents size: a file at the budget is clean", _agents_md_size_findings(AGENTS_MD_MAX_BYTES) == [])
+    f = _agents_md_size_findings(AGENTS_MD_MAX_BYTES + 1)
+    check("agents size: one byte over the budget is reported with the size",
+          len(f) == 1 and str(AGENTS_MD_MAX_BYTES + 1) in f[0])
+
+    # checks 22 and 23: decision record shape and Adoption rosters (literal fixtures).
+    good_record = (
+        "# Example\n\nStatus: accepted\n\n## Context\n\nc\n\n## Decision\n\nd\n\n## Rules\n\nintro\n\n"
+        "1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n"
+        "## Alternatives rejected\n\na\n\n## Consequences\n\nq\n\n## Links\n\nl\n")
+    good_index = "- [Example](0001-example.md)\n- [Second](0002-second.md)\n"
+    tracked_fixture = ["src/a.cpp", "src/b.cpp", "docs/x.md"]
+
+    fixture_baseline = {"0001-example.md": 1, "0002-second.md": 1}
+
+    def records(first=good_record, second=good_record, index=good_index, extra=None,
+                baseline=fixture_baseline, reverse_from=99):
+        recs = {"0001-example.md": first, "0002-second.md": second}
+        recs.update(extra or {})
+        return _decision_record_findings(recs, index, tracked_fixture, baseline, reverse_from)
+
+    check("decision records: the baseline fixture is clean", records() == [])
+    retired_record = good_record.replace("Status: accepted", "Status: retired (#1234)").replace(
+        "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", "")
+    retired_index = "- [Example](0001-example.md) (retired)\n- [Second](0002-second.md)\n"
+    check("decision records: a retired record with no Rules and a suffixed index line is clean",
+          records(first=retired_record, index=retired_index) == [])
+    f = records(first=good_record.replace("Status: accepted", "Status: retired (#1234)"), index=retired_index)
+    check("decision records: a retired record that keeps its Rules is reported",
+          any("retired record drops its `## Rules`" in x for x in f))
+    f = records(first=good_record.replace("Status: accepted", "Status: retired"))
+    check("decision records: retired without the retiring issue or PR is reported", any("line 3" in x for x in f))
+    f = records(first=retired_record)
+    check("decision records: a retired record whose index line lacks the suffix is reported",
+          any("0001-example.md lacks the `(retired)` suffix" in x for x in f))
+    f = records(index=retired_index)
+    check("decision records: an accepted record whose index line carries the suffix is reported",
+          any("0001-example.md carries the `(retired)` suffix" in x for x in f))
+    f = records(first=good_record.replace("Checked by: review.", "Checked by: review (no sleep in the getter)."),
+                baseline={"0002-second.md": 1})
+    check("decision records: `review (<evidence>)` counts as evidence, not a bare review", f == [])
+    f = records(baseline={"0002-second.md": 1})
+    check("decision records: a bare review above the ratchet is reported",
+          any("1 rules say a bare `Checked by: review` but the ratchet allows 0" in x for x in f))
+    f = records(first=good_record.replace("Checked by: review.", "Checked by: review (evidence)."))
+    check("decision records: a stale ratchet figure is reported so the baseline only falls",
+          any("0 bare `Checked by: review` rules remain but DECISION_BARE_REVIEW_BASELINE allows 1" in x for x in f))
+    f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing unless asked."))
+    check("decision records: an exception word in a rule is reported", any("rule 1 says `unless`" in x for x in f))
+    f = records(first=good_record.replace("1. Do a thing. Scope: `src/a.cpp`. Checked by: review.",
+                                          "1. Do a thing until told. Scope: `src/a.cpp`. Checked by: review. <!-- allowed -->"))
+    check("decision records: the allowed marker admits a bounded rule", f == [])
+    f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `**`"))
+    check("decision records: scope `**` outside the catalogue is reported",
+          any("scope `**` is allowed only in" in x for x in f))
+    f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `**`"),
+                extra={"0013-designs-to-avoid.md": good_record.replace("Scope: `src/a.cpp`", "Scope: `**`")})
+    check("decision records: scope `**` inside the catalogue is not the finding",
+          not any("0013-designs-to-avoid.md: rule 1 scope `**`" in x for x in f))
+    f = records(reverse_from=2)
+    check("decision records: a record from the cut-over number on without How to reverse is reported",
+          any("0002-second.md: a record from 0002 on needs a `## How to reverse`" in x for x in f)
+          and not any("0001-example.md: a record from" in x for x in f))
+    f = records(second=good_record.replace("## Links", "## How to reverse\n\nr\n\n## Links"), reverse_from=2)
+    check("decision records: How to reverse satisfies the cut-over", f == [])
+    f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0002").replace(
+        "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""),
+        baseline={"0002-second.md": 1})
+    check("decision records: a superseding record below the cut-over without How to reverse is reported",
+          any("0002-second.md: supersedes 0001-example.md and needs a `## How to reverse`" in x for x in f))
+    f = records(first=good_record.replace("## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+                                          "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""))
+    check("decision records: a missing Rules section is reported", any("missing section `## Rules`" in x for x in f))
+    f = records(first=good_record.replace("Status: accepted", "Status: approved"))
+    check("decision records: an unknown status is reported", any("line 3" in x for x in f))
+    f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0009"))
+    check("decision records: a supersede target that does not exist is reported", any("0009, which does not exist" in x for x in f))
+    f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0002").replace(
+        "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""),
+        second=good_record.replace("## Links", "## How to reverse\n\nr\n\n## Links"), baseline={"0002-second.md": 1})
+    check("decision records: a superseded record needs no Rules section", f == [])
+    f = records(first=good_record.replace(" Checked by: review.", "."))
+    check("decision records: a rule with no `Checked by:` is reported", any("rule line does not end" in x for x in f))
+    f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `src/missing.cpp`"))
+    check("decision records: a scope that matches no tracked file is reported", any("matches no tracked file" in x for x in f))
+    f = records(first=good_record.replace("2. Do another.", "3. Do another."))
+    check("decision records: a gap in rule numbers is reported", any("out of sequence" in x for x in f))
+    f = records(first=good_record.replace("## Consequences", "## Notes"))
+    check("decision records: an unknown section is reported", any("unknown section `## Notes`" in x for x in f))
+    f = records(first=good_record.replace("## Alternatives rejected\n\na\n\n## Consequences\n\nq\n\n",
+                                          "## Consequences\n\nq\n\n## Alternatives rejected\n\na\n\n"))
+    check("decision records: sections out of order are reported", any("out of order" in x for x in f))
+    f = records(index="- [Example](0001-example.md)\n")
+    check("decision records: a record missing from the README index is reported", any("not indexed: 0002-second.md" in x for x in f))
+    f = records(extra={"0004-gap.md": good_record}, index=good_index + "- [Gap](0004-gap.md)\n")
+    check("decision records: a gap in record numbers is reported", any("no gap or repeat" in x for x in f))
+
+    adoption_body = (
+        "\nScan: `src/*_driver.cpp`\nSymbol: `Clock`\n\n| Driver | Source | State | Issue | Notes |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| A | `src/a_driver.cpp` | adopted | #1 | |\n"
+        "| B | `src/b_driver.cpp` | partial | #2 | |\n"
+        "| C | `src/c_driver.cpp` | planned | — | |\n"
+        "| D | — | planned | — | |\n")
+    adoption_files = {"src/a_driver.cpp": "Clock c;", "src/b_driver.cpp": "util::Clock& x;",
+                      "src/c_driver.cpp": "nothing", "src/z_helper.cpp": "Clock c;"}
+
+    def adoption(body=adoption_body, files=None):
+        return _adoption_findings("rec", body, adoption_files if files is None else files)
+
+    check("adoption: the baseline fixture is clean", adoption() == [])
+    f = adoption(files=dict(adoption_files, **{"src/e_driver.cpp": "Clock c;"}))
+    check("adoption: a scanned file that names the symbol with no row is reported", any("src/e_driver.cpp" in x and "no Adoption row" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/a_driver.cpp": "nothing"}))
+    check("adoption: an adopted row whose source lacks the symbol is reported", any("row A is adopted" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "Clock c;"}))
+    check("adoption: a planned row whose source already uses the symbol is reported", any("row C is planned" in x for x in f))
+    f = adoption(body=adoption_body.replace("| partial | #2 |", "| partial | — |"))
+    check("adoption: a partial row with no issue is reported", any("row B is partial" in x for x in f))
+    f = adoption(body=adoption_body.replace("`src/c_driver.cpp`", "`src/gone_driver.cpp`"))
+    check("adoption: a source that is not tracked is reported", any("not a tracked AlpacaCore/ or AlpacaHTTP/" in x for x in f))
+    f = adoption(body=adoption_body.replace("| adopted |", "| done |"))
+    check("adoption: an unknown state is reported", any("state 'done'" in x for x in f))
+    f = adoption(body=adoption_body.replace("Scan: `src/*_driver.cpp`\n", ""))
+    check("adoption: a missing Scan line is reported", any("no `Scan:" in x for x in f))
+    f = adoption(body=adoption_body.replace("| D | — | adopted", "| D | — | adopted").replace("| D | — | planned", "| D | — | adopted"))
+    check("adoption: only a planned row may omit its source", any("row D names no source" in x for x in f))
+    per_row = ("\nScan: `t/locked_*.h`\n\n| Driver | Symbol | Source | State | Issue |\n| --- | --- | --- | --- | --- |\n"
+               "| X | `XSDK` | `t/locked_x.h` | adopted | #1 |\n")
+    f = _adoption_findings("rec", per_row, {"t/locked_x.h": "class L : public XSDK", "t/locked_y.h": "class M : public YSDK"})
+    check("adoption: with per-row symbols, every scanned file needs a row", any("t/locked_y.h" in x for x in f))
+    f = _adoption_findings("rec", per_row, {"t/locked_x.h": "class L : public XSDK"})
+    check("adoption: a per-row symbol fixture with every file listed is clean", f == [])
+    both = per_row.replace("\n\n| Driver", "\nSymbol: `XSDK`\n\n| Driver")
+    f = _adoption_findings("rec", both, {"t/locked_x.h": "class L : public XSDK", "t/locked_y.h": "class M : public YSDK"})
+    check("adoption: with a Symbol line, a Symbol column overrides per row and an unrelated scanned file needs no row",
+          f == [])
+    mixed = ("\nScan: `src/*_driver.cpp`\nSymbol: `Clock`\n\n| Driver | Symbol | Source | State | Issue |\n"
+             "| --- | --- | --- | --- | --- |\n| A |  | `src/a_driver.cpp` | adopted | #1 |\n"
+             "| B | `Other` | `src/b_driver.cpp` | adopted | #2 |\n")
+    mixed_files = {"src/a_driver.cpp": "Clock c;", "src/b_driver.cpp": "Other o;", "src/c_driver.cpp": "nothing"}
+    check("adoption: a blank Symbol cell uses the Symbol line, and a file naming neither needs no row",
+          _adoption_findings("rec", mixed, mixed_files) == [])
+    f = _adoption_findings("rec", mixed, dict(mixed_files, **{"src/a_driver.cpp": "Other o;"}))
+    check("adoption: a blank Symbol cell is checked against the Symbol line", any("row A is adopted" in x for x in f))
+    polled = ("\nScan: `src/*_driver.cpp`\nSymbol: `StateSnapshot`\n\n| Driver | Symbol | Source | State | Issue |\n"
+              "| --- | --- | --- | --- | --- |\n| P | `PolledState` | `src/p_driver.cpp` | adopted | #1 |\n"
+              "| S | `StateSnapshot` | `src/s_driver.cpp` | adopted | #2 |\n")
+    polled_files = {"src/p_driver.cpp": "util::PolledState<F> state_;", "src/s_driver.cpp": "util::StateSnapshot<F> snap_;"}
+    check("adoption: a PolledState row and a StateSnapshot row each hold to their own symbol",
+          _adoption_findings("rec", polled, polled_files) == [])
+    f = _adoption_findings("rec", polled, dict(polled_files, **{"src/p_driver.cpp": "util::StateSnapshot<F> snap_;"}))
+    check("adoption: a PolledState row whose source names only StateSnapshot is reported",
+          any("row P is adopted but no source names `PolledState`" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/a_driver.cpp": "// Clock is not used here\nint x;"}))
+    check("adoption: a symbol named only in a comment does not count as adoption", any("row A is adopted" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))
+    check("adoption: a planned row whose source names the symbol only in a comment is clean", f == [])
+
+    # check 25: README authored-line badge (issue #1465).
+    badge = authored_badge_line(150000)
+    ab_readme = "# T\n\n" + badge + "\n"
+    check("authored badge: the generated line is what the extractor reads",
+          AUTHORED_BADGE_RE.search(ab_readme) is not None and "150k%20lines" in badge)
+    check("authored badge: a badge equal to the count is clean", _authored_badge_findings(ab_readme, 150000) == [])
+    check("authored badge: an ordinary PR's churn inside the tolerance is clean",
+          _authored_badge_findings(ab_readme, 150000 + 3000) == [] and _authored_badge_findings(ab_readme, 150000 - 3000) == [])
+    f = _authored_badge_findings(ab_readme, 170000)
+    check("authored badge: a count beyond the tolerance is flagged with the paste-ready line",
+          len(f) == 1 and "says 150k" in f[0] and "170k%20lines" in f[0])
+    f = _authored_badge_findings(ab_readme, 130000)
+    check("authored badge: a count far below the badge is flagged too", len(f) == 1 and "130k%20lines" in f[0])
+    f = _authored_badge_findings("# T\n", 150000)
+    check("authored badge: a missing badge is a finding, not a pass", len(f) == 1 and "could not find" in f[0])
+    f = _authored_badge_findings(ab_readme.replace("Authored%20code", "Code"), 150000)
+    check("authored badge: a renamed badge label is not found", len(f) == 1 and "could not find" in f[0])
+    f = _authored_badge_findings(ab_readme, 10)
+    check("authored badge: a near-zero count is a floor finding", len(f) == 1 and "floor" in f[0])
+    check("authored paths: first-party code counts",
+          all(is_authored_path(p) for p in ("AlpacaCore/src/a.cpp", "AlpacaHTTP/web/app.js", "scripts/x.py",
+                                            "AlpacaHTTP/tests/t.cpp", "AlpacaCore/include/alpacacore/a.h")))
+    check("authored paths: vendored SDKs and the bundled libgphoto2 do not count",
+          not is_authored_path("AlpacaCore/external/ZWO/inc/ASICamera2.h")
+          and not is_authored_path("AlpacaCore/external/libgphoto2/src/x.c"))
+    check("authored paths: docs, data and files outside the roots do not count",
+          not any(is_authored_path(p) for p in ("README.md", "docs/x.py", "AlpacaCore/CMakeLists.txt",
+                                                "AlpacaCore/conformu/a.txt", ".github/scripts/c.py")))
+    check("authored lines: blank lines and excluded files are not counted",
+          count_authored_lines({"scripts/a.py": "a\n\n  \nb\n", "AlpacaCore/external/x.h": "x\ny\n",
+                                "README.md": "z\n"}) == 2)
+
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
 
@@ -2866,4 +3941,6 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--counts" in sys.argv:
         sys.exit(print_counts())
+    if "--badge" in sys.argv:
+        sys.exit(print_badge())
     sys.exit(main())

@@ -155,6 +155,9 @@ public:
     /// single-threaded, and clear it after joining), never mid-[stress].
     std::function<void(const std::string&)> before_call;
     bool sdk_resource_available = true;
+    // false makes get_chip_info() return false (the wrapper's "chip info unreadable" result), so a
+    // connect finishes with camera_info_valid_ == false.
+    bool chip_info_available = true;
     // Set to "" to reach the empty-cache branch the driver special-cases in
     // get_driver_info()/get_device_sdk_version(): the real wrapper returns an
     // empty string until the SDK resource comes up, so a fake that always
@@ -436,6 +439,7 @@ public:
     bool get_chip_info(const std::string& camera_id, QHYCameraInfo& info) override {
         hit("get_chip_info");
         require_open(camera_id);
+        if (!chip_info_available) return false;
         // QHYSDKWrapper::get_chip_info() never writes info.model at all -- the
         // driver gets the model exclusively from the separate
         // get_camera_model() call, made earlier in the connect sequence.
@@ -810,11 +814,13 @@ private:
     std::map<std::string, std::shared_ptr<std::atomic<bool>>> exposure_workers_;
     // open-astro#328: the frame size the most recent get_mem_length() promised.
     // A plain member, guarded exactly as roi_ and bits_ are: every seam test
-    // reaches this fake through LockedQHYSDK, which serialises 25 of the 26
-    // forwards through its one mutex_ -- cancel_exposure() alone takes its
-    // own cancel_mutex_ (#339), and this fake's cancel body touches no member
-    // at all -- so both the write here and the read in get_single_frame() are
-    // already mutually exclusive. Making it atomic
+    // reaches this fake through LockedQHYSDK, which serialises 24 of the 26
+    // forwards through its one mutex_ -- cancel_exposure() takes its own
+    // cancel_mutex_ (#339) and get_sdk_version() its own version_mutex_
+    // (#1646); the cancel body touches no member at all, and get_sdk_version()
+    // reads only sdk_version (set at construction) plus the calls_mutex-guarded
+    // hit() counter -- so both the write here and the read in
+    // get_single_frame() are already mutually exclusive. Making it atomic
     // would buy nothing and would cost FakeQHYSDK its move constructor, which
     // the default_camera()/make_fake() factories return by value.
     uint32_t last_mem_length_ = 0;

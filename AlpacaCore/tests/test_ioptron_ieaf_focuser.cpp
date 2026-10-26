@@ -14,13 +14,19 @@
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_protocol_wrapper.h>
 #include <alpacacore/version.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+#include <cerrno>
+#include <chrono>
 #include <functional>
+#include <string>
 #include <thread>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_ioptron_ieaf.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -88,10 +94,10 @@ TEST_CASE("iOptron iEAF Focuser Driver - Unsupported actions", "[ioptron][focuse
 TEST_CASE("iOptron iEAF Focuser Driver - Static capabilities", "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
 
-    // Range limits are fixed by the protocol (7-digit move field, hardware
-    // range 0..99999) and do not require a live connection.
-    CHECK(driver->get_max_step() == 99999);
-    CHECK(driver->get_max_increment() == 99999);
+    // Range limits are fixed by the protocol (7-digit move field, hardware range 0..99999), but MaxStep and
+    // MaxIncrement are properties: a disconnected read refuses (issue #1478), the value is read connected below.
+    require_alpaca_error([&]() { driver->get_max_step(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_max_increment(); }, alpacacore::AlpacaError::NotConnected);
 
     // Step size in microns is not exposed by the iEAF protocol -- but
     // disconnected, the connection check answers first (open-astro#309).
@@ -180,10 +186,31 @@ TEST_CASE("iOptron iEAF Focuser Driver - connects and moves over the fake", "[io
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     CHECK(fake.connects() == 1);
     CHECK(driver->get_position() == 1000);
+    CHECK(driver->get_max_step() == 99999);
+    CHECK(driver->get_max_increment() == 99999);
     driver->move(1500);
     CHECK(fake.count(":FM") == 1);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+}
+
+// #1590: the 100 ms status cache ages by the driver's TaskClock.
+TEST_CASE("iOptron iEAF Focuser Driver - the status cache ages by the TaskClock",
+          "[ioptron][focuser][unit][taskclock]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path(), "ieaf", clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    clock.advance(std::chrono::seconds(1));  // outdate whatever the connect cached
+    (void)driver->get_position();
+    const int polls = fake.count(":FI#");
+    (void)driver->get_position();
+    (void)driver->get_is_moving();
+    CHECK(fake.count(":FI#") == polls);  // within 100 ms: served from the cache
+    clock.advance(std::chrono::milliseconds(150));
+    (void)driver->get_position();
+    CHECK(fake.count(":FI#") == polls + 1);  // past STATUS_CACHE_TTL: polled again
+    driver->set_connected(false);
 }
 
 // Parameter validation precedes the connection check (ASCOM precedence).
@@ -228,4 +255,68 @@ TEST_CASE("iOptron iEAF Focuser Driver - sync disconnect during sync connect is 
     CHECK(driver->get_connected() == false);
     CHECK(fake.connects() == 1);
     driver->set_connected(false);
+}
+
+// Issue #995: a connected iOptron link is held exclusively (TIOCEXCL), so a
+// second open of the same tty, which is what every iOptron auto-detect probe
+// does to each candidate, fails with EBUSY and the probe skips the port
+// instead of flushing the connected driver's replies and writing its own query.
+TEST_CASE("iOptron iEAF Focuser Driver - a connected port refuses a second open", "[ioptron][focuser][unit]") {
+    if (geteuid() == 0) {
+        SUCCEED("root bypasses TIOCEXCL");
+        return;
+    }
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    errno = 0;
+    const int fd = open(fake.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    const int err = errno;
+    if (fd >= 0) close(fd);
+    CHECK(fd < 0);
+    CHECK(err == EBUSY);
+
+    // A second driver on the same node stands in for a probe's open().
+    auto intruder = alpacacore::vendor::ioptron::create_ieaf_focuser(1, fake.slave_path());
+    require_alpaca_error([&] { intruder->set_connected(true); },
+                         static_cast<int>(alpacacore::AlpacaError::NotConnected));
+    CHECK(intruder->get_connected() == false);
+
+    CHECK(fake.connects() == 1);
+    CHECK(driver->get_position() == 1000);
+    driver->set_connected(false);
+}
+
+// A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
+// errno at once, not a read timeout after serial_timeout_s.
+// Falsified by: ioptron_ieaf_protocol_wrapper.cpp:434 read_response() sending ReadOutcome::LinkDead to the timeout
+// branch (the message reads "iEAF read timeout" and the call takes the full serial_timeout_s).
+TEST_CASE("iOptron iEAF protocol wrapper - a hangup before the reply throws serial link lost with the errno",
+          "[ioptron][focuser][unit][link-dead]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    alpacacore::vendor::ioptron::IeafProtocolWrapper wrapper;
+    alpacacore::vendor::ioptron::IeafConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    wrapper.connect(config);
+    fake.hold_next_reply(std::chrono::milliseconds(300));  // the fake sits on the :FI# reply while the cable is pulled
+    std::thread pull([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        fake.unplug();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::string what;
+    try {
+        wrapper.get_status();
+        FAIL("a hung-up port must not return a value");
+    } catch (const alpacacore::AlpacaException& ex) {
+        what = ex.what();
+    }
+    pull.join();
+    CHECK(what == "iEAF serial link lost (errno 5)");
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    try {
+        wrapper.disconnect();
+    } catch (...) {
+    }
 }

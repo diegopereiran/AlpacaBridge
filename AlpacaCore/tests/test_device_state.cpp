@@ -22,6 +22,8 @@
 #include <alpacacore/telescope_driver.h>
 
 #include <algorithm>
+#include <initializer_list>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -34,10 +36,8 @@
 // base classes pushed a TimeStamp entry unconditionally, so a disconnected
 // driver reported [TimeStamp] instead of [].
 //
-// These doubles are never connected: get_connected() is always false and
-// every operational getter throws NotConnected, matching a real driver's
-// disconnected behavior (AGENTS.md: "Every property otherwise throws
-// NotConnected when disconnected").
+// The doubles default to disconnected with unavailable operational getters.
+// Tests can independently enable a connection and a subset of values.
 
 namespace {
 
@@ -55,9 +55,17 @@ bool has_timestamp(const std::vector<alpacacore::DeviceState>& state) {
 template <typename Base>
 class DisconnectedDriverBase : public Base {
 public:
+    bool state_available = false;
+
+    template <typename T>
+    T available_value(T value) const {
+        if (!state_available) throw_not_connected();
+        return value;
+    }
+
     int get_device_number() const override { return 0; }
     std::string get_name() const override { return "Disconnected Driver"; }
-    std::string get_unique_id() const override { return "disconnected-driver"; }
+    std::string fallback_unique_id() const override { return "disconnected-driver"; }
     std::string get_description() const override { return "test double"; }
     std::string get_driver_info() const override { return "test double"; }
     std::string get_driver_version() const override { return "0.0.0"; }
@@ -117,7 +125,7 @@ public:
     double get_heat_sink_temperature() const override { throw_not_connected(); }
     alpacacore::ImageArray get_image_array() const override { throw_not_connected(); }
     std::string get_image_array_variant() const override { throw_not_connected(); }
-    bool get_image_ready() const override { throw_not_connected(); }
+    bool get_image_ready() const override { return available_value(false); }
     bool get_is_pulse_guiding() const override { throw_not_connected(); }
     double get_last_exposure_duration() const override { throw_not_connected(); }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override { throw_not_connected(); }
@@ -155,22 +163,38 @@ public:
     void stop_exposure() override { throw_not_connected(); }
 };
 
-// Mirrors zwo_camera_driver.cpp/gphoto_camera_driver.cpp et al.: these vendor
-// drivers answer CameraState and PercentCompleted with a default value while
-// disconnected instead of throwing NotConnected. get_device_state() must
-// still report the empty list for a disconnected driver regardless of what
-// an individual vendor getter does.
+// Guards against a driver that leaks a value (Idle, 0) from CameraState and
+// PercentCompleted while disconnected instead of throwing NotConnected.
+// get_device_state() must still report the empty list for a disconnected
+// driver regardless of what an individual getter does (#635).
 class LeakyDisconnectedCamera final : public DisconnectedCamera {
 public:
     alpacacore::CameraState get_camera_state() const override { return alpacacore::CameraState::Idle; }
     double get_percent_completed() const override { return 0.0; }
 };
 
+// Issue #1477: the ICameraV4 PercentCompleted rule lives in CameraDriver, so one double with a scripted
+// CameraState and raw value covers every camera driver.
+class ScriptedProgressCamera final : public DisconnectedCamera {
+public:
+    alpacacore::CameraState state = alpacacore::CameraState::Idle;
+    double raw_percent = 0.0;
+    bool link_fault = false;
+
+    alpacacore::CameraState get_camera_state() const override { return state; }
+    double get_percent_completed() const override {
+        if (link_fault) {
+            throw alpacacore::AlpacaException("link fault", alpacacore::AlpacaError::DriverException);
+        }
+        return raw_percent;
+    }
+};
+
 class DisconnectedCoverCalibrator final : public DisconnectedDriverBase<alpacacore::CoverCalibratorDriver> {
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
 
-    int get_brightness() const override { throw_not_connected(); }
+    int get_brightness() const override { return available_value(0); }
     void set_brightness(int) override {}
     alpacacore::CalibratorState get_calibrator_state() const override { throw_not_connected(); }
     bool get_calibrator_changing() const override { throw_not_connected(); }
@@ -188,7 +212,7 @@ class DisconnectedDome final : public DisconnectedDriverBase<alpacacore::DomeDri
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Dome; }
 
-    double get_altitude() const override { throw_not_connected(); }
+    double get_altitude() const override { return available_value(12.5); }
     bool get_can_find_home() const override { throw_not_connected(); }
     bool get_can_park() const override { throw_not_connected(); }
     bool get_can_set_altitude() const override { throw_not_connected(); }
@@ -196,7 +220,6 @@ public:
     bool get_can_set_park() const override { throw_not_connected(); }
     bool get_can_set_shutter() const override { throw_not_connected(); }
     bool get_can_slave() const override { throw_not_connected(); }
-    bool get_can_slew() const override { throw_not_connected(); }
     bool get_can_sync_azimuth() const override { throw_not_connected(); }
     double get_azimuth() const override { throw_not_connected(); }
     bool get_at_home() const override { throw_not_connected(); }
@@ -220,7 +243,7 @@ class DisconnectedFilterWheel final : public DisconnectedDriverBase<alpacacore::
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::FilterWheel; }
 
-    int get_position() const override { throw_not_connected(); }
+    int get_position() const override { return available_value(2); }
     void set_position(int) override {}
     std::vector<int> get_focus_offsets() const override { throw_not_connected(); }
     void set_focus_offsets(const std::vector<int>&) override {}
@@ -233,7 +256,7 @@ public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Focuser; }
 
     bool get_absolute() const override { throw_not_connected(); }
-    bool get_is_moving() const override { throw_not_connected(); }
+    bool get_is_moving() const override { return available_value(false); }
     int get_max_step() const override { throw_not_connected(); }
     int get_max_increment() const override { throw_not_connected(); }
     int get_position() const override { throw_not_connected(); }
@@ -252,7 +275,7 @@ public:
 
     double get_average_period() const override { throw_not_connected(); }
     void set_average_period(double) override {}
-    double get_cloud_cover() const override { throw_not_connected(); }
+    double get_cloud_cover() const override { return available_value(12.5); }
     double get_dew_point() const override { throw_not_connected(); }
     double get_humidity() const override { throw_not_connected(); }
     double get_pressure() const override { throw_not_connected(); }
@@ -260,7 +283,6 @@ public:
     double get_sky_brightness() const override { throw_not_connected(); }
     double get_sky_quality() const override { throw_not_connected(); }
     double get_sky_temperature() const override { throw_not_connected(); }
-    double get_seeing() const override { throw_not_connected(); }
     double get_star_fwhm() const override { throw_not_connected(); }
     double get_temperature() const override { throw_not_connected(); }
     double get_wind_direction() const override { throw_not_connected(); }
@@ -278,7 +300,7 @@ public:
     bool get_can_reverse() const override { throw_not_connected(); }
     bool get_reverse() const override { throw_not_connected(); }
     void set_reverse(bool) override {}
-    bool get_is_moving() const override { throw_not_connected(); }
+    bool get_is_moving() const override { return available_value(false); }
     double get_mechanical_position() const override { throw_not_connected(); }
     double get_position() const override { throw_not_connected(); }
     double get_step_size() const override { throw_not_connected(); }
@@ -295,23 +317,26 @@ class DisconnectedSafetyMonitor final : public DisconnectedDriverBase<alpacacore
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::SafetyMonitor; }
 
-    bool get_is_safe() const override { throw_not_connected(); }
+    bool get_is_safe() const override { return available_value(false); }
 };
 
 class DisconnectedSwitch final : public DisconnectedDriverBase<alpacacore::SwitchDriver> {
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Switch; }
 
-    int get_max_switch() const override { throw_not_connected(); }
+    int get_max_switch() const override { return available_value(2); }
     bool get_can_write(int) const override { throw_not_connected(); }
     bool get_can_async(int) const override { throw_not_connected(); }
-    bool get_switch(int) const override { throw_not_connected(); }
+    bool get_switch(int id) const override {
+        if (id != 0) throw_not_connected();
+        return available_value(false);
+    }
     void set_switch(int, bool) override {}
     void set_async(int, bool) override {}
-    double get_switch_value(int) const override { throw_not_connected(); }
+    double get_switch_value(int) const override { return available_value(0.0); }
     void set_switch_value(int, double) override {}
     void set_async_value(int, double) override {}
-    bool get_state_change_complete(int) const override { throw_not_connected(); }
+    bool get_state_change_complete(int) const override { return available_value(true); }
     std::string get_switch_name(int) const override { throw_not_connected(); }
     void set_switch_name(int, const std::string&) override {}
     std::string get_switch_description(int) const override { throw_not_connected(); }
@@ -325,7 +350,7 @@ public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Telescope; }
 
     alpacacore::AlignmentMode get_alignment_mode() const override { throw_not_connected(); }
-    double get_altitude() const override { throw_not_connected(); }
+    double get_altitude() const override { return available_value(12.5); }
     double get_aperture_diameter() const override { throw_not_connected(); }
     void set_aperture_diameter(double) override {}
     double get_aperture_area() const override { throw_not_connected(); }
@@ -512,32 +537,177 @@ TEST_CASE("DeviceState is empty while disconnected even when a getter does not t
     CHECK(state.empty());
 }
 
-// The connected side of the contract: the early return must key on
-// get_connected(), not be unconditional. Each double's getters throw
-// NotConnected regardless (omitted by the per-getter try/catch), so a
-// connected double still reports the TimeStamp -- and only a base class whose
-// early return ignored get_connected() could report the empty list here.
 namespace {
 template <typename Driver>
-void require_timestamp_once_connected() {
+void require_empty_when_unavailable() {
     Driver driver;
     REQUIRE(driver.get_device_state().empty());
     driver.set_connected(true);
     std::vector<alpacacore::DeviceState> state;
     REQUIRE_NOTHROW(state = driver.get_device_state());
-    CHECK(has_timestamp(state));
+    CHECK(state.empty());
+    CHECK_FALSE(has_timestamp(state));
+}
+
+template <typename Driver>
+void require_available_state(std::initializer_list<alpacacore::DeviceState> expected) {
+    Driver driver;
+    driver.state_available = true;
+    REQUIRE(driver.get_device_state().empty());
+    driver.set_connected(true);
+    const auto before = alpacacore::device_state_timestamp();
+    const auto state = driver.get_device_state();
+    const auto after = alpacacore::device_state_timestamp();
+    REQUIRE(state.size() == expected.size() + 1);
+    std::size_t i = 0;
+    for (const auto& entry : expected) {
+        CHECK(state[i].name == entry.name);
+        CHECK(state[i].value == entry.value);
+        ++i;
+    }
+    CHECK(state.back().name == "TimeStamp");
+    const auto stamp = std::get<std::string>(state.back().value);
+    CHECK(stamp >= before);
+    CHECK(stamp <= after);
 }
 }  // namespace
 
-TEST_CASE("DeviceState carries the TimeStamp once connected, per base class", "[driver]") {
-    SECTION("Camera") { require_timestamp_once_connected<DisconnectedCamera>(); }
-    SECTION("CoverCalibrator") { require_timestamp_once_connected<DisconnectedCoverCalibrator>(); }
-    SECTION("Dome") { require_timestamp_once_connected<DisconnectedDome>(); }
-    SECTION("FilterWheel") { require_timestamp_once_connected<DisconnectedFilterWheel>(); }
-    SECTION("Focuser") { require_timestamp_once_connected<DisconnectedFocuser>(); }
-    SECTION("ObservingConditions") { require_timestamp_once_connected<DisconnectedObservingConditions>(); }
-    SECTION("Rotator") { require_timestamp_once_connected<DisconnectedRotator>(); }
-    SECTION("SafetyMonitor") { require_timestamp_once_connected<DisconnectedSafetyMonitor>(); }
-    SECTION("Switch") { require_timestamp_once_connected<DisconnectedSwitch>(); }
-    SECTION("Telescope") { require_timestamp_once_connected<DisconnectedTelescope>(); }
+TEST_CASE("DeviceState is empty when all connected reads fail, per base class", "[driver]") {
+    SECTION("Camera") { require_empty_when_unavailable<DisconnectedCamera>(); }
+    SECTION("CoverCalibrator") { require_empty_when_unavailable<DisconnectedCoverCalibrator>(); }
+    SECTION("Dome") { require_empty_when_unavailable<DisconnectedDome>(); }
+    SECTION("FilterWheel") { require_empty_when_unavailable<DisconnectedFilterWheel>(); }
+    SECTION("Focuser") { require_empty_when_unavailable<DisconnectedFocuser>(); }
+    SECTION("ObservingConditions") { require_empty_when_unavailable<DisconnectedObservingConditions>(); }
+    SECTION("Rotator") { require_empty_when_unavailable<DisconnectedRotator>(); }
+    SECTION("SafetyMonitor") { require_empty_when_unavailable<DisconnectedSafetyMonitor>(); }
+    SECTION("Switch") { require_empty_when_unavailable<DisconnectedSwitch>(); }
+    SECTION("Telescope") { require_empty_when_unavailable<DisconnectedTelescope>(); }
+}
+
+TEST_CASE("DeviceState preserves available values with one TimeStamp, per base class", "[driver]") {
+    SECTION("Camera") { require_available_state<DisconnectedCamera>({{"ImageReady", false}}); }
+    SECTION("CoverCalibrator") { require_available_state<DisconnectedCoverCalibrator>({{"Brightness", 0}}); }
+    SECTION("Dome") { require_available_state<DisconnectedDome>({{"Altitude", 12.5}}); }
+    SECTION("FilterWheel") { require_available_state<DisconnectedFilterWheel>({{"Position", 2}}); }
+    SECTION("Focuser") { require_available_state<DisconnectedFocuser>({{"IsMoving", false}}); }
+    SECTION("ObservingConditions") { require_available_state<DisconnectedObservingConditions>({{"CloudCover", 12.5}}); }
+    SECTION("Rotator") { require_available_state<DisconnectedRotator>({{"IsMoving", false}}); }
+    SECTION("SafetyMonitor") { require_available_state<DisconnectedSafetyMonitor>({{"IsSafe", false}}); }
+    SECTION("Switch") {
+        require_available_state<DisconnectedSwitch>(
+            {{"GetSwitch0", false}, {"GetSwitchValue0", 0.0}, {"StateChangeComplete0", true}});
+    }
+    SECTION("Telescope") { require_available_state<DisconnectedTelescope>({{"Altitude", 12.5}}); }
+}
+
+TEST_CASE("Telescope DeviceState includes known UTCDate and omits failed reads", "[driver][utcdate]") {
+    class TelescopeWithClock final : public DisconnectedTelescope {
+    public:
+        std::chrono::system_clock::time_point get_utc_date() const override {
+            ++utc_reads;
+            if (failure == 1) {
+                throw alpacacore::AlpacaException("clock unavailable", alpacacore::AlpacaError::DriverException);
+            }
+            if (failure == 2) {
+                throw std::runtime_error("clock unavailable");
+            }
+            return std::chrono::sys_days{std::chrono::year{2024} / 2 / 29} + std::chrono::hours{23} +
+                   std::chrono::minutes{59} + std::chrono::seconds{58} + std::chrono::milliseconds{123};
+        }
+        std::optional<std::chrono::nanoseconds> device_state_age() const override { return std::chrono::seconds{10}; }
+        int failure = 0;
+        mutable int utc_reads = 0;
+    } driver;
+
+    driver.set_connected(true);
+    SECTION("disconnected does not read even a known clock") { driver.set_connected(false); }
+    SECTION("Alpaca failure omits UTCDate") { driver.failure = 1; }
+    SECTION("standard failure omits UTCDate") { driver.failure = 2; }
+    SECTION("known clock is a UTC string independent of snapshot age") {}
+
+    if (!driver.get_connected()) {
+        CHECK(driver.get_device_state().empty());
+        CHECK(driver.utc_reads == 0);
+        return;
+    }
+    const auto before = std::chrono::system_clock::now() - std::chrono::seconds{10};
+    const auto state = driver.get_device_state();
+    const auto after = std::chrono::system_clock::now() - std::chrono::seconds{10};
+    CHECK(driver.utc_reads == 1);
+    REQUIRE(state.size() == (driver.failure ? 0 : 2));
+    if (driver.failure) return;
+    CHECK(state.front().name == "UTCDate");
+    REQUIRE(std::holds_alternative<std::string>(state.front().value));
+    CHECK(std::get<std::string>(state.front().value) == "2024-02-29T23:59:58.123Z");
+    CHECK(state.back().name == "TimeStamp");
+    const auto stamp = std::get<std::string>(state.back().value);
+    CHECK(stamp >= alpacacore::device_state_timestamp(before));
+    CHECK(stamp <= alpacacore::device_state_timestamp(after));
+}
+
+TEST_CASE("Camera PercentCompleted raises InvalidOperation unless Exposing", "[driver][camera]") {
+    ScriptedProgressCamera camera;
+    for (const auto state :
+         {alpacacore::CameraState::Idle, alpacacore::CameraState::Error, alpacacore::CameraState::Waiting,
+          alpacacore::CameraState::Reading, alpacacore::CameraState::Download}) {
+        camera.state = state;
+        camera.raw_percent = 100.0;  // a driver's raw value after a frame, or after a failed one
+        try {
+            (void)camera.get_percent_completed_checked();
+            FAIL("Expected InvalidOperation for CameraState " << static_cast<int>(state));
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        }
+    }
+}
+
+TEST_CASE("Camera PercentCompleted is the clamped raw value while Exposing", "[driver][camera]") {
+    ScriptedProgressCamera camera;
+    camera.state = alpacacore::CameraState::Exposing;
+    camera.raw_percent = 42.5;
+    CHECK(camera.get_percent_completed_checked() == 42.5);
+    camera.raw_percent = 250.0;
+    CHECK(camera.get_percent_completed_checked() == 100.0);
+    camera.raw_percent = -3.0;
+    CHECK(camera.get_percent_completed_checked() == 0.0);
+}
+
+TEST_CASE("Camera PercentCompleted raises the driver's fault before InvalidOperation", "[driver][camera]") {
+    ScriptedProgressCamera camera;
+    camera.state = alpacacore::CameraState::Error;
+    camera.link_fault = true;
+    try {
+        (void)camera.get_percent_completed_checked();
+        FAIL("Expected the link fault");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+}
+
+TEST_CASE("Camera DeviceState carries PercentCompleted as an integer only while Exposing", "[driver][camera]") {
+    ScriptedProgressCamera camera;
+    camera.set_connected(true);
+    const auto percent_entry = [&]() -> const alpacacore::DeviceState* {
+        static std::vector<alpacacore::DeviceState> state;
+        state = camera.get_device_state();
+        for (const auto& entry : state) {
+            if (entry.name == "PercentCompleted") return &entry;
+        }
+        return nullptr;
+    };
+
+    camera.raw_percent = 100.0;
+    CHECK(percent_entry() == nullptr);  // Idle: omitted on purpose
+
+    camera.state = alpacacore::CameraState::Exposing;
+    camera.raw_percent = 37.9;
+    const auto* entry = percent_entry();
+    REQUIRE(entry != nullptr);
+    const auto* value = std::get_if<std::int32_t>(&entry->value);
+    REQUIRE(value != nullptr);  // a short, never a double
+    CHECK(*value == 37);
+
+    camera.state = alpacacore::CameraState::Error;
+    CHECK(percent_entry() == nullptr);
 }

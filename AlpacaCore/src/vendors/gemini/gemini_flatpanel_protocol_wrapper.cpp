@@ -30,6 +30,7 @@
 #include <windows.h>
 #else
 #include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_read.h>
 #include <errno.h>
 #include <termios.h>
 #include <unistd.h>
@@ -39,7 +40,9 @@ namespace alpacacore::vendor::gemini {
 
 namespace {
 constexpr int kCommandDelayMs = 50;
+#ifdef _WIN32
 constexpr int kReadCharDelayMs = 10;
+#endif
 constexpr int kMaxResponseLen = 32;
 constexpr int kMaxCommandLen = 32;  // ">Bnnn#" + nul fits comfortably
 constexpr int kHandshakeRetries = 3;
@@ -221,34 +224,18 @@ static bool probe_port(const std::string& port_path) {
         // as "*HGeminiFlatPanelLite#" (22 chars). A too-small buffer here
         // silently truncates before the '#' terminator, so the well-formed
         // check below never passes and the port is wrongly rejected.
-        char resp[kMaxResponseLen] = {};
-        int total = 0;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kProbeReadTimeoutMs);
-        while (total < static_cast<int>(sizeof(resp)) - 1) {
-            const auto remaining =
-                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
-                    .count();
-            if (remaining <= 0) {
-                break;
-            }
-            char ch = 0;
-            const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
-            if (r == 1) {
-                if (ch == '\r' || ch == '\n') continue;
-                resp[total++] = ch;
-                if (ch == '#') break;
-            } else if (r == 0) {
-                continue;  // timed out; the deadline check above ends the loop
-            } else {
-                break;
-            }
-        }
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Terminator;
+        spec.terminators = "#";
+        spec.max_len = kMaxResponseLen - 1;
+        const auto reply = util::read_until(
+            fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(kProbeReadTimeoutMs));
 
         // See is_flatpanel_handshake_reply()'s doc comment: requiring the
         // "*H" prefix (rather than any well-formed '#'-terminated reply) is
         // what lets auto-detect discriminate the flat panel from the Gemini
         // focuser when both share the same USB-serial by-id patterns.
-        if (is_flatpanel_handshake_reply(std::string(resp, static_cast<std::size_t>(total)))) {
+        if (is_flatpanel_handshake_reply(reply.bytes)) {
             // HUPCL was already cleared by configure_flatpanel_line(); DTR
             // stays high when `link` closes the port.
             return true;
@@ -283,7 +270,22 @@ bool raw_port_looks_like_flatpanel_candidate(const std::string& port_path) {
 }  // namespace
 #endif
 
+namespace {
+GeminiFlatPanelScanHooks& scan_hooks() {
+    static GeminiFlatPanelScanHooks hooks;
+    return hooks;
+}
+}  // namespace
+
+void set_gemini_flatpanel_scan_hooks_for_testing(GeminiFlatPanelScanHooks hooks) { scan_hooks() = std::move(hooks); }
+
+bool probe_gemini_flatpanel_port(const std::string& port_path) {
+    if (const auto& on_probe = scan_hooks().on_probe) on_probe(port_path);
+    return probe_port(port_path);
+}
+
 std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
+    if (const auto& enumerate = scan_hooks().enumerate) return enumerate();
     std::vector<GeminiFlatPanelPortInfo> results;
 
 #ifndef _WIN32
@@ -760,11 +762,11 @@ private:
     }
 
     std::string read_response() {
+        const int timeout_ms = config_.serial_timeout_s * 1000;
         std::string response;
+#ifdef _WIN32
         response.reserve(kMaxResponseLen);
         char ch = 0;
-
-        int timeout_ms = config_.serial_timeout_s * 1000;
         auto start = std::chrono::steady_clock::now();
 
         while (true) {
@@ -774,22 +776,9 @@ private:
                 throw AlpacaException("Read timeout", AlpacaError::DriverException);
             }
 
-            bool got_char = false;
-#ifdef _WIN32
             DWORD bytes_read = 0;
             if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-                got_char = true;
-            }
-#else
-            const ssize_t r = util::tty_read(link_.fd(), &ch, 1, static_cast<int>(timeout_ms - elapsed));
-            if (r == 1) {
-                got_char = true;
-            } else if (r == 0) {
-                continue;  // timed out; the elapsed check above throws
-            }
-#endif
-
-            if (got_char) {
+                // Ignore CR/LF
                 if (ch == '\r' || ch == '\n') {
                     continue;
                 }
@@ -804,6 +793,24 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(kReadCharDelayMs));
             }
         }
+#else
+        util::ReadSpec spec;
+        spec.max_len = kMaxResponseLen;
+        const auto r = util::read_until(link_.fd(), spec,
+                                        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+        switch (r.outcome) {
+            case util::ReadOutcome::Terminator:
+                response = r.bytes;
+                break;
+            case util::ReadOutcome::Overflow:
+                throw AlpacaException("Response too long", AlpacaError::DriverException);
+            case util::ReadOutcome::LinkDead:
+                throw AlpacaException("Serial link lost (errno " + std::to_string(r.err) + ")",
+                                      AlpacaError::DriverException);
+            default:
+                throw AlpacaException("Read timeout", AlpacaError::DriverException);
+        }
+#endif
 
         ALPACA_LOG_TRACE("Gemini", "Flat panel response: " + response);
         return response;

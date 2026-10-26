@@ -40,7 +40,7 @@ public:
      * checks. A getter that throws (NotConnected, or an unwrapped vendor error)
      * causes that id's members to be omitted rather than failing the whole call.
      *
-     * Per AGENTS.md, DeviceState is intentionally NOT an atomic snapshot (each
+     * Per ascom-contract.instructions.md, DeviceState is intentionally NOT an atomic snapshot (each
      * getter locks separately) and vendors must NOT override this with a
      * single-lock or wrapper-direct per-vendor version: reading through anything
      * but the public getters is exactly what desyncs DeviceState from the GETs.
@@ -54,7 +54,7 @@ public:
         try {
             count = get_max_switch();
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-            // MaxSwitch itself unavailable -- report TimeStamp only.
+            // MaxSwitch itself unavailable -- no operational values can be collected.
         }
         for (int id = 0; id < count; ++id) {
             try {
@@ -72,7 +72,9 @@ public:
                 // Omit this id's members per the DeviceState contract.
             }
         }
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 

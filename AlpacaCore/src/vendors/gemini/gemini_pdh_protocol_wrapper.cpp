@@ -318,7 +318,22 @@ std::optional<PdhState> parse_pdh_status_frame(const std::string& frame_in) {
     return s;
 }
 
+namespace {
+GeminiPdhScanHooks& scan_hooks() {
+    static GeminiPdhScanHooks hooks;
+    return hooks;
+}
+}  // namespace
+
+void set_gemini_pdh_scan_hooks_for_testing(GeminiPdhScanHooks hooks) { scan_hooks() = std::move(hooks); }
+
+bool probe_gemini_pdh_port(const std::string& port_path) {
+    if (const auto& on_probe = scan_hooks().on_probe) on_probe(port_path);
+    return probe_pdh_port(port_path);
+}
+
 std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports() {
+    if (const auto& enumerate = scan_hooks().enumerate) return enumerate();
     std::vector<GeminiPdhPortInfo> results;
 
 #ifndef _WIN32
@@ -525,7 +540,7 @@ public:
     /// teardown clears the cache only after joining the reader, which can
     /// sit in a 500 ms read, and the driver's firmware getter relies on the
     /// cache being empty whenever the driver reports disconnected
-    /// (AGENTS.md) rather than consulting connected_.
+    /// (driver-lifecycle.instructions.md) rather than consulting connected_.
     void clear_firmware() {
         std::lock_guard<std::mutex> lock(state_mutex_);
         firmware_.clear();

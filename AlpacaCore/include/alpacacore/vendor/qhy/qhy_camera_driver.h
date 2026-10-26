@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 #include <chrono>
@@ -51,6 +52,12 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
  * inject a FakeQHYSDK instead — the only way to reach this driver's connect
  * path, since the real SDK cannot initialise on a USB-less host.
  *
+ * Every exposure, pulse-guide and reap deadline and every worker wait reads the
+ * `clock` argument (decision 0005); a test passes a FakeTaskClock and advance()s
+ * instead of sleeping. The clock MUST outlive the returned driver and its
+ * detachable workers, like the SDK reference. Pointing time (UTCDate, last
+ * exposure start) stays on the system clock.
+ *
  * The SDK reference MUST outlive the returned driver, INCLUDING this driver's
  * detachable workers: the exposure, temperature, cooler-off AND telemetry
  * threads join with a bounded timeout and detach on expiry, and the
@@ -70,13 +77,15 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
  * Do not read this as "a worker that only touches the seam is safe to
  * detach": these workers are unsafe once detached, and the bounded-join
  * discipline is what keeps that window small. See the member comment in
- * qhy_camera_driver.cpp and rule (b) in AGENTS.md ("Hardware-free driver tests via the SDK seam").
+ * qhy_camera_driver.cpp and rule (b) in testing.instructions.md ("Hardware-free driver tests via the SDK seam").
  */
-std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk);
-std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk);
+std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
+                                                util::TaskClock& clock = util::default_task_clock());
+std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk,
+                                                         util::TaskClock& clock = util::default_task_clock());
 
-/// The camera driver's two polling workers, as named to a QHYWorkerStartHook.
-enum class QHYWorker : std::uint8_t { Telemetry, TempControl };
+/// The camera driver's workers, as named to a QHYWorkerStartHook.
+enum class QHYWorker : std::uint8_t { Telemetry, TempControl, CoolerOff };
 
 /**
  * @brief Test-only hook, called by each worker start after the new thread is
@@ -88,11 +97,14 @@ enum class QHYWorker : std::uint8_t { Telemetry, TempControl };
  * thread with only the driver's thread-start mutex held, and must not throw
  * (the built thread is still unstored). A hook that blocks must be released
  * before the driver is destroyed. Production passes none.
+ * CoolerOff instead calls the hook on its worker thread before taking the
+ * state mutex; a throwing hook is caught and ends that test-only worker.
  */
 using QHYWorkerStartHook = std::function<void(QHYWorker)>;
 
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
                                                 QHYWorkerStartHook on_worker_start,
-                                                std::chrono::seconds watchdog_margin = std::chrono::seconds(60));
+                                                std::chrono::seconds watchdog_margin = std::chrono::seconds(60),
+                                                util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::qhy

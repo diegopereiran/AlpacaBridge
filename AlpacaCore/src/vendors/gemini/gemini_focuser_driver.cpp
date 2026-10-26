@@ -11,15 +11,19 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/polled_state.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -27,24 +31,47 @@
 
 namespace alpacacore::vendor::gemini {
 
+namespace {
+
+// State poll (open-astro#1229, decision 0010), start to start. One poll is
+// three request/response exchanges at 9600 baud, so the period leaves the wire
+// mostly free for Move/Halt. The freshness bound is two periods; a stale frame
+// is still served. The cadence, the #237 fault latch (kFaultThreshold failed
+// polls in a row) and the link-loss rule live in util::PolledState.
+constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
+constexpr int kFaultThreshold = 3;
+// A failed temperature read can cost the whole serial timeout while holding the
+// wrapper, which Move and Halt would queue behind; ask again after this.
+constexpr auto kTemperatureRetry = std::chrono::seconds(30);
+
+}  // namespace
+
 class GeminiFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     GeminiFocuserDriver(int device_number, ConnectionConfig config,
-                        util::ConnectionResolver<ConnectionConfig> connection_resolver = {})
+                        util::ConnectionResolver<ConnectionConfig> connection_resolver = {},
+                        util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("Gemini"),
+          clock_(clock),
           device_number_(device_number),
           config_(std::move(config)),
           connection_resolver_(std::move(connection_resolver)),
           connected_(false),
-          protocol_() {}
+          protocol_(),
+          state_(
+              clock_, state_poll_generation_, {kStatePollPeriod, kFaultThreshold, 2 * kStatePollPeriod, "Gemini"},
+              [this] { return probe(); }, [this] { protocol_.disconnect(); }) {}
 
     ~GeminiFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
+        // Joins the poll body before the members it touches go away; a driver
+        // that never finished a connect has no body, so this is a no-op.
+        state_.stop_and_join();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -66,9 +93,7 @@ public:
         return DeviceType::Focuser;
     }
 
-    std::string get_unique_id() const override {
-        return "GEMINI_FOCUSER_" + std::to_string(device_number_);
-    }
+    std::string fallback_unique_id() const override { return "GEMINI_FOCUSER_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "Gemini Automatic Astro Focuser Pro Driver";
@@ -98,9 +123,10 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override {
-        return connected_.load();
-    }
+    // Lock-free. A poll that has gone unanswered for util::kLinkStalenessBound
+    // latches the loss in state_ (decision 0009), and Connected reads false
+    // without a reconnect.
+    bool get_connected() const override { return connected_.load() && !state_.link_lost(); }
 
     void connect() override {
         start_connection_task(true);
@@ -141,17 +167,26 @@ public:
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
         // newer pending disconnect by staying down.
+        // A lost link counts as disconnected for a connect: Connected=true
+        // against a lost link reconnects instead of taking the idempotency
+        // return. The disconnect gate takes the raw connected_, so
+        // Connected=false still tears down a lost link (decision 0009).
+        const bool live = connected_.load() && !state_.link_lost();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            if (connected_.load()) {
+                // Stale connection over a lost link: start from a clean driver.
+                teardown_locked();
+            }
             // An auto-detected focuser resolves its port here, not in the factory (#659).
             util::connect_resolved(
                 config_, connection_resolved_, connection_resolver_,
@@ -179,23 +214,51 @@ public:
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
+            // First frame before Connected reads true, so a getter has an
+            // answer the moment Connect returns. A lost or dropped first
+            // reply gets one retry. A connect whose retry also publishes
+            // nothing fails: Connected true means the getters have a frame to
+            // serve (decisions 0010 and 0016).
+            state_.reset();
+            temperature_retry_at_.reset();
+            if (!state_.start()) {
+                state_.stop_and_join();
+                state_.reset();
+                {
+                    std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
+                    firmware_.clear();
+                }
+                protocol_.disconnect();
+                throw AlpacaException("Gemini focuser did not answer the first state poll",
+                                      AlpacaError::DriverException);
+            }
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
-            // throwing close must not leave the driver reporting connected on
-            // a closed port. disconnect() cannot throw today; the order is
-            // the contract, not the current wrapper's behaviour.
-            // The cached firmware goes first, so the store(false) is never
-            // observable beside a stale firmware string.
-            {
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_.clear();
-            }
-            connected_.store(false);
-            protocol_.disconnect();
+            teardown_locked();
             ALPACA_LOG_INFO("Gemini", "Focuser disconnected");
         }
+    }
+
+    // The disconnect body, shared by the explicit disconnect and the
+    // stale-link reconnect. Caller holds transition_mutex_.
+    void teardown_locked() {
+        // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
+        // throwing close must not leave the driver reporting connected on
+        // a closed port. disconnect() cannot throw today; the order is
+        // the contract, not the current wrapper's behaviour.
+        // The cached firmware goes first, so the store(false) is never
+        // observable beside a stale firmware string.
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
+        }
+        connected_.store(false);
+        // Join the poll before the transport closes; its body takes no
+        // lock this thread holds (transition_mutex_, firmware_mutex_).
+        state_.stop_and_join();
+        state_.reset();
+        protocol_.disconnect();
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -229,10 +292,7 @@ public:
         return true;
     }
 
-    bool get_is_moving() const override {
-        ensure_connected();
-        return const_cast<GeminiFocuserDriver*>(this)->protocol_.is_moving();
-    }
+    bool get_is_moving() const override { return served_frame().moving; }
 
     int get_max_step() const override {
         ensure_connected();
@@ -244,10 +304,7 @@ public:
         return get_max_step();
     }
 
-    int get_position() const override {
-        ensure_connected();
-        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_position();
-    }
+    int get_position() const override { return served_frame().position; }
 
     double get_step_size() const override {
         ensure_connected();
@@ -259,7 +316,7 @@ public:
     }
 
     bool get_temp_comp_available() const override {
-        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // open-astro#309: the connection check comes first. driver-lifecycle.instructions.md's ASCOM
         // contract precedence rule is that only parameter/range validation
         // precedes it -- every other property throws NotConnected when
         // disconnected, with no early return that skips it. ensure_connected()
@@ -269,15 +326,10 @@ public:
     }
 
     bool get_temp_comp() const override {
-        // Was an early return of false while disconnected, which answered a
-        // property that should have refused. The try/catch below still covers
-        // a transport failure on a CONNECTED focuser.
+        // A failed read raises (the wrapper throws DriverException on a reply it cannot parse, NotConnected
+        // on a lost link); reporting "off" would answer a property the driver could not read (issue #1478).
         ensure_connected();
-        try {
-            return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temp_comp_enabled();
-        } catch (const std::exception&) {
-            return false;
-        }
+        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temp_comp_enabled();
     }
 
     void set_temp_comp(bool temp_comp) override {
@@ -286,17 +338,23 @@ public:
     }
 
     double get_temperature() const override {
-        ensure_connected();
-        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temperature();
+        const auto frame = served_frame();
+        if (!frame.temperature.has_value()) {
+            throw AlpacaException("Focuser temperature not available", AlpacaError::DriverException);
+        }
+        return *frame.temperature;
     }
 
     void halt() override {
         ensure_connected();
+        // Never refused for a link fault: Halt is the safety stop and the
+        // blind command costs nothing if the link is down.
         protocol_.halt();
+        state_.write([](StateFrame& frame) { frame.moving = false; });
     }
 
     void move(int position) override {
-        ensure_connected();
+        (void)served_frame();  // refused while the link is faulted or lost
         int max_step = protocol_.get_max_position();
         // ConformU requires graceful clamping, not exceptions
         if (position < 0) {
@@ -305,15 +363,71 @@ public:
             position = max_step;
         }
         protocol_.move_to(position);
+        // Write-through: IsMoving must read true right after a successful
+        // Move, not after the next poll (decision 0010, point 3).
+        state_.write([](StateFrame& frame) { frame.moving = true; });
     }
 
 private:
+    // What one poll measured; position, motion and temperature only.
+    struct StateFrame {
+        int position = 0;
+        bool moving = false;
+        std::optional<double> temperature;  // empty: the probe did not answer
+    };
+
+    // The single fault text (decision 0009, point 5): the latched poll fault,
+    // kept after the link is lost so the management listing says why.
+    std::string get_link_fault() const override {
+        auto fault = state_.fault();
+        if (!fault.empty()) return fault;
+        return state_.link_lost() ? "no answer to the state poll" : std::string();
+    }
+
+    // The TimeStamp of DeviceState is when the frame was measured (decision 0010).
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return state_.age(); }
+
+    // The frame the getters serve (decisions 0009 and 0010): stale is served,
+    // a faulted link throws DriverException, a lost one NotConnected.
+    StateFrame served_frame() const {
+        ensure_connected();
+        return state_.served().value;
+    }
+
+    // One poll: three exchanges on the poll thread with no driver lock held
+    // (the protocol wrapper serialises them). The temperature is optional: a
+    // failed read leaves it empty (the getter reports it) without costing
+    // Position and IsMoving, and is not retried for kTemperatureRetry.
+    StateFrame probe() {
+        StateFrame frame;
+        frame.position = protocol_.get_position();
+        frame.moving = protocol_.is_moving();
+        const auto now = clock_.now();
+        if (!temperature_retry_at_ || now >= *temperature_retry_at_) {
+            try {
+                frame.temperature = protocol_.get_temperature();
+                temperature_retry_at_.reset();
+            } catch (const std::exception&) {
+                temperature_retry_at_ = now + kTemperatureRetry;
+                ALPACA_LOG_DEBUG("Gemini", "Focuser temperature read failed; retrying in 30 s");
+            }
+        } else if (const auto last = state_.read(); last && last->value.temperature) {
+            frame.temperature = last->value.temperature;  // keep the last good value meanwhile
+        }
+        return frame;
+    }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
+        if (state_.link_lost()) {
+            throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
+                                  AlpacaError::NotConnected);
+        }
     }
 
+    util::TaskClock& clock_;
     int device_number_;
     ConnectionConfig config_;
     // Set by the by-index factory; empty for an explicit port. connection_resolved_
@@ -323,6 +437,13 @@ private:
     bool connection_resolved_ = false;
     std::atomic<bool> connected_;
     GeminiProtocolWrapper protocol_;
+    // Poll thread, and connect before it starts; never concurrent.
+    std::optional<util::TaskClock::clock::time_point> temperature_retry_at_;
+    util::OperationGeneration state_poll_generation_;
+    // Position, motion and temperature served to the getters (open-astro#1229).
+    // Declared after clock_ and protocol_: it is destroyed first and joins its
+    // poll body while both are still alive.
+    util::PolledState<StateFrame> state_;
     // firmware_ has its OWN mutex, NOT the base's connection mutex:
     // set_connected() runs on the connection thread and caches firmware, while
     // the base joins that thread — sharing one mutex would deadlock.
@@ -340,6 +461,16 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
     config.serial_port = serial_port;
     config.baud_rate = baud_rate;
     return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config));
+}
+
+std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number, const std::string& serial_port, int baud_rate,
+                                                     util::TaskClock& clock) {
+    ConnectionConfig config;
+    config.type = ConnectionType::Serial;
+    config.serial_port = serial_port;
+    config.baud_rate = baud_rate;
+    return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config),
+                                                 util::ConnectionResolver<ConnectionConfig>{}, clock);
 }
 
 std::unique_ptr<FocuserDriver> create_gemini_focuser_deferred(int device_number,

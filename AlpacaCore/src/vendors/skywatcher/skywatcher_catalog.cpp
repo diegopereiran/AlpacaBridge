@@ -46,13 +46,15 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
 
         // #274: normalize refuses a config from the API with no site, so only a
         // saved one gets here without it. Register it so it stays listed and
-        // editable in the web UI; the driver refuses the connect until it is fixed.
+        // editable in the web UI; the driver connects and refuses to point until
+        // the site is set (decision 0019).
         if (!latitude || !longitude) {
             const char* missing = (!latitude && !longitude) ? "site coordinates"
                                   : !latitude               ? "site latitude"
                                                             : "site longitude";
             ALPACA_LOG_WARN("SkyWatcherCatalog", "Persisted Sky-Watcher telescope " + std::to_string(device_number) +
-                                                     " has no " + missing + " and will refuse to connect. " +
+                                                     " has no " + missing +
+                                                     "; it connects but refuses to point until the site is set. " +
                                                      std::string(kSkyWatcherMissingSite));
         }
 
@@ -62,12 +64,19 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
                                     : sense_text == "reversed" ? vendor::skywatcher::DecAxisSenseSetting::Reversed
                                                                : vendor::skywatcher::DecAxisSenseSetting::Auto;
 
+        // #437: a value outside 0..max is refused by the schema, so the cast is safe.
+        vendor::skywatcher::BacklashSettings backlash;
+        backlash.ra.steps = static_cast<std::uint32_t>(config.get(kSkyWatcherBacklashStepsRa));
+        backlash.ra.enabled = config.get(kSkyWatcherBacklashEnabledRa);
+        backlash.dec.steps = static_cast<std::uint32_t>(config.get(kSkyWatcherBacklashStepsDec));
+        backlash.dec.enabled = config.get(kSkyWatcherBacklashEnabledDec);
+
         std::unique_ptr<TelescopeDriver> telescope;
         const std::string type = config.get(kSkyWatcherConnectionType);
         if (type.empty() || type == "auto") {
             const int mount_index = static_cast<int>(config.get(kSkyWatcherMountIndex));
             telescope = vendor::skywatcher::create_skywatcher_telescope_auto(
-                device_number, mount_index, latitude, longitude, elevation, limits, dec_axis_sense);
+                device_number, mount_index, latitude, longitude, elevation, limits, dec_axis_sense, backlash);
         } else {
             // normalize has left "serial" or "network" here; anything else is
             // read as serial, never auto (#380).
@@ -82,9 +91,9 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
                 info.baud_rate = static_cast<int>(config.get(kSkyWatcherBaudRate));
             }
             info.response_timeout_ms = static_cast<int>(config.get(kSkyWatcherResponseTimeoutMs));
-            telescope =
-                vendor::skywatcher::create_skywatcher_telescope(device_number, info, latitude, longitude, elevation, {},
-                                                                limits, util::default_task_clock(), dec_axis_sense);
+            telescope = vendor::skywatcher::create_skywatcher_telescope(
+                device_number, info, latitude, longitude, elevation, {}, limits, util::default_task_clock(),
+                dec_axis_sense, backlash);
         }
 
         if (const double aperture = config.get(kSkyWatcherApertureDiameter); aperture > 0.0) {

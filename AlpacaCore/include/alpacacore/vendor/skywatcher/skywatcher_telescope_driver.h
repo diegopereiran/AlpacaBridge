@@ -23,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <thread>
 
 namespace alpacacore::vendor::skywatcher {
 
@@ -53,6 +54,12 @@ bool host_synchronized_probe();
 // driver is destroyed. Process-wide; tests clear it afterwards.
 void set_pulse_restore_hook(std::function<void()> hook);
 void run_pulse_restore_hook();
+// Test-only: called by the RA pulse task when the dispatch threw after the
+// live ":I" went out, before the drive-rate recovery takes the lock and with no
+// driver lock held, so a test can change SiteLatitude in that window. Default
+// empty; process-wide; tests clear it afterwards.
+void set_pulse_dispatch_failure_hook(std::function<void()> hook);
+void run_pulse_dispatch_failure_hook();
 // open-astro#405: how often the pointing path re-samples discipline while a
 // client offset is armed on a host that was undisciplined at the write
 // (default 30 s; a test shortens it). Zero disables the re-sample.
@@ -76,28 +83,26 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed,
                         std::chrono::milliseconds tolerance = std::chrono::milliseconds(1000));
 
-// Whether the POINTING math (LST, SiderealTime, DestinationSideOfPier, every
-// goto) applies the client's UTCDate offset (open-astro#301).
+// Whether the driver's one time source (UTCDate, LST, SiderealTime,
+// DestinationSideOfPier, every goto; decision 0001) applies the client's
+// UTCDate offset (open-astro#301, #1472).
 //
-// The ASCOM UTCDate readback always honours a client's write; this rule is
-// only about the clock the mount is aimed by. A client's offset is applied
-// when the host clock has nothing better to offer, and ignored when the host
-// is NTP/PTP-disciplined, whether at the moment of the write or found so by a
-// later re-sample (#405) -- there, a tablet with
-// a 30-minute error would otherwise skew every goto by 7.5 degrees of RA on a
-// rig whose own time is good. The router already refuses to step a
-// disciplined clock and already warns when a client disagrees by more than
-// 2 s; this makes the driver agree with that decision.
+// A client's offset is applied when the host clock has nothing better to
+// offer, and ignored once the host is found NTP/PTP-disciplined by a later
+// re-sample (#405) -- there, a tablet with a 30-minute error would otherwise
+// skew every goto by 7.5 degrees of RA on a rig whose own time is good. On a
+// host disciplined at the write the write itself is refused
+// (PropertyNotImplemented), so no offset is stored. The router already
+// refuses to step a disciplined clock; this makes the driver agree with it.
 //
-// `host_was_synchronized` is sampled when the client writes UTCDate and,
-// while an offset is armed on a host that was undisciplined then, re-sampled
-// at most once per interval on the pointing path (open-astro#405; one
-// adjtimex read, no device I/O). Pure, so the rule is unit-testable without
-// an NTP daemon.
+// `host_was_synchronized` is false at the write (a disciplined host refuses
+// it) and, while an offset is armed, re-sampled at most once per interval on
+// the time path (open-astro#405; one adjtimex read, no device I/O). Pure, so
+// the rule is unit-testable without an NTP daemon.
 //
 // `offset_survives` folds in both "an offset was written" and "the host clock
 // has not been stepped since", because the caller's
-// client_offset_survives_locked() already answers exactly that and the two
+// client_offset_survives() already answers exactly that and the two
 // can never disagree at the call site.
 bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized);
 }  // namespace detail
@@ -108,6 +113,22 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 /// identify itself. It sets eps, never the hemisphere term k = s * eps.
 enum class DecAxisSenseSetting : std::uint8_t { Auto, Normal, Reversed };
 
+/// open-astro#437: per-axis goto backlash compensation. `steps` is the
+/// overshoot in microsteps (the board's own counts) a goto against the axis'
+/// approach side makes before its slow final leg back onto the target; an axis
+/// with `enabled` false or `steps` 0 is never compensated. Applies to gotos only (decision in the
+/// Sky-Watcher docs): PulseGuide, MoveAxis and the rate properties are not.
+struct BacklashSettings {
+    struct Axis {
+        std::uint32_t steps = 0;
+        bool enabled = false;
+        bool active() const { return enabled && steps > 0; }
+    };
+    Axis ra;
+    Axis dec;
+    bool any_active() const { return ra.active() || dec.active(); }
+};
+
 // `motion_limits` (open-astro#436): per-device altitude floor and meridian
 // limit, both off by default; see <alpacacore/util/motion_limits.h>.
 /// `clock` is the TaskClock the driver's task waits and deadlines run on
@@ -117,8 +138,32 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
     int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg = std::nullopt,
     std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {}, util::MotionLimits motion_limits = {},
-    util::TaskClock& clock = util::default_task_clock(),
-    DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
+    util::TaskClock& clock = util::default_task_clock(), DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto,
+    BacklashSettings backlash = {});
+
+/// Test seam: replaces the thread factory of the driver's slew slot, so a case
+/// can hold a new body's thread back until a replaced body has finished its
+/// tail. Call only while no start is in flight. `driver` must come from the
+/// factories above; anything else is ignored.
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seam: while paused the driver's status poll (decision 0010) wakes and
+/// samples nothing, so a case can age the snapshot's frame on the task clock
+/// without the board going quiet. `driver` must come from the factories above;
+/// anything else is ignored.
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+
+/// Test seam: `hook` runs on the poll thread between a poll's sample and its
+/// publish, with no driver lock held, so a case can land a client write in that
+/// window. Pass an empty function to clear it, and release anything the hook
+/// blocks on before the driver is destroyed.
+void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: `hook` runs on the thread that changes the RA rate, in the window
+/// where it has released the driver locks and not yet started the rate-applied
+/// check, so a case can land a disconnect and a reconnect before the check body
+/// starts. Pass an empty function to clear it.
+void set_rate_verify_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
@@ -127,7 +172,7 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
     std::optional<double> site_elevation_m = std::nullopt, std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {},
     util::MotionLimits motion_limits = {}, util::TaskClock& clock = util::default_task_clock(),
-    DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
+    DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto, BacklashSettings backlash = {});
 
 /// The scan behind create_skywatcher_telescope_auto(): serial ports first, then
 /// Wi-Fi discovery (UDP 11880); throws when nothing answers.
@@ -138,6 +183,7 @@ ConnectionInfo resolve_skywatcher_auto(int mount_index);
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
     int device_number, int mount_index = 0, std::optional<double> site_latitude_deg = std::nullopt,
     std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
-    util::MotionLimits motion_limits = {}, DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
+    util::MotionLimits motion_limits = {}, DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto,
+    BacklashSettings backlash = {});
 
 }  // namespace alpacacore::vendor::skywatcher

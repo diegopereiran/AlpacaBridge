@@ -12,10 +12,11 @@
 
 #pragma once
 
-// One do-nothing driver per Alpaca device type, used by test_route_table to
-// reach the router's per-type dispatchers (#646). Every pure virtual of the
-// device interface returns a value-initialised default; nothing here models
-// device behaviour. If a driver interface gains or loses a pure virtual this
+// One do-nothing driver per Alpaca device type, used by test_route_table and
+// test_routing to reach the router's per-type dispatchers (#646). Every pure
+// virtual of the device interface returns a value-initialised default, except
+// that FilterWheelStub returns the focus offsets last set and CameraStub exposes
+// scripted images and LastExposure metadata/errors. If an interface gains or loses a pure virtual this
 // header stops compiling, which is the cue to update it deliberately.
 
 #include <alpacacore/alpaca_defs.h>
@@ -30,6 +31,8 @@
 #include <alpacacore/safetymonitor_driver.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/last_exposure.h>
 
 #include <chrono>
 #include <optional>
@@ -47,7 +50,7 @@ using namespace alpacacore;
     int get_device_number() const override { return number_; }                                              \
     std::string get_name() const override { return "Route Table Stub " LABEL; }                             \
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::DEVICE_TYPE; } \
-    std::string get_unique_id() const override { return "route-table-stub-" LABEL; }                        \
+    std::string fallback_unique_id() const override { return "route-table-stub-" LABEL; }                   \
     std::string get_description() const override { return "fake device"; }                                  \
     std::string get_driver_info() const override { return "fake driver"; }                                  \
     std::string get_driver_version() const override { return "0.0.1"; }                                     \
@@ -67,6 +70,17 @@ public:
     ROUTE_TABLE_STUB_COMMON(Camera, "camera")
 
     void set_image_array(ImageArray image) { image_array_ = std::move(image); }
+    // ImageArray throws this instead of returning the image while set.
+    void set_image_array_error(std::optional<alpacacore::AlpacaException> error) {
+        image_array_error_ = std::move(error);
+    }
+    void set_last_exposure(double duration, std::chrono::system_clock::time_point start) {
+        last_exposure_.commit(duration, start);
+    }
+    void set_last_exposure_error(std::optional<alpacacore::AlpacaException> error) {
+        last_exposure_error_ = std::move(error);
+    }
+    mutable int image_getter_calls = 0;
 
     int get_bayer_offset_x() const override { return int{}; }
     int get_bayer_offset_y() const override { return int{}; }
@@ -102,13 +116,27 @@ public:
     std::vector<std::string> get_gains() const override { return std::vector<std::string>{}; }
     bool get_has_shutter() const override { return bool{}; }
     double get_heat_sink_temperature() const override { return double{}; }
-    ImageArray get_image_array() const override { return image_array_; }
-    std::string get_image_array_variant() const override { return std::string{}; }
-    bool get_image_ready() const override { return bool{}; }
+    ImageArray get_image_array() const override {
+        ++image_getter_calls;
+        if (image_array_error_) throw *image_array_error_;
+        return image_array_;
+    }
+    std::string get_image_array_variant() const override {
+        ++image_getter_calls;
+        return std::string{};
+    }
+    bool get_image_ready() const override {
+        ++image_getter_calls;
+        return bool{};
+    }
     bool get_is_pulse_guiding() const override { return bool{}; }
-    double get_last_exposure_duration() const override { return double{}; }
+    double get_last_exposure_duration() const override {
+        check_last_exposure_read();
+        return last_exposure_.duration();
+    }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
-        return std::chrono::system_clock::time_point{};
+        check_last_exposure_read();
+        return last_exposure_.start_time();
     }
     int get_max_adu() const override { return int{}; }
     int get_max_bin_x() const override { return int{}; }
@@ -144,9 +172,17 @@ public:
     void stop_exposure() override {}
 
 private:
+    void check_last_exposure_read() const {
+        if (!connected_) throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        if (last_exposure_error_) throw *last_exposure_error_;
+    }
+
     int number_;
     bool connected_ = false;
     ImageArray image_array_;
+    std::optional<alpacacore::AlpacaException> image_array_error_;
+    util::LastExposure last_exposure_;
+    std::optional<alpacacore::AlpacaException> last_exposure_error_;
 };
 
 class TelescopeStub final : public alpacacore::TelescopeDriver {
@@ -249,14 +285,15 @@ public:
 
     int get_position() const override { return int{}; }
     void set_position(int position) override {}
-    std::vector<int> get_focus_offsets() const override { return std::vector<int>{}; }
-    void set_focus_offsets(const std::vector<int>& offsets) override {}
+    std::vector<int> get_focus_offsets() const override { return focus_offsets_; }
+    void set_focus_offsets(const std::vector<int>& offsets) override { focus_offsets_ = offsets; }
     std::vector<std::string> get_names() const override { return std::vector<std::string>{}; }
     void set_names(const std::vector<std::string>& names) override {}
 
 private:
     int number_;
     bool connected_ = false;
+    std::vector<int> focus_offsets_;  // last set, so a test can read back what the router parsed
 };
 
 class FocuserStub final : public alpacacore::FocuserDriver {
@@ -320,7 +357,6 @@ public:
     bool get_can_set_park() const override { return bool{}; }
     bool get_can_set_shutter() const override { return bool{}; }
     bool get_can_slave() const override { return bool{}; }
-    bool get_can_slew() const override { return bool{}; }
     bool get_can_sync_azimuth() const override { return bool{}; }
     double get_azimuth() const override { return double{}; }
     bool get_at_home() const override { return bool{}; }
@@ -344,7 +380,7 @@ private:
     bool connected_ = false;
 };
 
-class SwitchStub final : public alpacacore::SwitchDriver {
+class SwitchStub : public alpacacore::SwitchDriver {
 public:
     explicit SwitchStub(int number) : number_(number) {}
     ROUTE_TABLE_STUB_COMMON(Switch, "switch")
@@ -409,7 +445,6 @@ public:
     double get_sky_brightness() const override { return double{}; }
     double get_sky_quality() const override { return double{}; }
     double get_sky_temperature() const override { return double{}; }
-    double get_seeing() const override { return double{}; }
     double get_star_fwhm() const override { return double{}; }
     double get_temperature() const override { return double{}; }
     double get_wind_direction() const override { return double{}; }

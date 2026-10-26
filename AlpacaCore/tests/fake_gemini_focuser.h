@@ -110,11 +110,23 @@ public:
     void set_handshake_delay(std::chrono::milliseconds delay) { handshake_delay_ms_.store(delay.count()); }
 
     /// What ":24#" reports for temperature compensation ("11#" on, "10#"
-    /// off). Settable so a test can pin the TRUE branch: the driver's
-    /// get_temp_comp() catches every std::exception and returns false, so an
-    /// assertion that only ever sees "off" passes whether the round trip
-    /// worked or threw.
+    /// off). Settable so a test can pin the TRUE branch: an assertion that
+    /// only ever sees "off" would not show that the round trip worked.
     void set_temp_comp_reply(bool on) { temp_comp_on_.store(on); }
+
+    /// What ":01#" and ":06#" report; the position is set by a move or here.
+    /// Answer the three state queries with a parseable-looking but invalid
+    /// frame at once ("Px#"), as a wedged firmware does, without the serial
+    /// timeout a silent fake costs.
+    void set_garbage_state_replies(bool on) { garbage_state_.store(on); }
+    /// ":06#" answers garbage while the other state queries stay good (a
+    /// focuser without a temperature probe).
+    void set_garbage_temperature(bool on) { garbage_temperature_.store(on); }
+    /// ":24#" answers a frame the temperature compensation parser rejects ("Qx#"), the other queries stay good.
+    void set_garbage_temp_comp(bool on) { garbage_temp_comp_.store(on); }
+    void set_moving(bool moving) { moving_.store(moving); }
+    void set_temperature(double celsius) { temperature_.store(celsius); }
+    void set_position(int position) { position_.store(position); }
 
     int position() const { return position_.load(); }
     int max_position() const { return max_position_.load(); }
@@ -122,6 +134,19 @@ public:
     /// Put `bytes` in the driver's receive queue as an unsolicited reply, the
     /// way a late answer to a timed-out command lands.
     void push_unsolicited(const std::string& bytes) { pty_write_bounded(pty_.master_fd(), bytes, stop_); }
+
+    /// One shot, then spent: the next reply the fake sends is held for @p delay (blind commands do not use it up).
+    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+
+    /// A USB unplug: the reader stops and both pty ends close, so the driver's reads fail with EIO from here on.
+    /// Not reversible.
+    void unplug() {
+        stop_.store(true);
+        if (reader_.joinable()) {
+            reader_.join();
+        }
+        pty_.sever();
+    }
 
 private:
     void run() {
@@ -161,18 +186,26 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
             }
             reply = "F" + std::to_string(kFirmware) + "#";
+        } else if (garbage_state_.load() && (cmd == ":00#" || cmd == ":01#" || cmd == ":06#")) {
+            reply = "Px#";
+        } else if (garbage_temperature_.load() && cmd == ":06#") {
+            reply = "Zx#";
         } else if (cmd == ":00#") {
             reply = "P" + std::to_string(position_.load()) + "#";
         } else if (cmd == ":01#") {
-            reply = "I0#";  // never moving: the tests here are about connect
+            reply = moving_.load() ? "I1#" : "I0#";
         } else if (cmd == ":06#") {
-            reply = "Z12.5#";
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "Z%.1f#", temperature_.load());
+            reply = buf;
         } else if (cmd == ":08#") {
             reply = "M" + std::to_string(max_position_.load()) + "#";
         } else if (cmd == ":11#") {
             reply = "O1#";
         } else if (cmd == ":13#") {
             reply = "R0#";
+        } else if (cmd == ":24#" && garbage_temp_comp_.load()) {
+            reply = "Qx#";
         } else if (cmd == ":24#") {
             reply = temp_comp_on_.load() ? "11#" : "10#";
         } else if (cmd == ":26#") {
@@ -190,6 +223,9 @@ private:
         } else {
             return;  // every other write is blind on this firmware
         }
+        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+        }
         pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
@@ -199,11 +235,17 @@ private:
     std::thread reader_;
     std::atomic<bool> stop_{false};
     std::atomic<long long> handshake_delay_ms_{0};
+    std::atomic<int> hold_ms_{0};
     std::atomic<bool> temp_comp_on_{false};
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
 
+    std::atomic<bool> garbage_state_{false};
+    std::atomic<bool> garbage_temperature_{false};
+    std::atomic<bool> garbage_temp_comp_{false};
+    std::atomic<bool> moving_{false};
+    std::atomic<double> temperature_{12.5};
     std::atomic<int> position_{1000};
     std::atomic<int> max_position_{50000};
 };

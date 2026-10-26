@@ -13,7 +13,11 @@
 #pragma once
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/pointing.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
+
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -24,20 +28,30 @@ namespace detail {
 // MoveAxis run before the connection check and any TheSkyX call. Free
 // functions so a test can call them without constructing a driver.
 // Throws InvalidValue for a non-finite or out-of-range RA (checked first) or Dec.
-void validate_ra_dec(double ra, double dec);
+inline void validate_ra_dec(double ra, double dec, const char* operation = "SlewToCoordinates") {
+    util::validate_ra_dec(ra, dec, operation);
+}
 // Throws InvalidValue for a non-finite MoveAxis rate.
 void validate_move_axis_rate(double rate);
 }  // namespace detail
 
-std::unique_ptr<TelescopeDriver> create_bisque_telescope(
-    int device_number,
-    const ConnectionInfo& connection_info);
+std::unique_ptr<TelescopeDriver> create_bisque_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                         util::TaskClock& clock = util::default_task_clock());
 
-std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m);
+std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(int device_number,
+                                                                   const ConnectionInfo& connection_info,
+                                                                   std::optional<double> site_latitude_deg,
+                                                                   std::optional<double> site_longitude_deg,
+                                                                   std::optional<double> site_elevation_m,
+                                                                   util::TaskClock& clock = util::default_task_clock());
+
+/// Test seams of the status poll (decision 0010): stop or resume its ticks, and run one tick on the calling thread
+/// (paused or not; false when the connection is gone). `driver` must come from the factories above; anything else is
+/// ignored.
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+bool poll_status_now_for_testing(TelescopeDriver& driver);
+/// Runs `hook` on the SlewToCoordinates thread once IsSlewComplete has answered true and the position is published,
+/// before the wait applies Slewing false; no driver lock is held. An empty hook removes it.
+void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 } // namespace alpacacore::vendor::bisque

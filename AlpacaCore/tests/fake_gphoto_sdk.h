@@ -97,8 +97,8 @@ inline std::string unique_test_model(const std::string& base) {
 /**
  * Scripted fake for GPhotoSDK (issue #489 fault-injection seam).
  *
- * KNOWN PARITY GAPS (AGENTS.md: a fake must be the harsher of the two; keep
- * this list exhaustive and prefer closing a gap to documenting it):
+ * KNOWN PARITY GAPS (docs/decisions/0015-sdk-seams.md rule 4, "The fake is the harsher of the
+ * two"; keep this list exhaustive and prefer closing a gap to documenting it):
  *  - `capture_result` defaults to an EMPTY `data` vector, where a real
  *    capture returns 20+ MB of RAW. Harmless only because FakeRawDecoder
  *    ignores the bytes; a test that exercises a real decoder path must fill
@@ -112,12 +112,26 @@ inline std::string unique_test_model(const std::string& base) {
  *  - `set_choice_value` / `set_toggle_value` on an UNMODELLED widget insert a
  *    new map entry and succeed, where GPhotoSDKWrapper throws
  *    PropertyNotImplemented. Unreachable today (every production write is
- *    gated by has_widget or has_bulb_), but lenient in the direction a fake
- *    must not be; a test that scripts an absent widget must not rely on the
- *    write failing.
+ *    gated by has_widget or has_bulb_; the longexpnr write at connect is gated
+ *    by has_widget), but lenient in the direction a fake must not be; a test
+ *    that scripts an absent widget must not rely on the write failing. Script a
+ *    failing write with `refuse_choice_writes` instead.
+ *  - The mirror lock-up widgets (`mirrorlock`, `mirrorlockstatus`) are modelled
+ *    as text widgets holding "0"/"1" (`mirrorlockstatus` also "2" after the
+ *    first press). The real `mirrorlock` is a RANGE or TEXT widget
+ *    (`_get_INT`); the wrapper's type-aware read turns it into the same
+ *    string, so the fake skips that layer. The fake does not move `mirrorlockstatus` when the
+ *    driver presses the shutter, and it does not model a camera that stalls
+ *    in gp_camera_capture with mirror lock-up on (the real body times out
+ *    after 60 s); a case asserts that capture_and_download is never called.
  *  - `drain_events` sleeps out its WHOLE budget where the real wrapper
  *    returns as each event lands and polls again; the fake is the slower of
  *    the two, so the hold loop's timing is exercised at its harshest.
+ *  - With `skip_sleeps` set, `drain_events` returns at once and a "not ready"
+ *    poll does not sleep either: a case then spends no real time in the bulb
+ *    loops and moves a FakeTaskClock from `before_call` instead. Real time no
+ *    longer bounds the loop, so such a case caps the calls and fails through
+ *    the cap.
  *  - `poll_bulb_file_and_download` answers instantly, where the real wrapper
  *    blocks up to its timeout for the file-added event. A "not ready" poll
  *    (`bulb_file_polls_before_ready`) sleeps at most 10 ms of the timeout so
@@ -151,15 +165,24 @@ public:
     std::vector<FakeCamera> cameras;
     std::set<std::string> throw_from;
     // Persistent, not a one-shot: runs before every call until it is cleared (after the call is counted, before
-    // throw_from), so a case can make one named call block. Null in every ordinary test; the contract sweep
-    // sets it on the connect call to hold a connect open.
+    // throw_from), so a case can make one named call block or move a FakeTaskClock. Null in every ordinary
+    // test; the contract sweep sets it on the connect call to hold a connect open, and the [taskclock] cases
+    // set it to drive the exposure and bulb loops.
     // Ownership (as fake_qhy_sdk.h): set before the driver exists, never changed while a connect is in flight.
     std::function<void(const std::string&)> before_call;
+    // The widget name of the has_widget / get_choices / set_choice_value call now running, set before before_call
+    // fires, so a hook can key a fault on the widget instead of counting calls (a call count shifts when a priming
+    // capture or another connect step adds calls). Other calls leave it unchanged, so a hook checks the call name
+    // first.
+    std::string current_widget;
+    // When true, drain_events() and poll_bulb_file_and_download() return at once instead of sleeping their
+    // budget, so a case drives the driver's bulb loops with a FakeTaskClock from before_call and spends no real time.
+    bool skip_sleeps{false};
     std::vector<std::string> call_log;
 
     int open_count{0};
     int close_count{0};
-    std::string gphoto_version{"2.5.31"};
+    std::string gphoto_version{"2.5.34"};
 
     // Canned result returned by capture_and_download / poll_bulb_file_and_download.
     vendor::gphoto::GPhotoCaptureResult capture_result;
@@ -167,6 +190,18 @@ public:
     // Records every set_toggle_value(handle, "bulb", on) call, in order, so
     // bulb-sequence tests can assert true-then-false-then-download ordering.
     std::vector<bool> bulb_toggle_history;
+
+    // Records every set_choice_value(handle, "eosremoterelease", value) call, in order (the Canon press/release
+    // bulb path), so tests can assert press-then-release ordering.
+    std::vector<std::string> remote_release_history;
+
+    // Every successful set_choice_value, per widget and in order (eosremoterelease, longexpnr, ...), so a case can
+    // assert a widget was written once, or not at all. A refused write is not recorded.
+    std::unordered_map<std::string, std::vector<std::string>> choice_write_history;
+
+    // Widgets whose set_choice_value throws "I/O in progress", as a Canon body in mode dial B does for
+    // the shutter-speed widget (it owns the shutter and refuses the write).
+    std::vector<std::string> refuse_choice_writes;
 
     // drain_events() bookkeeping: how many hold slices the driver pumped and
     // their summed budget, so a test can pin that the bulb hold is spent
@@ -225,12 +260,14 @@ public:
     }
 
     bool has_widget(int handle, const std::string& name) override {
+        current_widget = name;
         log_and_maybe_throw("has_widget");
         const auto& cam = camera_for(handle);
         return cam.choices.count(name) != 0 || cam.toggle_value.count(name) != 0 || cam.text_value.count(name) != 0;
     }
 
     std::vector<std::string> get_choices(int handle, const std::string& name) override {
+        current_widget = name;
         log_and_maybe_throw("get_choices");
         const auto& cam = camera_for(handle);
         auto it = cam.choices.find(name);
@@ -248,9 +285,20 @@ public:
     }
 
     void set_choice_value(int handle, const std::string& name, const std::string& value) override {
+        current_widget = name;
         log_and_maybe_throw("set_choice_value");
         auto& cam = camera_for(handle);
+        for (const auto& refused : refuse_choice_writes) {
+            if (refused == name) {
+                throw AlpacaException("Failed to set " + name + " = " + value + ": I/O in progress",
+                                      AlpacaError::DriverException);
+            }
+        }
         cam.choice_value[name] = value;
+        choice_write_history[name].push_back(value);
+        if (name == "eosremoterelease") {
+            remote_release_history.push_back(value);
+        }
     }
 
     bool get_toggle_value(int handle, const std::string& name) override {
@@ -293,7 +341,7 @@ public:
         camera_for(handle);
         ++drain_events_calls;
         drained_budget += budget;
-        std::this_thread::sleep_for(budget);
+        if (!skip_sleeps) std::this_thread::sleep_for(budget);
     }
 
     std::optional<vendor::gphoto::GPhotoCaptureResult> poll_bulb_file_and_download(
@@ -304,7 +352,7 @@ public:
         bulb_file_poll_timeouts.push_back(timeout);
         if (bulb_file_polls_before_ready > 0) {
             --bulb_file_polls_before_ready;
-            std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
+            if (!skip_sleeps) std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
             return std::nullopt;
         }
         return capture_result;

@@ -249,6 +249,55 @@ function installerStateText(installer) {
     }
 }
 
+// Channel selector of the Software Update card (docs/software-update.md).
+// `status` is the /management/v1/update/status payload. The selector shows the
+// host's effective channel and is disabled, with the reason, while
+// update_packages_url pins the check (ChannelOverridden) or a switch/install
+// is running.
+function channelSelectorState(status) {
+    const source = status || {};
+    const value = source.Channel === 'beta' ? 'beta' : 'stable';
+    if (source.ChannelOverridden) {
+        return { value, disabled: true, note: 'set by update_packages_url' };
+    }
+    const switching = (source.ChannelSwitch || {}).State === 'running';
+    const installing = (source.Installer || {}).State === 'running';
+    if (switching) return { value, disabled: true, note: 'Switching the channel...' };
+    if (installing) return { value, disabled: true, note: 'An update is installing.' };
+    if ((source.ChannelSwitch || {}).State === 'unavailable') {
+        return { value, disabled: true, note: 'Not available on this host.' };
+    }
+    return { value, disabled: false, note: channelDowngradeNotice(value, source.InstalledVersion) };
+}
+
+// What choosing Stable does to a host on a beta build: apt never downgrades,
+// so the build stays until the stable release overtakes it. '' when the
+// installed version is not a pre-release, or the choice is not Stable.
+function channelDowngradeNotice(choice, installedVersion) {
+    const installed = String(installedVersion || '');
+    if (choice !== 'stable' || installed.indexOf('~') < 0) return '';
+    return 'You stay on ' + installed + ' until the stable release overtakes it. ' +
+           'The update card then offers stable releases only.';
+}
+
+// The channel helper half of the payload; '' when there is nothing to say.
+// A finished switch is reported only when this page started it: the helper's
+// transcript outlives the run, and a reload weeks later must not repeat it.
+function channelSwitchText(channelSwitch, startedHere) {
+    const source = channelSwitch || {};
+    if (source.State !== 'running' && !startedHere) return '';
+    switch (source.State) {
+        case 'running':
+            return 'Switching the update channel...';
+        case 'succeeded':
+            return 'The update channel was switched. Check for updates to see what it offers.';
+        case 'failed':
+            return 'Switching the update channel failed.' + (source.Detail ? ' (' + source.Detail + ')' : '');
+        default:
+            return '';
+    }
+}
+
 // Release notes for the Software Update card (docs/software-update.md).
 //
 // docs/releases/X.Y.Z.md is written in a small Markdown subset: "#"/"##"
@@ -388,6 +437,13 @@ function hostCheckSettings(desc) {
     };
 }
 
+// #1509: the saved discovery port the description reports, or null when the
+// server does not report one (an older build) so the row is not shown.
+function discoveryPortSetting(desc) {
+    const port = desc && desc.DiscoveryPort;
+    return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
 // The message to show for a settings PUT, or '' when it saved. The server
 // refuses a lockout with HTTP 400 and the reason in ErrorMessage, so the body
 // is read before the status decides anything.
@@ -440,21 +496,33 @@ function normalizeAlignmentMode(value) {
     return value === 'altaz' || value === 'equatorial' ? value : 'auto';
 }
 
-// Status dot for a configureddevices row: green = driver loaded and Connected,
-// yellow = loaded, not connected, red = LoadError, LastConnectError, a
-// LinkFault (connected or not), or Connected missing/non-boolean (unknown).
+// Status dot for a configureddevices row: green = driver loaded and a client
+// Connected, yellow = loaded and idle (no client connected; the hardware is not
+// probed until a connect), red = LoadError, LastConnectError, a LinkFault
+// (connected or not), or Connected missing/non-boolean (unavailable).
 // Green means a client is connected AND the device still replies, so any latched
-// LinkFault turns the device red. The red text joins every reason.
+// LinkFault turns the device red. Each red reason carries its own label, and the
+// red text joins every reason.
 function deviceStatus(device) {
     const d = device || {};
     const reasons = [];
-    if (d.LoadError === true) reasons.push('Driver failed to load');
-    if (d.LastConnectError) reasons.push(String(d.LastConnectError));
-    if (d.LinkFault) reasons.push('Link fault: ' + String(d.LinkFault));
-    if (reasons.length > 0) return { state: 'error', text: 'Error: ' + reasons.join('; ') };
-    if (d.Connected === true) return { state: 'connected', text: 'Connected' };
-    if (d.Connected === false) return { state: 'idle', text: 'Loaded, not connected' };
-    return { state: 'error', text: 'Error: status unknown' };
+    if (d.LoadError === true) reasons.push('Driver failed to load, see the server log');
+    if (d.LastConnectError) reasons.push('Last connect failed: ' + String(d.LastConnectError));
+    if (d.LinkFault) reasons.push('Device not responding: ' + String(d.LinkFault));
+    if (reasons.length > 0) return { state: 'error', text: reasons.join('; ') };
+    if (d.Connected === true) return { state: 'connected', text: 'Client connected' };
+    if (d.Connected === false) return { state: 'idle', text: 'Idle, no client connected' };
+    return { state: 'error', text: 'Status unavailable' };
+}
+
+// Site coordinates in the Configured Settings list: finite numbers print at a
+// fixed 6 decimals (about 0.11 m); display only, the stored value keeps full
+// precision. Any other type returns null so the caller keeps its own path.
+// A value that rounds to zero from below prints "0.000000", never "-0.000000".
+function formatSiteCoordinate(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const text = value.toFixed(6);
+    return text === '-0.000000' ? '0.000000' : text;
 }
 
 // Camera picker for a camera-attached thermal switch (ZWO dew heater, ToupTek and
@@ -585,13 +653,122 @@ function thermalCameraHint(cameras, value, controls, listError, saved, taken) {
     return '';
 }
 
+// Saved-config keys the device card's settings list leaves out: the card shows
+// them in its own rows (type, number, vendor, and the Unique ID row for the
+// stored ID in `uniqueId`, decision 0018) or derives them (aperture area
+// and focal length).
+const HIDDEN_DEVICE_SETTING_KEYS = new Set(['vendor', 'deviceType', 'deviceNumber', 'uniqueId',
+    'apertureDiameter', 'focalLength']);
+
+function deviceSettingShown(key) {
+    return !HIDDEN_DEVICE_SETTING_KEYS.has(key);
+}
+
+// Celestron focus motor calibration (issue #1411). The driver's
+// CalibrationStatus action answers exactly "Calibrating", "Calibrated" or
+// "NotCalibrated"; anything else (an error, a disconnected device, an unknown
+// string) parses to 'unknown'. Abort is offered only for 'calibrating': the
+// motor firmware can lose a good calibration to an abort sent while idle.
+const CALIBRATION_STATUS_STATES = {
+    Calibrating: 'calibrating',
+    Calibrated: 'calibrated',
+    NotCalibrated: 'not-calibrated',
+};
+
+function showsCalibrationControls(device) {
+    if (!device) return false;
+    const vendor = String(device.Vendor || (device.Config && device.Config.vendor) || '').toLowerCase();
+    return vendor === 'celestron' && String(device.DeviceType || '').toLowerCase() === 'focuser';
+}
+
+function parseCalibrationStatus(value) {
+    if (typeof value !== 'string') return 'unknown';
+    return Object.prototype.hasOwnProperty.call(CALIBRATION_STATUS_STATES, value)
+        ? CALIBRATION_STATUS_STATES[value] : 'unknown';
+}
+
+function isCalibrationRunning(state) {
+    return state === 'calibrating';
+}
+
+function mayAbortCalibration(state) {
+    return state === 'calibrating';
+}
+
+// A fresh CalibrationStatus answer, read just before AbortCalibration is sent,
+// must still say "Calibrating"; a cached state is not enough.
+function mayAbortFromStatus(value) {
+    return mayAbortCalibration(parseCalibrationStatus(value));
+}
+
+// Whether to schedule another status read. Failed reads during a run keep
+// the poll going (Abort stays hidden meanwhile); a failure after any other
+// state ends it.
+function keepPollingCalibration(lastGoodState, nextState, failed) {
+    if (failed) return lastGoodState === 'calibrating';
+    return isCalibrationRunning(nextState);
+}
+
+function calibrationStatusClass(state) {
+    return state === 'not-calibrated' ? 'calibration-status calibration-status-warn' : 'calibration-status';
+}
+
+function mayStartCalibration(state) {
+    return state === 'calibrated' || state === 'not-calibrated';
+}
+
+function calibrationStatusText(state, errorText) {
+    if (state === 'calibrating') return 'Calibrating: the motor is driving between its end stops (about 5 minutes).';
+    if (state === 'calibrated') return 'Calibrated.';
+    if (state === 'not-calibrated') return 'Not calibrated.';
+    return errorText ? 'Calibration status unavailable: ' + errorText : 'Calibration status unknown.';
+}
+
+function calibrationHint(state) {
+    if (state === 'not-calibrated') {
+        return 'The motor is not calibrated, so Position, MaxStep and moves are refused. Press Calibrate.';
+    }
+    return '';
+}
+
+function calibrationConfirmText() {
+    return 'Calibrate the focus motor? It drives from one end of its travel to the other and back, ' +
+        'which takes about 5 minutes. Check first that the motor is firmly seated on the focuser: ' +
+        'a loose fit can make it bind during the run.';
+}
+
+// Body for PUT /api/v1/focuser/{n}/action (Alpaca form fields).
+function calibrationActionBody(actionName, clientTransactionId) {
+    return new URLSearchParams({
+        Action: actionName,
+        Parameters: '',
+        ClientID: '1',
+        ClientTransactionID: String(clientTransactionId),
+    }).toString();
+}
+
+function zwoUsbBandwidth(value) {
+    if (value === null || value === undefined || String(value).trim() === '') return undefined;
+    const bandwidth = Number(value);
+    if (!Number.isInteger(bandwidth) || bandwidth < 0 || bandwidth > 100) {
+        throw new Error('USB Limit must be a whole number from 0 to 100, or blank for the default.');
+    }
+    return bandwidth;
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
-                        HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
+                       channelSelectorState, channelDowngradeNotice, channelSwitchText,
+                        HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, discoveryPortSetting, settingsSaveError,
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
-                        normalizeAlignmentMode, deviceStatus,
-                        thermalCameraOptions, thermalCameraSelection, thermalCameraHint };
+                        normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
+                        thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
+                        deviceSettingShown,
+                       showsCalibrationControls, parseCalibrationStatus, isCalibrationRunning,
+                       mayAbortCalibration, mayAbortFromStatus, keepPollingCalibration, calibrationStatusClass,
+                       mayStartCalibration, calibrationStatusText, calibrationHint,
+                        calibrationConfirmText, calibrationActionBody, zwoUsbBandwidth };
 }

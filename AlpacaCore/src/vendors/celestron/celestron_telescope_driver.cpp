@@ -12,12 +12,19 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/park_slew.h>
+#include <alpacacore/util/pointing.h>
+#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -38,31 +45,57 @@
 #include <numbers>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <tuple>
 
 namespace alpacacore::vendor::celestron {
 
 namespace {
 
 constexpr double kHoursToDegrees = 15.0;
-constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
-constexpr int kPositionLinkFailureThreshold = 3;
+// Decision 0010, Celestron adoption. A poll body samples the mount every kStatusPollPeriod (start to start; ticks
+// missed behind a slow link are skipped, never made up): the slewing flag and the equatorial pair on every tick, the
+// slower-moving fields (alt/az, pier side, tracking mode) on every kSlowPollEvery-th. A full frame is up to five
+// handset round trips, so the cadence stays slow enough to leave the line to the control path. Alt/az, pier side and
+// tracking mode move only with a motion the driver commands (and the control path publishes a full frame when that
+// motion ends) or with a keypad press.
+// kSnapshotMaxAge is the FRESHNESS bound: a frame older than it reads `stale` and is still served. It is not the
+// bound at which a getter refuses: that is the link-loss policy of decision 0009 (util::kLinkStalenessBound).
+constexpr auto kStatusPollPeriod = std::chrono::milliseconds(1000);
+constexpr int kSlowPollEvery = 4;
+constexpr auto kSnapshotMaxAge = std::chrono::milliseconds(3000);
+static_assert(kSnapshotMaxAge >= 2 * kStatusPollPeriod, "two poll periods, or a healthy link reads stale");
+static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must undercut the link-loss bound");
+
+// One polled frame of operational state (decision 0010). Small and copyable: the snapshot copies it under its mutex.
+struct PolledFrame {
+    double ra_hours = 0.0;
+    double dec_degrees = 0.0;
+    bool equatorial_known = false;
+    double az_degrees = 0.0;
+    double alt_degrees = 0.0;
+    bool altaz_known = false;
+    bool slewing = false;
+    bool slewing_known = false;  // false until a query (or a control-path write) has answered
+    int side_of_pier = -1;       // ASCOM value, -1 (pierUnknown) when the handset's state maps to neither side
+    bool pier_known = false;     // the handset has answered the pier query at least once
+    int tracking_mode = -1;      // handset tracking mode, -1 unknown
+};
+constexpr int kLinkFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
+// The poll's own retry of an unread site. A failed read ends the tick without a sample (one exchange timeout at
+// most), and a full tick comes every 4 s, so a 2 s retry would skip the sample of every full tick on a link whose
+// location never reads; 30 s leaves one tick in about eight.
+constexpr auto kSitePollRetryDelay = std::chrono::seconds(30);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
+constexpr int kMaxPulseGuideMs = 25500;
 constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
 constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
-
-double wrap_degrees(double deg) {
-    double wrapped = std::fmod(deg, 360.0);
-    if (wrapped < 0.0) {
-        wrapped += 360.0;
-    }
-    return wrapped;
-}
 
 double decode_angle(uint32_t raw, int bits) {
     const double denom = bits == 24 ? 16777216.0 : 65536.0;
@@ -75,7 +108,7 @@ double decode_angle(uint32_t raw, int bits) {
 
 uint32_t encode_angle(double degrees, int bits) {
     const double denom = bits == 24 ? 16777216.0 : 65536.0;
-    double wrapped = wrap_degrees(degrees);
+    double wrapped = util::wrap_degrees(degrees);
     double fraction = wrapped / 360.0;
     uint32_t raw = static_cast<uint32_t>(std::round(fraction * denom));
     if (raw >= static_cast<uint32_t>(denom)) {
@@ -93,13 +126,7 @@ double decode_ra_hours(uint32_t raw, int bits) {
     return hours;
 }
 
-uint32_t encode_ra_raw(double hours, int bits) {
-    double wrapped_hours = std::fmod(hours, 24.0);
-    if (wrapped_hours < 0.0) {
-        wrapped_hours += 24.0;
-    }
-    return encode_angle(wrapped_hours * kHoursToDegrees, bits);
-}
+uint32_t encode_ra_raw(double hours, int bits) { return encode_angle(util::wrap_hours(hours) * kHoursToDegrees, bits); }
 
 struct LocalTimeInfo {
     int offset_minutes = 0;
@@ -131,7 +158,8 @@ public:
                              std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                              std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
                              CelestronAlignmentSetting alignment,
-                             util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
+                             util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
+                             util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("Celestron"),
           device_number_(device_number),
           connection_info_(connection_info),
@@ -145,15 +173,10 @@ public:
           site_latitude_cached_(0.0),
           site_longitude_cached_(0.0),
           site_info_valid_(false),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_elevation_m_(site_elevation_m),
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
-          last_utc_set_{},
-          last_utc_set_monotonic_(std::chrono::steady_clock::now()),
-          last_utc_valid_(false),
-          tracking_mode_cached_(0),
-          tracking_mode_valid_(false),
           parked_(false),
           at_home_(false),
           mount_model_id_(-1),
@@ -162,7 +185,8 @@ public:
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
           sync_time_on_connect_(sync_time_on_connect.value_or(false)),
-          alignment_setting_(alignment) {
+          alignment_setting_(alignment),
+          clock_(clock) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
@@ -171,6 +195,7 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
+        stop_status_poller();
         // Cancel + join the background slew/pulse task threads before any
         // member they touch is destroyed. Must run WITHOUT mutex_ held (the
         // slew task tail re-acquires mutex_).
@@ -194,6 +219,7 @@ public:
     }
 
     std::string get_name() const override {
+        std::lock_guard<std::mutex> lock(mutex_);  // the connect publishes the model name under it, at its end
         if (!mount_model_name_.empty()) {
             return "Celestron " + mount_model_name_;
         }
@@ -204,9 +230,7 @@ public:
         return DeviceType::Telescope;
     }
 
-    std::string get_unique_id() const override {
-        return "Celestron_" + std::to_string(device_number_);
-    }
+    std::string fallback_unique_id() const override { return "Celestron_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "Celestron NexStar Mount Driver";
@@ -219,8 +243,7 @@ public:
     std::string get_driver_version() const override { return alpacacore::kVersion; }
 
     // Handset firmware captured at connect; surfaced in the web UI only. Guarded
-    // by its OWN narrow firmware_mutex_, NOT the coarse mutex_ that set_connected()
-    // holds across the multi-second connect, so a configureddevices poll never
+    // by its OWN narrow firmware_mutex_, so a configureddevices poll never
     // blocks on the mount connection.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -232,14 +255,11 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return connected_;
-    }
+    // Lock-free (decision 0016 rule 3): both flags are atomics.
+    bool get_connected() const override { return connected_.load() && !link_lost_.load(); }
 
-    // Reads only the published copy under its own narrow mutex, never the coarse
-    // mutex_ that set_connected() holds across the connect, so a configureddevices
-    // poll does not wait on the mount connection.
+    // Reads only the published copy under its own narrow mutex, so a configureddevices poll does not wait on the
+    // mount connection.
     std::string get_link_fault() const override {
         std::lock_guard<std::mutex> lock(link_fault_mutex_);
         return link_fault_text_;
@@ -256,245 +276,102 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        // transition_mutex_ spans the whole call and no getter takes it: the connect handshake runs under it and the
+        // wrapper's per-link lock, never under mutex_ (decision 0016). Lock order: transition_mutex_,
+        // initiator_mutex_, the wrapper's lock, mutex_ (leaf).
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         std::unique_lock<std::mutex> ilock(initiator_mutex_, std::defer_lock);
-        if (!connected) {
+        // Decision 0009 point 4: a lost link is relinked only by the client's Connected=true, which tears the dead
+        // session down (slew bodies included) and connects afresh.
+        const bool relink = connected && connected_.load() && link_lost_.load();
+        if (!connected || relink) {
             ilock.lock();
-            // Cancel + join the background slew/pulse task threads BEFORE
-            // taking mutex_: the slew task tail re-acquires mutex_, so joining
-            // under the lock would deadlock, and leaving the threads running
-            // across the protocol disconnect would race the shared wrapper.
+            // Cancel + join the status poll and the background slew/pulse task
+            // threads BEFORE closing: the task threads take mutex_ and send on the
+            // shared wrapper, so leaving them running across the protocol
+            // disconnect would race it.
+            stop_status_poller();
             cancel_async_tasks();
         }
-        std::unique_lock<std::mutex> lock(mutex_);
+        auto& protocol = CelestronProtocolWrapper::instance();
+        if (relink) {
+            clear_session_state();
+            protocol.disconnect();
+        }
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
         // newer pending disconnect by staying down.
-        if (!connected && record_disconnect_if_connect_in_flight(connected_)) {
+        if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_)) {
+        if (connected && consume_pending_disconnect(connected_.load())) {
             return;
         }
-        if (connected == connected_) {
+        if (connected == connected_.load()) {
             return;
         }
-        ++motion_generation_;
-
-        auto& protocol = CelestronProtocolWrapper::instance();
-        if (connected) {
-            // An auto-detected mount resolves its port here, not in the factory (#659).
-            util::connect_resolved(
-                connection_info_, connection_resolved_, connection_resolver_,
-                [&protocol](const ConnectionInfo& info) {
-                    if (!protocol.connect(info)) {
-                        // The wrapper's reason (a port another device holds, #1202)
-                        // goes to the operator.
-                        const std::string reason = protocol.last_connect_error();
-                        const std::string message = reason.empty() ? "Failed to connect to Celestron mount"
-                                                                   : "Failed to connect to Celestron mount: " + reason;
-                        // Refused TCP connect, vanished serial node, or a port another connected
-                        // device now holds (#1202): stale, re-scan.
-                        if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
-                            throw util::StaleEndpoint(message);
-                        }
-                        throw AlpacaException(message);
-                    }
-                },
-                "Celestron");
-            connected_ = true;
-            mount_firmware_version_ = "";
-            mount_model_id_ = -1;
-            mount_model_name_ = "";
-            site_info_valid_ = false;
-            timezone_offset_valid_ = false;
-            tracking_mode_valid_ = false;
-            target_ra_set_ = false;
-            target_dec_set_ = false;
-            parked_ = false;
-            parking_ = false;
-            at_home_ = false;
-            homing_ = false;
-            pulse_guide_active_.fill(false);
-            pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
-            slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
-            last_utc_valid_ = false;
-            client_disagreement_warned_ = false;
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
-            position_link_health_.reset();
-            publish_link_fault_locked();
-            last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
-            last_slew_error_.clear();
-
-            try {
-                mount_firmware_version_ = protocol.get_handset_firmware_version();
-                // Determine if precise commands are available (v1.6+ for RA/Dec, v2.2+ for Alt/Az)
-                // TODO: Parse firmware version to detect v1.6+ support; assume precise for now.
-            } catch (...) {
-            }
-            // HC fw "0.0" means the hand controller isn't functional (e.g. WiFi-only connection).
-            // In that case, HC-level commands ('E','e','R','r','S','s','L') don't work —
-            // use pass-through MC commands instead (MC_GET_POSITION, MC_GOTO_FAST, etc.).
-            hc_available_ = !mount_firmware_version_.empty() && mount_firmware_version_ != "0.0";
-            // Publish the firmware to the web-UI getter under its OWN narrow mutex
-            // so a configureddevices poll never blocks on the coarse mutex_ that
-            // this connect sequence holds for several seconds.
-            {
-                // Gate on the version string directly (not hc_available_) so the
-                // UI display isn't coupled to HC-command support: suppress the
-                // empty / "0.0" sentinel the same way SynScan suppresses "0.0.0".
-                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_ = (!mount_firmware_version_.empty() && mount_firmware_version_ != "0.0")
-                                      ? mount_firmware_version_
-                                      : std::string();
-            }
-            ALPACA_LOG_WARN("Celestron", "HC firmware: " + mount_firmware_version_ +
-                           " — HC " + (hc_available_ ? "available" : "unavailable, using pass-through commands"));
-            try {
-                mount_model_id_ = protocol.get_model_id();
-                mount_model_name_ = protocol.get_model_name();
-            } catch (...) {
-            }
-
-            // Probe the AUX bus to discover connected devices and capabilities.
-            has_autoguider_port_ = false;
-            has_ra_switch_ = false;
-            has_dec_switch_ = false;
-            has_gps_ = false;
-            has_focuser_ = false;
-            detected_devices_.clear();
-            try {
-                detected_devices_ = protocol.probe_bus();
-                for (const auto& dev : detected_devices_) {
-                    ALPACA_LOG_INFO("Celestron", "Detected: " + dev.name +
-                                   " (0x" + ([](int a) {
-                                       char buf[8];
-                                       std::snprintf(buf, sizeof(buf), "%02X", a);
-                                       return std::string(buf);
-                                   })(dev.address) + ") fw " + dev.firmware_version);
-                    switch (dev.address) {
-                        case CelestronProtocolWrapper::DEV_DEC_AG:
-                            has_autoguider_port_ = true;
-                            break;
-                        case CelestronProtocolWrapper::DEV_RA_SW:
-                            has_ra_switch_ = true;
-                            break;
-                        case CelestronProtocolWrapper::DEV_DEC_SW:
-                            has_dec_switch_ = true;
-                            break;
-                        case CelestronProtocolWrapper::DEV_GPS:
-                            has_gps_ = true;
-                            break;
-                        case CelestronProtocolWrapper::DEV_FOCUSER:
-                            has_focuser_ = true;
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            } catch (...) {
-                ALPACA_LOG_WARN("Celestron", "Bus probe failed, using default capabilities");
-            }
-
-            if (pending_site_latitude_.has_value() && pending_site_longitude_.has_value()) {
-                LocationInfo loc;
-                loc.latitude_degrees = pending_site_latitude_.value();
-                loc.longitude_degrees = pending_site_longitude_.value();
-                try {
-                    protocol.set_location(loc);
-                    site_latitude_cached_ = loc.latitude_degrees;
-                    site_longitude_cached_ = loc.longitude_degrees;
-                    site_info_valid_ = true;
-                } catch (...) {
-                }
-            }
-            if (pending_site_elevation_.has_value()) {
-                site_elevation_m_ = pending_site_elevation_.value();
-            }
-            if (sync_time_on_connect_) {
-                sync_mount_time_locked();
-            }
-            // Warm caches so first property reads stay within Conform fast-time targets.
-            try {
-                if (hc_available_) {
-                    auto raw = protocol.get_ra_dec_raw(use_precise_commands_);
-                    int bits = use_precise_commands_ ? 24 : 16;
-                    cached_ra_hours_ = decode_ra_hours(raw.first, bits);
-                    cached_dec_degrees_ = decode_angle(raw.second, bits);
-                } else {
-                    uint32_t ra_raw = protocol.get_mc_position(0);
-                    uint32_t dec_raw = protocol.get_mc_position(1);
-                    cached_ra_hours_ = decode_ra_hours(ra_raw, 24);
-                    cached_dec_degrees_ = decode_angle(dec_raw, 24);
-                }
-                equatorial_cache_valid_ = true;
-                last_equatorial_update_ = std::chrono::steady_clock::now();
-            } catch (...) {
-            }
-            try {
-                auto raw = protocol.get_alt_az_raw(use_precise_commands_);
-                int bits = use_precise_commands_ ? 24 : 16;
-                cached_az_degrees_ = wrap_degrees(decode_angle(raw.first, bits));
-                cached_alt_degrees_ = decode_angle(raw.second, bits);
-                altaz_cache_valid_ = true;
-                last_altaz_update_ = std::chrono::steady_clock::now();
-            } catch (...) {
-            }
-            try {
-                LocationInfo info = protocol.get_location();
-                site_latitude_cached_ = info.latitude_degrees;
-                site_longitude_cached_ = info.longitude_degrees;
-                site_info_valid_ = true;
-            } catch (...) {
-            }
-        } else {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++motion_generation_;
+        }
+        if (!connected) {
+            // State first, then the close: it waits for an exchange in flight, so none sees a closed link, and
+            // no getter waits for it.
+            clear_session_state();
             protocol.disconnect();
-            connected_ = false;
-            {
-                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_.clear();
-            }
-            target_ra_set_ = false;
-            target_dec_set_ = false;
-            parked_ = false;
-            parking_ = false;
-            at_home_ = false;
-            homing_ = false;
-            pulse_guide_active_.fill(false);
-            pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
-            slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
-            sync_completed_this_session_ = false;
-            skip_next_ra_learn_ = false;
-            flip_in_progress_ = false;
-            last_slew_error_.clear();
-            position_link_health_.reset();
-            publish_link_fault_locked();
+            return;
         }
+        try {
+            connect_session(protocol);
+        } catch (...) {
+            // A throw after the open closes it again; connected_ was never set.
+            try {
+                protocol.disconnect();
+            } catch (...) {  // NOLINT(bugprone-empty-catch): the connect's own error is the one to report
+            }
+            clear_session_state();
+            throw;
+        }
+        start_status_poller();
     }
 
+    // "gps_status": whether the mount's GPS module holds a link, with the module's own latitude and longitude
+    // (issue #1277). Listed only when the bus probe found the GPS module (has_gps_) at connect.
+    static constexpr std::string_view kGpsStatusAction = "gps_status";
+
     std::vector<std::string> get_supported_actions() const override {
-        return {};
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_ || link_lost_.load() || !has_gps_) return {};
+        return {std::string(kGpsStatusAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+        (void)action_parameters;  // gps_status takes none
+        if (!util::is_gps_status_action(action_name)) {
+            throw AlpacaException("Action not supported: " + std::string(action_name),
+                                  AlpacaError::ActionNotImplemented);
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (!has_gps_) {
+                throw AlpacaException("Action not supported: " + std::string(action_name),
+                                      AlpacaError::ActionNotImplemented);
+            }
+        }
+        // The pass-through exchanges run outside mutex_ (the wrapper serialises the wire).
+        const auto reading = CelestronProtocolWrapper::instance().get_gps_reading();
+        if (!reading.linked) return util::format_gps_status(false, std::nullopt, std::nullopt);
+        return util::format_gps_status(true, reading.latitude_degrees, reading.longitude_degrees);
     }
 
     bool can_action(std::string_view action_name) const override {
-        (void)action_name;
-        return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return connected_ && !link_lost_.load() && has_gps_ && util::is_gps_status_action(action_name);
     }
 
     std::string command_blind(std::string_view command, bool raw) override {
-        std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = CelestronProtocolWrapper::instance();
         if (raw) {
@@ -506,7 +383,6 @@ public:
     }
 
     bool command_bool(std::string_view command, bool raw) override {
-        std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = CelestronProtocolWrapper::instance();
         if (raw) {
@@ -518,7 +394,6 @@ public:
     }
 
     std::string command_string(std::string_view command, bool raw) override {
-        std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = CelestronProtocolWrapper::instance();
         if (raw) {
@@ -536,8 +411,7 @@ public:
     double get_altitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        refresh_altaz_cache_locked();
-        return cached_alt_degrees_;
+        return served_altaz_locked().second;
     }
 
     double get_aperture_diameter() const override {
@@ -564,9 +438,13 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (homing_ && connected_) {
-            check_homing_complete_locked();
+        // AtHome is affected only by FindHome failures. A failed goto or Park
+        // still surfaces through Slewing without making this independent flag
+        // unreadable.
+        if (!last_home_error_.empty()) {
+            throw AlpacaException(last_home_error_);
         }
+        // The status poll checks a FindHome for completion; the getter serves its result.
         return at_home_;
     }
 
@@ -579,8 +457,7 @@ public:
     double get_azimuth() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        refresh_altaz_cache_locked();
-        return cached_az_degrees_;
+        return served_altaz_locked().first;
     }
 
     bool get_can_find_home() const override {
@@ -598,7 +475,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now();
         bool active = false;
         for (std::size_t axis = 0; axis < pulse_guide_active_.size(); ++axis) {
             if (pulse_guide_active_[axis] && now >= pulse_guide_end_time_[axis]) {
@@ -665,16 +542,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (!position_link_health_.faulted() && target_ra_set_ && target_dec_set_ &&
-            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+            clock_.now() < position_override_until_ && !get_slewing_locked()) {
             return std::clamp(target_dec_degrees_, -90.0, 90.0);
         }
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now();
         double dec_value;
         if (!position_link_health_.faulted() && pg_hold_dec_valid_ && now < pg_hold_dec_until_) {
             dec_value = pg_hold_dec_degrees_;
         } else {
-            refresh_equatorial_cache_locked();
-            dec_value = cached_dec_degrees_;
+            dec_value = served_equatorial_locked().second;
         }
         if (!position_link_health_.faulted() && pg_dec_correction_valid_ && now < pg_dec_correction_until_) {
             dec_value = pg_dec_baseline_degrees_ + pg_dec_expected_delta_degrees_;
@@ -684,6 +560,7 @@ public:
     }
 
     double get_declination_rate() const override {
+        check_connected();
         return 0.0;
     }
 
@@ -698,26 +575,38 @@ public:
         return get_tracking_locked();
     }
 
+    // The device exchange runs under the wrapper's per-link lock only; mutex_ is taken to read state and again to
+    // publish. transition_mutex_ keeps two setters' wire order and published order the same.
     void set_tracking(bool tracking) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        auto& protocol = CelestronProtocolWrapper::instance();
+        std::lock_guard<std::mutex> transition(transition_mutex_);
+        int mode = 0;
         if (tracking) {
-            const AlignmentMode alignment = alignment_mode_locked();
-            if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
-                ensure_site_info_cached_locked();
+            AlignmentMode alignment = AlignmentMode::AltAz;
+            bool read_site = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                check_connected();
+                alignment = alignment_mode_locked();
+                read_site = alignment != AlignmentMode::AltAz && !site_info_valid_ && site_info_attempt_due_locked();
             }
+            if (read_site) {
+                read_site_info_unlocked();
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
             if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
                 throw AlpacaException("Set SiteLatitude before enabling equatorial tracking", AlpacaError::ValueNotSet);
             }
-            const int mode = tracking_mode_for_alignment_locked(alignment);
-            protocol.set_tracking_mode(mode);
-            tracking_mode_cached_ = mode;
+            mode = tracking_mode_for_alignment_locked(alignment);
         } else {
-            protocol.set_tracking_mode(0);
-            tracking_mode_cached_ = 0;
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
         }
-        tracking_mode_valid_ = true;
+        CelestronProtocolWrapper::instance().set_tracking_mode(mode);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_) {
+            set_tracking_mode_cached_locked(mode);
+        }
     }
 
     double get_focal_length() const override {
@@ -746,13 +635,14 @@ public:
         if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
             throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         check_connected();
         double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
         double dec_percent = (rate.dec / kSiderealDegPerSec) * 100.0;
         auto& protocol = CelestronProtocolWrapper::instance();
         protocol.set_autoguide_rate(0, ra_percent);
         protocol.set_autoguide_rate(1, dec_percent);
+        std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = rate;
     }
 
@@ -760,16 +650,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (!position_link_health_.faulted() && target_ra_set_ && target_dec_set_ &&
-            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+            clock_.now() < position_override_until_ && !get_slewing_locked()) {
             return target_ra_hours_;
         }
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now();
         double ra_value;
         if (!position_link_health_.faulted() && pg_hold_ra_valid_ && now < pg_hold_ra_until_) {
             ra_value = pg_hold_ra_hours_;
         } else {
-            refresh_equatorial_cache_locked();
-            ra_value = cached_ra_hours_;
+            ra_value = served_equatorial_locked().first;
         }
         if (!position_link_health_.faulted() && pg_ra_correction_valid_ && now < pg_ra_correction_until_) {
             ra_value = std::fmod(pg_ra_baseline_hours_ + pg_ra_expected_delta_hours_, 24.0);
@@ -780,6 +669,7 @@ public:
     }
 
     double get_right_ascension_rate() const override {
+        check_connected();
         return 0.0;
     }
 
@@ -794,11 +684,12 @@ public:
         if (!hc_available_) {
             return -1;
         }
-        auto& protocol = CelestronProtocolWrapper::instance();
-        char side = protocol.get_pier_side();
-        if (side == 'W') return 0;  // pierEast (ASCOM enum: 0=pierEast)
-        if (side == 'E') return 1;  // pierWest (ASCOM enum: 1=pierWest)
-        return -1;
+        const auto frame = served_frame_locked().value;
+        if (!frame.pier_known) {
+            throw AlpacaException("Celestron mount pier side is not available: the last read failed",
+                                  AlpacaError::DriverException);
+        }
+        return frame.side_of_pier;
     }
 
     void set_side_of_pier(int side) override {
@@ -807,31 +698,28 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        (void)dec;
+        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-        }
-        if (!site_info_valid_) {
             return -1;
         }
-        double lst_hours = compute_local_sidereal_time_hours(std::chrono::system_clock::now(),
-                                                            site_longitude_cached_);
-        double hour_angle = shortest_ra_delta_hours(lst_hours, ra);
-        return hour_angle >= 0.0 ? 0 : 1;
+        double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+        double hour_angle = util::shortest_ra_delta_hours(lst_hours, ra);
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     EquatorialSystem get_equatorial_system() const override {
         return EquatorialSystem::J2000;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -847,14 +735,15 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-        }
-        return compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+        return util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_cached_);
     }
 
     double get_site_elevation() const override {
-        return site_elevation_m_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
 
     void set_site_elevation(double elevation) override {
@@ -862,14 +751,12 @@ public:
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         site_elevation_m_ = elevation;
     }
 
     double get_site_latitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-        }
         if (!site_info_valid_) {
             throw AlpacaException("SiteLatitude not available — location not set on mount",
                                   AlpacaError::ValueNotSet);
@@ -878,15 +765,12 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
-            throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees",
-                                  AlpacaError::InvalidValue);
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        LocationInfo info = current_location_locked();
+        util::validate_latitude(latitude);
+        std::lock_guard<std::mutex> transition(transition_mutex_);
+        LocationInfo info = current_location();
         info.latitude_degrees = latitude;
         CelestronProtocolWrapper::instance().set_location(info);
+        std::lock_guard<std::mutex> lock(mutex_);
         site_latitude_cached_ = latitude;
         site_longitude_cached_ = info.longitude_degrees;
         site_info_valid_ = true;
@@ -895,9 +779,6 @@ public:
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-        }
-        if (!site_info_valid_) {
             throw AlpacaException("SiteLongitude not available — location not set on mount",
                                   AlpacaError::ValueNotSet);
         }
@@ -905,15 +786,12 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-            throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees",
-                                  AlpacaError::InvalidValue);
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        LocationInfo info = current_location_locked();
+        util::validate_longitude(longitude);
+        std::lock_guard<std::mutex> transition(transition_mutex_);
+        LocationInfo info = current_location();
         info.longitude_degrees = longitude;
         CelestronProtocolWrapper::instance().set_location(info);
+        std::lock_guard<std::mutex> lock(mutex_);
         site_latitude_cached_ = info.latitude_degrees;
         site_longitude_cached_ = longitude;
         site_info_valid_ = true;
@@ -940,10 +818,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-            throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees",
-                                  AlpacaError::InvalidValue);
-        }
+        util::validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -958,10 +833,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-            throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours",
-                                  AlpacaError::InvalidValue);
-        }
+        util::validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -981,70 +853,116 @@ public:
     }
 
     std::chrono::system_clock::time_point get_utc_date() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        if (!last_utc_valid_) {
-            try {
-                TimeInfo info = CelestronProtocolWrapper::instance().get_time();
-                timezone_offset_minutes_ = info.timezone_offset_minutes;
-                timezone_offset_valid_ = true;
-                dst_observed_ = info.dst_enabled;
-
-                using namespace std::chrono;
-                int year = 2000 + info.year;
-                sys_days date = sys_days{std::chrono::year{year} /
-                                         std::chrono::month{static_cast<unsigned>(info.month)} /
-                                         std::chrono::day{static_cast<unsigned>(info.day)}};
-                auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
-                int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
-                last_utc_set_ = local_time - minutes{total_offset};
-            } catch (...) {
-                last_utc_set_ = std::chrono::system_clock::now();
-            }
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+        ensure_utc_cached(lock);
+        if (const auto utc = utc_offset_.current(clock_.now())) {
+            return *utc;
         }
-        return current_utc_time_locked();
-    }
-
-    void set_utc_date(std::chrono::system_clock::time_point utc) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        set_utc_date_locked(utc);
+        throw AlpacaException("The mount clock could not be read", AlpacaError::InvalidOperation);
     }
 
 private:
-    // Body of set_utc_date with mutex_ already held — also called from the
-    // connect path (sync_mount_time_locked), which holds mutex_; calling the
-    // public locking method there would self-deadlock on the non-recursive mutex.
-    void set_utc_date_locked(std::chrono::system_clock::time_point utc) {
-        check_connected();
+    // What a UTCDate write sends and what it publishes once the mount has taken it.
+    struct TimeWrite {
+        TimeInfo info;
+        LocalTimeInfo tz;
+        std::chrono::system_clock::time_point utc;
+        std::chrono::system_clock::duration client_minus_host{};
+    };
+
+    static TimeWrite prepare_time_write(std::chrono::system_clock::time_point utc) {
+        TimeWrite write;
+        write.utc = utc;
         std::time_t utc_time_t = std::chrono::system_clock::to_time_t(utc);
-        LocalTimeInfo tz_info = compute_local_timezone_info(utc_time_t);
+        write.tz = compute_local_timezone_info(utc_time_t);
 
         std::tm local_tm {};
         local_tm = *std::localtime(&utc_time_t);
 
-        TimeInfo info;
-        info.hour = local_tm.tm_hour;
-        info.minute = local_tm.tm_min;
-        info.second = local_tm.tm_sec;
-        info.month = local_tm.tm_mon + 1;
-        info.day = local_tm.tm_mday;
-        info.year = (local_tm.tm_year + 1900) % 100;
-        info.timezone_offset_minutes = tz_info.offset_minutes;
-        info.dst_enabled = tz_info.dst;
+        write.info.hour = local_tm.tm_hour;
+        write.info.minute = local_tm.tm_min;
+        write.info.second = local_tm.tm_sec;
+        write.info.month = local_tm.tm_mon + 1;
+        write.info.day = local_tm.tm_mday;
+        write.info.year = (local_tm.tm_year + 1900) % 100;
+        write.info.timezone_offset_minutes = write.tz.offset_minutes;
+        write.info.dst_enabled = write.tz.dst;
+        write.client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
+        return write;
+    }
 
-        const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
-        CelestronProtocolWrapper::instance().set_time(info);
-        timezone_offset_minutes_ = tz_info.offset_minutes;
+    void publish_time_write_locked(const TimeWrite& write) {
+        timezone_offset_minutes_ = write.tz.offset_minutes;
         timezone_offset_valid_ = true;
-        dst_observed_ = tz_info.dst;
-        last_utc_set_ = utc;
-        last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-        last_utc_valid_ = true;
+        dst_observed_ = write.tz.dst;
+        utc_offset_.set(write.utc, clock_.now());
+        mount_clock_unreadable_ = false;
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
-        alpacacore::util::ClientUtcWarning::warn_once("Celestron", client_minus_host, client_disagreement_warned_);
+        alpacacore::util::ClientUtcWarning::warn_once("Celestron", write.client_minus_host,
+                                                      client_disagreement_warned_);
+    }
+
+    // The mount's clock as one read of it gave it.
+    struct MountClock {
+        int timezone_offset_minutes = 0;
+        bool dst = false;
+        std::chrono::system_clock::time_point utc;
+    };
+
+    // The mount's clock, or nothing when it does not answer. Touches no driver state: the caller has mutex_ free.
+    static std::optional<MountClock> read_mount_clock() {
+        try {
+            TimeInfo info = CelestronProtocolWrapper::instance().get_time();
+            using namespace std::chrono;
+            int year = 2000 + info.year;
+            sys_days date = sys_days{std::chrono::year{year} / std::chrono::month{static_cast<unsigned>(info.month)} /
+                                     std::chrono::day{static_cast<unsigned>(info.day)}};
+            auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
+            int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
+            return MountClock{info.timezone_offset_minutes, info.dst_enabled, local_time - minutes{total_offset}};
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    // Seeds the clock from the read. A mount that did not answer leaves it unset and remembers that: the host clock
+    // is not the mount's, so UTCDate throws InvalidOperation rather than answer with it, and no getter asks again.
+    void publish_mount_clock_locked(const std::optional<MountClock>& mount_clock) const {
+        if (!mount_clock) {
+            mount_clock_unreadable_ = true;
+            return;
+        }
+        timezone_offset_minutes_ = mount_clock->timezone_offset_minutes;
+        timezone_offset_valid_ = true;
+        dst_observed_ = mount_clock->dst;
+        utc_offset_.set(mount_clock->utc, clock_.now());
+    }
+
+    // The mount's clock, read once at connect so no getter reaches the mount for it; a connect-time read that failed
+    // is remembered (mount_clock_unreadable_), so the getter throws without I/O. A getter that finds the clock unset
+    // for another reason reads it with mutex_ free, and a UTCDate write that landed meanwhile wins.
+    void ensure_utc_cached(std::unique_lock<std::mutex>& lock) const {
+        if (utc_offset_.valid() || mount_clock_unreadable_) {
+            return;
+        }
+        const auto mount_clock = without_lock(lock, [] { return read_mount_clock(); });
+        if (!utc_offset_.valid()) {
+            publish_mount_clock_locked(mount_clock);
+        }
+    }
+
+public:
+    void set_utc_date(std::chrono::system_clock::time_point utc) override {
+        std::lock_guard<std::mutex> transition(transition_mutex_);
+        check_connected();
+        const TimeWrite write = prepare_time_write(utc);
+        CelestronProtocolWrapper::instance().set_time(write.info);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_) {
+            publish_time_write_locked(write);
+        }
     }
 
 public:
@@ -1055,27 +973,43 @@ public:
             check_connected();
             check_not_parked_locked("FindHome");
         }
-        reap_slew_task();
-        reap_pulse_tasks();
-        std::lock_guard<std::mutex> lock(mutex_);
+        join_pulse_bodies();
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         clear_pulse_guiding_locked();
         check_not_parked_locked("FindHome");
-        ++motion_generation_;
-        auto& protocol = CelestronProtocolWrapper::instance();
+        claim_slew_slot_locked();  // supersedes a slew or park body in flight; it is not joined
+        const std::uint64_t mine = motion_generation_;
 
         // MC_LEVEL_START (0x0B) — moves each axis to its hardware home switch.
-        // Asynchronous: returns immediately, client polls Slewing/AtHome.
-        protocol.level_start(0);
-        protocol.level_start(1);
+        // Asynchronous: returns immediately, client polls Slewing/AtHome. The initiator lock held here keeps any
+        // other initiator out while mutex_ is free for the exchange.
+        try {
+            const bool sent = send_motion_locked(
+                lock, [this, mine] { return motion_generation_ == mine; },
+                [] {
+                    auto& protocol = CelestronProtocolWrapper::instance();
+                    protocol.level_start(0);
+                    protocol.level_start(1);
+                });
+            if (!sent) {
+                return;  // taken over before the command went out: the new owner has the state
+            }
+        } catch (const std::exception& ex) {
+            fail_home(lock, std::string("FindHome dispatch failed: ") + ex.what());
+            throw AlpacaException(last_slew_error_);
+        } catch (...) {
+            fail_home(lock, "FindHome dispatch failed: unknown exception");
+            throw AlpacaException(last_slew_error_);
+        }
 
         homing_ = true;
         at_home_ = false;
-        slewing_cached_ = true;
+        set_slewing_locked(true);
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that calls FindHome after a failed GOTO must not be told the OLD
         // goto failed while it's homing.
-        last_slew_error_.clear();
+        clear_motion_errors_locked();
     }
 
     // Park is an asynchronous initiator (ITelescopeV4; ConformU 4.5 times it
@@ -1091,8 +1025,8 @@ public:
         // (or a slew could clobber a park) in the gap.
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
-            // Check BEFORE reaping: reap_slew_task() would cancel a park in
-            // flight (its task clears parking_), so a second Park would
+            // Check BEFORE claiming: claiming the slew slot would end a park in
+            // flight (its body clears parking_), so a second Park would
             // restart the slew instead of being the documented no-op.
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1102,35 +1036,52 @@ public:
         }
         double park_ra = 0.0;
         double park_dec = 0.0;
-        // Cancel + join any previous slew task first. Must run without mutex_
-        // held: the task takes mutex_.
-        reap_slew_task();
-        reap_pulse_tasks();
+        // A pulse body is joined first (no mutex_ held: it ends its axis late); a slew or park body in flight is
+        // superseded by the claim below, not joined.
+        join_pulse_bodies();
+        bool displaced = false;
+        bool prev_slewing = false;
+        bool prev_homing = false;
+        bool prev_at_home = false;
+        bool prev_manual[2] = {false, false};
+        auto prev_override = util::TaskClock::clock::time_point::min();
+        uint64_t superseded = 0;
+        uint64_t park_generation = 0;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             clear_pulse_guiding_locked();
             if (parked_ || parking_) {
                 return;  // ASCOM: Park on a parked (or parking) mount is harmless.
             }
             if (!park_position_set_) {
-                refresh_equatorial_cache_locked();
-                park_ra_hours_ = cached_ra_hours_;
-                park_dec_degrees_ = cached_dec_degrees_;
+                std::tie(park_ra_hours_, park_dec_degrees_) = measure_equatorial(lock);
                 park_position_set_ = true;
             }
             park_ra = park_ra_hours_;
             park_dec = park_dec_degrees_;
-            validate_ra_dec(park_ra, park_dec, "Park");
+            util::validate_ra_dec(park_ra, park_dec, "Park");
             // Run the slew-safety gate synchronously so an unaligned mount
             // still throws from Park (as the blocking implementation did)
             // rather than silently never reaching AtPark.
-            check_slew_safety_locked("Park");
+            check_slew_safety(lock, "Park");
+            // Every check that can refuse Park has run: claim the slot, then snapshot what the block below
+            // overwrites (for a refused start) and publish.
+            superseded = motion_generation_;
+            displaced = claim_slew_slot_locked();
+            park_generation = motion_generation_;
+            // Snapshot what the block below overwrites, for a refused start.
+            prev_slewing = slewing_cached_;
+            prev_homing = homing_;
+            prev_at_home = at_home_;
+            prev_manual[0] = manual_axis_slewing_[0];
+            prev_manual[1] = manual_axis_slewing_[1];
+            prev_override = position_override_until_;
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
-            slewing_cached_ = true;
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            set_slewing_locked(true);
+            slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+            position_override_until_ = util::TaskClock::clock::time_point::min();
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             homing_ = false;
@@ -1138,339 +1089,549 @@ public:
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls Park after a failed GOTO must not be told the OLD
             // goto failed while it's parking.
-            last_slew_error_.clear();
+            clear_motion_errors_locked();
             parking_ = true;
-            ++motion_generation_;
         }
 
-        // Join any task that raced in between the reap above and this lock,
-        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
-        // to observe the cancel and exit, so joining under the lock deadlocks.
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        while (slew_task_thread_.joinable()) {
-            std::thread stale = std::move(slew_task_thread_);
-            tlock.unlock();
-            slew_task_cancel_.store(true);
-            task_cv_.notify_all();
-            stale.join();
-            slew_task_cancel_.store(false);
-            tlock.lock();
-        }
-        slew_task_thread_ = std::thread([this, park_ra, park_dec]() {
-            std::unique_lock<std::mutex> lock(mutex_);
-            if (!connected_ || slew_task_cancel_.load() || !parking_) {
-                parking_ = false;
-                return;
-            }
-            try {
-                do_slew_to_coordinates_locked(park_ra, park_dec);
-            } catch (const std::exception& ex) {
-                fail_park_locked(std::string("Park slew dispatch failed: ") + ex.what());
-                return;
-            } catch (...) {
-                fail_park_locked("Park slew dispatch failed with unknown exception");
-                return;
-            }
-            // Poll for completion with mutex_ released between polls so the
-            // HTTP getters (Slewing, RightAscension, ...) stay responsive.
-            const auto timeout = std::chrono::seconds(120);
-            const auto start = std::chrono::steady_clock::now();
-            const auto start_grace = std::chrono::seconds(2);
-            bool saw_slewing = false;
-            while (true) {
-                lock.unlock();
-                const bool keep_going = task_wait_for(std::chrono::milliseconds(250), slew_task_cancel_);
-                lock.lock();
-                // Cancelled (disconnect / destruction / superseding slew),
-                // aborted, or unparked meanwhile: the canceller owns the state.
-                if (!keep_going || !connected_ || !parking_) {
-                    parking_ = false;
-                    return;
-                }
-                const bool slewing = poll_hardware_slewing_locked();
-                if (slewing) {
-                    saw_slewing = true;
-                } else {
-                    if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
-                        continue;
-                    }
-                    break;
-                }
-                if (std::chrono::steady_clock::now() - start > timeout) {
-                    fail_park_locked("Park slew timed out after 120s");
-                    return;
-                }
-            }
-            if (slew_settle_time_seconds_ > 0) {
-                lock.unlock();
-                const bool keep_going =
-                    task_wait_for(std::chrono::seconds(slew_settle_time_seconds_), slew_task_cancel_);
-                lock.lock();
-                if (!keep_going || !connected_ || !parking_) {
-                    parking_ = false;
-                    return;
-                }
-            }
-            try {
-                CelestronProtocolWrapper::instance().set_tracking_mode(0);
-                tracking_mode_cached_ = 0;
-                tracking_mode_valid_ = true;
-            } catch (const std::exception& ex) {
-                fail_park_locked(std::string("Park: stopping tracking failed: ") + ex.what());
-                return;
-            } catch (...) {
-                fail_park_locked("Park: stopping tracking failed with unknown exception");
-                return;
-            }
-            slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
-            flip_in_progress_ = false;
-            // AtPark and Slewing flip in the same locked step.
-            parked_ = true;
-            parking_ = false;
-        });
-    }
-
-    // Stop a park slew: cancel the GOTO, then both axes to rate 0. Each stop
-    // is tried on its own so one failure does not skip the others. Returns
-    // the first failure's message, or an empty string when every stop was
-    // answered (#742). mutex_ must be held.
-    std::string stop_park_slew_locked() {
-        auto& protocol = CelestronProtocolWrapper::instance();
-        std::string first_error;
-        const auto try_stop = [&first_error](auto&& stop) {
-            try {
-                stop();
-            } catch (const std::exception& ex) {
-                if (first_error.empty()) {
-                    first_error = ex.what();
-                }
-            } catch (...) {
-                if (first_error.empty()) {
-                    first_error = "unknown exception";
-                }
-            }
+        // Every hook runs with mutex_ held and releases it around its own exchange; whatever takes the park over
+        // (AbortSlew, Unpark, a disconnect) claims the slot, which bumps motion_generation_, and `superseded` reads
+        // that after each hook. A hook that wrote after an exchange tests `still_mine` first.
+        const auto still_mine = [this, park_generation](const util::OperationContext& ctx) {
+            return body_owns_locked(ctx) && motion_generation_ == park_generation;
         };
-        try_stop([&protocol] { protocol.cancel_goto(); });
-        try_stop([&protocol] { protocol.move_axis_fixed_rate(0, 0); });
-        try_stop([&protocol] { protocol.move_axis_fixed_rate(1, 0); });
-        return first_error;
+        start_slew_body(
+            [this, park_ra, park_dec, park_generation, still_mine](util::OperationContext& ctx) {
+                std::unique_lock<std::mutex> lock(mutex_);
+                util::ParkSlewHooks hooks;
+                hooks.still_parking = [this] { return connected_ && parking_; };
+                hooks.superseded = [this, park_generation] { return motion_generation_ != park_generation; };
+                hooks.abandon = [this, park_generation] {
+                    if (motion_generation_ == park_generation) {
+                        parking_ = false;
+                    }
+                };
+                hooks.dispatch = [&] {
+                    do_slew_to_coordinates(lock, park_ra, park_dec, &ctx, [&] { return still_mine(ctx); });
+                };
+                hooks.poll_slewing = [&] { return poll_hardware_slewing(lock); };
+                hooks.stop_tracking = [&] {
+                    const bool sent = send_motion_locked(
+                        lock, [&] { return still_mine(ctx); },
+                        [] { CelestronProtocolWrapper::instance().set_tracking_mode(0); });
+                    if (sent) {
+                        set_tracking_mode_cached_locked(0);  // the mount was told, whoever owns the slot now
+                    }
+                };
+                hooks.fail = [&](const std::string& message) { fail_park(lock, message, ctx); };
+                hooks.complete = [&] {
+                    // The position is read first; AtPark and Slewing then flip in one locked step, beside the
+                    // position the mount stopped at.
+                    const Measurement landed = measure_full(lock);
+                    if (!still_mine(ctx)) {
+                        return;  // taken over while the mount was read: the new owner has the state
+                    }
+                    publish_measurement_locked(landed);
+                    set_slewing_locked(false);
+                    slew_force_until_ = util::TaskClock::clock::time_point::min();
+                    flip_in_progress_ = false;
+                    parked_ = true;
+                    parking_ = false;
+                };
+                util::run_park_slew(ctx, lock, clock_, slew_settle_time_seconds_, hooks);
+            },
+            displaced,
+            [&] {
+                parking_ = false;
+                set_slewing_locked(prev_slewing);
+                homing_ = prev_homing;
+                at_home_ = prev_at_home;
+                manual_axis_slewing_[0] = prev_manual[0];
+                manual_axis_slewing_[1] = prev_manual[1];
+                position_override_until_ = prev_override;
+                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                keep_pending_stop_locked(superseded);  // the park goto never went out
+            });
     }
 
-    // Park task failure path: stop the hardware so the reported idle state
-    // (Slewing false, AtPark false) matches reality, then drop the parking
-    // state so the caller can retry. When a stop fails the mount may still
-    // be moving, so Slewing keeps its cached value. mutex_ must be held.
-    void fail_park_locked(const std::string& message) {
-        const std::string stop_error = stop_park_slew_locked();
+    // The stop exchanges: cancel the GOTO, then both axes to rate 0. Each stop is tried on its own so one failure
+    // does not skip the others. Returns the first failure's message, or an empty string when every stop was
+    // answered (#742). The wrapper's per-link lock serialises them, so the caller has mutex_ free (decision 0016).
+    static std::string stop_park_slew_wire() { return util::stop_goto_and_axes(CelestronProtocolWrapper::instance()); }
+
+    void clear_motion_errors_locked() {
+        last_slew_error_.clear();
+        last_home_error_.clear();
+        slew_status_poll_failures_ = 0;
+        home_status_poll_failures_ = 0;
+    }
+
+    // The stops, through the send gate with mutex_ released; `lock` is held again on return. `owns` says the caller
+    // still holds the mount: when it does not, nothing is sent and the result is empty.
+    template <typename Owns>
+    std::string stop_park_slew(std::unique_lock<std::mutex>& lock, Owns&& owns) const {
+        std::string stop_error;
+        send_motion_locked(lock, owns, [&] { stop_error = stop_park_slew_wire(); });
+        return stop_error;
+    }
+
+    // The stops of a failure found by the status poll or the slew-complete wait, which no initiator owns: they go out
+    // only while no newer initiator has taken the mount, so a client that saw the failure and sent a new motion
+    // never has it cut short by a stale stop. try_lock, never a blocking lock: set_connected joins the poll while it
+    // holds initiator_mutex_. A changed generation means a newer motion owns the mount and the stale stop is
+    // dropped (Superseded). A busy lock means an initiator is dispatching but may not have taken the mount (a sync,
+    // a pulse guide, a motion command that fails validation bump no generation): the stop stays pending (Busy) and
+    // the poll retries it. `generation` is the motion generation the failure was found under.
+    enum class StopOutcome : std::uint8_t { Sent, Busy, Superseded };
+    struct FailureStop {
+        StopOutcome outcome = StopOutcome::Superseded;
+        std::string error;  // Sent only
+    };
+    struct PendingStop {
+        std::uint64_t generation = 0;
+        std::string message;
+        bool home = false;
+    };
+
+    FailureStop stop_park_slew_unless_superseded(std::uint64_t generation) const {
+        run_failure_stop_hook();
+        std::unique_lock<std::mutex> ilock(initiator_mutex_, std::try_to_lock);
+        if (!ilock.owns_lock()) {
+            bool first_deferral = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                first_deferral = !pending_stop_ || pending_stop_->generation != generation;
+            }
+            if (first_deferral) {  // the poll retries every tick; one line per deferred stop
+                ALPACA_LOG_WARN("Celestron",
+                                "failure stop deferred: an initiator holds the mount; retried by the poll");
+            }
+            return {StopOutcome::Busy, {}};
+        }
+        std::unique_lock<std::mutex> lock(mutex_);
+        std::string stop_error;
+        const bool sent = send_motion_locked(
+            lock, [&] { return motion_generation_ == generation; }, [&] { stop_error = stop_park_slew_wire(); });
+        if (!sent) {
+            ALPACA_LOG_WARN("Celestron", "failure stop skipped: a new motion command owns the mount");
+            return {StopOutcome::Superseded, {}};
+        }
+        return {StopOutcome::Sent, stop_error};
+    }
+
+    // Sends the failure stops with mutex_ free and publishes the outcome: Sent finishes the failure, Busy keeps the
+    // stop pending for the next poll tick, Superseded drops it. Busy never writes an older generation over a newer one
+    // (generations only go up): a retry that read the stop before an initiator handed it on leaves it handed on.
+    void send_failure_stop(std::uint64_t generation, const std::string& message, bool home) const {
+        const FailureStop stop = stop_park_slew_unless_superseded(generation);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stop.outcome == StopOutcome::Busy) {
+            if (!pending_stop_ || pending_stop_->generation <= generation) {
+                pending_stop_ = PendingStop{generation, message, home};
+            }
+            return;
+        }
+        if (pending_stop_ && pending_stop_->generation == generation) {
+            pending_stop_.reset();
+        }
+        if (stop.outcome == StopOutcome::Sent && connected_) {
+            if (home) {
+                finish_home_failure_locked(generation, message, stop.error);
+            } else {
+                finish_slew_poll_failure_locked(message, stop.error);
+            }
+        }
+    }
+
+    // Poll tick: retries a stop that found an initiator busy. A disconnect drops it here; a newer motion drops it in
+    // send_failure_stop, once no initiator is busy, so an initiator that fails before it sends anything can hand it
+    // back first (keep_pending_stop_locked).
+    void retry_pending_stop() const {
+        PendingStop pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!pending_stop_) {
+                return;
+            }
+            if (!connected_) {
+                pending_stop_.reset();
+                return;
+            }
+            pending = *pending_stop_;
+        }
+        send_failure_stop(pending.generation, pending.message, pending.home);
+    }
+
+    // An initiator that took the mount from generation `superseded` and then failed before it sent anything: a stop
+    // still pending under `superseded` stays due under the new generation (only a stop or a motion on the wire, or a
+    // disconnect, drops one).
+    void keep_pending_stop_locked(std::uint64_t superseded) const {
+        if (pending_stop_ && pending_stop_->generation == superseded) {
+            pending_stop_->generation = motion_generation_;
+        }
+    }
+
+    // The failure of a motion body is sticky from the moment it is known, before its stops go out with mutex_ free:
+    // a client that polls Slewing in the window reads the failure, not a motion still in progress.
+    void begin_motion_failure_locked(const std::string& message) const {
+        if (!connected_) {
+            return;
+        }
+        last_home_error_.clear();
+        last_slew_error_ = message;
+    }
+
+    // False once the body behind `ctx` was superseded or cancelled, or the mount disconnected: the new owner (or the
+    // disconnect) owns the state, and a body that lost it touches neither a flag nor an axis (decision 0006 rule 6).
+    // Every claimer bumps the slot's generation under mutex_ before it writes, so a body that tests this under
+    // mutex_ right before a write cannot write over a newer initiator.
+    bool body_owns_locked(const util::OperationContext& ctx) const {
+        return connected_ && ctx.stop_reason() == util::StopReason::None;
+    }
+
+    // Park task failure path: stop the hardware, then drop the parking state so
+    // the caller can retry. A successful stop publishes Slewing=false; a failed
+    // stop leaves a persistent Slewing error because the mount may still move.
+    void fail_park(std::unique_lock<std::mutex>& lock, const std::string& message, util::OperationContext& ctx) {
+        const auto owns = [this, &ctx] { return body_owns_locked(ctx); };
+        if (!owns()) {
+            ALPACA_LOG_WARN("Celestron", "Park failure dropped, the park was taken over: " + message);
+            return;
+        }
+        begin_motion_failure_locked(message);
+        const std::string stop_error = stop_park_slew(lock, owns);
+        if (!owns()) {
+            return;
+        }
         parking_ = false;
         if (stop_error.empty()) {
-            slewing_cached_ = false;
+            set_slewing_locked(false);
         } else {
+            last_slew_error_ =
+                message + "; stopping after failure failed: " + stop_error + "; the mount may still be moving";
             ALPACA_LOG_ERROR("Celestron",
                              "stop after park failure failed: " + stop_error + "; the mount may still be moving");
         }
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
         flip_in_progress_ = false;
         ALPACA_LOG_WARN("Celestron", message);
     }
 
+    void fail_slew(std::unique_lock<std::mutex>& lock, const std::string& message, util::OperationContext& ctx) {
+        const auto owns = [this, &ctx] { return body_owns_locked(ctx); };
+        if (!owns()) {
+            ALPACA_LOG_WARN("Celestron", "slew failure dropped, the slew was taken over: " + message);
+            return;
+        }
+        begin_motion_failure_locked(message);
+        const std::string stop_error = stop_park_slew(lock, owns);
+        if (!owns()) {
+            return;
+        }
+        if (stop_error.empty()) {
+            set_slewing_locked(false);
+        } else {
+            last_slew_error_ =
+                message + "; stopping after failure failed: " + stop_error + "; the mount may still be moving";
+            ALPACA_LOG_ERROR("Celestron",
+                             "stop after slew failure failed: " + stop_error + "; the mount may still be moving");
+        }
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
+        drop_poll_in_flight_locked();
+        flip_in_progress_ = false;
+        ALPACA_LOG_WARN("Celestron", message);
+    }
+
+    // `generation` is the motion generation the failing read was taken under.
+    void fail_slew_poll(std::unique_lock<std::mutex>& lock, const std::string& message,
+                        std::uint64_t generation) const {
+        begin_motion_failure_locked(message);
+        without_lock(lock, [&] { send_failure_stop(generation, message, false); });
+    }
+
+    // After the stops of a poll-found slew failure went out (`connected_` already holds).
+    void finish_slew_poll_failure_locked(const std::string& message, const std::string& stop_error) const {
+        if (stop_error.empty()) {
+            set_slewing_locked(false);
+        } else {
+            last_slew_error_ =
+                message + "; stopping after failure failed: " + stop_error + "; the mount may still be moving";
+            ALPACA_LOG_ERROR("Celestron", "stop after Slewing poll failure failed: " + stop_error +
+                                              "; the mount may still be moving");
+        }
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
+        drop_poll_in_flight_locked();
+        flip_in_progress_ = false;
+        ALPACA_LOG_WARN("Celestron", message);
+    }
+
+    void fail_home(std::unique_lock<std::mutex>& lock, const std::string& message) const {
+        const std::uint64_t generation = motion_generation_;
+        begin_home_failure_locked(message);
+        finish_home_failure_locked(
+            generation, message, stop_park_slew(lock, [this, generation] { return motion_generation_ == generation; }));
+    }
+
+    // The two halves of fail_home, for the status poll, which sends the stop between them with mutex_ free
+    // (the wrapper's per-link lock serialises it): the error is sticky from the first half on, so a getter in the
+    // window reports the failure rather than a finished home.
+    void begin_home_failure_locked(const std::string& message) const {
+        homing_ = false;
+        at_home_ = false;
+        last_slew_error_ = message;
+        last_home_error_ = message;
+        ALPACA_LOG_WARN("Celestron", message);
+    }
+
+    // `message` is what begin_home_failure_locked stored and `generation` the motion generation it ran under; a new
+    // initiator (it bumps the generation) owns the state now, so only the log carries the stop's outcome then.
+    void finish_home_failure_locked(std::uint64_t generation, const std::string& message,
+                                    const std::string& stop_error) const {
+        if (!stop_error.empty()) {
+            ALPACA_LOG_ERROR("Celestron",
+                             "stop after FindHome failure failed: " + stop_error + "; the mount may still be moving");
+        }
+        if (motion_generation_ != generation) {
+            return;
+        }
+        if (stop_error.empty()) {
+            set_slewing_locked(false);
+        } else {
+            last_slew_error_ =
+                message + "; stopping after failure failed: " + stop_error + "; the mount may still be moving";
+            last_home_error_ = last_slew_error_;
+        }
+    }
+
     void pulse_guide(int direction, int duration) override {
+        // The MC_AUX_GUIDE duration byte counts 10 ms steps, 255 per command, chained up to 25.5 s.
+        if (direction < 0 || direction > 3 || duration < 0 || duration > kMaxPulseGuideMs) {
+            throw AlpacaException("PulseGuide direction must be 0-3 and duration 0-25500 ms",
+                                  AlpacaError::InvalidValue);
+        }
         if (!has_autoguider_port_) {
             throw AlpacaException("PulseGuide not supported — no autoguider port detected",
                                   AlpacaError::MethodNotImplemented);
         }
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("PulseGuide");
-
         auto& protocol = CelestronProtocolWrapper::instance();
 
         int axis = -1;
         int velocity = 0;
+        bool read_pier = false;
+        // Validation only. The pier read, the join and the start below run with mutex_ free (decision 0006).
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("PulseGuide");
 
-        switch (direction) {
-            case 0: // North → DEC axis, positive velocity
-                axis = 1;
-                velocity = static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
-                break;
-            case 1: // South → DEC axis, negative velocity
-                axis = 1;
-                velocity = -static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
-                break;
-            case 2: // East → RA axis, negative velocity (slow tracking = RA increases on sky)
-                axis = 0;
-                velocity = -static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
-                break;
-            case 3: // West → RA axis, positive velocity (speed tracking = RA decreases on sky)
-                axis = 0;
-                velocity = static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
-                break;
-            default:
-                throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+            switch (direction) {
+                case 0:  // North → DEC axis, positive velocity
+                    axis = 1;
+                    velocity = static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
+                    break;
+                case 1:  // South → DEC axis, negative velocity
+                    axis = 1;
+                    velocity = -static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
+                    break;
+                case 2:  // East → RA axis, negative velocity (slow tracking = RA increases on sky)
+                    axis = 0;
+                    velocity = -static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
+                    break;
+                case 3:  // West → RA axis, positive velocity (speed tracking = RA decreases on sky)
+                    axis = 0;
+                    velocity = static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
+                    break;
+                default:
+                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+            }
+
+            if (velocity == 0) {
+                velocity = (direction == 1 || direction == 2) ? -1 : 1;
+            }
+
+            read_pier = axis == 1 && hc_available_;
         }
-
-        if (velocity == 0) {
-            velocity = (direction == 1 || direction == 2) ? -1 : 1;
-        }
-
         // MC_AUX_GUIDE uses raw motor coordinates: positive rate = South
         // when pierWest (normal), North when pierEast (through-the-pole).
         // Flip DEC sign on the normal (West) side so North means North.
-        if (axis == 1 && hc_available_) {
+        if (read_pier) {
             char pier = protocol.get_pier_side();
             if (pier == 'W') {
                 velocity = -velocity;
             }
         }
 
-        int total_cs = std::clamp(duration / 10, 0, 2550);
+        int total_cs = duration / 10;
         int first_chunk_cs = std::min(total_cs, 255);
 
-        const bool is_dec_axis = (direction == 0 || direction == 1);
-        const double duration_sec = duration / 1000.0;
-        const auto now = std::chrono::steady_clock::now();
-        const auto hold_end = now + std::chrono::milliseconds(duration) +
-                              kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
-        const auto correction_end = now + std::chrono::milliseconds(duration) +
-                                    kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
+        // The pulse body never takes mutex_, but joining it waits out the serial transaction it is in: do it
+        // with mutex_ free, so no getter stalls for that long.
+        pulse_ops_[axis].cancel_all_and_join();
 
-        refresh_equatorial_cache_locked();
+        std::chrono::milliseconds pulse_length{duration};
+        util::TaskClock::clock::time_point pulse_start;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("PulseGuide");
 
-        if (is_dec_axis) {
-            pg_hold_ra_hours_ = cached_ra_hours_;
-            pg_hold_ra_valid_ = !pulse_guide_active_[0] || now >= pulse_guide_end_time_[0];
-            pg_hold_ra_until_ = hold_end;
-            pg_hold_dec_valid_ = false;
+            // Taken after the join: it can last a full transaction timeout, which would leave these stale.
+            const bool is_dec_axis = (direction == 0 || direction == 1);
+            const double duration_sec = duration / 1000.0;
+            const auto now = clock_.now();
+            const auto hold_end =
+                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
+            const auto correction_end =
+                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
 
-            double expected_delta = guide_rate_.dec * duration_sec;
-            if (direction == 1) expected_delta = -expected_delta;
-            pg_dec_baseline_degrees_ = cached_dec_degrees_;
-            pg_dec_expected_delta_degrees_ = expected_delta;
-            pg_dec_correction_valid_ = true;
-            pg_dec_correction_until_ = correction_end;
-        } else {
-            pg_hold_dec_degrees_ = cached_dec_degrees_;
-            pg_hold_dec_valid_ = !pulse_guide_active_[1] || now >= pulse_guide_end_time_[1];
-            pg_hold_dec_until_ = hold_end;
-            pg_hold_ra_valid_ = false;
+            const auto [served_ra, served_dec] = served_equatorial_locked();
 
-            double expected_delta = (guide_rate_.ra * duration_sec) / 15.0;
-            if (direction == 3) expected_delta = -expected_delta;
-            pg_ra_baseline_hours_ = cached_ra_hours_;
-            pg_ra_expected_delta_hours_ = expected_delta;
-            pg_ra_correction_valid_ = true;
-            pg_ra_correction_until_ = correction_end;
+            if (is_dec_axis) {
+                pg_hold_ra_hours_ = served_ra;
+                pg_hold_ra_valid_ = !pulse_guide_active_[0] || now >= pulse_guide_end_time_[0];
+                pg_hold_ra_until_ = hold_end;
+                pg_hold_dec_valid_ = false;
+
+                double expected_delta = guide_rate_.dec * duration_sec;
+                if (direction == 1) expected_delta = -expected_delta;
+                pg_dec_baseline_degrees_ = served_dec;
+                pg_dec_expected_delta_degrees_ = expected_delta;
+                pg_dec_correction_valid_ = true;
+                pg_dec_correction_until_ = correction_end;
+            } else {
+                pg_hold_dec_degrees_ = served_dec;
+                pg_hold_dec_valid_ = !pulse_guide_active_[1] || now >= pulse_guide_end_time_[1];
+                pg_hold_dec_until_ = hold_end;
+                pg_hold_ra_valid_ = false;
+
+                double expected_delta = (guide_rate_.ra * duration_sec) / 15.0;
+                if (direction == 3) expected_delta = -expected_delta;
+                pg_ra_baseline_hours_ = served_ra;
+                pg_ra_expected_delta_hours_ = expected_delta;
+                pg_ra_correction_valid_ = true;
+                pg_ra_correction_until_ = correction_end;
+            }
+
+            pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
+            pulse_start = now;
+        }
+        // The guide write goes out with mutex_ free; the initiator lock keeps any other motion out meanwhile.
+        protocol.pulse_guide_axis(axis, velocity, first_chunk_cs);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pulse_guide_active_[static_cast<std::size_t>(axis)] = true;
+            pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
+                pulse_start + pulse_length + kPulseGuideCompletionDelay;
+            drop_poll_in_flight_locked();
         }
 
-        reap_pulse_task(axis);
-        pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
-        protocol.pulse_guide_axis(axis, velocity, first_chunk_cs);
-
-        pulse_guide_active_[static_cast<std::size_t>(axis)] = true;
-        pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
-            now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
-
-        // Chain remaining chunks in a joinable member thread (MC_AUX_GUIDE max
-        // = 255cs = 2550ms). Never detached: the thread is cancelled + joined
-        // on disconnect and in the destructor. It never takes mutex_, so
-        // reaping it while mutex_ is held (as here) cannot deadlock.
+        // Chain remaining chunks on the axis's own slot (MC_AUX_GUIDE max =
+        // 255cs = 2550ms): one slot per axis, so a pulse on RA never supersedes
+        // one on Dec. Cancelled + joined on disconnect and in the destructor.
+        // Started with mutex_ free, like the join above.
         int remaining_cs = total_cs - first_chunk_cs;
         if (remaining_cs > 0) {
-            // Join any task that raced in between the reap above and this lock,
-            // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
-            // to observe the cancel and exit, so joining under the lock deadlocks.
-            std::unique_lock<std::mutex> tlock(task_mutex_);
-            const auto pulse_index = static_cast<std::size_t>(axis);
-            while (pulse_task_threads_[pulse_index].joinable()) {
-                std::thread stale = std::move(pulse_task_threads_[pulse_index]);
-                tlock.unlock();
-                pulse_task_cancel_[pulse_index].store(true);
-                task_cv_.notify_all();
-                stale.join();
-                pulse_task_cancel_[pulse_index].store(false);
-                tlock.lock();
-            }
-            pulse_task_threads_[pulse_index] = std::thread([this, axis, velocity, remaining_cs, first_chunk_cs,
-                                                            pulse_index]() {
-                if (!task_wait_for(std::chrono::milliseconds(first_chunk_cs * 10), pulse_task_cancel_[pulse_index])) {
-                    return;
-                }
-                int left = remaining_cs;
-                auto& proto = CelestronProtocolWrapper::instance();
-                while (left > 0) {
-                    int chunk = std::min(left, 255);
-                    try {
-                        proto.pulse_guide_axis(axis, velocity, chunk);
-                    } catch (const std::exception& e) {
-                        // Each MC_AUX_GUIDE chunk is hardware-timed, so a
-                        // failed re-arm just ends the pulse early (no runaway).
-                        ALPACA_LOG_WARN("Celestron", std::string("Pulse-guide chunk chain aborted: ") + e.what());
-                        break;
-                    } catch (...) {
-                        ALPACA_LOG_WARN("Celestron", "Pulse-guide chunk chain aborted");
-                        break;
-                    }
-                    left -= chunk;
-                    if (left > 0 &&
-                        !task_wait_for(std::chrono::milliseconds(chunk * 10), pulse_task_cancel_[pulse_index])) {
+            try {
+                pulse_ops_[axis].start([axis, velocity, remaining_cs, first_chunk_cs](util::OperationContext& ctx) {
+                    if (!ctx.wait_for(std::chrono::milliseconds(first_chunk_cs * 10))) {
                         return;
                     }
+                    int left = remaining_cs;
+                    auto& proto = CelestronProtocolWrapper::instance();
+                    while (left > 0) {
+                        int chunk = std::min(left, 255);
+                        try {
+                            proto.pulse_guide_axis(axis, velocity, chunk);
+                        } catch (const std::exception& e) {
+                            // Each MC_AUX_GUIDE chunk is hardware-timed, so a
+                            // failed re-arm just ends the pulse early (no runaway).
+                            ALPACA_LOG_WARN("Celestron", std::string("Pulse-guide chunk chain aborted: ") + e.what());
+                            break;
+                        } catch (...) {
+                            ALPACA_LOG_WARN("Celestron", "Pulse-guide chunk chain aborted");
+                            break;
+                        }
+                        left -= chunk;
+                        if (left > 0 && !ctx.wait_for(std::chrono::milliseconds(chunk * 10))) {
+                            return;
+                        }
+                    }
+                });
+            } catch (...) {
+                // No chain will end the pulse the first chunk started on this axis, and the mount keeps
+                // guiding for the first chunk only: stop the axis as AbortSlew does and drop the pulse state
+                // before the refusal reaches the client.
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    const auto axis_index = static_cast<std::size_t>(axis);
+                    pulse_guide_active_[axis_index] = false;
+                    pulse_guide_end_time_[axis_index] = util::TaskClock::clock::time_point::min();
                 }
-            });
+                if (connected_) {
+                    try {
+                        protocol.move_axis_fixed_rate(axis, 0);
+                    } catch (...) {
+                        ALPACA_LOG_ERROR("Celestron", "PulseGuide stop after a refused chain start failed on axis " +
+                                                          std::to_string(axis) + "; the axis may still be moving");
+                    }
+                }
+                throw;
+            }
         }
     }
 
     void set_park() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        refresh_equatorial_cache_locked();
-        park_ra_hours_ = cached_ra_hours_;
-        park_dec_degrees_ = cached_dec_degrees_;
+        std::tie(park_ra_hours_, park_dec_degrees_) = measure_equatorial(lock);
         park_position_set_ = true;
     }
 
     void slew_to_coordinates(double ra, double dec) override {
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinates");
-            validate_ra_dec(ra, dec, "SlewToCoordinates");
-            check_slew_safety_locked("SlewToCoordinates");
+            util::validate_ra_dec(ra, dec, "SlewToCoordinates");
+            check_slew_safety(lock, "SlewToCoordinates");
+            check_tracking_for_slew(lock, "SlewToCoordinates");
         }
-        reap_slew_task();
-        reap_pulse_tasks();
+        join_pulse_bodies();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
-        do_slew_to_coordinates_locked(ra, dec);
-        const uint64_t owner_generation = ++motion_generation_;
+        claim_slew_slot_locked();  // supersedes a slew or park body in flight; it is not joined
+        const uint64_t owner_generation = motion_generation_;
+        const auto still_mine = [this, owner_generation] { return motion_generation_ == owner_generation; };
+        // The initiator lock stays held through the dispatch, so no other initiator runs while mutex_ is free.
+        if (!do_slew_to_coordinates(lock, ra, dec, nullptr, still_mine)) {
+            throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
+        }
         ilock.unlock();
         if (!wait_for_slew_complete(lock, owner_generation)) {
             // Another client's AbortSlew / Park / MoveAxis / FindHome / slew took the
             // mount: skip the completion tail so it cannot write T2 over their motion.
             throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
         }
-        restore_tracking_after_slew_locked();
-        learn_ra_offset_locked(ra);
+        restore_tracking_after_slew(lock, still_mine);
+        learn_ra_offset(lock, ra, still_mine);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see park()
         {
-            // Gate BEFORE reaping: reap_slew_task() would cancel a park in
+            // Gate BEFORE claiming: claiming the slew slot would end a park in
             // flight (clearing parking_) and let this slew clobber it.
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
+            util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            check_tracking_for_slew(lock, "SlewToCoordinatesAsync");
         }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
@@ -1478,20 +1639,22 @@ public:
         bool use_passthrough = false;
         bool do_flip = false;
         uint32_t flip_ra = 0, flip_dec = 0;
-        // Cancel + join any previous slew task BEFORE publishing the new slew
-        // state below (its tail would otherwise clear the new slew's flags).
-        // Must run without mutex_ held: the previous task's tail takes mutex_.
-        reap_slew_task();
-        reap_pulse_tasks();
+        // A pulse body is joined first (no mutex_ held: it ends its axis late). A slew or park body in flight is
+        // superseded by the claim below, before the new slew's state is published; it is not joined.
+        join_pulse_bodies();
+        bool displaced = false;
+        bool prev_slewing = false;
+        bool prev_at_home = false;
+        bool prev_manual[2] = {false, false};
+        auto prev_override = util::TaskClock::clock::time_point::min();
+        uint64_t superseded = 0;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             clear_pulse_guiding_locked();
             check_not_parked_locked("SlewToCoordinatesAsync");
-            validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
-            check_slew_safety_locked("SlewToCoordinatesAsync");
-            slew_aborted_ = false;
-            ++motion_generation_;
+            util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            check_slew_safety(lock, "SlewToCoordinatesAsync");
 
             use_passthrough = !hc_available_;
             int bits = use_passthrough ? 24 : (use_precise_commands_ ? 24 : 16);
@@ -1501,7 +1664,8 @@ public:
             dec_raw = encode_angle(dec, bits);
             precise = use_precise_commands_;
 
-            do_flip = compute_flip_locked(ra, dec, ra_biased, flip_ra, flip_dec);
+            // The last read that can refuse the slew: nothing is claimed yet, so a throw leaves the mount as it was.
+            do_flip = compute_flip(lock, ra, dec, ra_biased, flip_ra, flip_dec);
 
             {
                 char buf[256];
@@ -1516,15 +1680,22 @@ public:
                 ALPACA_LOG_WARN("Celestron", std::string(buf));
             }
 
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
-            slewing_cached_ = true;
+            superseded = motion_generation_;
+            displaced = claim_slew_slot_locked();
+            slew_aborted_ = false;
+            drop_poll_in_flight_locked();
+            prev_slewing = slewing_cached_;
+            prev_at_home = at_home_;
+            prev_manual[0] = manual_axis_slewing_[0];
+            prev_manual[1] = manual_axis_slewing_[1];
+            prev_override = position_override_until_;
+            set_slewing_locked(true);
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that retries a rejected goto must not be told the OLD goto
             // failed.
-            last_slew_error_.clear();
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            clear_motion_errors_locked();
+            slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+            position_override_until_ = util::TaskClock::clock::time_point::min();
             flip_in_progress_ = do_flip;
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
@@ -1537,61 +1708,64 @@ public:
         }
 
         double slew_target_ra = ra;
-        // Join any task that raced in between the reap above and this lock,
-        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
-        // to observe the cancel and exit, so joining under the lock deadlocks.
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        while (slew_task_thread_.joinable()) {
-            std::thread stale = std::move(slew_task_thread_);
-            tlock.unlock();
-            slew_task_cancel_.store(true);
-            task_cv_.notify_all();
-            stale.join();
-            slew_task_cancel_.store(false);
-            tlock.lock();
-        }
-        slew_task_thread_ = std::thread(
-            [this, ra_raw, dec_raw, precise, use_passthrough, do_flip, flip_ra, flip_dec, slew_target_ra]() {
+        start_slew_body(
+            [this, ra_raw, dec_raw, precise, use_passthrough, do_flip, flip_ra, flip_dec,
+             slew_target_ra](util::OperationContext& ctx) {
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (!connected_ || slew_task_cancel_.load()) {
+                    // The goto goes out through the send gate with mutex_ free. An initiator that supersedes this body
+                    // does not join it: a goto already committed to the wire lands before the newer initiator's own
+                    // command, and a body that lost the slot before the gate sends nothing.
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    if (!body_owns_locked(ctx)) {
                         return;
                     }
                     try {
-                        auto& protocol = CelestronProtocolWrapper::instance();
-                        if (do_flip) {
-                            protocol.mc_goto_fast(0, flip_ra);
-                            protocol.mc_goto_fast(1, flip_dec);
-                        } else if (use_passthrough) {
-                            protocol.mc_goto_fast(0, ra_raw);
-                            protocol.mc_goto_fast(1, dec_raw);
-                        } else {
-                            protocol.goto_ra_dec_raw(ra_raw, dec_raw, precise);
+                        const bool sent = send_motion_locked(
+                            lock, [&] { return body_owns_locked(ctx); },
+                            [&] {
+                                auto& protocol = CelestronProtocolWrapper::instance();
+                                if (do_flip) {
+                                    protocol.mc_goto_fast(0, flip_ra);
+                                    protocol.mc_goto_fast(1, flip_dec);
+                                } else if (use_passthrough) {
+                                    protocol.mc_goto_fast(0, ra_raw);
+                                    protocol.mc_goto_fast(1, dec_raw);
+                                } else {
+                                    protocol.goto_ra_dec_raw(ra_raw, dec_raw, precise);
+                                }
+                            });
+                        if (!sent) {
+                            return;
+                        }
+                        run_slew_body_hook(lock, ctx);  // test seam: the GOTO is out, the gate is free, mutex_ is free
+                        if (!body_owns_locked(ctx)) {
+                            return;
                         }
                     } catch (const std::exception& ex) {
-                        slewing_cached_ = false;
-                        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                        position_override_until_ = std::chrono::steady_clock::time_point::min();
-                        flip_in_progress_ = false;
                         // open-astro#575: a reap by a newer initiator or AbortSlew is not a
                         // failure -- that operation owns clearing/replacing last_slew_error_.
-                        if (!slew_task_cancel_.load()) {
-                            last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + ex.what();
+                        if (ctx.stop_reason() == util::StopReason::None) {
+                            fail_slew(lock, std::string("SlewToCoordinatesAsync dispatch failed: ") + ex.what(), ctx);
                         }
-                        ALPACA_LOG_WARN("Celestron", std::string("Async slew dispatch failed: ") + ex.what());
+                        return;
+                    } catch (...) {
+                        if (ctx.stop_reason() == util::StopReason::None) {
+                            fail_slew(lock, "SlewToCoordinatesAsync dispatch failed: unknown exception", ctx);
+                        }
                         return;
                     }
                 }
                 // Poll for slew completion WITHOUT holding the mutex so that
                 // HTTP endpoints (Slewing, RightAscension, etc.) remain responsive.
                 auto timeout = std::chrono::seconds(120);
-                auto start = std::chrono::steady_clock::now();
+                auto start = clock_.now();
                 auto start_grace = std::chrono::seconds(2);
                 bool saw_slewing = false;
+                int completion_poll_failures = 0;
                 bool use_axis_poll = do_flip || use_passthrough;
                 auto& protocol = CelestronProtocolWrapper::instance();
                 while (true) {
-                    if (!task_wait_for(std::chrono::milliseconds(250), slew_task_cancel_)) {
+                    if (!ctx.wait_for(std::chrono::milliseconds(250))) {
                         // Cancelled (AbortSlew, disconnect / destruction, or a superseding motion):
                         // exit without touching driver state.
                         return;
@@ -1603,27 +1777,66 @@ public:
                         } else {
                             still_slewing = !protocol.is_slew_done(0) || !protocol.is_slew_done(1);
                         }
+                    } catch (const std::exception& ex) {
+                        if (ctx.stop_reason() == util::StopReason::None) {
+                            const int failures = ++completion_poll_failures;
+                            if (failures < kLinkFailureThreshold) {
+                                ALPACA_LOG_WARN("Celestron",
+                                                "Slew completion poll failed (" + std::to_string(failures) + "/" +
+                                                    std::to_string(kLinkFailureThreshold) + "): " + ex.what());
+                                continue;
+                            }
+                            std::unique_lock<std::mutex> lock(mutex_);
+                            if (connected_ && ctx.stop_reason() == util::StopReason::None) {
+                                fail_slew(lock,
+                                          "Slew completion polling failed after " + std::to_string(failures) +
+                                              " consecutive failures: " + ex.what(),
+                                          ctx);
+                            }
+                        }
+                        return;
                     } catch (...) {
-                        still_slewing = false;
+                        if (ctx.stop_reason() == util::StopReason::None) {
+                            const int failures = ++completion_poll_failures;
+                            if (failures < kLinkFailureThreshold) {
+                                ALPACA_LOG_WARN("Celestron", "Slew completion poll failed (" +
+                                                                 std::to_string(failures) + "/" +
+                                                                 std::to_string(kLinkFailureThreshold) +
+                                                                 "): " + "unknown exception");
+                                continue;
+                            }
+                            std::unique_lock<std::mutex> lock(mutex_);
+                            if (connected_ && ctx.stop_reason() == util::StopReason::None) {
+                                fail_slew(lock,
+                                          "Slew completion polling failed after " + std::to_string(failures) +
+                                              " consecutive failures: unknown exception",
+                                          ctx);
+                            }
+                        }
+                        return;
                     }
+                    completion_poll_failures = 0;
                     if (still_slewing) {
                         saw_slewing = true;
                     }
                     if (!still_slewing) {
-                        if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                        if (!saw_slewing && (clock_.now() - start) < start_grace) {
                             continue;
                         }
                         break;
                     }
-                    if (std::chrono::steady_clock::now() - start > timeout) {
-                        ALPACA_LOG_WARN("Celestron", "Async slew timed out after 120s");
-                        break;
+                    if (clock_.now() - start > timeout) {
+                        std::unique_lock<std::mutex> lock(mutex_);
+                        if (connected_ && ctx.stop_reason() == util::StopReason::None) {
+                            fail_slew(lock, "Slew timed out after 120s", ctx);
+                        }
+                        return;
                     }
                 }
                 if (slew_settle_time_seconds_ > 0) {
                     // Settle without holding the mutex (a settle of many seconds
                     // must not block GETs); bail out if cancelled meanwhile.
-                    if (!task_wait_for(std::chrono::seconds(slew_settle_time_seconds_), slew_task_cancel_)) {
+                    if (!ctx.wait_for(std::chrono::seconds(slew_settle_time_seconds_))) {
                         return;
                     }
                 }
@@ -1631,23 +1844,52 @@ public:
                 // makes restore_tracking_after_slew_locked()/learn_ra_offset_locked()
                 // throw NotConnected, and an exception escaping the thread lambda
                 // is std::terminate.
+                // Each step that asks the mount releases mutex_, so the body checks it still owns the slot after each.
                 try {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    slewing_cached_ = false;
-                    slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                    equatorial_cache_valid_ = false;
-                    altaz_cache_valid_ = false;
-                    flip_in_progress_ = false;
-                    if (!connected_ || slew_task_cancel_.load()) {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
                         return;
                     }
-                    restore_tracking_after_slew_locked();
-                    learn_ra_offset_locked(slew_target_ra);
+                    const auto owns = [this, &ctx] { return body_owns_locked(ctx); };
+                    restore_tracking_after_slew(lock, owns);
+                    if (!owns()) {
+                        return;
+                    }
+                    learn_ra_offset(lock, slew_target_ra, owns);
+                    if (!owns()) {
+                        return;
+                    }
+                    const Measurement landed = measure_full(lock);
+                    if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+                        return;
+                    }
+                    // Slewing, the flags and the position the mount stopped at flip in one locked step.
+                    publish_measurement_locked(landed);
+                    set_slewing_locked(false);
+                    slew_force_until_ = util::TaskClock::clock::time_point::min();
+                    flip_in_progress_ = false;
                 } catch (const std::exception& ex) {
-                    ALPACA_LOG_WARN("Celestron", std::string("Async slew completion handling failed: ") + ex.what());
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    if (connected_ && ctx.stop_reason() == util::StopReason::None) {
+                        fail_slew(lock, std::string("Slew completion handling failed: ") + ex.what(), ctx);
+                    }
                 } catch (...) {
-                    ALPACA_LOG_WARN("Celestron", "Async slew completion handling failed");
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    if (connected_ && ctx.stop_reason() == util::StopReason::None) {
+                        fail_slew(lock, "Slew completion handling failed: unknown exception", ctx);
+                    }
                 }
+            },
+            displaced,
+            [&] {
+                set_slewing_locked(prev_slewing);
+                at_home_ = prev_at_home;
+                manual_axis_slewing_[0] = prev_manual[0];
+                manual_axis_slewing_[1] = prev_manual[1];
+                position_override_until_ = prev_override;
+                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                flip_in_progress_ = false;
+                keep_pending_stop_locked(superseded);  // the goto never went out
             });
     }
 
@@ -1683,28 +1925,39 @@ public:
     }
 
     void sync_to_coordinates(double ra, double dec) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // An initiator like the motion commands: its write and its publish stay one step to them (the sync used
+        // to hold mutex_ across the write, which kept them out).
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
-        auto& protocol = CelestronProtocolWrapper::instance();
-        if (hc_available_) {
-            int bits = use_precise_commands_ ? 24 : 16;
-            uint32_t ra_raw = encode_ra_raw(ra, bits);
-            uint32_t dec_raw = encode_angle(dec, bits);
-            protocol.sync_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
-        } else {
-            uint32_t ra_raw = encode_ra_raw(ra, 24);
-            uint32_t dec_raw = encode_angle(dec, 24);
-            protocol.mc_set_position(0, ra_raw);
-            protocol.mc_set_position(1, dec_raw);
-        }
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
+        const bool hc = hc_available_;
+        const bool precise = use_precise_commands_;
+        without_lock(lock, [&] {
+            auto& protocol = CelestronProtocolWrapper::instance();
+            if (hc) {
+                int bits = precise ? 24 : 16;
+                uint32_t ra_raw = encode_ra_raw(ra, bits);
+                uint32_t dec_raw = encode_angle(dec, bits);
+                protocol.sync_ra_dec_raw(ra_raw, dec_raw, precise);
+            } else {
+                uint32_t ra_raw = encode_ra_raw(ra, 24);
+                uint32_t dec_raw = encode_angle(dec, 24);
+                protocol.mc_set_position(0, ra_raw);
+                protocol.mc_set_position(1, dec_raw);
+            }
+        });
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
         target_dec_set_ = true;
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
+        // The mount now reports the synced position: write it through, and drop the poll in flight.
+        snapshot_.write([ra, dec](PolledFrame& frame) {
+            frame.ra_hours = ra;
+            frame.dec_degrees = dec;
+            frame.equatorial_known = true;
+        });
         sync_completed_this_session_ = true;
         skip_next_ra_learn_ = true;
         ALPACA_LOG_WARN("Celestron",
@@ -1730,27 +1983,42 @@ public:
         bool was_parking = false;
         std::string stop_error;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             parked_ = false;
             was_parking = parking_;
             if (was_parking) {
-                // Unpark during a park wins the race: stop the park slew and
-                // drop the parking state; the task below is then joined. A
-                // failed stop leaves Slewing at its cached value, since the
-                // park slew may still be running.
+                // Unpark during a park wins the race: drop the parking state and claim the slot, so the park body
+                // (which may be inside an exchange) finds itself Superseded and writes nothing. It is not joined: a
+                // park GOTO already on the wire lands before the stops below, which pass the same send gate.
+                // An Unpark with no park in flight claims nothing: it sends no motion, and a slew body that failed
+                // and is inside its stops finishes its own failure.
                 parking_ = false;
-                stop_error = stop_park_slew_locked();
-                if (stop_error.empty()) {
-                    slewing_cached_ = false;
-                }
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
-                flip_in_progress_ = false;
+                claim_slew_slot_locked();
+                const std::uint64_t mine = motion_generation_;
+                stop_error = stop_park_slew(lock, [this, mine] { return motion_generation_ == mine; });
             }
         }
-        if (was_parking) {
-            reap_slew_task();  // without mutex_ held
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (was_parking) {
+                // A failed stop leaves Slewing to report the stored error, since the park slew may still be
+                // running.
+                if (stop_error.empty()) {
+                    set_slewing_locked(false);
+                }
+                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                position_override_until_ = util::TaskClock::clock::time_point::min();
+                flip_in_progress_ = false;
+            }
+            if (stop_error.empty()) {
+                // A deferred failure stop stays pending: only a stop or a motion on the wire, or a disconnect, drops
+                // one. An Unpark with no park in flight sends nothing, so the next poll tick still sends it.
+                clear_motion_errors_locked();
+            } else {
+                last_home_error_.clear();
+                last_slew_error_ = "Unpark could not stop the park slew: " + stop_error;
+            }
         }
         if (!stop_error.empty()) {
             throw AlpacaException("Unpark could not stop the park slew: " + stop_error, AlpacaError::DriverException);
@@ -1780,32 +2048,30 @@ public:
             check_connected();
             check_not_parked_locked("MoveAxis");
         }
-        reap_slew_task();
-        reap_pulse_task(axis);
-        std::lock_guard<std::mutex> lock(mutex_);
+        pulse_ops_[axis].cancel_all_and_join();
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
-        ++motion_generation_;
+        claim_slew_slot_locked();  // supersedes a slew body in flight; it is not joined
+        const std::uint64_t mine = motion_generation_;
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
-        slewing_cached_ = false;
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        set_slewing_locked(false);
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
         flip_in_progress_ = false;
         manual_axis_slewing_[axis] = moving;
         pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
-        pulse_guide_end_time_[static_cast<std::size_t>(axis)] = std::chrono::steady_clock::time_point::min();
+        pulse_guide_end_time_[static_cast<std::size_t>(axis)] = util::TaskClock::clock::time_point::min();
         if (moving) {
             parked_ = false;
             at_home_ = false;
         }
-        // open-astro#575: a fresh initiator is a clean start -- a client
-        // that jogs an axis after a failed GOTO must not be told the OLD
-        // goto failed.
-        last_slew_error_.clear();
-
-        CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0);
+        send_motion_locked(
+            lock, [this, mine] { return motion_generation_ == mine; },
+            [&] { CelestronProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0); });
+        clear_motion_errors_locked();
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1827,69 +2093,50 @@ public:
 
     void abort_slew() override {
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        std::uint64_t mine = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
-            check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
-            slew_task_cancel_.store(true);
-            task_cv_.notify_all();
+            check_not_fully_parked_locked("AbortSlew");  // AbortSlew may end a park in flight
+            // The claim supersedes the slew or park body, which finds itself Superseded and writes nothing. It is
+            // bumped before any stop goes out: a blocking slew that sees the mount stopped must also see that it
+            // was superseded, so it cannot run its completion tail before slew_aborted_ is set. The park state
+            // ends here, not after the stop: a failed stop must not leave parking_ set, which would refuse every
+            // later slew and make every later Park a no-op (the stored error and Slewing report the failure).
+            claim_slew_slot_locked();
+            parking_ = false;
+            mine = motion_generation_;
         }
-        try {
-            // Stop both pulse chains before stopping hardware, so neither can
-            // re-arm a guide pulse after the stop commands.
-            reap_pulse_tasks();
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                check_connected();
-                check_not_fully_parked_locked("AbortSlew");
-                // The slew cancellation above prevents delayed dispatches. The
-                // wrapper serializes transactions, so a GOTO already in flight
-                // must finish (or time out) before these stops can reach the mount.
-                // open-astro#575: AbortSlew is a valid clearing command for a stored
-                // slew failure -- the client acted on the error, so the next Slewing
-                // read must answer normally again.
-                last_slew_error_.clear();
-                auto& protocol = CelestronProtocolWrapper::instance();
-                // Try every stop on its own, so one lost command cannot skip the others (#781).
-                std::string stop_error;
-                const auto try_stop = [&stop_error](const std::function<void()>& stop) {
-                    try {
-                        stop();
-                    } catch (const std::exception& ex) {
-                        if (stop_error.empty()) {
-                            stop_error = ex.what();
-                        }
-                    } catch (...) {
-                        if (stop_error.empty()) {
-                            stop_error = "unknown exception";
-                        }
-                    }
-                };
-                try_stop([&protocol]() { protocol.cancel_goto(); });
-                try_stop([&protocol]() { protocol.move_axis_fixed_rate(0, 0); });
-                try_stop([&protocol]() { protocol.move_axis_fixed_rate(1, 0); });
-                if (!stop_error.empty()) {
-                    // The mount may still be moving: leave Slewing and the slew state as they were.
-                    throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
-                }
-                pulse_guide_active_.fill(false);
-                pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
-                homing_ = false;
-                parking_ = false;  // an aborted park never reaches AtPark
-                slewing_cached_ = false;
-                slew_aborted_ = true;
-                ++motion_generation_;
-                flip_in_progress_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
-                manual_axis_slewing_[0] = false;
-                manual_axis_slewing_[1] = false;
-            }
-        } catch (...) {
-            reap_slew_task();
-            throw;
+        // Stop both pulse chains before stopping hardware, so none can re-arm a guide pulse after the stop commands:
+        // the joins wait out an exchange a pulse body is in, with mutex_ free. The slew body is not joined; its
+        // goto, if already on the wire, lands before the stops (the send gate).
+        pulse_ops_[0].cancel_all_and_join();
+        pulse_ops_[1].cancel_all_and_join();
+        std::unique_lock<std::mutex> lock(mutex_);
+        check_connected();
+        check_not_fully_parked_locked("AbortSlew");
+        // Try every stop on its own, so one lost command cannot skip the others (#781). The send gate orders them
+        // behind any motion command in flight.
+        const std::string stop_error = stop_park_slew(lock, [this, mine] { return motion_generation_ == mine; });
+        if (!stop_error.empty()) {
+            last_home_error_.clear();
+            last_slew_error_ = "AbortSlew stop failed: " + stop_error;
+            // The mount may still be moving: leave Slewing and the slew state as they were.
+            throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
         }
-        reap_slew_task();
+        // AbortSlew clears a stored motion error only after all stop
+        // commands are acknowledged.
+        clear_motion_errors_locked();
+        pulse_guide_active_.fill(false);
+        pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
+        homing_ = false;
+        set_slewing_locked(false);
+        slew_aborted_ = true;
+        flip_in_progress_ = false;
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
+        manual_axis_slewing_[0] = false;
+        manual_axis_slewing_[1] = false;
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
@@ -1911,93 +2158,376 @@ public:
     }
 
 private:
+    // Runs `fn`, a call into the protocol wrapper, with mutex_ released, and takes mutex_ again before it returns or
+    // throws. The wrapper serialises its transactions itself (its per-link lock is the I/O lock), so a caller that
+    // held mutex_ across the exchange would make every getter wait for it (decision 0016 rule 1). After it returns
+    // the caller re-checks whatever state it depends on.
+    template <typename Fn>
+    static auto without_lock(std::unique_lock<std::mutex>& lock, Fn&& fn) -> decltype(fn()) {
+        struct Relock {
+            std::unique_lock<std::mutex>& lock;
+            ~Relock() { lock.lock(); }
+        } relock{lock};
+        lock.unlock();
+        return fn();
+    }
+
+    // The disconnect's state half, also the first half of a relink: the driver stops answering as connected before
+    // the transport closes. The caller closes it afterwards with mutex_ free.
+    void clear_session_state() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        connected_ = false;
+        {
+            std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+            firmware_cache_.clear();
+        }
+        utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
+        mount_clock_unreadable_ = false;
+        target_ra_set_ = false;
+        target_dec_set_ = false;
+        parked_ = false;
+        parking_ = false;
+        at_home_ = false;
+        homing_ = false;
+        pulse_guide_active_.fill(false);
+        pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
+        set_slewing_locked(false);
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
+        manual_axis_slewing_[0] = false;
+        manual_axis_slewing_[1] = false;
+        sync_completed_this_session_ = false;
+        skip_next_ra_learn_ = false;
+        flip_in_progress_ = false;
+        clear_motion_errors_locked();
+        position_link_health_.reset();
+        publish_link_fault_locked();
+        snapshot_.reset();
+        link_lost_ = false;
+    }
+
+    // The connect, under transition_mutex_ with mutex_ free. Every exchange runs under the wrapper's lock alone;
+    // what it learns goes into locals and is published under mutex_ in short steps, and connected_ is set last, so a
+    // getter that sees Connected also sees the identity and the first frame (decision 0016 rules 3 and 4).
+    void connect_session(CelestronProtocolWrapper& protocol) {
+        // An auto-detected mount resolves its port here, not in the factory (#659).
+        util::connect_resolved(
+            connection_info_, connection_resolved_, connection_resolver_,
+            [&protocol](const ConnectionInfo& info) {
+                if (!protocol.connect(info)) {
+                    // The wrapper's reason (a port another device holds, #1202)
+                    // goes to the operator.
+                    const std::string reason = protocol.last_connect_error();
+                    const std::string message = reason.empty() ? "Failed to connect to Celestron mount"
+                                                               : "Failed to connect to Celestron mount: " + reason;
+                    // Refused TCP connect, vanished serial node, or a port another connected
+                    // device now holds (#1202): stale, re-scan.
+                    if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
+                        throw util::StaleEndpoint(message);
+                    }
+                    throw AlpacaException(message);
+                }
+            },
+            "Celestron");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            link_lost_ = false;
+            mount_firmware_version_ = "";
+            mount_model_id_ = -1;
+            mount_model_name_ = "";
+            site_info_valid_ = false;
+            timezone_offset_valid_ = false;
+            target_ra_set_ = false;
+            target_dec_set_ = false;
+            parked_ = false;
+            parking_ = false;
+            at_home_ = false;
+            homing_ = false;
+            pulse_guide_active_.fill(false);
+            pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
+            snapshot_.reset();
+            set_slewing_locked(false);
+            slew_force_until_ = util::TaskClock::clock::time_point::min();
+            position_override_until_ = util::TaskClock::clock::time_point::min();
+            utc_offset_.clear();
+            mount_clock_unreadable_ = false;
+            client_disagreement_warned_ = false;
+            position_link_health_.reset();
+            publish_link_fault_locked();
+            last_site_info_attempt_ = util::TaskClock::clock::time_point::min();
+            clear_motion_errors_locked();
+        }
+
+        std::string firmware;
+        try {
+            firmware = protocol.get_handset_firmware_version();
+            // Determine if precise commands are available (v1.6+ for RA/Dec, v2.2+ for Alt/Az)
+            // TODO: Parse firmware version to detect v1.6+ support; assume precise for now.
+        } catch (...) {
+            ALPACA_LOG_WARN("Celestron", "firmware version query failed; assuming precise commands");
+        }
+        // HC fw "0.0" means the hand controller isn't functional (e.g. WiFi-only connection).
+        // In that case, HC-level commands ('E','e','R','r','S','s','L') don't work —
+        // use pass-through MC commands instead (MC_GET_POSITION, MC_GOTO_FAST, etc.).
+        const bool hc = !firmware.empty() && firmware != "0.0";
+        // Publish the firmware to the web-UI getter under its OWN narrow mutex.
+        {
+            // Gate on the version string directly (not hc_available_) so the
+            // UI display isn't coupled to HC-command support: suppress the
+            // empty / "0.0" sentinel the same way SynScan suppresses "0.0.0".
+            std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+            firmware_cache_ = hc ? firmware : std::string();
+        }
+        ALPACA_LOG_WARN("Celestron", "HC firmware: " + firmware + " — HC " +
+                                         (hc ? "available" : "unavailable, using pass-through commands"));
+        int model_id = -1;
+        std::string model_name;
+        try {
+            model_id = protocol.get_model_id();
+            model_name = protocol.get_model_name();
+        } catch (...) {
+            ALPACA_LOG_WARN("Celestron", "model query failed; the model stays unknown");
+        }
+
+        // Probe the AUX bus to discover connected devices and capabilities.
+        bool autoguider_port = false;
+        bool ra_switch = false;
+        bool dec_switch = false;
+        bool gps = false;
+        bool focuser = false;
+        std::vector<CelestronProtocolWrapper::BusDevice> devices;
+        try {
+            devices = protocol.probe_bus();
+            for (const auto& dev : devices) {
+                ALPACA_LOG_INFO("Celestron", "Detected: " + dev.name + " (0x" + ([](int a) {
+                                                 char buf[8];
+                                                 std::snprintf(buf, sizeof(buf), "%02X", a);
+                                                 return std::string(buf);
+                                             })(dev.address) +
+                                                 ") fw " + dev.firmware_version);
+                switch (dev.address) {
+                    case CelestronProtocolWrapper::DEV_DEC_AG:
+                        autoguider_port = true;
+                        break;
+                    case CelestronProtocolWrapper::DEV_RA_SW:
+                        ra_switch = true;
+                        break;
+                    case CelestronProtocolWrapper::DEV_DEC_SW:
+                        dec_switch = true;
+                        break;
+                    case CelestronProtocolWrapper::DEV_GPS:
+                        gps = true;
+                        break;
+                    case CelestronProtocolWrapper::DEV_FOCUSER:
+                        focuser = true;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        } catch (...) {
+            ALPACA_LOG_WARN("Celestron", "Bus probe failed, using default capabilities");
+        }
+
+        std::optional<LocationInfo> written_site;
+        if (pending_site_latitude_.has_value() && pending_site_longitude_.has_value()) {
+            LocationInfo loc;
+            loc.latitude_degrees = pending_site_latitude_.value();
+            loc.longitude_degrees = pending_site_longitude_.value();
+            try {
+                protocol.set_location(loc);
+                written_site = loc;
+            } catch (...) {
+                ALPACA_LOG_WARN("Celestron", "site write at connect failed; the mount keeps its own site");
+            }
+        }
+        std::optional<TimeWrite> time_write;
+        if (sync_time_on_connect_) {
+            time_write = prepare_time_write(std::chrono::system_clock::now());
+            protocol.set_time(time_write->info);
+        }
+        SamplePlan plan;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            mount_firmware_version_ = firmware;
+            hc_available_ = hc;
+            mount_model_id_ = model_id;
+            mount_model_name_ = model_name;
+            has_autoguider_port_ = autoguider_port;
+            has_ra_switch_ = ra_switch;
+            has_dec_switch_ = dec_switch;
+            has_gps_ = gps;
+            has_focuser_ = focuser;
+            detected_devices_ = devices;
+            if (written_site) {
+                site_latitude_cached_ = written_site->latitude_degrees;
+                site_longitude_cached_ = written_site->longitude_degrees;
+                site_info_valid_ = true;
+            }
+            if (pending_site_elevation_.has_value()) {
+                site_elevation_m_ = pending_site_elevation_.value();
+            }
+            if (time_write) {
+                publish_time_write_locked(*time_write);
+            }
+            plan = sample_plan_locked(true);
+        }
+        // Seed the snapshot so the first property reads are served from memory, status flags included, and
+        // read the clock once, so no getter reaches the mount (ConformU holds the first reads to its
+        // fast-response target).
+        const auto token = snapshot_.begin_poll();
+        const PolledFrame seed = seed_frame(plan);
+        std::optional<MountClock> mount_clock;
+        if (!time_write) {
+            mount_clock = read_mount_clock();
+        }
+        std::optional<LocationInfo> read_site;
+        try {
+            read_site = protocol.get_location();
+        } catch (...) {
+            ALPACA_LOG_WARN("Celestron", "site read at connect failed; the site stays unread");
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot_.publish(token, seed);
+        if (!time_write) {
+            publish_mount_clock_locked(mount_clock);
+        }
+        if (read_site) {
+            site_latitude_cached_ = read_site->latitude_degrees;
+            site_longitude_cached_ = read_site->longitude_degrees;
+            site_info_valid_ = true;
+        }
+        connected_ = true;
+    }
+
     void check_connected() const {
-        if (!connected_) {
+        if (!connected_ || link_lost_.load()) {
             throw AlpacaException("Not connected to Celestron mount", AlpacaError::NotConnected);
         }
     }
 
-    // ── Background task threads (async slew, pulse-guide chunk chain) ──
-    // Never detached: each is a joinable member thread with a cancel flag +
-    // condition_variable, cancelled and joined in the destructor and on
-    // disconnect so a wakeup can never touch a destroyed/disconnected driver.
+    // ── Background bodies (async slew / park, pulse-guide chunk chain) ──
+    // Each runs on a util::AsyncOperation slot (decision 0006): never
+    // detached, cancelled and joined in the destructor and on disconnect so a
+    // wakeup can never touch a destroyed or disconnected driver.
 
-    // Interruptible sleep for a task thread. Returns false if cancelled.
-    bool task_wait_for(std::chrono::milliseconds d, std::atomic<bool>& cancel) const {
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        task_cv_.wait_for(tlock, d, [&] { return cancel.load(); });
-        return !cancel.load();
-    }
-
-    // Cancel and join all task threads. Must be called WITHOUT mutex_ held
-    // (the slew task tail re-acquires mutex_ before finishing).
+    // Cancel and join every slot. Must be called WITHOUT mutex_ held (the slew body re-acquires mutex_ before
+    // finishing). Only the lifecycle paths call it (disconnect, relink, the destructor): a motion initiator claims
+    // the slew slot instead (claim_slew_slot_locked()) and never waits for the body it replaces (decision 0006,
+    // "Claim").
     void cancel_async_tasks() {
-        slew_task_cancel_.store(true);
-        for (auto& cancel : pulse_task_cancel_) {
-            cancel.store(true);
+        slew_.cancel_all_and_join();
+        join_pulse_bodies();
+    }
+
+    // A pulse body stops its axis late, so an initiator ends it by cancelling and joining its slot with no driver
+    // mutex held (decision 0006, "Pulse and rate-check slots"). The pulse body never takes mutex_ and waits for at
+    // most the exchange it is in. Only the slew slot is never joined by an initiator.
+    void join_pulse_bodies() {
+        pulse_ops_[0].cancel_all_and_join();
+        pulse_ops_[1].cancel_all_and_join();
+    }
+
+    // Caller holds mutex_, after every check that can refuse the initiator and before it writes its own flags. The
+    // body in flight becomes Superseded: it re-checks that under mutex_ after each wire exchange and then touches
+    // neither a flag nor the axes. A bump alone wakes no waiter, so the cancel() wakes a body parked in its slot
+    // wait (Superseded still wins over Cancelled), and the notify wakes a body or initiator waiting in the send gate.
+    // The body is not joined (it may be inside an exchange). Returns whether a body was in flight: only then is there
+    // a motion nobody will stop if the start is refused.
+    bool claim_slew_slot_locked() {
+        const bool displaced = slew_.running();
+        slew_generation_.bump();
+        slew_.cancel();
+        ++motion_generation_;
+        send_cv_.notify_all();
+        return displaced;
+    }
+
+    // The send gate: at most one motion command is committed to the wire at a time, so an old goto that is on its
+    // way lands before any later stop or goto, and a command whose sender lost the mount in the meantime is never
+    // sent. This is what the join of the old slew body used to give. Call with `lock` held; it is released around
+    // `fn` (the exchanges, decision 0016 rule 1) and held again on return or throw. `owns` is tested under mutex_ in
+    // the same step that takes the gate, so there is no gap between the check and the send. Returns false, with `fn`
+    // not run, when `owns` is false. The gate is held for one command group only, never across a wait or a read.
+    template <typename Owns, typename Fn>
+    bool send_motion_locked(std::unique_lock<std::mutex>& lock, Owns&& owns, Fn&& fn) const {
+        send_cv_.wait(lock, [&] { return !owns() || motion_sends_in_flight_ == 0; });
+        if (!owns()) {
+            return false;
         }
-        task_cv_.notify_all();
-        std::thread slew_thread;
-        std::array<std::thread, 2> pulse_threads;
-        {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            slew_thread = std::move(slew_task_thread_);
-            for (std::size_t axis = 0; axis < pulse_task_threads_.size(); ++axis) {
-                pulse_threads[axis] = std::move(pulse_task_threads_[axis]);
+        ++motion_sends_in_flight_;
+        struct EndSend {
+            std::unique_lock<std::mutex>& lock;
+            unsigned& in_flight;
+            std::condition_variable& cv;
+            ~EndSend() {
+                lock.lock();
+                --in_flight;
+                cv.notify_all();
             }
-        }
-        if (slew_thread.joinable()) {
-            slew_thread.join();
-        }
-        for (auto& pulse_thread : pulse_threads) {
-            if (pulse_thread.joinable()) {
-                pulse_thread.join();
+        } end_send{lock, motion_sends_in_flight_, send_cv_};
+        lock.unlock();
+        fn();
+        return true;
+    }
+
+    // Call without mutex_ held. Starts `body` on the slew slot. The initiator claimed the slot
+    // (claim_slew_slot_locked()) and published its flags before this; when the slot refuses (no thread),
+    // `rollback_locked` undoes the flags, hands back a pending failure stop (keep_pending_stop_locked) and the
+    // exception goes to the caller. `displaced` says the claim superseded a body in flight: its motion may still be
+    // running with nobody left to stop it, so the mount is stopped and the AbortSlew state published (decision 0006,
+    // "Thread refusal"). A refusal that replaced nothing sends no stop.
+    template <typename Rollback>
+    void start_slew_body(std::function<void(util::OperationContext&)> body, bool displaced,
+                         Rollback&& rollback_locked) {
+        try {
+            slew_.start(std::move(body));
+        } catch (...) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            rollback_locked();
+            if (displaced && connected_) {
+                stop_after_refused_start(lock);
             }
+            throw;
         }
     }
 
-    // Join the previous slew task (if any) and reset its cancel flag so a new
-    // one can start. Must be called WITHOUT mutex_ held (see above).
-    void reap_slew_task() {
-        slew_task_cancel_.store(true);
-        task_cv_.notify_all();
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(slew_task_thread_);
+    // AbortSlew's stop and published state, for a refused start whose claim superseded a body in flight. A failed
+    // stop leaves Slewing as it was: the mount may still be moving.
+    void stop_after_refused_start(std::unique_lock<std::mutex>& lock) {
+        const std::uint64_t mine = motion_generation_;  // initiator_mutex_ is held: no other claimer ran
+        const std::string stop_error = stop_park_slew(lock, [this, mine] { return motion_generation_ == mine; });
+        if (stop_error.empty()) {
+            set_slewing_locked(false);
+        } else {
+            ALPACA_LOG_ERROR("Celestron",
+                             "stop after refused slew start failed: " + stop_error + "; the mount may still be moving");
         }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        slew_task_cancel_.store(false);
+        homing_ = false;
+        parking_ = false;
+        slew_aborted_ = true;
+        ++motion_generation_;
+        flip_in_progress_ = false;
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
+        manual_axis_slewing_[0] = false;
+        manual_axis_slewing_[1] = false;
     }
 
-    // Join the previous pulse-chain task for one axis and reset its cancel flag.
-    // Safe with or without mutex_ held: pulse tasks never take mutex_ and their
-    // cancellable waits wake immediately.
-    void reap_pulse_task(int axis) {
-        const auto index = static_cast<std::size_t>(axis);
-        pulse_task_cancel_[index].store(true);
-        task_cv_.notify_all();
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(pulse_task_threads_[index]);
-        }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        pulse_task_cancel_[index].store(false);
+public:
+    void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        slew_.set_spawn_for_testing(std::move(spawn));
     }
 
+    void set_pulse_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        pulse_ops_[0].set_spawn_for_testing(spawn);
+        pulse_ops_[1].set_spawn_for_testing(std::move(spawn));
+    }
+
+private:
     void clear_pulse_guiding_locked() {
         pulse_guide_active_.fill(false);
-        pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
-    }
-
-    void reap_pulse_tasks() {
-        reap_pulse_task(0);
-        reap_pulse_task(1);
+        pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
     }
 
     // A park in flight (parking_) gates the same members as a completed park:
@@ -2018,54 +2548,293 @@ private:
         }
     }
 
-    void refresh_equatorial_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
-        if (!position_link_health_.faulted() && equatorial_cache_valid_ &&
-            (now - last_equatorial_update_) < kPositionCacheTtl) {
-            return;
-        }
+    // ── Snapshot-served state (decision 0010, Celestron adoption) ──────────────
+
+    struct SamplePlan {
+        bool hc = true;            // the hand controller answers the HC commands
+        bool precise = true;       // precise (24-bit) HC commands
+        bool read_slewing = true;  // false while the control path owns the Slewing value
+        bool hc_slewing = true;    // Slewing from the HC goto flag; false: the two MC axis flags
+        bool full = false;         // alt/az, pier side and tracking mode too
+    };
+
+    // One mount sample, taken without mutex_ (the protocol wrapper serialises each exchange).
+    struct Sample {
+        std::optional<bool> slewing;
+        double ra_hours = 0.0;
+        double dec_degrees = 0.0;
+        std::optional<std::pair<double, double>> altaz;  // {azimuth, altitude}
+        std::optional<int> pier;                         // ASCOM value
+        std::optional<int> tracking_mode;
+    };
+
+    // Throws what the protocol throws for the slewing flag or the equatorial pair; the slow fields keep their last
+    // value when the mount does not answer them.
+    Sample sample_raw(const SamplePlan& plan) const {
         auto& protocol = CelestronProtocolWrapper::instance();
-        try {
-            if (hc_available_) {
-                int bits = use_precise_commands_ ? 24 : 16;
-                auto raw = protocol.get_ra_dec_raw(use_precise_commands_);
-                cached_ra_hours_ = decode_ra_hours(raw.first, bits);
-                cached_dec_degrees_ = decode_angle(raw.second, bits);
+        Sample sample;
+        if (plan.read_slewing) {
+            if (plan.hc_slewing) {
+                sample.slewing = protocol.is_goto_in_progress();
             } else {
-                uint32_t ra_raw = protocol.get_mc_position(0);
-                uint32_t dec_raw = protocol.get_mc_position(1);
-                cached_ra_hours_ = decode_ra_hours(ra_raw, 24);
-                cached_dec_degrees_ = decode_angle(dec_raw, 24);
+                const bool ra_done = protocol.is_slew_done(0);
+                const bool dec_done = protocol.is_slew_done(1);
+                sample.slewing = !ra_done || !dec_done;
             }
-            equatorial_cache_valid_ = true;
-            last_equatorial_update_ = now;
-            note_position_reply_locked();
-        } catch (const std::exception& e) {
-            equatorial_cache_valid_ = false;
-            note_position_failure_locked(e);
-            if (position_link_health_.faulted()) {
-                throw_position_link_fault_locked();
-            }
-            throw;
         }
+        if (plan.hc) {
+            const int bits = plan.precise ? 24 : 16;
+            const auto raw = protocol.get_ra_dec_raw(plan.precise);
+            sample.ra_hours = decode_ra_hours(raw.first, bits);
+            sample.dec_degrees = decode_angle(raw.second, bits);
+        } else {
+            const uint32_t ra_raw = protocol.get_mc_position(0);
+            const uint32_t dec_raw = protocol.get_mc_position(1);
+            sample.ra_hours = decode_ra_hours(ra_raw, 24);
+            sample.dec_degrees = decode_angle(dec_raw, 24);
+        }
+        if (plan.full) {
+            // The slow fields stop at the first failure: on a dead link each would wait out its own response
+            // timeout, and a Disconnect waiting on this tick would pass the ~5 s client budget.
+            bool slow_ok = true;
+            try {
+                const int bits = plan.precise ? 24 : 16;
+                const auto raw = protocol.get_alt_az_raw(plan.precise);
+                sample.altaz = {util::wrap_degrees(decode_angle(raw.first, bits)), decode_angle(raw.second, bits)};
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+                slow_ok = false;
+            }
+            if (plan.hc && slow_ok) {
+                try {
+                    const char side = protocol.get_pier_side();
+                    sample.pier = side == 'W' ? 0 : (side == 'E' ? 1 : -1);  // ASCOM: 0 = pierEast, 1 = pierWest
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+                    slow_ok = false;
+                }
+            }
+            if (slow_ok) {
+                try {
+                    sample.tracking_mode = protocol.get_tracking_mode();
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+                }
+            }
+        }
+        return sample;
     }
 
-    void refresh_altaz_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
-        if (!position_link_health_.faulted() && altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
+    // The frame a sample makes, over the previous one (a field the sample lacks keeps its value).
+    static PolledFrame decode_sample(const Sample& sample, const PolledFrame& previous) {
+        PolledFrame frame = previous;
+        if (sample.slewing) {
+            frame.slewing = *sample.slewing;
+            frame.slewing_known = true;
+        }
+        frame.ra_hours = sample.ra_hours;
+        frame.dec_degrees = sample.dec_degrees;
+        frame.equatorial_known = true;
+        if (sample.altaz) {
+            frame.az_degrees = sample.altaz->first;
+            frame.alt_degrees = sample.altaz->second;
+            frame.altaz_known = true;
+        }
+        if (sample.pier) {
+            frame.side_of_pier = *sample.pier;  // -1 (pierUnknown) is an answer too
+            frame.pier_known = true;
+        }
+        if (sample.tracking_mode) {
+            frame.tracking_mode = *sample.tracking_mode;
+        }
+        return frame;
+    }
+
+    SamplePlan sample_plan_locked(bool full) const {
+        SamplePlan plan;
+        plan.hc = hc_available_;
+        plan.precise = use_precise_commands_;
+        plan.hc_slewing = hc_available_ && !flip_in_progress_;
+        plan.full = full;
+        return plan;
+    }
+
+    // The frame a getter serves, or the refusal that applies: a lost link (NotConnected), a latched fault
+    // (DriverException "communications compromised", Connected stays true, decision 0009 point 1), no frame yet.
+    // A frame past kSnapshotMaxAge is served as it is: stale is not lost.
+    util::StateSnapshot<PolledFrame>::Reading served_frame_locked() const {
+        check_connected();
+        if (position_link_health_.faulted()) {
+            throw_position_link_fault_locked();
+        }
+        auto reading = snapshot_.read();
+        if (!reading) {
+            throw AlpacaException(
+                "Celestron mount state is not available yet: the first status poll has not been answered",
+                AlpacaError::DriverException);
+        }
+        return *reading;
+    }
+
+    // {RA hours, Dec degrees}
+    std::pair<double, double> served_equatorial_locked() const {
+        const auto frame = served_frame_locked();
+        if (!frame.value.equatorial_known) {
+            throw AlpacaException("Celestron mount position is not available: the last read failed",
+                                  AlpacaError::DriverException);
+        }
+        return {frame.value.ra_hours, frame.value.dec_degrees};
+    }
+
+    // {azimuth, altitude}
+    std::pair<double, double> served_altaz_locked() const {
+        const auto frame = served_frame_locked();
+        if (!frame.value.altaz_known) {
+            throw AlpacaException("Celestron mount alt/az is not available: the last read failed",
+                                  AlpacaError::DriverException);
+        }
+        return {frame.value.az_degrees, frame.value.alt_degrees};
+    }
+
+    // The handset tracking mode, as the poll last read it; the getter refuses when no poll has answered the query.
+    int tracking_mode_locked() const {
+        const auto frame = served_frame_locked();
+        if (frame.value.tracking_mode >= 0) {
+            return frame.value.tracking_mode;
+        }
+        throw AlpacaException("Celestron mount tracking state is not available: the last read failed",
+                              AlpacaError::DriverException);
+    }
+
+    // The control path (a slew's Tracking gate, the tracking restore): the snapshot's mode, or one read of the mount
+    // with mutex_ free when no poll has answered the tracking query yet.
+    int tracking_mode_for_control(std::unique_lock<std::mutex>& lock) const {
+        const auto frame = served_frame_locked();
+        if (frame.value.tracking_mode >= 0) {
+            return frame.value.tracking_mode;
+        }
+        const int mode = without_lock(lock, [] { return CelestronProtocolWrapper::instance().get_tracking_mode(); });
+        snapshot_.write([mode](PolledFrame& held) { held.tracking_mode = mode; });
+        return mode;
+    }
+
+    // The age of the state DeviceState serves: how long ago the poll measured it, on the task clock. Takes only the
+    // snapshot's own mutex.
+    std::optional<std::chrono::nanoseconds> device_state_age() const override {
+        const auto reading = snapshot_.read();
+        if (!reading) {
+            return std::nullopt;
+        }
+        return clock_.now() - reading->measured_at;
+    }
+
+    // A write that changed what the mount's position means (a slew start, a pulse, a sync): drops the poll in
+    // flight so its older sample cannot overwrite what the control path knows. The next poll publishes.
+    void drop_poll_in_flight_locked() const {
+        snapshot_.write([](PolledFrame&) {});
+    }
+
+    // The tracking mode the control path just commanded, written through so the next read sees it before the
+    // next poll runs.
+    void set_tracking_mode_cached_locked(int mode) const {
+        snapshot_.write([mode](PolledFrame& frame) { frame.tracking_mode = mode; });
+    }
+
+    // The slewing value the control path just decided (a slew started or ended, an abort), written through.
+    void set_slewing_locked(bool slewing) const {
+        slewing_cached_ = slewing;
+        snapshot_.write([slewing](PolledFrame& frame) {
+            frame.slewing = slewing;
+            frame.slewing_known = true;
+        });
+    }
+
+    // A re-read of the mount's slewing flag (the slew-complete and Park loops). Writes only a change: every write
+    // drops the poll tick in flight, so a same-value write on each re-read would drop nearly every tick of a GOTO
+    // and freeze the position.
+    void note_slewing_read_locked(bool slewing) const {
+        const auto held = snapshot_.read();
+        if (held && held->value.slewing_known && held->value.slewing == slewing) {
+            slewing_cached_ = slewing;
             return;
         }
-        auto& protocol = CelestronProtocolWrapper::instance();
-        int bits = use_precise_commands_ ? 24 : 16;
+        set_slewing_locked(slewing);
+    }
+
+    // One read of the mount for the control path at the end of a motion (slew landed, park complete, home done), taken
+    // with mutex_ free. The snapshot token is taken before the read, so a write that lands meanwhile drops the frame.
+    struct Measurement {
+        util::StateSnapshot<PolledFrame>::Token token{};
+        std::optional<Sample> sample;
+        std::string error;  // what the read threw, when `sample` is empty
+    };
+
+    // No driver state touched: `plan` is read under mutex_ by the caller.
+    Measurement take_measurement(SamplePlan plan) const {
+        plan.read_slewing = false;
+        Measurement measurement;
+        measurement.token = snapshot_.begin_poll();
         try {
-            auto raw = protocol.get_alt_az_raw(use_precise_commands_);
-            cached_az_degrees_ = wrap_degrees(decode_angle(raw.first, bits));
-            cached_alt_degrees_ = decode_angle(raw.second, bits);
-            altaz_cache_valid_ = true;
-            last_altaz_update_ = now;
-            note_position_reply_locked();
+            measurement.sample = sample_raw(plan);
         } catch (const std::exception& e) {
-            altaz_cache_valid_ = false;
+            measurement.error = e.what();
+        }
+        return measurement;
+    }
+
+    Measurement measure_full(std::unique_lock<std::mutex>& lock) const {
+        const SamplePlan plan = sample_plan_locked(true);
+        return without_lock(lock, [&] { return take_measurement(plan); });
+    }
+
+    // Publishes a measurement under mutex_: reads the mount now and publishes a full frame, so Slewing false is
+    // never served beside a mid-motion position. The caller flips Slewing and its other flags in the same locked
+    // step. A failed read leaves the position unknown, which the getters refuse until the next poll answers.
+    void publish_measurement_locked(const Measurement& measurement) const {
+        if (!measurement.sample) {
+            snapshot_.write([](PolledFrame& frame) {
+                frame.equatorial_known = false;
+                frame.altaz_known = false;
+            });
+            note_position_failure_locked(std::runtime_error(measurement.error));
+            return;
+        }
+        const auto previous = snapshot_.read();
+        snapshot_.publish(measurement.token,
+                          decode_sample(*measurement.sample, previous ? previous->value : PolledFrame{}));
+        drop_poll_in_flight_locked();  // a poll that sampled before this read must not replace it
+        note_position_reply_locked();
+    }
+
+    void publish_measurement(std::unique_lock<std::mutex>& lock) const {
+        publish_measurement_locked(measure_full(lock));
+    }
+
+    // The first frame, read at the end of a connect with mutex_ free, so the getters have an answer the moment Connect
+    // returns. Best effort: a mount that does not answer the slewing query still gives its position, and one that
+    // answers nothing leaves a frame with nothing known; the poll fills it in.
+    // The seed's failures do not feed position_link_health_: the status poll that follows judges the link.
+    PolledFrame seed_frame(SamplePlan plan) const {
+        PolledFrame frame;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            try {
+                frame = decode_sample(sample_raw(plan), frame);
+                break;
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried without the slewing query
+            }
+            plan.read_slewing = false;
+        }
+        return frame;
+    }
+
+    // Control path: one direct read of the equatorial pair, for an operation that needs the mount's position now
+    // (SetPark, Park without a park position, the RA offset learning). {RA hours, Dec degrees}. The read runs with
+    // mutex_ free.
+    std::pair<double, double> measure_equatorial(std::unique_lock<std::mutex>& lock) const {
+        SamplePlan plan = sample_plan_locked(false);
+        plan.read_slewing = false;
+        try {
+            const auto sample = without_lock(lock, [&] { return sample_raw(plan); });
+            note_position_reply_locked();
+            return {sample.ra_hours, sample.dec_degrees};
+        } catch (const std::exception& e) {
             note_position_failure_locked(e);
             if (position_link_health_.faulted()) {
                 throw_position_link_fault_locked();
@@ -2074,6 +2843,277 @@ private:
         }
     }
 
+    // Decision 0009 point 2(b): a fault that has stood past the bound is a LOST link. Connected reads false, the
+    // getters and setters throw NotConnected, DeviceState is empty, the transport is closed; only the client's
+    // Connected=true relinks. Caller holds mutex_ and closes the transport itself once it has released it. True when
+    // the link was just declared lost.
+    bool declare_link_lost_if_stale_locked() {
+        if (!position_link_health_.fault_stale(clock_.now())) {
+            return false;
+        }
+        ALPACA_LOG_ERROR(
+            "Celestron",
+            "Link to the mount lost after " +
+                std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
+                " s without a reply; reconnect to resume (" + position_link_health_.fault() + ")");
+        link_lost_ = true;
+        return true;
+    }
+
+    // True when the unread site (a connect that could not reach it) is due another attempt of the poll
+    // (kSitePollRetryDelay). Like the sample, its exchange runs without mutex_.
+    bool site_read_due_locked() {
+        const auto now = clock_.now();
+        if (last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
+            (now - last_site_info_attempt_) < kSitePollRetryDelay) {
+            return false;
+        }
+        last_site_info_attempt_ = now;
+        return true;
+    }
+
+    // One poll tick. The site read and the sample exchanges run WITHOUT mutex_, so a getter never waits behind a
+    // slow link and the snapshot mutex is never held across I/O; the frame is decoded and published under mutex_.
+    // So do a FindHome in flight's completion check and the stops of its third failure (decision 0016 rule 1).
+    // Returns false when the connection is gone or lost and the poll body should end. `ctx` is null for the test seam's
+    // direct tick, which also ignores the pause.
+    bool poll_status_once(util::OperationContext* ctx, int tick) {
+        const auto stopped = [ctx] { return ctx != nullptr && ctx->stop_reason() != util::StopReason::None; };
+        // Held for the whole tick of the poll body, so pausing it can wait out a tick already in flight.
+        std::unique_lock<std::mutex> tick_lock(status_poll_tick_mutex_, std::defer_lock);
+        if (ctx != nullptr) {
+            tick_lock.lock();
+        }
+        if (ctx != nullptr && status_poll_paused_for_testing_.load()) {
+            return true;
+        }
+        SamplePlan plan;
+        bool read_site = false;
+        bool check_home = false;
+        std::uint64_t home_generation = 0;
+        SamplePlan home_plan;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || link_lost_.load() || stopped()) {
+                return false;
+            }
+            check_home = homing_;
+            home_generation = motion_generation_;
+            home_plan = sample_plan_locked(true);
+        }
+        retry_pending_stop();
+        if (check_home) {
+            // A FindHome in flight is completed here, not by a getter. The exchanges (the completion check, the
+            // position read when it is done, and the stops of a third failure) run with mutex_ free; the result is
+            // published under it only if the same FindHome is still on.
+            const HomeProbe probe = probe_homing_complete();
+            std::optional<Measurement> landed;
+            if (probe.done) {
+                landed = take_measurement(home_plan);
+            }
+            std::string failure;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_ || stopped()) {
+                    return false;
+                }
+                if (homing_ && motion_generation_ == home_generation) {
+                    failure = apply_home_probe_locked(probe, landed);
+                    if (!failure.empty()) {
+                        begin_home_failure_locked(failure);
+                    }
+                }
+            }
+            if (!failure.empty()) {
+                // The three stop exchanges go out only while no newer initiator owns the mount.
+                send_failure_stop(home_generation, failure, true);
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (home_status_poll_failures_ != 0) {
+                return true;  // it timed out: no second timeout in this tick (Disconnect waits for the tick)
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || link_lost_.load() || stopped()) {
+                return false;
+            }
+            plan = sample_plan_locked(tick % kSlowPollEvery == 0);
+            // The control path owns the Slewing value while it moves the mount itself.
+            plan.read_slewing = !(parking_ || slew_.running() || homing_ || manual_axis_slewing_[0] ||
+                                  manual_axis_slewing_[1] || clock_.now() < slew_force_until_);
+            read_site = !site_info_valid_ && plan.full && site_read_due_locked();
+        }
+        if (read_site) {
+            std::optional<LocationInfo> site;
+            try {
+                site = CelestronProtocolWrapper::instance().get_location();
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): retried after kSiteInfoRetryDelay
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || stopped()) {
+                return false;
+            }
+            if (!site) {
+                return true;  // it timed out: no second timeout in this tick; the next tick samples
+            }
+            // A client's SiteLatitude/SiteLongitude write that landed during the read wins over the older value.
+            if (!site_info_valid_) {
+                site_latitude_cached_ = site->latitude_degrees;
+                site_longitude_cached_ = site->longitude_degrees;
+                site_info_valid_ = true;
+            }
+        }
+        const auto token = snapshot_.begin_poll();
+        Sample sample;
+        try {
+            sample = sample_raw(plan);
+        } catch (const std::exception& e) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_ || stopped()) {
+                    return false;
+                }
+                note_position_failure_locked(e);
+                if (!declare_link_lost_if_stale_locked()) {
+                    return true;
+                }
+            }
+            // The link is lost: close the transport with mutex_ free (it waits for an exchange in flight).
+            CelestronProtocolWrapper::instance().disconnect();
+            return false;
+        }
+        run_status_poll_after_sample_hook();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_ || link_lost_.load() || stopped()) {
+            return false;
+        }
+        const auto previous = snapshot_.read();
+        snapshot_.publish(token, decode_sample(sample, previous ? previous->value : PolledFrame{}));
+        note_position_reply_locked();  // a dropped frame (a write landed since the sample) was still a reply
+        return true;
+    }
+
+    void run_slewing_read_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = slewing_read_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    void run_failure_stop_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = failure_stop_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    // The two slew test seams release mutex_ only when a hook is set, so a production run is unchanged.
+    void run_slew_dispatch_hook(std::unique_lock<std::mutex>& lock) const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(status_poll_hook_mutex_);
+            hook = slew_dispatch_hook_;
+        }
+        if (hook) {
+            without_lock(lock, hook);
+        }
+    }
+
+    void run_slew_body_hook(std::unique_lock<std::mutex>& lock, const util::OperationContext& ctx) const {
+        SlewBodyHook hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(status_poll_hook_mutex_);
+            hook = slew_body_hook_;
+        }
+        if (hook) {
+            without_lock(lock, [&] { hook([&ctx] { return ctx.stop_reason(); }); });
+        }
+    }
+
+    void run_status_poll_after_sample_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = status_poll_after_sample_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
+    void run_status_poller(util::OperationContext& ctx) {
+        for (int tick = 0;; ++tick) {
+            const auto started = clock_.now();
+            if (!poll_status_once(&ctx, tick)) {
+                return;
+            }
+            // Start to start: wait for the next tick, skipping any a slow poll ran over (no catch-up).
+            const auto spent = clock_.now() - started;
+            const auto ticks = spent / kStatusPollPeriod + 1;
+            if (!ctx.wait_for(ticks * kStatusPollPeriod - spent)) {
+                return;
+            }
+        }
+    }
+
+    // Call without mutex_ held: the poll body takes mutex_.
+    void stop_status_poller() { status_poll_.cancel_all_and_join(); }
+
+    // Call without mutex_ held (AsyncOperation rule 10), after a connect.
+    void start_status_poller() {
+        try {
+            status_poll_.start([this](util::OperationContext& ctx) { run_status_poller(ctx); });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_ERROR("Celestron", std::string("Status poll did not start: ") + e.what());
+        }
+    }
+
+public:
+    // Returns once no poll-body tick is in flight, so a case that pauses the poll then counts mount transactions
+    // without a tick started before the pause adding to them. The pause survives a relink: set_connected(true) does
+    // not clear it, so a case that reconnects unpauses before it expects the body to tick.
+    void set_status_poll_paused_for_testing(bool paused) {
+        status_poll_paused_for_testing_ = paused;
+        std::lock_guard<std::mutex> drain(status_poll_tick_mutex_);
+    }
+
+    bool poll_status_now_for_testing() { return poll_status_once(nullptr, 0); }
+
+    void set_slewing_read_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        slewing_read_hook_ = std::move(hook);
+    }
+
+    void set_failure_stop_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        failure_stop_hook_ = std::move(hook);
+    }
+
+    void set_slew_dispatch_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        slew_dispatch_hook_ = std::move(hook);
+    }
+
+    void set_slew_body_hook_for_testing(SlewBodyHook hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        slew_body_hook_ = std::move(hook);
+    }
+
+    void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        status_poll_after_sample_hook_ = std::move(hook);
+    }
+
+private:
     void note_position_reply_locked() const {
         if (position_link_health_.on_reply()) {
             ALPACA_LOG_INFO("Celestron", "Position link recovered; mount readback is available again");
@@ -2089,7 +3129,7 @@ private:
     }
 
     void note_position_failure_locked(const std::exception& e) const {
-        if (auto fault = position_link_health_.note_failure(e.what(), kPositionLinkFailureThreshold)) {
+        if (auto fault = position_link_health_.note_failure(e.what(), kLinkFailureThreshold, clock_.now())) {
             ALPACA_LOG_ERROR("Celestron", "Position link faulted: " + *fault);
         } else {
             ALPACA_LOG_WARN("Celestron", "Position read failed (" +
@@ -2104,69 +3144,191 @@ private:
                               AlpacaError::DriverException);
     }
 
-    bool get_slewing_locked() const {
+    // What the control path alone decides about Slewing, or nothing when the mount's own flag decides.
+    std::optional<bool> slewing_from_control_path_locked() const {
+        if (!last_slew_error_.empty()) {
+            throw AlpacaException(last_slew_error_);
+        }
         // A park in flight reports Slewing until the park task flips AtPark
         // (same locked step) — never Slewing false with AtPark false.
         if (parking_) {
             return true;
         }
-        return poll_hardware_slewing_locked();
+        // The async body owns its completion polling; a getter serves its
+        // published state instead of competing for a second wire read.
+        if (slew_.running()) {
+            return slewing_cached_;
+        }
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1] || clock_.now() < slew_force_until_ || homing_) {
+            return true;  // homing: the status poll checks for completion
+        }
+        return std::nullopt;
     }
 
-    bool poll_hardware_slewing_locked() const {
+    // The getter: serves the snapshot, never asks the mount.
+    bool get_slewing_locked() const {
+        if (const auto decided = slewing_from_control_path_locked()) {
+            return *decided;
+        }
+        const auto reading = served_frame_locked();
+        if (!reading.value.slewing_known) {
+            // The connect-time query failed; no guess is served until a poll (or the control path) answers.
+            throw AlpacaException("Celestron mount state is not available yet: the slewing flag has not been answered",
+                                  AlpacaError::DriverException);
+        }
+        return reading.value.slewing;
+    }
+
+    // The control path (the slew-complete loops): asks the mount, with mutex_ free for the exchange.
+    bool get_slewing_fresh(std::unique_lock<std::mutex>& lock) const {
+        if (const auto decided = slewing_from_control_path_locked()) {
+            return *decided;
+        }
+        return poll_hardware_slewing(lock);
+    }
+
+    bool poll_hardware_slewing(std::unique_lock<std::mutex>& lock) const {
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
-        if (std::chrono::steady_clock::now() < slew_force_until_) {
+        if (clock_.now() < slew_force_until_) {
             return true;
         }
         if (homing_) {
-            check_homing_complete_locked();
-            return homing_; // still homing = still slewing
+            // The status poll completes a FindHome with mutex_ free; this caller asks no exchange.
+            if (!last_slew_error_.empty()) {
+                throw AlpacaException(last_slew_error_);
+            }
+            return true;  // still homing = still slewing
         }
         bool was_slewing = slewing_cached_;
+        const bool hc_slewing = hc_available_ && !flip_in_progress_;
+        std::optional<Measurement> landed;
+        bool hardware_slewing = false;
+        // The read runs with mutex_ free: a newer motion command (AbortSlew, MoveAxis, Park, a new slew) may take the
+        // mount meanwhile, and its state is then not this read's to change.
+        const std::uint64_t generation = motion_generation_;
         try {
-            auto& protocol = CelestronProtocolWrapper::instance();
-            if (hc_available_ && !flip_in_progress_) {
-                slewing_cached_ = protocol.is_goto_in_progress();
-            } else {
-                bool ra_done = protocol.is_slew_done(0);
-                bool dec_done = protocol.is_slew_done(1);
-                slewing_cached_ = !ra_done || !dec_done;
+            const SamplePlan landed_plan = sample_plan_locked(true);
+            std::tie(hardware_slewing, landed) = without_lock(lock, [&] {
+                auto& protocol = CelestronProtocolWrapper::instance();
+                bool slewing = false;
+                if (hc_slewing) {
+                    slewing = protocol.is_goto_in_progress();
+                } else {
+                    bool ra_done = protocol.is_slew_done(0);
+                    bool dec_done = protocol.is_slew_done(1);
+                    slewing = !ra_done || !dec_done;
+                }
+                // A slew that just ended is read for its position at once, in the same pass.
+                std::optional<Measurement> measurement;
+                if (was_slewing && !slewing) {
+                    measurement = take_measurement(landed_plan);
+                }
+                run_slewing_read_hook();  // test seam: a newer motion command lands before the read is applied
+                return std::make_tuple(slewing, measurement);
+            });
+            if (motion_generation_ != generation) {
+                return slewing_cached_;  // superseded: the newer motion owns the published state
             }
+            note_slewing_read_locked(hardware_slewing);
+            slew_status_poll_failures_ = 0;
+        } catch (const std::exception& ex) {
+            if (motion_generation_ != generation) {
+                return slewing_cached_;
+            }
+            const int failures = ++slew_status_poll_failures_;
+            if (failures < kLinkFailureThreshold) {
+                ALPACA_LOG_WARN("Celestron", "Slew status poll failed (" + std::to_string(failures) + "/" +
+                                                 std::to_string(kLinkFailureThreshold) + "): " + ex.what());
+                return slewing_cached_;
+            }
+            const std::string message = "Slew completion polling failed after " + std::to_string(failures) +
+                                        " consecutive failures: " + ex.what();
+            if (parking_) throw AlpacaException(message, AlpacaError::DriverException);
+            if (slewing_cached_) fail_slew_poll(lock, message, generation);
+            throw AlpacaException(last_slew_error_.empty() ? message : last_slew_error_, AlpacaError::DriverException);
         } catch (...) {
+            if (motion_generation_ != generation) {
+                return slewing_cached_;
+            }
+            const int failures = ++slew_status_poll_failures_;
+            if (failures < kLinkFailureThreshold) {
+                ALPACA_LOG_WARN("Celestron", "Slew status poll failed (" + std::to_string(failures) + "/" +
+                                                 std::to_string(kLinkFailureThreshold) + "): unknown exception");
+                return slewing_cached_;
+            }
+            const std::string message = "Slew completion polling failed after " + std::to_string(failures) +
+                                        " consecutive failures: unknown exception";
+            if (parking_) throw AlpacaException(message, AlpacaError::DriverException);
+            if (slewing_cached_) fail_slew_poll(lock, message, generation);
+            throw AlpacaException(last_slew_error_.empty() ? message : last_slew_error_, AlpacaError::DriverException);
         }
         if (was_slewing && !slewing_cached_) {
-            equatorial_cache_valid_ = false;
-            altaz_cache_valid_ = false;
             flip_in_progress_ = false;
+            if (landed) {
+                publish_measurement_locked(*landed);
+            }
         }
         return slewing_cached_;
     }
 
-    void check_homing_complete_locked() const {
+    // The FindHome completion exchanges, with no driver state touched: the status poll runs them with mutex_ free.
+    struct HomeProbe {
+        bool done = false;
+        std::optional<std::string> error;  // the exchange failed: what it threw
+    };
+
+    static HomeProbe probe_homing_complete() {
         try {
             auto& protocol = CelestronProtocolWrapper::instance();
-            bool ra_done = protocol.is_level_done(0);
-            bool dec_done = protocol.is_level_done(1);
-            if (ra_done && dec_done) {
-                homing_ = false;
-                at_home_ = true;
-                slewing_cached_ = false;
-                equatorial_cache_valid_ = false;
-                altaz_cache_valid_ = false;
-            }
+            const bool ra_done = protocol.is_level_done(0);
+            const bool dec_done = protocol.is_level_done(1);
+            return {ra_done && dec_done, std::nullopt};
+        } catch (const std::exception& ex) {
+            return {false, std::string(ex.what())};
         } catch (...) {
+            return {false, std::string("unknown exception")};
         }
     }
 
-    bool get_tracking_locked() const {
-        if (!tracking_mode_valid_) {
-            tracking_mode_cached_ = CelestronProtocolWrapper::instance().get_tracking_mode();
-            tracking_mode_valid_ = true;
+    // Applies a probe under mutex_. Returns the failure message when this was the third failed check (the caller then
+    // stops the mount and finishes the failure), else empty.
+    std::string apply_home_probe_locked(const HomeProbe& probe, const std::optional<Measurement>& landed) const {
+        if (!probe.error) {
+            home_status_poll_failures_ = 0;
+            if (probe.done) {
+                // The position the mount stopped at, then the flags, in one locked step.
+                if (landed) {
+                    publish_measurement_locked(*landed);
+                }
+                homing_ = false;
+                at_home_ = true;
+                set_slewing_locked(false);
+            }
+            return {};
         }
-        return tracking_mode_cached_ != 0;
+        const int failures = ++home_status_poll_failures_;
+        if (failures < kLinkFailureThreshold) {
+            ALPACA_LOG_WARN("Celestron", "FindHome status poll failed (" + std::to_string(failures) + "/" +
+                                             std::to_string(kLinkFailureThreshold) + "): " + *probe.error);
+            return {};
+        }
+        return "FindHome completion polling failed after " + std::to_string(failures) +
+               " consecutive failures: " + *probe.error;
     }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Read as the Tracking getter reads it, except that the control path asks the mount once
+    // (with mutex_ free) when no poll has answered the tracking query yet.
+    void check_tracking_for_slew(std::unique_lock<std::mutex>& lock, const char* who) const {
+        if (tracking_mode_for_control(lock) == 0) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+        }
+    }
+
+    // The Tracking getter reads the snapshot only.
+    bool get_tracking_locked() const { return tracking_mode_locked() != 0; }
 
     AlignmentMode alignment_mode_locked() const {
         switch (mount_model_id_) {
@@ -2241,45 +3403,80 @@ private:
         return south ? 3 : 2;
     }
 
-    void ensure_site_info_cached_locked() const {
+    // True when a control-path site read is due (connected, and past kSiteInfoRetryDelay since the last try); stamps
+    // the try.
+    bool site_info_attempt_due_locked() const {
         if (!connected_) {
-            return;
+            return false;
         }
-        auto now = std::chrono::steady_clock::now();
-        if (!site_info_valid_ &&
-            last_site_info_attempt_ != std::chrono::steady_clock::time_point::min() &&
+        auto now = clock_.now();
+        if (!site_info_valid_ && last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
-            return;
+            return false;
         }
         last_site_info_attempt_ = now;
+        return true;
+    }
+
+    // The site read for a caller with mutex_ free: the exchange runs unlocked, the result is published under it,
+    // and a client's SiteLatitude/SiteLongitude write that landed meanwhile wins.
+    void read_site_info_unlocked() {
+        std::optional<LocationInfo> info;
         try {
-            LocationInfo info = CelestronProtocolWrapper::instance().get_location();
-            site_latitude_cached_ = info.latitude_degrees;
-            site_longitude_cached_ = info.longitude_degrees;
+            info = CelestronProtocolWrapper::instance().get_location();
+        } catch (...) {  // NOLINT(bugprone-empty-catch): the caller reports the missing site
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_ && info && !site_info_valid_) {
+            site_latitude_cached_ = info->latitude_degrees;
+            site_longitude_cached_ = info->longitude_degrees;
             site_info_valid_ = true;
-        } catch (...) {
-            site_info_valid_ = false;
         }
     }
 
-    LocationInfo current_location_locked() const {
-        LocationInfo info;
-        if (site_info_valid_) {
-            info.latitude_degrees = site_latitude_cached_;
-            info.longitude_degrees = site_longitude_cached_;
-            return info;
+    // The control path's site read (a flip decision needs the longitude): one attempt per kSiteInfoRetryDelay, with
+    // mutex_ free for the exchange; a client's SiteLatitude/SiteLongitude write that landed meanwhile wins.
+    void ensure_site_info_cached(std::unique_lock<std::mutex>& lock) const {
+        if (!site_info_attempt_due_locked()) {
+            return;
+        }
+        const auto info = without_lock(lock, [] {
+            try {
+                return std::optional<LocationInfo>(CelestronProtocolWrapper::instance().get_location());
+            } catch (...) {
+                return std::optional<LocationInfo>();
+            }
+        });
+        if (info && !site_info_valid_) {
+            site_latitude_cached_ = info->latitude_degrees;
+            site_longitude_cached_ = info->longitude_degrees;
+            site_info_valid_ = true;
+        }
+    }
+
+    // The site the mount holds, for a setter that rewrites one half of it: the cache, else a read with mutex_ free.
+    // Throws NotConnected first.
+    LocationInfo current_location() const {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (site_info_valid_) {
+                LocationInfo info;
+                info.latitude_degrees = site_latitude_cached_;
+                info.longitude_degrees = site_longitude_cached_;
+                return info;
+            }
         }
         return CelestronProtocolWrapper::instance().get_location();
     }
 
     // Centralized pier-safety gate used by both sync and async slew paths.
-    // Must be called with mutex_ held. Throws if the slew must be refused.
-    void check_slew_safety_locked(const char* context) const {
-        auto& protocol = CelestronProtocolWrapper::instance();
+    // Called with mutex_ held; the alignment query runs with it free. Throws if the slew must be refused.
+    void check_slew_safety(std::unique_lock<std::mutex>& lock, const char* context) const {
         bool aligned = false;
         std::string aligned_detail;
         try {
-            aligned = protocol.is_aligned();
+            aligned = without_lock(lock, [] { return CelestronProtocolWrapper::instance().is_aligned(); });
             aligned_detail = aligned ? "J=truthy" : "J=false";
         } catch (const std::exception& e) {
             aligned_detail = std::string("J-query-failed: ") + e.what();
@@ -2307,26 +3504,27 @@ private:
     // on CGX-L fw 7.18: axis 0 stays at rate=0 after goto completion and the
     // HC doesn't resume tracking automatically, so subsequent pulse-guide
     // tests run against a stopped RA motor and report spurious east drift.
-    void restore_tracking_after_slew_locked() {
-        if (!get_tracking_locked()) {
+    // The tracking write goes through the send gate, so a slew that lost the mount before the gate sends no `T`. The
+    // cache follows a committed send: the mount was told, whoever owns the slot by now.
+    void restore_tracking_after_slew(std::unique_lock<std::mutex>& lock, const std::function<bool()>& owns) {
+        int mode = tracking_mode_for_control(lock);
+        if (mode == 0) {
             return;
         }
-        auto& protocol = CelestronProtocolWrapper::instance();
-        try {
-            int mode = tracking_mode_cached_;
-            if (mode <= 0) {
-                mode = 2; // EQ-North default
-            }
-            protocol.set_tracking_mode(mode);
-            tracking_mode_cached_ = mode;
-            tracking_mode_valid_ = true;
-        } catch (const std::exception& e) {
-            ALPACA_LOG_WARN("Celestron",
-                            std::string("restore_tracking_after_slew: ") + e.what());
+        if (mode < 0) {
+            mode = 2;  // EQ-North default
+        }
+        if (send_motion_locked(lock, owns, [mode] { CelestronProtocolWrapper::instance().set_tracking_mode(mode); })) {
+            set_tracking_mode_cached_locked(mode);
         }
     }
 
-    void learn_ra_offset_locked(double target_ra) {
+    // `owns` is tested before the read and again before the measurement is committed: a measurement taken by a slew
+    // that lost the mount meanwhile is dropped (decision 0006 rule 6).
+    void learn_ra_offset(std::unique_lock<std::mutex>& lock, double target_ra, const std::function<bool()>& owns) {
+        if (!owns()) {
+            return;
+        }
         if (slew_aborted_) {
             ALPACA_LOG_WARN("Celestron", "RA offset learning skipped (slew was aborted)");
             return;
@@ -2336,9 +3534,12 @@ private:
             ALPACA_LOG_WARN("Celestron", "RA offset learning skipped (first slew after SyncToCoordinates)");
             return;
         }
-        equatorial_cache_valid_ = false;
-        refresh_equatorial_cache_locked();
-        double error = shortest_ra_delta_hours(target_ra, cached_ra_hours_);
+        const double measured_ra = measure_equatorial(lock).first;
+        if (!owns()) {
+            return;  // the read ran with mutex_ free; a claim that landed meanwhile owns the mount and the offset
+        }
+
+        double error = util::shortest_ra_delta_hours(target_ra, measured_ra);
         constexpr double kMaxResidualHours = 30.0 / 54000.0; // 30 arcsec
         if (std::abs(error) > kMaxResidualHours) {
             char buf[160];
@@ -2364,25 +3565,23 @@ private:
     // Determines whether the mount needs a forced meridian flip to reach
     // the target.  Returns true if mc_goto_fast should be used with flipped
     // encoder coordinates; fills ra_raw/dec_raw accordingly (24-bit).
-    bool compute_flip_locked(double ra, double dec, double ra_biased,
-                             uint32_t& ra_raw_out, uint32_t& dec_raw_out) const {
+    bool compute_flip(std::unique_lock<std::mutex>& lock, double ra, double dec, double ra_biased, uint32_t& ra_raw_out,
+                      uint32_t& dec_raw_out) const {
         if (!hc_available_) return false;
         if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-            // ensure_site_info_cached_locked() sets site_info_valid_ on success;
+            ensure_site_info_cached(lock);
+            // ensure_site_info_cached() sets site_info_valid_ on success;
             // this re-check detects a failed cache populate, not a dead condition.
             // cppcheck-suppress identicalInnerCondition
             if (!site_info_valid_) return false;
         }
-        auto& protocol = CelestronProtocolWrapper::instance();
-        char hw_side = protocol.get_pier_side();
+        char hw_side = without_lock(lock, [] { return CelestronProtocolWrapper::instance().get_pier_side(); });
         int curr = (hw_side == 'W') ? 0 : (hw_side == 'E') ? 1 : -1;
         if (curr < 0) return false;
 
-        double lst = compute_local_sidereal_time_hours(
-            std::chrono::system_clock::now(), site_longitude_cached_);
-        double ha = shortest_ra_delta_hours(lst, ra);
-        int dest = ha >= 0.0 ? 0 : 1;   // 0=pierEast, 1=pierWest
+        double lst = util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+        double ha = util::shortest_ra_delta_hours(lst, ra);
+        int dest = util::pier_side_for_hour_angle(ha);  // 0=pierEast, 1=pierWest
         if (dest == curr) return false;
 
         if (dest == 0) {
@@ -2406,11 +3605,22 @@ private:
         return true;
     }
 
-    void do_slew_to_coordinates_locked(double ra, double dec) {
-        validate_ra_dec(ra, dec, "SlewToCoordinates");
-        check_slew_safety_locked("SlewToCoordinates");
+    // The blocking slew's and the park's dispatch. The blocking slew's caller holds the initiator lock. The park
+    // body runs on the slot thread without it; that is safe because every initiator that replaces motion claims the
+    // slot first (claim_slew_slot_locked()), so a park body that was taken over finds `still_mine` false after each
+    // exchange and writes nothing, and its goto passes the send gate only while it still owns the mount.
+    // `still_mine` is tested under mutex_ in code order: after the J read, after the pier read, at the gate, and after
+    // the goto. Returns false, writing nothing further, when it was false: the slew was taken over. The publish
+    // block sits between the two reads, so the first test is what keeps a claim that landed during the J read from
+    // having its Slewing and its stored error overwritten.
+    bool do_slew_to_coordinates(std::unique_lock<std::mutex>& lock, double ra, double dec,
+                                const util::OperationContext* body_ctx, const std::function<bool()>& still_mine) {
+        util::validate_ra_dec(ra, dec, "SlewToCoordinates");
+        check_slew_safety(lock, "SlewToCoordinates");
+        if (!still_mine()) {
+            return false;
+        }
         slew_aborted_ = false;
-        auto& protocol = CelestronProtocolWrapper::instance();
 
         double ra_biased = std::fmod(ra + ra_slew_offset_hours_, 24.0);
         if (ra_biased < 0.0) ra_biased += 24.0;
@@ -2433,30 +3643,45 @@ private:
             ALPACA_LOG_WARN("Celestron", std::string(buf));
         }
 
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
-        slewing_cached_ = true;
+        drop_poll_in_flight_locked();
+        set_slewing_locked(true);
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that retries a rejected goto (even via the blocking SlewToCoordinates)
         // must not be told the OLD goto failed.
-        last_slew_error_.clear();
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        clear_motion_errors_locked();
+        slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+        position_override_until_ = util::TaskClock::clock::time_point::min();
 
         uint32_t flip_ra = 0, flip_dec = 0;
-        bool flip = compute_flip_locked(ra, dec, ra_biased, flip_ra, flip_dec);
+        bool flip = compute_flip(lock, ra, dec, ra_biased, flip_ra, flip_dec);
+        if (!still_mine()) {
+            return false;
+        }
 
-        if (flip) {
-            flip_in_progress_ = true;
-            protocol.mc_goto_fast(0, flip_ra);
-            protocol.mc_goto_fast(1, flip_dec);
-        } else if (hc_available_) {
-            flip_in_progress_ = false;
-            protocol.goto_ra_dec_raw(ra_raw_target, dec_raw_target, use_precise_commands_);
-        } else {
-            flip_in_progress_ = false;
-            protocol.mc_goto_fast(0, ra_raw_target);
-            protocol.mc_goto_fast(1, dec_raw_target);
+        flip_in_progress_ = flip;
+        const bool hc = hc_available_;
+        const bool precise = use_precise_commands_;
+        run_slew_dispatch_hook(lock);  // test seam: an initiator lands between the flip decision and the GOTO
+        const bool sent = send_motion_locked(lock, still_mine, [&] {
+            auto& protocol = CelestronProtocolWrapper::instance();
+            if (flip) {
+                protocol.mc_goto_fast(0, flip_ra);
+                protocol.mc_goto_fast(1, flip_dec);
+            } else if (hc) {
+                protocol.goto_ra_dec_raw(ra_raw_target, dec_raw_target, precise);
+            } else {
+                protocol.mc_goto_fast(0, ra_raw_target);
+                protocol.mc_goto_fast(1, dec_raw_target);
+            }
+        });
+        if (!sent) {
+            return false;
+        }
+        if (body_ctx != nullptr) {
+            run_slew_body_hook(lock, *body_ctx);  // test seam: the GOTO is out, mutex_ is free (Park body only)
+        }
+        if (!still_mine()) {
+            return false;
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -2467,6 +3692,7 @@ private:
         parked_ = false;
         at_home_ = false;
         homing_ = false;
+        return true;
     }
 
     // Poll for slew completion, RELEASING the driver mutex around every sleep
@@ -2478,12 +3704,12 @@ private:
     // past `owner_generation` while the lock was released (the slew was superseded).
     bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
         const auto timeout = std::chrono::seconds(120);
-        auto start = std::chrono::steady_clock::now();
+        auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
         bool saw_slewing = false;
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
             lock.unlock();
-            std::this_thread::sleep_for(d);
+            clock_.sleep_for(d);
             lock.lock();
             // The mount may have been disconnected while the lock was released.
             check_connected();
@@ -2492,83 +3718,38 @@ private:
             if (motion_generation_ != owner_generation) {
                 return false;
             }
-            bool slewing = get_slewing_locked();
+            bool slewing = get_slewing_fresh(lock);
+            // cppcheck-suppress identicalConditionAfterEarlyExit
+            if (motion_generation_ != owner_generation) {
+                return false;  // the read released mutex_: a concurrent motion command took the mount meanwhile
+            }
             if (slewing) {
                 saw_slewing = true;
             }
             if (!slewing) {
-                if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                if (!saw_slewing && (clock_.now() - start) < start_grace) {
                     sleep_unlocked(std::chrono::milliseconds(200));
                     continue;
                 }
                 break;
             }
-            if (std::chrono::steady_clock::now() - start > timeout) {
+            if (clock_.now() - start > timeout) {
                 throw AlpacaException("Slew timed out");
             }
             sleep_unlocked(std::chrono::milliseconds(250));
         }
-        slewing_cached_ = false;
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        equatorial_cache_valid_ = false;
-        altaz_cache_valid_ = false;
+        // The position is read first; Slewing then flips beside it in one locked step.
+        const Measurement landed = measure_full(lock);
+        if (motion_generation_ != owner_generation) {
+            return false;
+        }
+        publish_measurement_locked(landed);
+        set_slewing_locked(false);
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
         if (slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
         return motion_generation_ == owner_generation;
-    }
-
-    void sync_mount_time_locked() {
-        auto now_utc = std::chrono::system_clock::now();
-        // mutex_ is already held here — call the _locked body, not the public
-        // locking method (non-recursive mutex would self-deadlock).
-        set_utc_date_locked(now_utc);
-    }
-
-    std::chrono::system_clock::time_point current_utc_time_locked() const {
-        if (!last_utc_valid_) {
-            last_utc_set_ = std::chrono::system_clock::now();
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
-        }
-        auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
-        return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
-    }
-
-    static double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
-                                                    double longitude_degrees) {
-        using namespace std::chrono;
-        double days_since_epoch = duration_cast<seconds>(utc_time.time_since_epoch()).count() / 86400.0;
-        double jd = 2440587.5 + days_since_epoch;
-        double t = (jd - 2451545.0) / 36525.0;
-        double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
-                      + 0.000387933 * t * t - (t * t * t) / 38710000.0;
-        double lst = gmst + longitude_degrees;
-        lst = std::fmod(lst, 360.0);
-        if (lst < 0.0) {
-            lst += 360.0;
-        }
-        return lst / kHoursToDegrees;
-    }
-
-    static double shortest_ra_delta_hours(double a, double b) {
-        double delta = a - b;
-        while (delta > 12.0) {
-            delta -= 24.0;
-        }
-        while (delta < -12.0) {
-            delta += 24.0;
-        }
-        return delta;
-    }
-
-    static void validate_ra_dec(double ra, double dec, const char* context) {
-        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-            throw AlpacaException(std::string(context) + ": RA out of range", AlpacaError::InvalidValue);
-        }
-        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-            throw AlpacaException(std::string(context) + ": Dec out of range", AlpacaError::InvalidValue);
-        }
     }
 
     int device_number_;
@@ -2580,38 +3761,28 @@ private:
     bool connection_resolved_ = false;
     mutable std::mutex mutex_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
-    bool connected_;
+    std::atomic<bool> connected_{false};       // set last by a connect, first by a disconnect; lock-free for Connected
 
     double target_ra_hours_;
     double target_dec_degrees_;
     double aperture_diameter_m_;
     double aperture_area_m2_;
     double focal_length_m_;
-    mutable double cached_ra_hours_ = 0.0;
-    mutable double cached_dec_degrees_ = 0.0;
-    mutable double cached_alt_degrees_ = 0.0;
-    mutable double cached_az_degrees_ = 0.0;
-    mutable bool equatorial_cache_valid_ = false;
-    mutable bool altaz_cache_valid_ = false;
     mutable util::PolledLinkHealth position_link_health_;
     mutable std::mutex link_fault_mutex_;
     mutable std::string link_fault_text_;
-    mutable std::chrono::steady_clock::time_point last_equatorial_update_;
-    mutable std::chrono::steady_clock::time_point last_altaz_update_;
 
     mutable double site_latitude_cached_;
     mutable double site_longitude_cached_;
     mutable bool site_info_valid_;
-    mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
-    double site_elevation_m_;
+    mutable util::TaskClock::clock::time_point last_site_info_attempt_;
+    std::optional<double> site_elevation_m_;  // nullopt until set or configured
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
     mutable bool dst_observed_;
-    mutable std::chrono::system_clock::time_point last_utc_set_;
-    mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
-    mutable bool last_utc_valid_;
-    mutable int tracking_mode_cached_;
-    mutable bool tracking_mode_valid_;
+    // The client's UTCDate (or the mount/host seed) and the task-clock time since (decision 0014); guarded by mutex_.
+    mutable util::UtcOffset utc_offset_;
+    mutable bool mount_clock_unreadable_ = false;  // the connect-time clock read failed; guarded by mutex_
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
     // ValueNotSet until that property itself has been written. One shared flag
@@ -2630,12 +3801,16 @@ private:
     // returned used to be logged and forgotten, leaving Slewing read FALSE --
     // indistinguishable from a landed goto. Set (under mutex_) by the slew
     // task's catch block on a REAL failure (never on the task's own
-    // cancellation -- a newer initiator or AbortSlew reaped it), cleared by
-    // the next slew initiator, AbortSlew, and connect/disconnect. Consulted by
+    // supersession or cancellation -- a newer initiator or AbortSlew took
+    // the mount), cleared by the next motion initiator, a successful AbortSlew, and connect/disconnect.
+    // A failed AbortSlew replaces it with the failed-stop reason. Consulted by
     // get_slewing() before the cached bool.
     mutable std::string last_slew_error_;
-    mutable std::chrono::steady_clock::time_point slew_force_until_;
-    mutable std::chrono::steady_clock::time_point position_override_until_;
+    mutable std::string last_home_error_;  // FindHome's completion error, not every motion error.
+    mutable int slew_status_poll_failures_ = 0;
+    mutable int home_status_poll_failures_ = 0;
+    mutable util::TaskClock::clock::time_point slew_force_until_;
+    mutable util::TaskClock::clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     std::string mount_firmware_version_;
     // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so the
@@ -2646,7 +3821,6 @@ private:
     int mount_model_id_;
     std::string mount_model_name_;
     bool use_precise_commands_;
-    bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
 
     std::optional<double> pending_site_latitude_;
@@ -2656,8 +3830,8 @@ private:
     const CelestronAlignmentSetting alignment_setting_;  // fork geometry from the device config (#860)
     GuideRate guide_rate_{};
     mutable std::array<bool, 2> pulse_guide_active_{false, false};
-    mutable std::array<std::chrono::steady_clock::time_point, 2> pulse_guide_end_time_{
-        std::chrono::steady_clock::time_point::min(), std::chrono::steady_clock::time_point::min()};
+    mutable std::array<util::TaskClock::clock::time_point, 2> pulse_guide_end_time_{
+        util::TaskClock::clock::time_point::min(), util::TaskClock::clock::time_point::min()};
     // open-astro#326: atomic, not a plain bool. set_connected() writes this
     // during the AUX-bus probe while get_can_pulse_guide(),
     // get_can_set_guide_rates(), get_guide_rate()/set_guide_rate() and
@@ -2668,26 +3842,26 @@ private:
     // get_tracking()).
     //
     // Atomic rather than moving the reads under mutex_ deliberately: these are
-    // capability getters that AGENTS.md requires to be cheap, and mutex_ is
-    // held across the whole blocking connect handshake, so locking them would
-    // park a polling client for the duration -- the issue #130 shape.
+    // capability getters a polling client calls, so they stay lock-free -- the
+    // issue #130 shape (alpaca-http-conformance.instructions.md states the rule
+    // for get_connected()).
     std::atomic<bool> has_autoguider_port_{false};
 
     mutable double pg_hold_ra_hours_ = 0.0;
     mutable bool pg_hold_ra_valid_ = false;
-    mutable std::chrono::steady_clock::time_point pg_hold_ra_until_;
+    mutable util::TaskClock::clock::time_point pg_hold_ra_until_;
     mutable double pg_hold_dec_degrees_ = 0.0;
     mutable bool pg_hold_dec_valid_ = false;
-    mutable std::chrono::steady_clock::time_point pg_hold_dec_until_;
+    mutable util::TaskClock::clock::time_point pg_hold_dec_until_;
 
     mutable double pg_ra_baseline_hours_ = 0.0;
     mutable double pg_ra_expected_delta_hours_ = 0.0;
     mutable bool pg_ra_correction_valid_ = false;
-    mutable std::chrono::steady_clock::time_point pg_ra_correction_until_;
+    mutable util::TaskClock::clock::time_point pg_ra_correction_until_;
     mutable double pg_dec_baseline_degrees_ = 0.0;
     mutable double pg_dec_expected_delta_degrees_ = 0.0;
     mutable bool pg_dec_correction_valid_ = false;
-    mutable std::chrono::steady_clock::time_point pg_dec_correction_until_;
+    mutable util::TaskClock::clock::time_point pg_dec_correction_until_;
     mutable bool sync_completed_this_session_ = false;
     bool has_ra_switch_ = false;
     bool has_dec_switch_ = false;
@@ -2704,21 +3878,48 @@ private:
     // Bumped under mutex_ by every motion initiator; a sync slew waiting with the lock
     // released compares it to learn it was superseded (Sky-Watcher shape, #832).
     uint64_t motion_generation_ = 0;
+    // The send gate (send_motion_locked()): how many motion command groups are on the wire, and the wait for one to
+    // end. Both guarded by mutex_.
+    mutable unsigned motion_sends_in_flight_ = 0;
+    mutable std::condition_variable send_cv_;
+    mutable std::optional<PendingStop> pending_stop_;  // a failure stop that found an initiator busy; mutex_
     bool skip_next_ra_learn_ = false;
     mutable bool flip_in_progress_ = false;
 
-    // Background task threads — see the helpers above. task_mutex_ only guards
-    // thread handles and the cv; it is never held across protocol I/O.
     // Serializes motion handoffs: sync/async slews, park, FindHome, PulseGuide,
     // MoveAxis, AbortSlew, Unpark, and disconnect. Never taken under mutex_; a
     // blocking slew releases it before waiting for motion completion.
-    std::mutex initiator_mutex_;
-    mutable std::mutex task_mutex_;
-    mutable std::condition_variable task_cv_;
-    std::thread slew_task_thread_;
-    std::array<std::thread, 2> pulse_task_threads_;
-    mutable std::atomic<bool> slew_task_cancel_{false};
-    mutable std::array<std::atomic<bool>, 2> pulse_task_cancel_{};
+    mutable std::mutex initiator_mutex_;
+    // Serialises the connect, the disconnect and the setters that write the mount (tracking, guide rate, site, UTC)
+    // end to end: wire write, then publish. No getter takes it. Lock order (decision 0016): transition_mutex_,
+    // initiator_mutex_, the wrapper's per-link lock, mutex_ (leaf), then the AsyncOperation slot and StateSnapshot
+    // mutexes. Never taken under mutex_ or by a slew or pulse body.
+    std::mutex transition_mutex_;
+    // Declared last, initialised last; must outlive the driver (decision 0005).
+    util::TaskClock& clock_;
+    // Declared after clock_ (the slots take it) and last, so they are destroyed
+    // (and join) before any member their bodies touch. The slew slot carries
+    // slew, Park and the completion tails; each axis has its own pulse slot and
+    // generation, so a pulse on one axis never supersedes the other's.
+    util::OperationGeneration slew_generation_;
+    util::AsyncOperation slew_{"Celestron slew", slew_generation_, clock_};
+    util::OperationGeneration pulse_generation_[2];
+    util::AsyncOperation pulse_ops_[2] = {{"Celestron pulse guide (RA)", pulse_generation_[0], clock_},
+                                          {"Celestron pulse guide (Dec)", pulse_generation_[1], clock_}};
+    // Decision 0010: the polled frame, read by the getters and DeviceState, and the poll body that fills it. The
+    // snapshot is declared before the slot, so the slot (whose body publishes into it) is destroyed first.
+    mutable util::StateSnapshot<PolledFrame> snapshot_{clock_, kSnapshotMaxAge};
+    util::OperationGeneration poll_generation_;
+    util::AsyncOperation status_poll_{"Celestron status poll", poll_generation_, clock_};
+    std::atomic<bool> link_lost_{false};  // decision 0009: set under mutex_ by the poll body, cleared by a connect
+    std::atomic<bool> status_poll_paused_for_testing_{false};
+    std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
+    mutable std::mutex status_poll_hook_mutex_;
+    std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> slewing_read_hook_;   // guarded by status_poll_hook_mutex_
+    std::function<void()> failure_stop_hook_;   // guarded by status_poll_hook_mutex_
+    std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
+    SlewBodyHook slew_body_hook_;               // guarded by status_poll_hook_mutex_
 };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(
@@ -2732,23 +3933,78 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope(
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
     int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
     std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect, CelestronAlignmentSetting alignment) {
+    std::optional<bool> sync_time_on_connect, CelestronAlignmentSetting alignment, util::TaskClock& clock) {
     return std::make_unique<CelestronTelescopeDriver>(device_number, connection_info, site_latitude_deg,
                                                       site_longitude_deg, site_elevation_m, sync_time_on_connect,
-                                                      alignment);
+                                                      alignment, util::ConnectionResolver<ConnectionInfo>{}, clock);
+}
+
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_slew_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_pulse_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_status_poll_paused_for_testing(paused);
+    }
+}
+
+bool poll_status_now_for_testing(TelescopeDriver& driver) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        return celestron->poll_status_now_for_testing();
+    }
+    return false;
+}
+
+void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_slewing_read_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_failure_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_failure_stop_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_slew_body_hook_for_testing(TelescopeDriver& driver, SlewBodyHook hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_slew_body_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_slew_dispatch_hook_for_testing(std::move(hook));
+    }
 }
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
     std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
-    CelestronAlignmentSetting alignment) {
+    CelestronAlignmentSetting alignment, util::TaskClock& clock) {
     if (!connection_resolver) {
         throw AlpacaException("Celestron telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<CelestronTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
                                                       site_longitude_deg, site_elevation_m, sync_time_on_connect,
-                                                      alignment, std::move(connection_resolver));
+                                                      alignment, std::move(connection_resolver), clock);
 }
 
 ConnectionInfo resolve_celestron_serial_auto(int mount_index) {
@@ -2771,16 +4027,14 @@ ConnectionInfo resolve_celestron_serial_auto(int mount_index) {
     return conn;
 }
 
-std::unique_ptr<TelescopeDriver> create_celestron_telescope_auto(int device_number, int mount_index,
-                                                                 std::optional<double> site_latitude_deg,
-                                                                 std::optional<double> site_longitude_deg,
-                                                                 std::optional<double> site_elevation_m,
-                                                                 std::optional<bool> sync_time_on_connect,
-                                                                 CelestronAlignmentSetting alignment) {
+std::unique_ptr<TelescopeDriver> create_celestron_telescope_auto(
+    int device_number, int mount_index, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, CelestronAlignmentSetting alignment, util::TaskClock& clock) {
     // The serial scan runs at connect time (#659), not here.
     return create_celestron_telescope_deferred(
         device_number, [mount_index] { return resolve_celestron_serial_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect, alignment);
+        site_longitude_deg, site_elevation_m, sync_time_on_connect, alignment, clock);
 }
 
 } // namespace alpacacore::vendor::celestron

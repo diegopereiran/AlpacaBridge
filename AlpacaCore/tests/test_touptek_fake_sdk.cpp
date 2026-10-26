@@ -21,6 +21,7 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -33,6 +34,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
 #include "fake_touptek_sdk.h"
 
 using alpacacore::AlpacaException;
@@ -56,6 +58,208 @@ bool eventually(const std::function<bool()>& predicate, std::chrono::millisecond
 }
 
 }  // namespace
+
+TEST_CASE("FakeToupTekSDK - next image hold survives restart and resets its rendezvous",
+          "[touptek][camera][unit][fakesdk][last-exposure]") {
+    auto fake = make_fake_with_camera();
+    const auto handle = fake.open_camera_by_id("fake-cam-0");
+    fake.deliver_frame = true;
+    for (int acquisition = 0; acquisition < 2; ++acquisition) {
+        fake.hold_next_wait_image();
+        CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+        fake.stop(handle);  // the driver's format restart happens before WaitImage
+        CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+        bool delivered = false;
+        std::thread worker([&] {
+            unsigned width = 0;
+            unsigned height = 0;
+            delivered = fake.wait_image(handle, 2000, nullptr, 8, 1920, width, height);
+        });
+        const bool entered = fake.wait_for_held_image(std::chrono::seconds(1));
+        // Always release and join before an assertion can unwind the test.
+        fake.stop(handle);  // an actual active abort must still release WaitImage
+        worker.join();
+        REQUIRE(entered);
+        CHECK(delivered);
+        CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+    }
+    fake.close_camera(handle);
+}
+
+TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and survives unsuccessful acquisitions",
+          "[touptek][camera][unit][fakesdk][last-exposure]") {
+    auto fake = make_fake_with_camera();
+    alpacacore::test::FakeTaskClock clock;
+    std::atomic<bool> fail_wait{false};
+    fake.before_call = [&](const std::string& call) {
+        if (call == "wait_image" && fail_wait.load()) {
+            throw AlpacaException("injected image wait failure", alpacacore::AlpacaError::DriverException);
+        }
+    };
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    const auto error = [](auto&& read) {
+        try {
+            read();
+        } catch (const AlpacaException& ex) {
+            return ex.error_code();
+        }
+        return 0;
+    };
+    const auto check_error = [&](int code) {
+        CHECK(error([&] { driver->get_last_exposure_duration(); }) == code);
+        CHECK(error([&] { driver->get_last_exposure_start_time(); }) == code);
+    };
+    const auto wait_for = [](auto&& predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!predicate() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        return predicate();
+    };
+    check_error(alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    check_error(alpacacore::AlpacaError::InvalidOperation);
+
+    bool prior_success = false;
+    std::chrono::system_clock::time_point prior_start;
+    SECTION("first unsuccessful acquisition") {}
+    SECTION("previous successful image remains the LastExposure") {
+        fake.deliver_frame = true;
+        driver->start_exposure(0.0100004, true);
+        REQUIRE(wait_for([&] { return driver->get_image_ready(); }));
+        CHECK(driver->get_last_exposure_duration() == 0.01);  // programmed integer microseconds
+        prior_start = driver->get_last_exposure_start_time();
+        prior_success = true;
+        driver->set_connected(true);
+        CHECK(driver->get_last_exposure_start_time() == prior_start);
+        const int stops = fake.call_count("stop");
+        driver->set_start_x(driver->get_camera_x_size() - 1);
+        CHECK(error([&] { driver->start_exposure(0.02, true); }) == alpacacore::AlpacaError::InvalidValue);
+        CHECK(fake.call_count("stop") == stops);
+        CHECK(driver->get_last_exposure_duration() == 0.01);
+        CHECK(driver->get_last_exposure_start_time() == prior_start);
+        driver->set_start_x(0);
+        driver->abort_exposure();  // reap before installing the next held wait
+    }
+    const auto check_metadata = [&] {
+        if (prior_success) {
+            CHECK(driver->get_last_exposure_duration() == 0.01);
+            CHECK(driver->get_last_exposure_start_time() == prior_start);
+        } else {
+            check_error(alpacacore::AlpacaError::InvalidOperation);
+        }
+    };
+
+    // Each exit starts with a pending frame; Stop releases the fake's wait but
+    // delivers a valid frame, so abort must win even against a successful read.
+    for (const std::string outcome : {"abort", "stop", "missing", "malformed", "deadline", "late frame"}) {
+        CAPTURE(outcome);
+        fake.deliver_frame = outcome != "missing";
+        fake.delivered_dimensions.reset();
+        if (outcome == "malformed") fake.delivered_dimensions = std::pair<unsigned, unsigned>{0, 2};
+        fake.hold_next_wait_image();
+        CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+        driver->start_exposure(2.0, true);
+        REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
+        check_metadata();
+        CHECK_FALSE(driver->get_image_ready());
+        CHECK(error([&] { driver->get_image_array(); }) == alpacacore::AlpacaError::InvalidOperation);
+        // Invalid input cannot cancel this pending acquisition or replace A.
+        for (double invalid :
+             {-1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(), 1e100}) {
+            CHECK(error([&] { driver->start_exposure(invalid, true); }) == alpacacore::AlpacaError::InvalidValue);
+        }
+        check_metadata();
+        if (outcome == "abort" || outcome == "stop") {
+            if (outcome == "abort")
+                driver->abort_exposure();
+            else
+                driver->stop_exposure();
+            CHECK_FALSE(driver->get_image_ready());
+        } else {
+            if (outcome == "deadline" || outcome == "late frame") {
+                clock.advance(std::chrono::seconds(18));
+                if (outcome == "deadline") CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+            }
+            fake.release_wait_image();
+            REQUIRE(wait_for(
+                [&] { return error([&] { driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException; }));
+            CHECK(error([&] { driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
+            driver->abort_exposure();  // join before changing the fake's script
+        }
+        check_metadata();
+    }
+
+    fail_wait.store(true);
+    driver->start_exposure(2.0, true);
+    REQUIRE(wait_for(
+        [&] { return error([&] { driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException; }));
+    check_metadata();
+    driver->abort_exposure();
+    fail_wait.store(false);
+    fake.delivered_dimensions.reset();
+    fake.deliver_frame = true;
+    driver->start_exposure(0.0, false);
+    REQUIRE(wait_for([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_duration() == 0.0001);  // hardware minimum, not requested zero
+    CHECK(driver->get_last_exposure_start_time() >= prior_start);
+    driver->set_connected(false);
+    check_error(alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    check_error(alpacacore::AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("ToupTek camera - LastExposure start follows deferred setup and progress uses the current trigger",
+          "[touptek][camera][unit][fakesdk][last-exposure]") {
+    auto fake = make_fake_with_camera();
+    alpacacore::test::FakeTaskClock clock;
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool setup_entered = false;
+    bool release_setup = false;
+    fake.before_call = [&](const std::string& call) {
+        if (call != "put_roi") return;
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        setup_entered = true;
+        gate_cv.notify_all();
+        gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return release_setup; });
+    };
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    fake.deliver_frame = true;
+    fake.hold_next_wait_image();
+    driver->start_exposure(2.0, true);
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return setup_entered; }));
+    }
+    CHECK(fake.call_count("trigger") == 0);
+    CHECK(driver->get_percent_completed() == 0.0);
+    clock.advance(std::chrono::seconds(3));
+    const auto earliest_start = std::chrono::system_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        release_setup = true;
+    }
+    gate_cv.notify_all();
+    const auto wait_for = [](auto&& predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!predicate() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        return predicate();
+    };
+    REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
+    const auto latest_start = std::chrono::system_clock::now();
+    clock.advance(std::chrono::seconds(1));
+    CHECK(driver->get_percent_completed() == 50.0);
+    fake.release_wait_image();
+    REQUIRE(wait_for([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_start_time() >= earliest_start);
+    CHECK(driver->get_last_exposure_start_time() <= latest_start);
+    CHECK(driver->get_last_exposure_duration() == 2.0);
+    driver->set_connected(false);
+}
 
 TEST_CASE("ToupTek camera - connect-path failure releases the shared open (r18 #1)",
           "[touptek][camera][unit][fakesdk]") {
@@ -301,7 +505,12 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
         }
         return pred();
     };
-    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }, std::chrono::milliseconds(2000)));
+    // Wait on the tick's LAST read: it reads the temperature first and the TEC
+    // voltages after, so waiting on the temperature alone let the checks below
+    // run mid-tick, which the slow -O0 coverage build did (0 >= 1).
+    REQUIRE(
+        wait_until([&] { return fake.call_count("get_tec_voltage_max_deciV") >= 1; }, std::chrono::milliseconds(2000)));
+    CHECK(fake.call_count("get_temperature_deciC") >= 1);
     CHECK(fake.call_count("get_tec_voltage_deciV") >= 1);  // default fake camera supports the cooler
     CHECK(fake.call_count("get_tec_voltage_max_deciV") == 1);
 
@@ -384,6 +593,49 @@ TEST_CASE("ToupTek camera - malformed frame fails ImageReady and a later valid f
     CHECK(image.height == 2);
     CHECK(image.rank == 2);
     CHECK(image.data == std::vector<std::int32_t>{1, 2, 3, 4});
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - completed exposures reuse the pull-mode stream", "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    REQUIRE(fake.call_count("start_pull_mode") == 1);
+    REQUIRE(fake.call_count("stop") == 0);
+
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+
+    // PHD2 sends AbortExposure when Loop stops, after the last frame completed.
+    // Reaping either completed worker must not stop or restart pull mode.
+    driver->abort_exposure();
+    CHECK(fake.call_count("stop") == 0);
+    CHECK(fake.call_count("start_pull_mode") == 1);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - AbortExposure right after connect keeps the pull-mode stream",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(fake.call_count("start_pull_mode") == 1);
+
+    // Idle AbortExposure straight after connect (PHD2 on Loop stop): no worker
+    // ran, so connect itself must have marked the stream reusable.
+    driver->abort_exposure();
+    CHECK(fake.call_count("stop") == 0);
+
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(fake.call_count("start_pull_mode") == 1);
+
     driver->set_connected(false);
 }
 
@@ -744,4 +996,223 @@ TEST_CASE("ToupTek camera - malformed exposure failure clears on reconnect", "[t
     driver->set_connected(true);
     CHECK_FALSE(driver->get_image_ready());
     driver->set_connected(false);
+}
+
+// open-astro#294: a wheel's DeviceState is the single Position member, so it already costs one
+// device read and the static members cost none; this pins that so a cache is not needed.
+// Falsified by: touptek_filterwheel_driver.cpp get_names() calling
+// sdk_.get_filter_wheel_position() (position reads 4 after the loop, not 1).
+TEST_CASE("ToupTek AFW - DeviceState is one device read and static members cost none",
+          "[touptek][filterwheel][unit][fakesdk]") {
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFilterWheelInfo wheel;
+    wheel.id = "fake-afw-0";
+    wheel.name = "FakeAFW";
+    wheel.model_name = "AFW-M";
+    fake.wheels.push_back(wheel);
+    fake.wheel_position_script = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", fake);
+    driver->set_connected(true);
+    const int base = fake.call_count("get_filter_wheel_position");
+
+    CHECK(driver->get_device_state().size() == 2);  // Position, TimeStamp
+    CHECK(fake.call_count("get_filter_wheel_position") - base == 1);
+    for (int i = 0; i < 3; ++i) {
+        (void)driver->get_names();
+        (void)driver->get_focus_offsets();
+    }
+    CHECK(fake.call_count("get_filter_wheel_position") - base == 1);
+    driver->set_connected(false);
+}
+
+namespace {
+
+// Blocks the named SDK call for `delay` once armed; `entered` is set while it is in flight.
+void delay_sdk_call(FakeToupTekSDK& fake, const std::string& name, std::chrono::milliseconds delay,
+                    std::atomic<bool>& entered) {
+    fake.before_call = [name, delay, &entered](const std::string& call) {
+        if (call == name) {
+            entered.store(true);
+            std::this_thread::sleep_for(delay);
+        }
+    };
+}
+
+void wait_for_entered(const std::atomic<bool>& entered) {
+    for (int i = 0; i < 400 && !entered.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(entered.load());
+}
+
+template <typename Fn>
+std::chrono::milliseconds time_of(Fn&& fn) {
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        fn();
+    } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        // Only the latency matters here.
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+}
+
+// The error code a call ends with: 0 when it succeeds, else the AlpacaException code. A disconnect racing
+// an exchange may refuse it with NotConnected but must never fail it on a closed handle (DriverException).
+template <typename Fn>
+int outcome_of(Fn&& fn) {
+    try {
+        fn();
+    } catch (const AlpacaException& ex) {
+        return ex.error_code();
+    }
+    return 0;
+}
+
+constexpr std::chrono::milliseconds kSlowDevice{300};
+constexpr std::chrono::milliseconds kNoIoBound{20};
+
+}  // namespace
+
+TEST_CASE("ToupTek thermal switch - no-I/O getters do not wait on a heater read",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
+
+    std::thread read([&] { (void)time_of([&] { (void)thermal->get_switch_value(0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { (void)thermal->get_max_switch(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_unique_id(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_switch_name(0); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_connected(); }) < kNoIoBound);
+
+    read.join();
+    fake.before_call = nullptr;
+    thermal->set_connected(false);
+}
+
+TEST_CASE("ToupTek thermal switch - no-I/O getters do not wait on a connect",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat_max", kSlowDevice, entered);
+
+    std::thread connect([&] { (void)time_of([&] { thermal->set_connected(true); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { (void)thermal->get_max_switch(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_unique_id(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_connected(); }) < kNoIoBound);
+
+    connect.join();
+    fake.before_call = nullptr;
+    thermal->set_connected(false);
+}
+
+TEST_CASE("ToupTek thermal switch - disconnect with a read in flight returns and closes after it",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
+
+    std::atomic<int> outcome{-1};
+    std::thread read([&] { outcome = outcome_of([&] { (void)thermal->get_switch_value(0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
+    read.join();
+    fake.before_call = nullptr;
+    CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
+    CHECK_FALSE(thermal->get_connected());
+    CHECK(fake.underflow_closes == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+}
+
+TEST_CASE("ToupTek thermal switch - disconnect with a write in flight closes the handle after the write",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "put_heat", kSlowDevice, entered);
+
+    std::atomic<int> outcome{-1};
+    std::thread write([&] { outcome = outcome_of([&] { thermal->set_switch_value(0, 1.0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
+    write.join();
+    fake.before_call = nullptr;
+    // The close waits for the write: it never lands on a closed handle (the fake raises DriverException).
+    CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
+    CHECK_FALSE(thermal->get_connected());
+    CHECK(fake.underflow_closes == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+}
+
+// Falsified by: touptek_thermal_switch_driver.cpp read_value() reading the SDK directly instead of through
+// status_cache_ (get_heat is called again on the second read inside the 100 ms TTL).
+TEST_CASE("ToupTek thermal switch - reads inside the TTL share one cached frame", "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+
+    (void)thermal->get_switch_value(0);
+    const int base = fake.call_count("get_heat");
+    (void)thermal->get_switch_value(0);
+    (void)thermal->get_switch_value(0);
+    CHECK(fake.call_count("get_heat") == base);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    (void)thermal->get_switch_value(0);
+    CHECK(fake.call_count("get_heat") - base == 1);
+    thermal->set_connected(false);
+}
+
+// Falsified by: touptek_thermal_switch_driver.cpp write_element_value() dropping its
+// status_cache_.invalidate() (the read after a write serves the pre-write frame).
+TEST_CASE("ToupTek thermal switch - a write drops the cached frame", "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+
+    CHECK(thermal->get_switch_value(0) == 0.0);
+    thermal->set_switch_value(0, 1.0);
+    CHECK(thermal->get_switch_value(0) == 1.0);  // inside the TTL: only a refill can show the write
+    thermal->set_connected(false);
+}
+
+// Falsified by: ttl_status_cache.h get() dropping its health_.faulted() throw, or read_value() bypassing the
+// cache (the third failure reports the raw SDK error, not "communications compromised").
+TEST_CASE("ToupTek thermal switch - a dead link refuses reads after three failed refills",
+          "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    (void)thermal->get_switch_value(0);
+
+    fake.throw_from.insert("get_heat");
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    for (int i = 0; i < 2; ++i) {
+        CHECK_THROWS(thermal->get_switch_value(0));
+    }
+    try {
+        (void)thermal->get_switch_value(0);
+        FAIL("expected a throw");
+    } catch (const AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(thermal->get_connected());
+
+    fake.throw_from.clear();
+    CHECK(thermal->get_switch_value(0) == 0.0);
+    thermal->set_connected(false);
 }

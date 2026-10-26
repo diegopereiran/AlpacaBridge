@@ -8,10 +8,10 @@
 # alpacabridge-dbgsym_<tag without v>_arm64.deb, each with a .sha256 that holds
 # the sha256sum line for that file name. A tester can also install a named
 # beta, or any release, without apt. The .deb gets a signed build provenance
-# attestation (the dbgsym is a subject of it too; Actions > Attestations), so
-# `gh attestation verify` proves this workflow built it from the tag. A Release
-# also has a name, a source archive (GitHub attaches the zip/tarball itself)
-# and its release notes.
+# attestation (the dbgsym is a subject of it too) and an SPDX SBOM attestation
+# (Actions > Attestations), so `gh attestation verify` proves this workflow
+# built it from the tag. A Release also has a name, a source archive (GitHub
+# attaches the zip/tarball itself) and its release notes.
 #
 # Flow: `/bump-release` cuts the release on a PR (VERSION, README badge,
 # dated CHANGELOG heading, plain-language notes in docs/releases/X.Y.Z.md),
@@ -221,14 +221,14 @@ jobs:
     name: Attach the .deb to the release
     permissions:
       contents: write       # gh release upload
-      id-token: write       # OIDC token Sigstore signs the attestation with
-      attestations: write   # store the provenance attestation
+      id-token: write       # OIDC token Sigstore signs the attestations with
+      attestations: write   # store the provenance and SBOM attestations
     needs: release
     runs-on: ubuntu-24.04-arm
     # Built on the target distribution so dpkg-shlibdeps derives trixie
     # package names (libgpiod3 and friends), not the runner's Ubuntu ones.
     container: debian:trixie
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       NOTES_NAME: ${{ needs.release.outputs.notes_name }}
@@ -275,6 +275,12 @@ jobs:
           dpkg-deb --info "dist/alpacabridge_${NOTES_NAME}_arm64.deb" | sed -n '/Package:/,/Depends:/p'
           ls -l dist
 
+      - name: Generate the SBOM
+        # The repository's own inventory (scripts/dependency_snapshot.py), not a
+        # scanner: the vendored SDK .so files in the package carry no metadata a
+        # scanner could identify.
+        run: python3 scripts/dependency_snapshot.py --spdx "dist/alpacabridge_${NOTES_NAME}_arm64.deb" --output dist/sbom.spdx.json
+
       # Attestations are public records, so a dry run stops before them.
       - name: Attest build provenance
         if: github.event_name == 'push'
@@ -283,6 +289,13 @@ jobs:
           subject-path: |
             dist/alpacabridge_${{ env.NOTES_NAME }}_arm64.deb
             dist/alpacabridge-dbgsym_${{ env.NOTES_NAME }}_arm64.deb
+
+      - name: Attest the SBOM
+        if: github.event_name == 'push'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2 pinned (immutable ref)
+        with:
+          subject-path: dist/alpacabridge_${{ env.NOTES_NAME }}_arm64.deb
+          sbom-path: dist/sbom.spdx.json
 
       - name: Attach to the release
         if: github.event_name == 'push'
@@ -296,3 +309,40 @@ jobs:
             "dist/alpacabridge_${NOTES_NAME}_arm64.deb.sha256" \
             "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb" \
             "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb.sha256"
+
+  prune:
+    # Last job: once the .deb is attached, delete the GitHub Releases this tag
+    # supersedes (older betas of the same X.Y.Z; every beta of X.Y.Z after the
+    # stable). Tags stay; older betas are tags only, with no Release or .deb. A
+    # pruned release can be recreated, .deb attached, by re-running that tag's
+    # original push-triggered run (gh run rerun <run id>), which GitHub allows
+    # only within 30 days of the run. Off until the repository variable
+    # PRUNE_SUPERSEDED_RELEASES is 'true'; a dry run never prunes.
+    name: Prune superseded releases
+    if: github.event_name == 'push' && vars.PRUNE_SUPERSEDED_RELEASES == 'true'
+    needs: deb
+    permissions:
+      contents: write   # gh release delete
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Delete superseded releases (tags are kept)
+        run: |
+          set -euo pipefail
+          python3 scripts/release_prune.py --self-test
+          gh release list --repo "${GITHUB_REPOSITORY}" --limit 1000 --json tagName --jq '.[].tagName' > existing.txt
+          mapfile -t existing < existing.txt
+          python3 scripts/release_prune.py "${RELEASE_TAG}" "${existing[@]}" > doomed.txt
+          mapfile -t doomed < doomed.txt
+          for tag in "${doomed[@]}"; do
+            echo "Deleting release ${tag} (the tag stays)"
+            gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes
+          done

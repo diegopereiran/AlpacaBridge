@@ -15,8 +15,9 @@ Common build and runtime issues for AlpacaBridge.
 **Warning**: `Catch2 not found. Install Catch2 (v2 or v3) to build AlpacaCore tests.`
 
 **Solution**: `sudo apt install catch2`. A manual CMake configure can opt out instead with
-`cmake -S AlpacaHTTP -B AlpacaHTTP/build -DALPACACORE_BUILD_TESTS=OFF`, but `run_all_tests.sh` and `scripts/ci_preflight.sh`
-always build the tests, so Catch2 is required for those.
+`cmake -S AlpacaHTTP -B AlpacaHTTP/build -DALPACACORE_BUILD_TESTS=OFF`, but `run_all_tests.sh` and a full pre-flight
+(`PREFLIGHT_FULL=1 scripts/ci_preflight.sh`) always build the tests, so Catch2 is required for
+those. The default quick pre-flight builds nothing.
 
 ### Vendor SDK not found
 
@@ -49,6 +50,25 @@ always build the tests, so Catch2 is required for those.
 Add `catch2` to build the tests. [development.md](development.md#prerequisites) has the `apt install` command.
 
 ## Runtime issues
+
+### ZWO camera downloads fail or the USB link resets
+
+Edit the ZWO camera in the web UI and check **USB Limit** (`usbBandwidth` in its persisted
+configuration). Blank requests SDK control value **40**, clamped to the camera's supported range,
+in manual mode on each connect. This is a control value, not a measured throughput percentage.
+Lower values can improve marginal USB reliability but may slow downloads. Save and reconnect
+to apply a change; an explicit integer from 0 to 100 must also fit the camera's actual range.
+The setting survives restart. INFO logs show the requested/default value, applied value and range.
+
+A camera without a writable bandwidth control still connects with the field blank; an explicit
+unsupported value or a failed write/readback refuses connect with a USB Limit explanation.
+If the field is blank and a successful readback reports a different value or auto mode,
+the driver logs a WARNING with the requested and read-back settings and continues connecting.
+An explicit setting still refuses connect on either mismatch.
+Check power, cables, ports and hubs as well: limiting bandwidth does not prove or repair every
+USB reset, and automatic recovery of stale SDK handles after re-enumeration is not included
+([issue #1500](https://github.com/open-astro/AlpacaBridge/issues/1500)). A passing ASI6200/OPi6
+run is not proof that the reported ASI2600/CM4/Renesas/VIA-hub failure is resolved.
 
 ### Serial port connection fails
 
@@ -86,6 +106,18 @@ On a package install the file is `/var/lib/alpacabridge/config/default.yaml`; ed
 **Notes**:
 - The server reads the machine's hostname once, at start-up. After you rename the machine, restart the service, or the new name gets 403 and the old one is still allowed.
 - A bracketed IPv6 address with a zone id (`[fe80::1%25eth0]`) is refused: the address check does not accept zone ids. Use the hostname, `<hostname>.local`, or the IPv4 address instead.
+
+### Alpaca clients do not find the server by discovery
+
+**Why**: the discovery responder listens on UDP port 32227, the port the Alpaca API Reference (section 5.8.1) fixes as the default. If another program on the host holds that port without sharing it, or a client probes a different port, discovery fails while the web UI and the API still work.
+
+**Fix**: set `discovery.port` (1-65535) in the server config file, or `ALPACAHTTP_DISCOVERY_PORT` in the environment (it overrides the file), or use the "Discovery port" field in the web UI server settings (saved through `PUT /management/v1/description`, `DiscoveryPort`), then restart the service; the responder binds the port only at start. A value outside 1-65535 is ignored with a log warning and keeps the earlier value (the file value, else the default). Point the client at the same port.
+
+```yaml
+discovery:
+  enabled: true
+  port: 32227
+```
 
 ### Permission denied
 
@@ -131,6 +163,8 @@ This keeps Alpaca timestamps correct even with no NTP reachable. The hardware RT
 
 **Any request to the device resets the timer**, including a client's own routine `Slewing` polls — normal NINA/PHD2/ConformU polling (every few seconds) never comes close to the limit. Any request that itself blocks past the limit is also covered: it counts as activity for its whole duration, not just when it started, so a long call does not get aborted out from under the client that is waiting on it. (`SlewToCoordinates` and `SlewToTarget` are served for a mount that reports `CanSlew`: the server starts the async slew and waits up to 90 s for `Slewing` to clear, then answers a `DriverException` while the slew continues. `SlewToAltAz` is refused with `MethodNotImplemented`; use `SlewToAltAzAsync`.) A genuine trip means requests really did stop arriving for that long — which also means a request from any OTHER client still addressing the same telescope (a planetarium app polling position, say) keeps the watchdog disarmed even after the client that started the motion has gone away.
 
+**Sky-Watcher `MoveAxis` jogs.** On the Sky-Watcher driver, a stopped `MoveAxis` jog on a tracking mount goes back to tracking at its set rate; it does not stay stopped.
+
 **To change the limit or turn it off**: set `motion_watchdog_seconds` under `server:` in the server config file (default 30; 0 disables it). A slower-polling client may want a longer value; disabling it removes this backstop entirely, so only do that if you have another way to guarantee a hung client's slew gets stopped.
 
 On a package install the server config file is `/var/lib/alpacabridge/config/default.yaml`, owned by the `alpacabridge` service user. The package does not ship it (the web UI creates it on the first Server Info save), so it may not exist yet. Edit or create it as that user, because a file created with plain `sudo` is owned by root and later web UI saves then fail with "Unable to open config file for writing":
@@ -159,7 +193,7 @@ Environment=ALPACAHTTP_MOTION_WATCHDOG_SECONDS=0
 
 **Cause**: the driver knows the direction of the Dec axis counts (`eps`) only for boards that were measured: EQ-AL55i Pro (mount code `0x09`), EQM-35 Pro (`0x32`) and Wave 150i (`0x45`). Any other board keeps the shipped model `k = +1` (the home term sign, `eps` times the hemisphere sign), which is `eps = +1` in the north and `eps = -1` in the south, and is wrong for a board wired the other way (issue #582, #579). The connect log says where `eps` came from: `from the measured table`, `from the user override`, `from the unmeasured-board default`, or `Motor board not identified`.
 
-**Fix**: set **Dec axis sense** (`decAxisSense` in the device config) from one reading on your own mount. With the mount bare (no telescope), at its home position and tracking off, send a Dec-only `MoveAxis` until the Dec axis has turned about +90 degrees (`a2 = +90`), keeping the RA axis at home. Then look at which way the dovetail points:
+**Fix**: set **Dec axis sense** (`decAxisSense` in the device config) from one reading on your own mount. With the mount bare (no telescope), at its home position and tracking off, move the Dec axis alone until it has turned about +90 degrees (`a2 = +90`), keeping the RA axis at home. `MoveAxis` is sky-referenced (a positive secondary rate raises Declination, whichever way that turns the axis), so judge by the axis angle `a2`, not by the sign of the rate. Then look at which way the dovetail points:
 
 | Dovetail points | Your site | Dec axis sense |
 | --- | --- | --- |

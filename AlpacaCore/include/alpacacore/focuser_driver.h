@@ -15,7 +15,9 @@
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
 
+#include <chrono>
 #include <cstdint>
+#include <optional>
 
 namespace alpacacore {
 
@@ -37,7 +39,13 @@ public:
         if (!get_connected()) {
             return {};
         }
+        // Read once, before the getters: the age of the served state, so the
+        // TimeStamp names when it was measured (decision 0010).
+        const auto age = device_state_age();
         std::vector<DeviceState> state;
+        // IsMoving, Position, Temperature and TimeStamp: one allocation. GCC 14 reported
+        // -Werror=stringop-overflow in std::variant for the QHY focuser build when the vector grew by push_back.
+        state.reserve(4);
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
@@ -48,7 +56,13 @@ public:
         add("IsMoving", [this] { return get_is_moving(); });
         add("Position", [this] { return static_cast<std::int32_t>(get_position()); });
         add("Temperature", [this] { return get_temperature(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back(
+                {"TimeStamp",
+                 age ? device_state_timestamp(std::chrono::system_clock::now() -
+                                              std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
+                     : device_state_timestamp()});
+        }
         return state;
     }
 
@@ -117,6 +131,12 @@ public:
      * @param position Target position
      */
     virtual void move(int position) = 0;
+
+protected:
+    /// How old the state get_device_state() serves is, when the driver serves
+    /// it from a snapshot (decision 0010): the TimeStamp is then the time the
+    /// state was measured. nullopt (the default) stamps the request time.
+    virtual std::optional<std::chrono::nanoseconds> device_state_age() const { return std::nullopt; }
 };
 
 }  // namespace alpacacore

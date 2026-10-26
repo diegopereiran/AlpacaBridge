@@ -260,8 +260,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
     CHECK_FALSE(driver->get_switch_name(14).empty());
     // DeviceState omits the unavailable members rather than failing outright.
     const auto state = driver->get_device_state();
-    REQUIRE(state.size() == 1);
-    CHECK(state.front().name == "TimeStamp");
+    CHECK(state.empty());
 
     // The next frame restores the link without a reconnect.
     box.set_muted(false);
@@ -285,6 +284,41 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
         CHECK(std::string(ex.what()).find("Input/output error") != std::string::npos);
     }
     CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Falsified by: wandererastro_box_protocol_wrapper.cpp await_frame retries a hangup to the deadline
+TEST_CASE("WandererAstro Box Switch Driver - Connect fails at once when the port hangs up mid-wait",
+          "[wandererastro][switch][unit][fake]") {
+    // No frame for 60 s; the master closes 300 ms in. await_frame's budget is
+    // at least 3.5 s, so a connect that returns well before it saw the hangup.
+    alpacacore::test::FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(300), std::chrono::seconds(60));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path(), 19200);
+    std::thread severer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        box.sever_link();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    require_alpaca_error([&]() { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    severer.join();
+    CHECK(elapsed < std::chrono::milliseconds(2500));
+    CHECK_FALSE(driver->get_connected());
+}
+
+// #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
+// connect refuses in words the operator can act on instead of opening "" or auto-detecting.
+TEST_CASE("WandererAstro Box Switch Driver - Connect with empty serial port names portPath",
+          "[wandererastro][switch][unit]") {
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, "");
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    CHECK(message.find("portPath") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
 }
 

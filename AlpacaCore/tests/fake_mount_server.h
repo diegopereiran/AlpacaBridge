@@ -14,19 +14,17 @@
 
 // Minimal loopback TCP "mount" for the telescope [stress] tests (POSIX-only,
 // like the rest of the test suite's socket helpers). The telescope protocol
-// wrappers (ZWO / Celestron / SynScan / iOptron) treat a successful TCP
-// connect as a successful mount connect — every post-connect query is
-// individually fault-tolerant — so a server that accepts connections and
-// answers each read with a canned reply is enough to drive the drivers into
-// the CONNECTED state on a hardware-free host. That is the seam the stress
-// tests need: only a connected driver spawns its poll/pulse/GOTO/teardown
+// wrappers use vendor-specific handshakes: ZWO requires an AM-family :GVP#
+// identity, for example. A responder must supply the driver's mandatory
+// replies to reach the CONNECTED state on a hardware-free host. That is the
+// seam the stress tests need: only a connected driver spawns its poll/pulse/GOTO/teardown
 // threads, and those threads racing disconnect and destruction are exactly
 // where the audited detached-thread bugs lived.
 //
 // The responder callback receives each received chunk verbatim and returns
 // the bytes to send back (empty = no reply). Command framing/parsing is the
-// caller's business; per-command parse failures in the drivers are tolerated
-// by design, so a dumb default reply already exercises every thread path.
+// caller's business; the default reply is not sufficient for every driver's
+// handshake or operational thread path.
 
 #ifndef _WIN32
 
@@ -39,6 +37,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -52,8 +51,10 @@ class FakeMountServer {
 public:
     using Responder = std::function<std::string(const std::string& chunk)>;
 
-    /// Starts listening on an ephemeral loopback port immediately.
-    explicit FakeMountServer(Responder responder = default_responder()) : responder_(std::move(responder)) {
+    /// Starts listening (port zero is ephemeral); address and port are in host byte order.
+    explicit FakeMountServer(Responder responder = default_responder(), std::uint32_t bind_ipv4 = INADDR_LOOPBACK,
+                             std::uint16_t bind_port = 0)
+        : responder_(std::move(responder)) {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd_ < 0) {
             return;
@@ -62,8 +63,8 @@ public:
         ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = 0;  // ephemeral
+        addr.sin_addr.s_addr = htonl(bind_ipv4);
+        addr.sin_port = htons(bind_port);
         if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
             ::listen(listen_fd_, 16) != 0) {
             ::close(listen_fd_);
@@ -119,6 +120,17 @@ public:
 
     bool ok() const { return listen_fd_ >= 0 && port_ > 0; }
     int port() const { return port_; }
+    /// Non-empty replies written to a socket so far.
+    std::uint64_t replies_sent() const { return replies_sent_.load(); }
+    unsigned accepted_connections() const { return accepted_connections_.load(); }
+
+    /// Sends bytes to every live connection unprompted (a mount that keeps talking).
+    void push(const std::string& bytes) {
+        std::lock_guard<std::mutex> lock(conn_mutex_);
+        for (const int fd : conn_fds_) {
+            (void)::send(fd, bytes.data(), bytes.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+        }
+    }
 
     /// Resets every accepted connection (an RST, not a FIN, so the client's next send fails at once) and returns
     /// once each handler has closed its socket, or after 2 s. The listener stays open, so a reconnect is served.
@@ -174,8 +186,9 @@ public:
     }
 
     /// Replies "0#" to anything: valid terminator for every '#'-framed
-    /// protocol in the family; per-command parse failures are tolerated by
-    /// the drivers (and swallowed by the stress harness).
+    /// protocol in the family, but not a valid identity or measurement.
+    /// ZWO driver fixtures must answer :GVP# with a supported AM model
+    /// and :GMA# with twelve hexadecimal characters, both hash-terminated.
     // Canned "0#" for everything, EXCEPT the SynScan/NexStar protocol echo
     // ("K" + byte -> byte + "#"): the SynScan driver's connect now gates on
     // that echo matching, so a fake that never answers it leaves the driver
@@ -204,6 +217,7 @@ private:
                 continue;
             }
             int one = 1;
+            ++accepted_connections_;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
             std::lock_guard<std::mutex> lock(conn_mutex_);
             conn_fds_.push_back(fd);
@@ -221,6 +235,7 @@ private:
             const std::string reply = responder_(std::string(buf, static_cast<std::size_t>(n)));
             if (!reply.empty()) {
                 static_cast<void>(::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL));
+                replies_sent_.fetch_add(1);
             }
         }
         // Deregister and close under one lock so the destructor can never
@@ -236,6 +251,8 @@ private:
     int listen_fd_ = -1;
     int port_ = 0;
     std::atomic<bool> stop_{false};
+    std::atomic<std::uint64_t> replies_sent_{0};
+    std::atomic<unsigned> accepted_connections_{0};
     std::thread accept_thread_;
     std::mutex conn_mutex_;
     std::vector<int> conn_fds_;

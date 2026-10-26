@@ -14,10 +14,12 @@
 
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/util/error_handling.h>
-#include <cstdint>
-#include <vector>
+
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace alpacacore {
 
@@ -69,9 +71,9 @@ public:
     // individual property getters so the reported values always agree with the
     // corresponding GET endpoints (a consistency ConformU verifies). Properties
     // that throw (not implemented / not currently known) are omitted; a
-    // TimeStamp entry is added when connected. A disconnected driver returns the empty list, with no TimeStamp. Defined
-    // inline to keep the CameraDriver vtable weak so the per-vendor static libraries link without a base-library
-    // ordering dependency.
+    // TimeStamp entry is added only when operational values are available. A disconnected driver returns the empty
+    // list. Defined inline to keep the CameraDriver vtable weak so the per-vendor static libraries link without a
+    // base-library ordering dependency.
     std::vector<DeviceState> get_device_state() const override final {
         if (!get_connected()) {
             return {};
@@ -95,9 +97,13 @@ public:
         // ICameraV4.PercentCompleted is a short: emit an integer, matching the
         // GET endpoint. As a double ("0.0") ConformU cannot coerce it and
         // reports the property "not included in the DeviceState response".
-        add("PercentCompleted", [this] { return static_cast<std::int32_t>(get_percent_completed()); });
+        // It is present (as an integer) only while CameraState is Exposing: outside Exposing the checked
+        // getter raises InvalidOperation, so the entry is omitted on purpose, not dropped by accident.
+        add("PercentCompleted", [this] { return static_cast<std::int32_t>(get_percent_completed_checked()); });
 
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 
@@ -176,7 +182,24 @@ public:
     virtual int get_offset_min() const = 0;
     virtual std::vector<std::string> get_offsets() const = 0;
 
+    // The driver's raw progress value. Clients and DeviceState never read it directly: they call
+    // get_percent_completed_checked(), which applies the ICameraV4 rule.
     virtual double get_percent_completed() const = 0;
+
+    // Project policy: PercentCompleted is valid (0..100) only while Exposing; ICameraV4 also optionally permits
+    // Waiting, Reading and Downloading. Both the GET route and the DeviceState builder call this, so
+    // no driver can answer 0 or 100 while Idle. CameraState and the raw getter are read first, so a lost link
+    // or a latched fault (ADR 0006, 0009) surfaces before the InvalidOperation. Defined inline for the same
+    // vtable reason as get_device_state().
+    double get_percent_completed_checked() const {
+        const CameraState state = get_camera_state();
+        const double percent = get_percent_completed();
+        if (state != CameraState::Exposing) {
+            throw AlpacaException("PercentCompleted is only valid while an exposure is in progress",
+                                  AlpacaError::InvalidOperation);
+        }
+        return std::clamp(percent, 0.0, 100.0);
+    }
 
     virtual double get_pixel_size_x() const = 0;
     virtual double get_pixel_size_y() const = 0;

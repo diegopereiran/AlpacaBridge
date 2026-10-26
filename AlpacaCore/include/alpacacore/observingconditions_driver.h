@@ -60,7 +60,9 @@ public:
         add("WindDirection", [this] { return get_wind_direction(); });
         add("WindGust", [this] { return get_wind_gust(); });
         add("WindSpeed", [this] { return get_wind_speed(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 
@@ -115,11 +117,6 @@ public:
      * @brief Get sky temperature in degrees Celsius.
      */
     virtual double get_sky_temperature() const = 0;
-
-    /**
-     * @brief Get seeing in arcseconds.
-     */
-    virtual double get_seeing() const = 0;
 
     /**
      * @brief Get star FWHM in arcseconds.

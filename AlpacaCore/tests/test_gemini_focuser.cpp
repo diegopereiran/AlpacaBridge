@@ -262,16 +262,34 @@ TEST_CASE("Gemini Focuser Driver - connected, TempCompAvailable is true", "[gemi
 
     CHECK(driver->get_temp_comp_available() == true);
 
-    // BOTH branches, because get_temp_comp() catches every std::exception and
-    // returns false: an assertion that only ever sees "off" passes whether the
-    // ":24#" round trip worked or threw, which makes it no assertion at all.
-    // The fake defaults to "10#" (off); "11#" is the reading that can only
-    // come back from a round trip that actually happened.
+    // BOTH branches: an assertion that only ever sees "off" says nothing about
+    // the ":24#" round trip. The fake defaults to "10#" (off); "11#" is the
+    // reading that can only come back from a round trip that actually happened.
     CHECK(driver->get_temp_comp() == false);
     fake.set_temp_comp_reply(true);
     CHECK(driver->get_temp_comp() == true);
     fake.set_temp_comp_reply(false);
     CHECK(driver->get_temp_comp() == false);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("Gemini Focuser Driver - a failed TempComp read raises DriverException, not false",
+          "[gemini][focuser][unit][fake]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    fake.set_garbage_temp_comp(true);
+    // ASCOM: a property that cannot read its value raises, it does not report "off" (issue #1478).
+    int code = -1;
+    try {
+        (void)driver->get_temp_comp();
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::DriverException);
 
     driver->set_connected(false);
 }
@@ -296,3 +314,36 @@ TEST_CASE("Gemini protocol wrapper - a late reply to the previous command is dis
 }
 
 #endif  // _WIN32
+
+// A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
+// errno at once, not a read timeout after serial_timeout_s.
+// Falsified by: gemini_protocol_wrapper.cpp:767 read_response() sending ReadOutcome::LinkDead to the timeout branch
+// (the message reads "Read timeout" and the call takes the full serial_timeout_s).
+TEST_CASE("Gemini protocol wrapper - a hangup before the reply throws serial link lost with the errno",
+          "[gemini][focuser][unit][link-dead]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    alpacacore::vendor::gemini::GeminiProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    wrapper.connect(config);
+    fake.hold_next_reply(std::chrono::milliseconds(300));  // the fake sits on the :00# reply while the cable is pulled
+    std::thread pull([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        fake.unplug();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::string what;
+    try {
+        wrapper.get_position();
+        FAIL("a hung-up port must not return a value");
+    } catch (const alpacacore::AlpacaException& ex) {
+        what = ex.what();
+    }
+    pull.join();
+    CHECK(what == "Serial link lost (errno 5)");
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    try {
+        wrapper.disconnect();
+    } catch (...) {
+    }
+}

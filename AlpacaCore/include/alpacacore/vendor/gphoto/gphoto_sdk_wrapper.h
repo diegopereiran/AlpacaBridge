@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/error_handling.h>
+
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -40,6 +42,18 @@ struct GPhotoCaptureResult {
 };
 
 /**
+ * @brief A call failed because the camera is no longer on the USB bus (GP_ERROR_IO_USB_FIND), for
+ * example after the body's auto power-off.
+ *
+ * Still an AlpacaException with the DriverException number, so every caller that does not know about it
+ * sees the failure it saw before. The exposure worker catches it to report the camera as disconnected.
+ */
+class GPhotoDeviceGoneException : public AlpacaException {
+public:
+    using AlpacaException::AlpacaException;
+};
+
+/**
  * @brief Abstract interface over the libgphoto2 operations the gphoto driver
  * uses.
  *
@@ -63,7 +77,7 @@ public:
     // stack object (FakeGPhotoSDK, LockedGPhotoSDK). A public virtual
     // destructor here would make `delete static_cast<GPhotoSDK*>(&...)`
     // compile against the singleton, since access for delete is checked on the
-    // static type. AGENTS.md calls this the shape to copy; ToupTek's public
+    // static type. testing.instructions.md calls this the shape to copy; ToupTek's public
     // virtual destructor predates that reasoning.
 
     /**
@@ -101,7 +115,9 @@ public:
     virtual bool get_toggle_value(int handle, const std::string& name) = 0;
     virtual void set_toggle_value(int handle, const std::string& name, bool on) = 0;
 
-    /// Text widgets (rarely needed; kept for completeness/diagnostics).
+    /// Text widgets, and the type-agnostic read of any widget as text: a range widget reads as its number
+    /// ("1", not "1.000000") and a toggle as "0"/"1". The mirror lock-up widgets (`mirrorlock`,
+    /// `mirrorlockstatus`) are read this way because their type differs by body.
     virtual std::string get_text_value(int handle, const std::string& name) = 0;
 
     /// Trigger a normal (non-bulb) capture and download the resulting file.
@@ -111,8 +127,8 @@ public:
      * @brief Pump the camera's PTP event queue for up to `budget`, discarding
      * everything it delivers, and return once the budget is spent.
      *
-     * The bulb hold loop in gphoto_camera_driver.cpp calls this in short
-     * slices instead of sleeping: a Nikon body expects the host to keep
+     * The bulb hold loop and the mirror lock-up settle in
+     * gphoto_camera_driver.cpp call this in short slices instead of sleeping: a Nikon body expects the host to keep
      * polling its events while a bulb capture is open, exactly what the
      * gphoto2 CLI's `--wait-event` does between `bulb=1` and `bulb=0`
      * (issue #569). Best-effort for the poll itself: a failed event poll
@@ -135,8 +151,10 @@ public:
      * can keep polling in slices (checking its own abort flag between them)
      * up to a deadline of its own choosing; a real libgphoto2 failure throws.
      * Callers drive the bulb sequence themselves via set_toggle_value(handle,
-     * "bulb", true/false) and drain_events() (see gphoto_camera_driver.cpp's
-     * abortable hold loop) and call this after closing the shutter.
+     * "bulb", true/false) (a Canon body: the eosremoterelease press/release
+     * pair, which is also how a mirror lock-up exposure is fired) and
+     * drain_events() (see gphoto_camera_driver.cpp's abortable hold loop) and
+     * call this after closing the shutter.
      */
     virtual std::optional<GPhotoCaptureResult> poll_bulb_file_and_download(int handle,
                                                                            std::chrono::milliseconds timeout) = 0;

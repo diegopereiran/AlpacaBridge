@@ -13,11 +13,13 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -42,7 +44,8 @@ public:
           sdk_(sdk),
           device_number_(device_number),
           focuser_index_(focuser_index),
-          focuser_id_(std::move(focuser_id)) {}
+          focuser_id_(std::move(focuser_id)),
+          status_cache_("ToupTek AAF", kStatusTtl, 3, kLogTag) {}
 
     ~ToupTekFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -76,7 +79,7 @@ public:
         return DeviceType::Focuser;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!info_.id.empty()) {
             return "TOUPTEK_AAF_" + info_.id;
@@ -114,7 +117,9 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
+        // below runs under it and the I/O lock, never under mutex_ (decision 0016).
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -132,35 +137,50 @@ public:
         auto& sdk = sdk_;
 
         if (connected) {
-            ToupFocuserInfo info = resolve_focuser_locked(sdk);
-            HToupcam handle = sdk.open_focuser_by_id(info.id);
-            try {
-                int max_step = sdk.aaf_range(handle, ToupAAF::RangeMax,
-                                              ToupAAF::GetMaxStep,
-                                              "Toupcam_AAF(RANGEMAX,GETMAXSTEP)");
-                int current_max = sdk.aaf_get(handle, ToupAAF::GetMaxStep,
-                                               "Toupcam_AAF(GETMAXSTEP)");
-                int backlash_max = sdk.aaf_range(handle, ToupAAF::RangeMax,
-                                                  ToupAAF::GetBacklash,
-                                                  "Toupcam_AAF(RANGEMAX,GETBACKLASH)");
-                handle_ = handle;
-                info_ = info;
-                max_step_limit_ = max_step;
-                max_step_current_ = current_max > 0 ? current_max : max_step;
-                backlash_max_ = backlash_max;
-            } catch (...) {
-                sdk.close_focuser(handle);
-                throw;
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                ToupFocuserInfo info = resolve_focuser(sdk);
+                HToupcam handle = sdk.open_focuser_by_id(info.id);
+                try {
+                    int max_step = sdk.aaf_range(handle, ToupAAF::RangeMax, ToupAAF::GetMaxStep,
+                                                 "Toupcam_AAF(RANGEMAX,GETMAXSTEP)");
+                    int current_max = sdk.aaf_get(handle, ToupAAF::GetMaxStep, "Toupcam_AAF(GETMAXSTEP)");
+                    int backlash_max = sdk.aaf_range(handle, ToupAAF::RangeMax, ToupAAF::GetBacklash,
+                                                     "Toupcam_AAF(RANGEMAX,GETBACKLASH)");
+                    handle_ = handle;
+                    // The short state lock publishes identity and limits at the end of connect.
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    info_ = info;
+                    max_step_limit_ = max_step;
+                    max_step_current_.store(current_max > 0 ? current_max : max_step);
+                    backlash_max_ = backlash_max;
+                } catch (...) {
+                    handle_ = nullptr;
+                    sdk.close_focuser(handle);
+                    throw;
+                }
             }
+            // After the I/O lock is released: the cache lock is taken before it, never inside it.
+            status_cache_.reset();
             connected_.store(true);
             return;
         }
 
-        if (handle_) {
-            sdk.close_focuser(handle_);
-            handle_ = nullptr;
+        // Clear driver state before the SDK close: if the close throws the error still surfaces,
+        // but the driver must not stay half-connected.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            connected_.store(false);
+            max_step_current_.store(0);
         }
-        connected_.store(false);
+        status_cache_.reset();
+        // Waits for an exchange in flight: the handle is never closed under one.
+        std::lock_guard<std::mutex> io(io_mutex_);
+        if (handle_) {
+            const HToupcam handle = handle_;
+            handle_ = nullptr;
+            sdk.close_focuser(handle);
+        }
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -194,32 +214,13 @@ public:
         return true;
     }
 
-    bool get_is_moving() const override {
-        // Hold mutex_ across the SDK call (concurrency-checklist shape (a)):
-        // set_connected(false) closes handle_ under the same lock, so the
-        // connected check and the aaf_get can't straddle a disconnect.
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        return sdk_.aaf_get(handle_, ToupAAF::IsMoving, "Toupcam_AAF(ISMOVING)") != 0;
-    }
+    bool get_is_moving() const override { return read_status().moving; }
 
-    int get_max_step() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        return max_step_current_;
-    }
+    int get_max_step() const override { return connected_max_step(); }
 
-    int get_max_increment() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        return max_step_current_;
-    }
+    int get_max_increment() const override { return connected_max_step(); }
 
-    int get_position() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        return sdk_.aaf_get(handle_, ToupAAF::GetPosition, "Toupcam_AAF(GETPOSITION)");
-    }
+    int get_position() const override { return read_status().position; }
 
     double get_step_size() const override {
         // The AAF firmware reports a step size in some configurations, but
@@ -233,7 +234,7 @@ public:
     }
 
     bool get_temp_comp_available() const override {
-        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // open-astro#309: the connection check comes first. driver-lifecycle.instructions.md's ASCOM
         // contract precedence rule is that only parameter/range validation
         // precedes it -- every other property throws NotConnected when
         // disconnected, with no early return that skips it. ensure_connected()
@@ -254,40 +255,112 @@ public:
     }
 
     double get_temperature() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        int t = sdk_.aaf_get(handle_, ToupAAF::GetTemp, "Toupcam_AAF(GETTEMP)");
-        return static_cast<double>(t) / 10.0;
+        const auto status = read_status();
+        if (!status.temperature.has_value()) {
+            throw AlpacaException("Focuser temperature is not available: " + status.temperature_error,
+                                  status.temperature_error_code);
+        }
+        return *status.temperature;
     }
 
     void halt() override {
-        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        sdk_.aaf_set(handle_, ToupAAF::Halt, 0, "Toupcam_AAF(HALT)");
+        {
+            // Waits for a status refill in flight (the I/O lock is not preemptible); the stop follows at once.
+            std::lock_guard<std::mutex> io(io_mutex_);
+            ensure_connected();  // a disconnect that won the I/O lock has closed the handle
+            sdk_.aaf_set(handle_, ToupAAF::Halt, 0, "Toupcam_AAF(HALT)");
+        }
+        status_cache_.invalidate();
     }
 
     void move(int position) override {
-        // One mutex_ hold across validation AND the SDK write: the old shape
-        // released the lock after reading max_step_current_, leaving the
-        // aaf_set free to race a disconnect's close (use-after-close).
-        // Exception ordering is unchanged (NotConnected, then InvalidValue).
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        if (position < 0 || position > max_step_current_) {
+        // Exception ordering is unchanged (NotConnected, then InvalidValue). The write runs under the I/O
+        // lock, which a disconnect takes before it closes the handle (no use-after-close).
+        const int max_step = connected_max_step();
+        if (position < 0 || position > max_step) {
             throw AlpacaException("Focuser position out of range",
                                   AlpacaError::InvalidValue);
         }
-        sdk_.aaf_set(handle_, ToupAAF::SetPosition, position, "Toupcam_AAF(SETPOSITION)");
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            ensure_connected();  // a disconnect that won the I/O lock has closed the handle
+            sdk_.aaf_set(handle_, ToupAAF::SetPosition, position, "Toupcam_AAF(SETPOSITION)");
+        }
+        status_cache_.invalidate();
     }
 
 private:
+    // The connection flag and the limit are read in one state-lock hold. Connect publishes the limit under
+    // the lock before it sets the flag; disconnect clears both under the lock. A disconnected reading throws
+    // NotConnected without a second read: a reconnect and disconnect between two reads would yield a zero
+    // limit, which turns NotConnected into an out-of-range InvalidValue.
+    int connected_max_step() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load()) {
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+        }
+        return max_step_current_.load();
+    }
+
+    // One refill reads IsMoving, Position and Temperature in a burst; every
+    // getter and DeviceState reads a field of it (open-astro#294). 100 ms as the
+    // other cached request/response drivers: a SetPosition write drops the frame,
+    // so the TTL only bounds how stale a motion started elsewhere can look.
+    struct Status {
+        bool moving{};
+        int position{};
+        std::optional<double> temperature;                         // absent when GetTemp failed
+        std::string temperature_error;                             // why, for the Temperature getter
+        int temperature_error_code{AlpacaError::DriverException};  // the SDK error's mapped code
+        bool closed{};  // a disconnect won the I/O lock first: not a device frame, never a link fault
+    };
+
+    static constexpr std::chrono::milliseconds kStatusTtl{100};
+
+    Status read_status() const {
+        ensure_connected();
+        // The refill runs under the cache's own mutex, then the I/O lock (lock order: transition_mutex_, cache
+        // mutex, I/O lock, mutex_), so it takes no driver lock and no caller may hold mutex_ or the I/O lock
+        // around the cache. set_connected(false) closes handle_ under the I/O lock.
+        Status status = status_cache_.get([this] {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            Status fresh;
+            if (!connected_.load()) {
+                // A disconnect that won the I/O lock has closed the handle. Returning (not throwing) keeps it
+                // out of the link-health count; the disconnect's reset() drops this frame.
+                fresh.closed = true;
+                return fresh;
+            }
+            const HToupcam handle = handle_;
+            fresh.moving = sdk_.aaf_get(handle, ToupAAF::IsMoving, "Toupcam_AAF(ISMOVING)") != 0;
+            fresh.position = sdk_.aaf_get(handle, ToupAAF::GetPosition, "Toupcam_AAF(GETPOSITION)");
+            try {
+                const int t = sdk_.aaf_get(handle, ToupAAF::GetTemp, "Toupcam_AAF(GETTEMP)");
+                fresh.temperature = static_cast<double>(t) / 10.0;
+            } catch (const AlpacaException& e) {
+                // Temperature is optional: moving/position still answer.
+                fresh.temperature_error = e.what();
+                fresh.temperature_error_code = e.error_code();
+            } catch (const std::exception& e) {
+                fresh.temperature_error = e.what();
+            }
+            return fresh;
+        });
+        if (status.closed) {
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+        }
+        return status;
+    }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
     }
 
-    ToupFocuserInfo resolve_focuser_locked(ToupTekSDK& sdk) {
+    // Caller holds io_mutex_ (the enumeration is a device call).
+    ToupFocuserInfo resolve_focuser(ToupTekSDK& sdk) {
         auto focusers = sdk.enumerate_focusers();
         if (focusers.empty()) {
             ALPACA_LOG_WARN(kLogTag, "No ToupTek AAF focusers detected by SDK");
@@ -321,14 +394,20 @@ private:
     std::optional<int> focuser_index_;
     std::optional<std::string> focuser_id_;
 
+    // handle_ is guarded by io_mutex_. info_, max_step_limit_ and backlash_max_ are guarded by mutex_.
     HToupcam handle_{nullptr};
     ToupFocuserInfo info_{};
     int max_step_limit_{0};
-    int max_step_current_{0};
+    std::atomic<int> max_step_current_{0};
     int backlash_max_{0};
 
     std::atomic<bool> connected_{false};
+    // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf).
+    // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the wire.
+    std::mutex transition_mutex_;
+    mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
+    mutable util::TtlStatusCache<Status> status_cache_;
 };
 
 std::unique_ptr<FocuserDriver> create_touptek_focuser_by_index(int device_number,

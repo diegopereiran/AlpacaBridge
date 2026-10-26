@@ -14,11 +14,17 @@
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
+#include <limits>
 #include <set>
 #include <string>
+#include <thread>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
+#include "fake_zwo_sdk.h"
 
 namespace {
 
@@ -100,7 +106,7 @@ TEST_CASE("ZWO Camera Driver - Not connected throws", "[zwo][camera][unit]") {
 TEST_CASE("ZWO Camera Driver - Disconnected state", "[zwo][camera][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
 
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == true);
@@ -128,6 +134,9 @@ TEST_CASE("ZWO Camera Driver - Sub-exposure not supported", "[zwo][camera][unit]
 TEST_CASE("ZWO Camera Driver - ASCOM Error Codes", "[zwo][camera][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
 
+    require_alpaca_error([&]() { driver->start_exposure(-1.0, true); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->start_exposure(std::numeric_limits<double>::quiet_NaN(), true); },
+                         alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_gain(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_gain(100); }, alpacacore::AlpacaError::NotConnected);
@@ -143,7 +152,7 @@ TEST_CASE("ZWO Camera Driver - ASCOM Error Codes", "[zwo][camera][unit]") {
 TEST_CASE("ZWO Camera Driver - State Machine Contracts", "[zwo][camera][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0);
 
-    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
@@ -180,4 +189,134 @@ TEST_CASE("ZWO Camera Driver - A name query keeps the configured camera id", "[z
 
     CHECK(actual != "Camera ID not specified");
     CHECK(actual == expected);
+}
+
+// Issue #1477: ICameraV4 PercentCompleted raises InvalidOperation outside Exposing; the cooler members raise
+// PropertyNotImplemented on a camera without a cooler.
+TEST_CASE("ZWO Camera Driver - PercentCompleted only while Exposing", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    // The retry window is measured from the epoch before the first retry.
+    clock.advance(std::chrono::seconds(1));
+
+    SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*camera); }
+    SECTION("idle after a completed exposure") {
+        camera->start_exposure(0.001, true);
+        REQUIRE(camera->get_image_ready());
+        alpacacore::test::require_percent_completed_unavailable(*camera);
+    }
+    SECTION("after a failed exposure") {
+        // Three Failed statuses exhaust the retries (the driver waits 250 ms on the task clock between them);
+        // the old value here was 100 because the failed frame still counted as an image.
+        camera->start_exposure(0.001, true);
+        sdk.script_exposure_status({alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
+                                    alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
+                                    alpacacore::vendor::zwo::ZWOExposureStatus::Failed});
+        CHECK_FALSE(camera->get_image_ready());
+        clock.advance(std::chrono::milliseconds(250));
+        CHECK_FALSE(camera->get_image_ready());
+        clock.advance(std::chrono::milliseconds(250));
+        alpacacore::test::require_error_code([&] { (void)camera->get_image_ready(); },
+                                             alpacacore::AlpacaError::DriverException);
+        alpacacore::test::require_percent_completed_unavailable(*camera);
+    }
+    SECTION("while exposing") {
+        sdk.auto_complete_exposure = false;
+        camera->start_exposure(30.0, true);
+        alpacacore::test::require_percent_completed_available(*camera);
+    }
+}
+
+// ICameraV4: LastExposureDuration / LastExposureStartTime raise InvalidOperation until an image has been
+// successfully acquired (issue #1477). A failed exposure never publishes them; an earlier success survives it.
+TEST_CASE("ZWO Camera Driver - LastExposure values follow successful images only", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    clock.advance(std::chrono::seconds(1));
+    const auto fail_exposure = [&](double duration) {
+        camera->start_exposure(duration, true);
+        sdk.script_exposure_status({alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
+                                    alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
+                                    alpacacore::vendor::zwo::ZWOExposureStatus::Failed});
+        CHECK_FALSE(camera->get_image_ready());
+        clock.advance(std::chrono::milliseconds(250));
+        CHECK_FALSE(camera->get_image_ready());
+        clock.advance(std::chrono::milliseconds(250));
+        alpacacore::test::require_error_code([&] { (void)camera->get_image_ready(); },
+                                             alpacacore::AlpacaError::DriverException);
+    };
+
+    SECTION("before any exposure") { alpacacore::test::require_last_exposure_unset(*camera); }
+    SECTION("a failed first exposure publishes nothing") {
+        fail_exposure(0.001);
+        alpacacore::test::require_last_exposure_unset(*camera);
+    }
+    SECTION("a later failure keeps the earlier success") {
+        camera->start_exposure(0.001, true);
+        REQUIRE(camera->get_image_ready());
+        const auto start = camera->get_last_exposure_start_time();
+        CHECK(camera->get_last_exposure_duration() == 0.001);
+        fail_exposure(0.002);
+        CHECK(camera->get_last_exposure_duration() == 0.001);
+        CHECK(camera->get_last_exposure_start_time() == start);
+    }
+    SECTION("a new success replaces the earlier one") {
+        camera->start_exposure(0.001, true);
+        REQUIRE(camera->get_image_ready());
+        camera->start_exposure(0.002, true);
+        REQUIRE(camera->get_image_ready());
+        CHECK(camera->get_last_exposure_duration() == 0.002);
+    }
+}
+
+TEST_CASE("ZWO Camera Driver - cooler members need the cooler capability", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    sdk.report_cooler_controls = false;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    CHECK_FALSE(camera->get_can_get_cooler_power());
+    alpacacore::test::require_no_cooler_members(*camera);
+}
+
+TEST_CASE("ZWO Camera Driver - cooler members work with the cooler capability", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    REQUIRE(camera->get_can_get_cooler_power());
+    camera->set_cooler_on(true);
+    CHECK(camera->get_cooler_on());
+    CHECK(camera->get_cooler_power() >= 0.0);
+}
+
+// Issue #1277: the SDK's ElecPerADU is one static figure that does not follow gain, and ASCOM wants the value in
+// the current mode, so a client gets PropertyNotImplemented, never a number that is wrong at every other gain. An
+// unknown SensorName is the empty string (ICameraV4 SensorName), never a "ZWO Sensor" placeholder.
+TEST_CASE("ZWO Camera Driver - ElectronsPerADU and FullWellCapacity are not implemented, SensorName has no placeholder",
+          "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+
+    CHECK(driver->get_sensor_name().empty());
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_sensor_name() == "Fake ZWO Camera");
+    for (const int gain : {0, 300}) {
+        driver->set_gain(gain);
+        require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+        require_alpaca_error([&] { (void)driver->get_full_well_capacity(); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+    }
+    for (const auto& s : driver->get_device_state()) {
+        CHECK(s.name != "ElectronsPerADU");
+        CHECK(s.name != "FullWellCapacity");
+    }
+    driver->set_connected(false);
 }

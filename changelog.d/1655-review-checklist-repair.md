@@ -1,0 +1,3 @@
+### Fixed
+
+- **The review bot checks its own decision-record checklist before the gate does**, CI, issue #1655. One left-out rule used to fail the review job and post nothing. The prompt now carries one `- NNNN-slug.md rule N: VERDICT: reason` line per rule in scope (`check_adr_scope.py --skeleton`) instead of asking the model to expand `rules 1, 3, 4` itself, and the agent runs the gate's own `check_adr_scope.py --checklist` command on its file and fixes what it prints before it ends (one allowed Bash rule for that command only). The gate step is unchanged and still fails a missing line, a duplicate verdict or a defect under `✅ Approved`. Covered by the `skeleton` cases in `scripts/check_adr_scope.py --self-test`.

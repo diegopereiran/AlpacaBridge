@@ -16,14 +16,17 @@
 #include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -46,6 +49,10 @@ namespace alpacacore::test {
 //   verify the native wrapper's SVB_ERROR_TIMEOUT translation.
 class FakeSVBSDK final : public vendor::svbony::SVBSDK {
 public:
+    // Test-only hook, null by default, before the fake mutex. Set before starting an operation and never
+    // change it while a call is in flight; capture-start callbacks also run under the driver's state lock.
+    std::function<void(const std::string&)> before_call;
+
     using CameraInfo = vendor::svbony::SVBCameraInfo;
     using ControlCaps = vendor::svbony::SVBControlCaps;
     using Control = vendor::svbony::SVBControlType;
@@ -91,6 +98,9 @@ public:
         return true;
     }
     void open_camera(int camera_id) override {
+        // Outside the mutex, so the delay holds only the caller (the driver's connect), not other fake calls.
+        const auto delay = std::chrono::milliseconds(open_delay_ms_.load());
+        if (delay.count() > 0) std::this_thread::sleep_for(delay);
         std::lock_guard lock(mutex_);
         record_locked("open_camera");
         maybe_fail_locked("open_camera");
@@ -131,6 +141,12 @@ public:
         return true;
     }
     void set_control_value(int camera_id, Control type, long value, bool is_auto) override {
+        if (type == Control::FrameSpeedMode) {
+            if (before_call) before_call("set_control_value.FrameSpeedMode");
+            // Outside the mutex like open_camera: the driver's deferred write takes about a second on hardware.
+            const auto delay = std::chrono::milliseconds(frame_speed_write_delay_ms_.load());
+            if (delay.count() > 0) std::this_thread::sleep_for(delay);
+        }
         std::lock_guard lock(mutex_);
         record_locked("set_control_value");
         if (type == Control::Exposure) record_locked("set_control_value.Exposure");
@@ -147,6 +163,7 @@ public:
         }
         values_[type] = value;
         auto_values_[type] = is_auto;
+        if (type == Control::FrameSpeedMode) frame_speed_written_at_ = std::chrono::system_clock::now();
     }
     ROI get_roi_format(int camera_id) override {
         std::lock_guard lock(mutex_);
@@ -202,11 +219,18 @@ public:
         type_ = type;
     }
     void start_video_capture(int camera_id) override {
+        if (before_call) before_call("start_video_capture");
         std::lock_guard lock(mutex_);
         record_locked("start_video_capture");
         maybe_fail_locked("start_video_capture");
         require_open_locked(camera_id);
         capture_ids_.insert(camera_id);
+        if (hold_next_capture_) {
+            hold_next_capture_ = false;
+            block_video_data_ = true;
+            release_read_ = false;
+            video_data_held_ = false;
+        }
     }
     void stop_video_capture(int camera_id) override {
         std::lock_guard lock(mutex_);
@@ -222,6 +246,7 @@ public:
     }
     vendor::svbony::SVBVideoDataResult get_video_data(int camera_id, std::uint8_t* buffer, long capacity,
                                                       int wait_ms) override {
+        if (before_call) before_call("get_video_data");
         std::unique_lock lock(mutex_);
         last_video_wait_ms_ = wait_ms;
         record_locked("get_video_data");
@@ -300,6 +325,7 @@ public:
         return vendor::svbony::SVBVideoDataResult::Frame;
     }
     void pulse_guide(int camera_id, vendor::svbony::SVBGuideDirection, int) override {
+        if (before_call) before_call("pulse_guide");
         std::lock_guard lock(mutex_);
         record_locked("pulse_guide");
         maybe_fail_locked("pulse_guide");
@@ -369,6 +395,22 @@ public:
         std::lock_guard lock(mutex_);
         auto_values_[control] = is_auto;
     }
+    // The default camera has no cooler. This adds CoolerEnable, CoolerPower and TargetTemperature (the controls
+    // behind CoolerOn, CoolerPower and CanSetCCDTemperature); call it before the driver connects.
+    void add_cooler_controls() {
+        std::lock_guard lock(mutex_);
+        controls_.push_back({Control::CoolerEnable, "Cooler", "Cooler enable", 0, 1, 0, false, true});
+        controls_.push_back({Control::CoolerPower, "Cooler Power", "Cooler power", 0, 100, 0, false, false});
+        controls_.push_back(
+            {Control::TargetTemperature, "Target Temperature", "Target temperature", -500, 300, 0, false, true});
+        values_[Control::CoolerEnable] = 0;
+        values_[Control::CoolerPower] = 0;
+        values_[Control::TargetTemperature] = 0;
+    }
+    // Holds each open_camera() for `delay` (bounded, never indefinite), so a test can observe Connecting.
+    void set_open_delay(std::chrono::milliseconds delay) {
+        open_delay_ms_.store(std::clamp<std::int64_t>(delay.count(), 0, 20000));
+    }
     void set_max_read_wait(std::chrono::milliseconds timeout) {
         std::lock_guard lock(mutex_);
         max_read_wait_ms_ = static_cast<int>(std::clamp<std::int64_t>(timeout.count(), 1, 20000));
@@ -387,7 +429,9 @@ public:
     }
     void block_video_data() {
         std::lock_guard lock(mutex_);
-        block_video_data_ = true;
+        // An idle stop while the driver reaps its previous worker must not consume the next capture's hold.
+        hold_next_capture_ = capture_ids_.empty();
+        block_video_data_ = !hold_next_capture_;
         release_read_ = false;
         video_data_held_ = false;
     }
@@ -401,9 +445,18 @@ public:
     }
     void release_video_data() {
         std::lock_guard lock(mutex_);
+        hold_next_capture_ = false;
         release_read_ = true;
         block_video_data_ = false;
         video_data_cv_.notify_all();
+    }
+    // Models the slow deferred FrameSpeedMode write; frame_speed_written_at() is when the last one completed.
+    void set_frame_speed_write_delay(std::chrono::milliseconds delay) {
+        frame_speed_write_delay_ms_.store(delay.count());
+    }
+    std::chrono::system_clock::time_point frame_speed_written_at() {
+        std::lock_guard lock(mutex_);
+        return frame_speed_written_at_;
     }
     void fail_next(std::string method) {
         std::lock_guard lock(mutex_);
@@ -468,11 +521,15 @@ private:
     std::size_t last_buffer_capacity_{0};
     int last_video_wait_ms_{0};
     int max_read_wait_ms_{250};
+    std::atomic<std::int64_t> open_delay_ms_{0};
+    std::atomic<std::int64_t> frame_speed_write_delay_ms_{0};
+    std::chrono::system_clock::time_point frame_speed_written_at_{};
     int timeout_reads_remaining_{0};
     int completed_video_data_reads_{0};
     int open_count_{0};
     bool camera_present_{true};
     bool block_video_data_{false};
+    bool hold_next_capture_{false};
     bool timeout_video_data_{false};
     bool fail_after_held_read_{false};
     bool release_read_{false};

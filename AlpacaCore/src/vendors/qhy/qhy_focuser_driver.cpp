@@ -11,10 +11,13 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/polled_state.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
 #include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -37,6 +40,14 @@ constexpr double kHoldVoltageThreshold = 11.5;
 // window; a stalled or limit-clamped move therefore reads as stopped after
 // one grace period instead of forever.
 constexpr auto kMotionGrace = std::chrono::milliseconds(1500);
+// State poll (open-astro#1310, decision 0010), start to start. One poll is a
+// position and a telemetry exchange (about 35 ms each at 9600 baud), so the
+// period leaves the wire mostly free for Move and Halt. The freshness bound is
+// two periods; the cadence, the fault latch and the link-loss rule live in
+// util::PolledState. Every getter reads memory, so a burst of reads costs no
+// exchange at all.
+constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
+constexpr int kFaultThreshold = 3;
 }  // namespace
 
 class QhyFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
@@ -44,18 +55,26 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     QhyFocuserDriver(int device_number, QFocuserConnectionConfig config, QFocuserSettings settings,
-                     util::ConnectionResolver<QFocuserConnectionConfig> connection_resolver = {})
+                     util::ConnectionResolver<QFocuserConnectionConfig> connection_resolver = {},
+                     util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("QHY"),
+          clock_(clock),
           device_number_(device_number),
           config_(std::move(config)),
           connection_resolver_(std::move(connection_resolver)),
           settings_(std::move(settings)),
-          connected_(false) {
+          connected_(false),
+          state_(
+              clock_, state_poll_generation_, {kStatePollPeriod, kFaultThreshold, 2 * kStatePollPeriod, kLogTag},
+              [this] { return probe(); }, [this] { protocol_.disconnect(); }) {
         if (settings_.max_step < 1) settings_.max_step = 1;
     }
 
     ~QhyFocuserDriver() override {
         shutdown_connection();
+        // Joins the poll body before the members it touches go away; a driver
+        // that never finished a connect has no body, so this is a no-op.
+        state_.stop_and_join();
         if (connected_.load()) {
             try {
                 set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
@@ -68,7 +87,7 @@ public:
     int get_device_number() const override { return device_number_; }
     std::string get_name() const override { return "QHY Q-Focuser"; }
     DeviceType get_device_type() const override { return DeviceType::Focuser; }
-    std::string get_unique_id() const override { return "QHY_QFOCUSER_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "QHY_QFOCUSER_" + std::to_string(device_number_); }
     std::string get_description() const override { return "QHY Q-Focuser Driver"; }
     std::string get_driver_info() const override { return "AlpacaCore QHY Q-Focuser Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
@@ -83,11 +102,11 @@ public:
         return firmware_;
     }
 
-    // Connected follows the serial link (AGENTS.md, issue #445 shape; #527):
-    // once a transaction has seen the port die the wrapper latches link_lost_
+    // Connected follows the serial link (driver-lifecycle.instructions.md, issue #445 shape; #527):
+    // once a transaction has seen the port die the wrapper latches its lost flag
     // and releases the fd, so this reads false without a reconnect. Both
     // reads are lock-free; this stays a FAST-timing getter.
-    bool get_connected() const override { return connected_.load() && protocol_.link_alive(); }
+    bool get_connected() const override { return connected_.load() && link_up(); }
     void connect() override { start_connection_task(true); }
     void disconnect() override {
         stop_connection_thread();
@@ -113,7 +132,7 @@ public:
         // A lost link counts as disconnected here too: Connected=true against
         // a dead port must reconnect instead of taking the idempotency return
         // (issue #527), and Connected=false must still tear the driver down.
-        const bool live = connected_.load() && protocol_.link_alive();
+        const bool live = connected_.load() && link_up();
         // The disconnect gate takes the raw connected_: a lost link with an
         // async connect in flight must still run the teardown below rather
         // than be recorded as pending and skipped (review of #531). The
@@ -161,16 +180,27 @@ public:
                 firmware_ = std::to_string(info.firmware);
                 if (info.board_version > 0) firmware_ += " (board " + std::to_string(info.board_version) + ")";
             }
-            {
-                std::lock_guard<std::mutex> lock(status_mutex_);
-                target_.reset();
-                position_cache_.reset();
-                telemetry_cache_.reset();
+            // First frame before Connected reads true, so a getter has an
+            // answer the moment Connect returns.
+            reset_state();
+            // A lost or dropped first reply gets one retry. A connect whose
+            // retry also publishes nothing fails: Connected true means the
+            // getters have a frame to serve (decisions 0010 and 0016).
+            if (!state_.start()) {
+                state_.stop_and_join();
+                reset_state();
+                {
+                    std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
+                    firmware_.clear();
+                }
+                protocol_.disconnect();
+                throw AlpacaException("QHY Q-Focuser did not answer the first state poll",
+                                      AlpacaError::DriverException);
             }
             connected_.store(true);
             ALPACA_LOG_INFO(kLogTag, "Q-Focuser connected (firmware " + std::to_string(info.firmware) + ")");
         } else {
-            // Driver state first, port close second (AGENTS.md, issue #387): a
+            // Driver state first, port close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on a
             // closed port. disconnect() cannot throw today; the order is the
             // contract, not the current wrapper's behaviour. Clear firmware
@@ -189,8 +219,11 @@ public:
             firmware_.clear();
         }
         connected_.store(false);
+        // Join the poll before the transport closes; its body takes no lock
+        // this thread holds (transition_mutex_, firmware_mutex_).
+        state_.stop_and_join();
         protocol_.disconnect();
-        invalidate_caches();
+        reset_state();
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }
@@ -212,18 +245,18 @@ public:
 
     bool get_absolute() const override { return true; }
 
-    bool get_is_moving() const override {
+    bool get_is_moving() const override { return served_frame().moving; }
+
+    int get_max_step() const override {
         ensure_connected();
-        return sample_position().moving;
+        return settings_.max_step;
+    }
+    int get_max_increment() const override {
+        ensure_connected();
+        return settings_.max_step;
     }
 
-    int get_max_step() const override { return settings_.max_step; }
-    int get_max_increment() const override { return settings_.max_step; }
-
-    int get_position() const override {
-        ensure_connected();
-        return sample_position().position;
-    }
+    int get_position() const override { return served_frame().position; }
 
     double get_step_size() const override {
         // Step size in microns depends on the drawtube the motor drives; the
@@ -246,21 +279,25 @@ public:
     }
 
     double get_temperature() const override {
-        ensure_connected();
-        const QFocuserTelemetry t = cached_telemetry();
+        const QFocuserTelemetry t = served_frame().telemetry;
         return settings_.temperature_source == "chip" ? t.chip_temperature_c : t.external_temperature_c;
     }
 
     void halt() override {
         ensure_connected();
         // Hold status_mutex_ across the wire command so the command and the
-        // target_ update are atomic against a concurrent move()/halt() (Alpaca
-        // does not serialize device methods). Lock order is status_mutex_ ->
-        // wrapper mutex, matching sample_position(), so no deadlock.
+        // frame's target update are ordered against a concurrent move()/halt()
+        // (Alpaca does not serialize device methods). Lock order is
+        // status_mutex_ -> wrapper mutex, and status_mutex_ -> the module's leaf lock.
+        // Halt is the safety stop: never refused for a link fault.
         std::lock_guard<std::mutex> lock(status_mutex_);
         protocol_.halt();
-        target_.reset();  // no target => not moving, whatever position the motor stopped at
-        position_cache_.reset();
+        // Write-through: IsMoving reads false right after Halt, not after the next poll.
+        // No target => not moving, whatever position the motor stopped at.
+        state_.write([](StateFrame& frame) {
+            frame.target.reset();
+            frame.moving = false;
+        });
     }
 
     void move(int position) override {
@@ -268,63 +305,90 @@ public:
         if (position < 0 || position > settings_.max_step) {
             throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
         }
+        (void)served_frame();  // refused while the link is faulted or lost
         // Hold status_mutex_ across move_to() so two concurrent moves cannot
-        // reach the device in one order while target_ records the other (see
+        // reach the device in one order while the frame records the other (see
         // halt() for the lock-order note).
         std::lock_guard<std::mutex> lock(status_mutex_);
         protocol_.move_to(position);
-        target_ = position;
-        last_change_ = std::chrono::steady_clock::now();
-        position_cache_.reset();
+        const auto now = clock_.now();
+        // Write-through (decision 0010, point 3): IsMoving reads true right
+        // after a successful Move that has somewhere to go; Position stays the
+        // measured one until the next poll.
+        state_.write([position, now](StateFrame& frame) {
+            frame.target = position;
+            frame.last_change = now;
+            frame.moving = frame.position != position;
+        });
     }
 
 private:
-    struct PositionSample {
+    // What one poll measured. `telemetry` is refreshed with every poll.
+    // `target` and `last_change` are motion state: they live in the frame so a
+    // frame that a move()/halt() write overtook is dropped whole, with its
+    // position and these, by PolledState.
+    struct StateFrame {
         int position = 0;
         bool moving = false;
+        std::optional<int> target;
+        util::TaskClock::clock::time_point last_change{};
+        QFocuserTelemetry telemetry;
     };
 
-    // One {"cmd_id":5} round trip at 9600 baud is ~35 ms; DeviceState reads
-    // IsMoving then Position back to back against a 0.1 s FAST target, so a
-    // burst of reads is served from one poll. Dropped by move()/halt().
-    static constexpr auto kPositionCacheTtl = std::chrono::milliseconds(100);
-    static constexpr auto kTelemetryCacheTtl = std::chrono::milliseconds(1000);
-
-    PositionSample sample_position() const {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        const auto now = std::chrono::steady_clock::now();
-        if (!position_cache_ || now - position_cache_time_ > kPositionCacheTtl) {
-            const std::int32_t pos = const_cast<QhyFocuserDriver*>(this)->protocol_.get_position();
-            if (!position_cache_ || pos != position_cache_->position) {
-                last_change_ = now;
-            }
-            PositionSample sample;
-            sample.position = pos;
-            sample.moving = target_.has_value() && pos != *target_ && (now - last_change_) < kMotionGrace;
-            if (target_.has_value() && pos == *target_) {
-                target_.reset();  // arrived
-            }
-            position_cache_ = sample;
-            position_cache_time_ = now;
-        }
-        return *position_cache_;
+    // The single fault text (decision 0009, point 5): the latched poll fault,
+    // kept after the link is lost so the management listing says why.
+    std::string get_link_fault() const override {
+        auto fault = state_.fault();
+        if (!fault.empty()) return fault;
+        return state_.link_lost() ? "no answer to the state poll" : std::string();
     }
 
-    QFocuserTelemetry cached_telemetry() const {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        const auto now = std::chrono::steady_clock::now();
-        if (!telemetry_cache_ || now - telemetry_cache_time_ > kTelemetryCacheTtl) {
-            telemetry_cache_ = const_cast<QhyFocuserDriver*>(this)->protocol_.get_telemetry();
-            telemetry_cache_time_ = now;
-        }
-        return *telemetry_cache_;
+    // The TimeStamp of DeviceState is when the frame was measured (decision 0010).
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return state_.age(); }
+
+    // True while the transport is up and the poll has not declared the link lost.
+    bool link_up() const { return protocol_.link_alive() && !state_.link_lost(); }
+
+    // The frame the getters serve (decisions 0009 and 0010): stale is served,
+    // a faulted link throws DriverException, a lost one NotConnected.
+    StateFrame served_frame() const {
+        ensure_connected();
+        return state_.served().value;
     }
 
-    void invalidate_caches() {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        position_cache_.reset();
-        telemetry_cache_.reset();
-        target_.reset();
+    // The poll's exchanges, on the poll thread with no driver lock held (the
+    // protocol wrapper serialises them). A dead transport is a failed probe.
+    StateFrame probe() {
+        if (!protocol_.link_alive()) {
+            throw AlpacaException("Q-Focuser transport is down", AlpacaError::NotConnected);
+        }
+        StateFrame frame;
+        const std::int32_t pos = protocol_.get_position();
+        frame.telemetry = protocol_.get_telemetry();
+        // The motion decision reads the target and last change from the held
+        // frame and writes the arrival into the new one. A frame a move()/halt()
+        // write overtook is dropped whole by PolledState, so a target set
+        // meanwhile survives and the next poll decides again from it.
+        const auto now = clock_.now();
+        const auto previous = state_.read();
+        const bool changed = !previous.has_value() || pos != previous->value.position;
+        frame.position = pos;
+        if (previous.has_value()) {
+            frame.target = previous->value.target;
+            frame.last_change = changed ? now : previous->value.last_change;
+        } else {
+            frame.last_change = now;
+        }
+        frame.moving = frame.target.has_value() && pos != *frame.target && (now - frame.last_change) < kMotionGrace;
+        if (frame.target.has_value() && pos == *frame.target) {
+            frame.target.reset();  // arrived
+        }
+        return frame;
+    }
+
+    // At connect and disconnect: drop the frame, the fault and the target.
+    void reset_state() {
+        state_.reset();  // the target and last change go with the frame
     }
 
     // Push the user's settings to the firmware right after the handshake.
@@ -347,12 +411,13 @@ private:
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
-        if (!protocol_.link_alive()) {
+        if (!link_up()) {
             throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
                                   AlpacaError::NotConnected);
         }
     }
 
+    util::TaskClock& clock_;
     int device_number_;
     QFocuserConnectionConfig config_;
     // Set by the by-index factory; empty for an explicit port. connection_resolved_
@@ -370,13 +435,14 @@ private:
     mutable std::mutex firmware_mutex_;
     std::string firmware_;
 
-    mutable std::mutex status_mutex_;
-    mutable std::optional<int> target_;
-    mutable std::chrono::steady_clock::time_point last_change_{};
-    mutable std::optional<PositionSample> position_cache_;
-    mutable std::chrono::steady_clock::time_point position_cache_time_{};
-    mutable std::optional<QFocuserTelemetry> telemetry_cache_;
-    mutable std::chrono::steady_clock::time_point telemetry_cache_time_{};
+    // Orders move() and halt() on the wire. Held across a wire command, so
+    // never taken by a getter or the poll.
+    std::mutex status_mutex_;
+    util::OperationGeneration state_poll_generation_;
+    // Position, motion and telemetry served to the getters (open-astro#1310).
+    // Declared after clock_ and protocol_: it is destroyed first and joins its
+    // poll body while both are still alive.
+    util::PolledState<StateFrame> state_;
 };
 
 std::unique_ptr<FocuserDriver> create_qhy_focuser(int device_number, const std::string& serial_port,
@@ -384,6 +450,14 @@ std::unique_ptr<FocuserDriver> create_qhy_focuser(int device_number, const std::
     QFocuserConnectionConfig config;
     config.serial_port = serial_port;
     return std::make_unique<QhyFocuserDriver>(device_number, std::move(config), settings);
+}
+
+std::unique_ptr<FocuserDriver> create_qhy_focuser(int device_number, const std::string& serial_port,
+                                                  const QFocuserSettings& settings, util::TaskClock& clock) {
+    QFocuserConnectionConfig config;
+    config.serial_port = serial_port;
+    return std::make_unique<QhyFocuserDriver>(device_number, std::move(config), settings,
+                                              util::ConnectionResolver<QFocuserConnectionConfig>{}, clock);
 }
 
 std::unique_ptr<FocuserDriver> create_qhy_focuser_deferred(int device_number,

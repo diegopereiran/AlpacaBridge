@@ -12,9 +12,13 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -67,10 +71,18 @@ struct AltAz {
     double azimuth_degrees = 0.0;
 };
 
+// The firmware's horizon and overhead limits (:Gh#, :Go#), whole degrees.
+// OnStepX accepts -30..30 and 60..90; 90 overhead means no overhead limit.
+struct AltitudeLimits {
+    double horizon_degrees = 0.0;
+    double overhead_degrees = 90.0;
+};
+
 /**
  * @brief Mount status decoded from the :GU# extended status string.
  *
- * side_of_pier: -1 = unknown/not reported, 0 = pier east, 1 = pier west.
+ * side_of_pier: -1 = unknown/not reported, 0 = pier east ('T'), 1 = pier west
+ * ('W'). 'E' in :GU# is the mount type (GEM), not the pier side (#1217).
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
  * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
@@ -80,6 +92,16 @@ struct MountStatus {
     bool is_slewing = false;
     bool is_parked = false;
     bool is_at_home = false;
+    // 'g' in :GU#: a guide move is running (OnStepX guide.active(): a
+    // :Mn#/:Ms#/:Me#/:Mw# move, so a MoveAxis, and also a home or spiral
+    // guide; not a pulse guide). Firmware without the letter never sets it.
+    bool is_guide_active = false;
+    // 'h': a home is running (Home state HS_HOMING). 'I': a park is running.
+    bool is_homing = false;
+    bool is_parking = false;
+    // 'G': a pulse guide is running. While it runs OnStepX drops 'g' even
+    // when a MoveAxis is still running on the other axis.
+    bool is_pulse_guide_active = false;
     int side_of_pier = -1;
     std::string raw_status;
 };
@@ -100,7 +122,7 @@ struct TimeInfo {
     int month = 1;
     int day = 1;
     int year = 0;                   // two-digit year (e.g. 25 for 2025), per :SC#
-    double utc_offset_hours = 0.0;  // :SG#/:GG#, e.g. -5.0 for EST
+    double utc_offset_hours = 0.0;  // :SG#/:GG#: hours to ADD to local time for UTC, e.g. +5.0 for EST
 };
 
 /**
@@ -125,6 +147,50 @@ public:
     std::string last_connect_error() const;
 
     /**
+     * @brief Whether the serial link is still there (decision 0009, #1241).
+     *
+     * False once the link is lost: the configured port path no longer
+     * reaches the node opened at connect (adapter unplugged or re-enumerated),
+     * or a read or write failed with EIO, ENXIO, ENODEV or EBADF. A loss
+     * found here closes the port when no exchange holds it. No serial I/O;
+     * the network test seam is never lost this way.
+     */
+    bool link_alive();
+
+    /**
+     * @brief The clock the link-loss and last-alive stamps read (decision 0005,
+     *        #1378): the driver's injected TaskClock, set at connect, so the
+     *        driver times the #521 outage on the clock it runs on. Default:
+     *        util::default_task_clock(). release_task_clock() puts the default
+     *        back if `clock` is still the one set (a driver going away). A
+     *        change of the clock in use forgets the loss and last-alive
+     *        stamps: one taken on another clock means nothing here (#1460).
+     */
+    void set_task_clock(util::TaskClock& clock);
+    void release_task_clock(util::TaskClock& clock);
+
+    /// Why the link was lost, or "" while it is not lost. Cleared by
+    /// disconnect() or a successful connect().
+    std::string link_lost_reason() const;
+
+    /**
+     * @brief Ends the link as lost (decision 0009 point 2, #1414): records
+     *        `reason` and the loss time as a pulled adapter does, and closes
+     *        the port. For a fault that has stood past
+     *        util::kLinkStalenessBound. A no-op when not connected.
+     */
+    void declare_link_lost(const std::string& reason);
+
+    /// When the link was lost (first detection), read and cleared. Kept
+    /// across disconnect() so a reconnect can tell how long the outage was.
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
+
+    /// The last time the link was confirmed present before the current loss,
+    /// read and cleared. The adapter went away after this, so `now` minus it
+    /// is an upper bound on the outage even when nothing looked meanwhile.
+    std::optional<std::chrono::steady_clock::time_point> consume_last_alive_before_loss();
+
+    /**
      * @brief Get the mount's reported product name.
      *
      * Sends :GVP#. Used both for auto-detect identification (must be
@@ -138,6 +204,18 @@ public:
      * Sends :GVN#.
      */
     std::string get_version_number();
+
+    /**
+     * @brief Get OnStepX's coordinate mode (the firmware's MOUNT_COORDS - 1).
+     *
+     * Sends :GXEE#, which replies with one bare digit and no '#':
+     * 0 = observed place (no refraction applied to reported RA/Dec),
+     * 1 = topocentric, 2 = topocentric strict (both apply refraction).
+     * Returns std::nullopt for any other reply. Only meaningful on OnStepX:
+     * legacy OnStep answers an unknown command with "0" too, so callers must
+     * check the firmware version first (#1216).
+     */
+    std::optional<int> get_mount_coords_mode();
 
     /**
      * @brief Get current RA/Dec position.
@@ -154,6 +232,13 @@ public:
      * Sends :GA# and :GZ#.
      */
     AltAz get_alt_az();
+
+    /**
+     * @brief Get the horizon and overhead limits.
+     *
+     * Sends :Gh# and :Go#.
+     */
+    AltitudeLimits get_altitude_limits();
 
     /**
      * @brief Get mount status (tracking/slewing/parked/home/pier side).
@@ -179,17 +264,19 @@ public:
     /**
      * @brief Slew to the previously set target RA/Dec.
      *
-     * Sends :MS#. Returns true if the mount accepted the slew (response "0"),
-     * false if it reported the target as unreachable.
+     * Sends :MS# and returns the mount's reply: "0" when it accepted the slew,
+     * otherwise the OnStepX refusal digit (1 below the horizon limit ... 9
+     * unspecified, see the OnStepX :MS# reference).
      */
-    bool slew_to_target();
+    std::string slew_to_target();
 
     /**
      * @brief Sync to the previously set target RA/Dec.
      *
-     * Sends :CM#.
+     * Sends :CM# and returns the reply: "N/A" when the mount synced, "E1".."E9"
+     * when it refused (the :MS# digits, OnStep Command.ino, OnStepX Goto.command.cpp).
      */
-    void sync_to_target();
+    std::string sync_to_target();
 
     /**
      * @brief Abort any slew in progress on all axes.
@@ -220,37 +307,59 @@ public:
     void stop_tracking();
 
     /**
+     * @brief Start or stop tracking and read the mount's answer.
+     *
+     * Sends what start_tracking()/stop_tracking() send, but reads the bare
+     * '0'/'1' reply instead of draining it. Returns true when the mount
+     * accepted it; on false, get_last_command_error() says why (OnStep 4.x
+     * refuses it while slewing).
+     */
+    bool set_tracking_checked(bool on);
+
+    /**
      * @brief Park the mount at its configured park position.
      *
-     * Sends :hP#.
+     * Sends :hP#. Returns true when the mount accepted the park (bare '1');
+     * on false, get_last_command_error() says why (OnStepX, OnStep 4.x).
      */
-    void park();
+    bool park();
 
     /**
      * @brief Set the current position as the park position.
      *
-     * Sends :hQ#.
+     * Sends :hQ#. Returns true when the mount accepted it (bare '1'); on false,
+     * get_last_command_error() says why.
      */
-    void set_park();
+    bool set_park();
 
     /**
      * @brief Unpark the mount.
      *
-     * Sends :hR#.
+     * Sends :hR#. Returns true when the mount accepted it (bare '1'); on false,
+     * get_last_command_error() says why (11: it was not parked).
      */
-    void unpark();
+    bool unpark();
 
     /**
      * @brief Seek the mount's home position using its home sensors.
      *
-     * Sends :hC#.
-     *
-     * TODO: Verify against real OnStep firmware — the INDI reference driver
-     * does not expose a dedicated find-home command distinct from park, so
-     * this was inferred from general OnStep command documentation and needs
-     * hardware confirmation.
+     * Sends :hC#, which has no reply: on OnStepX, get_last_command_error()
+     * right after it says whether the home started (checked on the HM-17,
+     * OnStepX 10.23a, #1430).
      */
     void find_home();
+
+    /**
+     * @brief The error code of the last command on this link (:GE#).
+     *
+     * OnStepX and OnStep 4.x keep it per serial channel with the same codes
+     * (0 no error, 22 mount in motion, 12 no park position set, ...;
+     * OnStepX adds 25 for an explicit success: docs/COMMAND_REFERENCE.md,
+     * OnStep Globals.h CommandErrors). Any later command replaces it, so read
+     * it right after the command it is about. Empty when the reply is not a
+     * two-digit code (firmware without :GE#); waits at most 1 s.
+     */
+    std::optional<int> get_last_command_error();
 
     /**
      * @brief Select the mount's half-max slew rate for :Mn#/:Ms#/:Me#/:Mw#
@@ -377,5 +486,17 @@ private:
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };
+
+namespace detail {
+/// Where the link-loss test hook runs (open-astro#1289).
+enum class LinkLossHookPoint : std::uint8_t {
+    AliveBeforeRecord,      ///< link_alive(): node found gone, loss not yet recorded; no lock held
+    AliveBeforeClose,       ///< link_alive(): loss recorded, port not yet closed; no lock held
+    DisconnectBeforeClose,  ///< disconnect_locked(): link marked down, port not yet closed; mutex_ held
+};
+/// Test hook: lets a test land a Disconnect or a reconnect at the points above.
+/// Empty in production.
+void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook);
+}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

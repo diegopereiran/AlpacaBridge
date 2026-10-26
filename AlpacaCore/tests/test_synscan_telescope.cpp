@@ -29,10 +29,12 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "sidereal_time_check.h"
 
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 #endif
 
 using alpacacore::DeviceType;
@@ -211,6 +213,36 @@ TEST_CASE("SynScan Telescope Driver - Target Coordinate Persistence", "[synscan]
     ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 90.0);
 }
 
+// Falsified by: AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp get_destination_side_of_pier: putting back
+// the old "<op>: RA out of range" / "<op>: Dec out of range" check, or changing the validate_ra_dec message text in
+// util/pointing.h, fails the DestinationSideOfPier checks.
+TEST_CASE("SynScan Telescope Driver - out of range arguments report the shared message before the connection",
+          "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    const auto message_of = [](const std::function<void()>& call) {
+        try {
+            call();
+        } catch (const alpacacore::AlpacaException& ex) {
+            return std::string(ex.what());
+        }
+        return std::string("no exception");
+    };
+    CHECK(message_of([&] { driver->set_target_right_ascension(24.0); }).find("TargetRightAscension must be in range") !=
+          std::string::npos);
+    CHECK(message_of([&] { driver->set_site_latitude(90.1); }).find("SiteLatitude must be in range") !=
+          std::string::npos);
+    CHECK(message_of([&] {
+              driver->get_destination_side_of_pier(24.0, 0.0);
+          }).find("DestinationSideOfPier: RightAscension must be in range") != std::string::npos);
+    CHECK(message_of([&] {
+              driver->get_destination_side_of_pier(0.0, 90.1);
+          }).find("DestinationSideOfPier: Declination must be in range") != std::string::npos);
+}
+
 TEST_CASE("SynScan Telescope Driver - Site Property Validation", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
     conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
@@ -277,7 +309,7 @@ TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][
 }
 
 // open-astro#769: PulseGuide and MoveAxis validate their arguments before the
-// connection check (AGENTS.md error precedence), so a disconnected driver
+// connection check (driver-lifecycle.instructions.md error precedence), so a disconnected driver
 // answers a bad argument with InvalidValue rather than NotConnected.
 TEST_CASE("SynScan Telescope Driver - motion argument errors precede NotConnected", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
@@ -391,6 +423,41 @@ TEST_CASE("SynScan Telescope Driver - a far-off client UTCDate is logged once pe
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_utc_date(far);
     CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE(
+    "SynScan Telescope Driver - UTCDate readback advances with the task clock and clears on connect and disconnect",
+    "[synscan][telescope][unit]") {
+    // Decision 0014: the written UTC value stays on system_clock, the elapsed
+    // time since the write is measured on the driver's task clock, so a fake
+    // clock moves the readback without a sleep.
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const std::chrono::system_clock::time_point written{std::chrono::seconds(4102444800)};
+    driver->set_utc_date(written);
+    CHECK(driver->get_utc_date() == written);
+    clock.advance(std::chrono::seconds(90));
+    CHECK(driver->get_utc_date() == written + std::chrono::seconds(90));
+
+    // Disconnect and reconnect forget the written value: the readback is the
+    // mount's clock, not the stale client instant.
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto after = driver->get_utc_date();
+    CHECK(after != written + std::chrono::seconds(90));
+    CHECK(after < written);  // the host/mount clock, not the year-2100 client write
     driver->set_connected(false);
 }
 
@@ -672,7 +739,7 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
         CHECK(axis_stops == 4);  // each axis gets both stop directions
     }
 
-    SECTION("a dropped link throws DriverException and leaves Slewing true") {
+    SECTION("a dropped link throws DriverException and keeps the slew error observable") {
         REQUIRE(server.drop_connections());
         try {
             driver->abort_slew();
@@ -681,10 +748,73 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
             CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
         }
-        CHECK(driver->get_slewing());
+        try {
+            (void)driver->get_slewing();
+            FAIL("Slewing returned a completion value after the stop failed");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+        }
     }
 
     driver->set_connected(false);
 }
 
 #endif  // _WIN32
+
+// #1298: the LST helper cut UTC to whole seconds.
+TEST_CASE("SynScan Telescope Driver - SiderealTime follows the clock to under a second", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+}
+
+// ── #1478 spec-audit items ───────────────────────────────────────────────────
+
+TEST_CASE("SynScan Telescope Driver spec audit - DestinationSideOfPier rejects out-of-range RA and Dec",
+          "[synscan][telescope][unit][spec-audit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    // ITelescopeV4.DestinationSideOfPier: InvalidValue for RA outside 0..24 h or Dec outside -90..90, checked
+    // before the connection (ascom-contract), so a disconnected driver answers InvalidValue too.
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(25.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(-1.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(12.0, 91.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(12.0, -91.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("SynScan Telescope Driver spec audit - DoesRefraction is not implemented",
+          "[synscan][telescope][unit][spec-audit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}
+
+TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
+          "[synscan][telescope][unit][spec-audit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    // ASCOM time-and-place FAQ (decision 0019): a site value never set reads as InvalidOperation, not 0 m.
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
+    driver->set_site_elevation(42.0);
+    CHECK(driver->get_site_elevation() == 42.0);
+}

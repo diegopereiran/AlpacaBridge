@@ -126,11 +126,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_config_int");
         if (is_auto) *is_auto = false;
+        if (config_id == 0) return exposure_us_;
         return config_id == 1 ? gain_.load() : 0;
     }
     void set_config_int(int, int config_id, long value, bool) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("set_config_int");
+        if (config_id == 0) exposure_us_ = value;
         if (config_id == 1) gain_ = value;
     }
     double get_config_float(int, int, bool* is_auto = nullptr) override {
@@ -319,12 +321,20 @@ public:
     int get_cooler_power_percent(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_cooler_power_percent");
+        if (cooler_power_failure_) {
+            // The real wrapper throws an AlpacaException from throw_on_error().
+            throw alpacacore::AlpacaException("scripted cooler-power read failure",
+                                              alpacacore::AlpacaError::DriverException);
+        }
         return 0;
     }
     double get_egain(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_egain");
-        return 1.0;
+        if (egain_failure_) {
+            throw alpacacore::AlpacaException("scripted EGAIN read failure", alpacacore::AlpacaError::DriverException);
+        }
+        return egain_;
     }
     int get_heater_power_percent(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -428,6 +438,20 @@ public:
     }
     void set_pulse_off_failure(bool fail) { pulse_off_failure_ = fail; }
     void set_stop_failure(bool fail) { stop_failure_ = fail; }
+    void set_cooler_power_failure(bool fail) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cooler_power_failure_ = fail;
+    }
+    // Advertise POA_EGAIN (read by connect through probe_config_caps) and the e-/ADU it answers.
+    void set_egain(double e_per_adu) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        caps_.has_egain = true;
+        egain_ = e_per_adu;
+    }
+    void set_egain_failure(bool fail) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        egain_failure_ = fail;
+    }
     void set_ready_on_stop_failure(bool ready) { ready_on_stop_failure_ = ready; }
     void set_image_ready(bool ready) {
         ready_on_start_ = ready;
@@ -495,6 +519,9 @@ private:
     std::vector<ListedCamera> listed_;
     bool init_failure_{false};
     bool download_failure_{false};
+    bool cooler_power_failure_{false};
+    bool egain_failure_{false};
+    double egain_{1.0};
     bool hold_image_data_{false};
     bool ignore_download_timeout_{false};
     bool hold_start_readback_{false};
@@ -510,6 +537,7 @@ private:
     int start_x_{0};
     int start_y_{0};
     int bin_{1};
+    long exposure_us_{1};
     std::optional<int> returned_width_;
     std::optional<int> returned_height_;
     std::vector<std::uint8_t> frame_data_ = std::vector<std::uint8_t>(16 * 8 * 2, 0);

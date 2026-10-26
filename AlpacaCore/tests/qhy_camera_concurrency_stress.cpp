@@ -24,13 +24,49 @@ TEST_CASE("QHY camera - concurrent connect/disconnect/exposure stress", "[qhy][c
     alpacacore::test::LockedQHYSDK sdk(fake);
     auto camera = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
 
+    // DriverException is deliberately NOT expected (open-astro#980). Only a worker
+    // failure, the watchdog, or a failed image build in get_image_array() publishes
+    // QHYExposureStatus::Failed, which makes get_image_ready() and
+    // get_image_array() throw DriverException, and none can happen in this storm:
+    //  - set_connected(false) holds exposure_lifecycle_mutex_, cancels and joins the
+    //    worker BEFORE close_camera() and keeps the mutex through the close, so
+    //    start_exposure() cannot spawn a worker in the gap and a live worker never
+    //    meets a closed handle (FakeQHYSDK::require_open). A join that times out
+    //    marks the worker superseded before detaching it.
+    //  - With the real SDK the cancel makes GetQHYCCDSingleFrame fail, so the worker
+    //    would publish Failed while connected_ is still true. FakeQHYSDK::cancel_exposure
+    //    is a no-op and frame_ok defaults to true, so no SDK call fails here. If a case
+    //    changes either (frame_ok, throw_from, before_call), or makes the frame invalid
+    //    (frame_width, frame_height, frame_bpp, frame_channels), widen this set.
+    //  - expire_overdue_exposure_locked() needs the exposure duration plus the default
+    //    60 s watchdog margin to pass; this case never passes one, and the fake is instant.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
     alpacacore::test::run_lifecycle_stress(*camera, [&guard](alpacacore::AlpacaDriver& device) {
         auto& cam = static_cast<alpacacore::CameraDriver&>(device);
+        guard([&] { static_cast<void>(cam.get_name()); });
+        guard([&] { static_cast<void>(cam.get_camera_x_size()); });
+        guard([&] { static_cast<void>(cam.get_camera_y_size()); });
+        guard([&] { static_cast<void>(cam.get_pixel_size_x()); });
+        guard([&] { static_cast<void>(cam.get_pixel_size_y()); });
+        guard([&] { static_cast<void>(cam.get_readout_modes()); });
         guard([&] { static_cast<void>(cam.get_camera_state()); });
         guard([&] { static_cast<void>(cam.get_image_ready()); });
+        guard([&] { static_cast<void>(cam.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(cam.get_last_exposure_start_time()); });
         guard([&] { static_cast<void>(cam.get_image_array()); });
+        // Valid values only: InvalidOperation is a live exposure or a competing
+        // configuration transition, not a reason to admit arbitrary SDK failures.
+        guard([&] { cam.set_readout_mode(1); });
+        guard([&] { cam.set_readout_mode(0); });
+        guard([&] { cam.set_gain(42); });
+        guard([&] { cam.set_offset(17); });
+        guard([&] { cam.set_bin_x(2); });
+        guard([&] { cam.set_bin_y(1); });
+        guard([&] { cam.set_num_x(32); });
+        guard([&] { cam.set_num_y(24); });
+        guard([&] { cam.set_start_x(0); });
+        guard([&] { cam.set_start_y(0); });
         guard([&] { cam.start_exposure(0.001, true); });
         guard([&] { cam.abort_exposure(); });
     });

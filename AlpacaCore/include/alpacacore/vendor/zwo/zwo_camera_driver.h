@@ -13,9 +13,13 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/zwo/zwo_camera_identity.h>
+#include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -30,6 +34,11 @@ namespace alpacacore::vendor::zwo {
  * @return Unique pointer to camera driver
  */
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id);
+
+// Test seam: sdk and clock are non-owning and must outlive the returned driver
+// and any in-flight ZWO SDK operation or pulse-guide turn-off thread started by it.
+std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id, ZWOSDK& sdk,
+                                                util::TaskClock& clock = util::default_task_clock());
 
 /**
  * @brief Create a ZWO camera driver by camera index (enumeration order).
@@ -53,6 +62,8 @@ struct ZwoCameraBinding {
     ZwoConfiguredIdentity identity;
     std::string unique_id;
     std::set<std::string> claimed_serials;
+    // Setup policy, not identity: absent uses 40 clamped to the camera's capabilities.
+    std::optional<std::int64_t> usb_bandwidth;
 };
 
 /// Every connected camera with its serial (opens each one briefly).
@@ -60,5 +71,9 @@ std::vector<ZwoEnumeratedCamera> enumerate_zwo_cameras(const std::string& only_m
 
 /// Create a camera driver for a config entry. See ZwoCameraBinding.
 std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding);
+std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding, ZWOSDK& sdk,
+                                                      util::TaskClock& clock = util::default_task_clock());
+std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int camera_index, ZWOSDK& sdk,
+                                                         util::TaskClock& clock = util::default_task_clock());
 
-} // namespace alpacacore::vendor::zwo
+}  // namespace alpacacore::vendor::zwo

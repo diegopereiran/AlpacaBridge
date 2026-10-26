@@ -28,7 +28,8 @@
 // effect on a non-blocking fd, so a retune to VMIN=1/VTIME=0 cannot park a
 // reader in n_tty_read and hang Disconnect or service stop (the #1202
 // WandererRotator and OnStep hangs). Some USB CDC-ACM ports ignore VTIME
-// anyway (the Sky-Watcher rule in AGENTS.md); this makes that the only shape.
+// anyway (the Sky-Watcher rule in the serial-autodetect instructions); this
+// makes that the only shape.
 //
 // When a read times out, tty_read() checks the line settings against the
 // ones SerialLink recorded and puts them back if another program changed
@@ -60,6 +61,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -112,22 +114,25 @@ inline int remaining_ms(std::chrono::steady_clock::time_point deadline) {
  * A no-op for an fd SerialLink did not open. Cheap: one tcgetattr().
  */
 inline bool restore_serial_line_settings(int fd) {
-    std::string port;
-    bool ok = false;
-    int err = 0;
+    // The registry lock is a leaf: held only to copy the record out. tcgetattr()
+    // and tcsetattr() can park on a stalled adapter, and the lock is shared by
+    // every port. The fd belongs to the caller, so it cannot be closed (and its
+    // number reused) under this call; no re-check under the lock is needed.
+    detail::SerialLineRecord record;
     {
         auto& reg = detail::serial_line_registry();
         std::lock_guard<std::mutex> lock(reg.mutex);
         auto it = reg.lines.find(fd);
         if (it == reg.lines.end()) return false;
-        struct termios now {};
-        if (tcgetattr(fd, &now) != 0) return false;
-        if (detail::same_line_settings(now, it->second.applied)) return false;
-        ok = tcsetattr(fd, TCSANOW, &it->second.applied) == 0;
-        err = errno;
-        port = it->second.port;
+        record = it->second;
     }
-    // Logged after the unlock so the line registry stays a leaf lock.
+    struct termios now {};
+    if (tcgetattr(fd, &now) != 0) return false;
+    if (detail::same_line_settings(now, record.applied)) return false;
+    const bool ok = tcsetattr(fd, TCSANOW, &record.applied) == 0;
+    const int err = errno;
+    const std::string& port = record.port;
+    // Logged with no lock held.
     ALPACA_LOG_WARN("Serial", "Line settings of " + port +
                                   " were changed by another program while this driver held it; " +
                                   (ok ? std::string("restored them") : "restoring them failed: " + errno_string(err)));
@@ -240,6 +245,15 @@ inline void make_raw_8n1(struct termios& tty, speed_t baud) {
     tty.c_iflag &= ~static_cast<tcflag_t>(IXON | IXOFF | IXANY);
 }
 
+/// Whether SerialLink::open() fails when the kernel refuses TIOCEXCL. Best
+/// effort logs a warning and keeps the port (the default); Required refuses
+/// it, for a link that must not share its tty (the Celestron CGX, decision
+/// 0011). The general rule is best effort (decision 0017).
+enum class SerialExclusive : std::uint8_t {
+    BestEffort,
+    Required,
+};
+
 /**
  * @brief A serial port this process owns: registry claim + fd + TIOCEXCL.
  *
@@ -272,11 +286,13 @@ public:
      * @param error Receives the operator-facing reason on failure. A probe
      *              refused because a connected driver holds the port gets an
      *              error too; probes normally just skip that port.
+     * @param exclusive Required makes a refused TIOCEXCL a failure.
      * @return an open link, or a closed one on failure (nothing held).
      */
     static SerialLink open(const std::string& path, SerialClaimKind kind, const std::string& owner,
                            const SerialLineConfigure& configure, std::string* error = nullptr,
-                           std::chrono::milliseconds probe_wait = kSerialProbeClaimWait) {
+                           std::chrono::milliseconds probe_wait = kSerialProbeClaimWait,
+                           SerialExclusive exclusive = SerialExclusive::BestEffort) {
         SerialLink link;
         auto fail = [&](const std::string& why) {
             if (error != nullptr) *error = why;
@@ -296,6 +312,9 @@ public:
             return fail(why);
         }
         if (::ioctl(link.fd_, TIOCEXCL) != 0) {
+            if (exclusive == SerialExclusive::Required) {
+                return fail("Could not lock serial port " + path + " for exclusive use: " + errno_string(errno));
+            }
             ALPACA_LOG_WARN("Serial", "Could not lock " + path + " for exclusive use (" + errno_string(errno) +
                                           "); another program can still open it");
         }

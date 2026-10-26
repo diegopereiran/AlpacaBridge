@@ -197,8 +197,8 @@ state-changing management endpoint carries the same guard — `synctime`,
 handler accepts both and the guard covers both), and both
 `DELETE /management/v1/logfiles` (all files) and
 `DELETE /management/v1/logfiles/<name>` (one file), and since 4.2.0 the
-software-update pair `POST /management/v1/update/check` and
-`POST /management/v1/update/install` ([software-update.md](software-update.md)).
+software-update endpoints `POST /management/v1/update/check`,
+`POST /management/v1/update/install` and `POST /management/v1/update/channel` ([software-update.md](software-update.md)).
 The rejection message names the endpoint.
 
 The guard compares the request's `Origin` against the request's own `Host`,
@@ -218,7 +218,7 @@ The robust client flow:
 2. Fire the request; treat a timeout/socket error after acceptance as
    expected, not as failure.
 3. Re-locate the device on the new network: Alpaca UDP discovery
-   (port 32227), mDNS hostname, or `172.24.1.1` when the hotspot is/returns
+   (UDP port 32227 unless `discovery.port` changed it), mDNS hostname, or `172.24.1.1` when the hotspot is/returns
    active.
 4. Poll `status` until it reflects the new state.
 
@@ -269,20 +269,35 @@ counts as a client step: `ClockSource` reads `client` afterwards.
 `/sys/class/rtc/rtc*` device whose `hctosys` reads 1, whose `since_epoch` is
 after 2020-01-01 (a battery-less Raspberry Pi 5 RTC reads 2000-01-01 and does
 not count). It is a statement about where the clock came from, not about how
-accurate it is: nothing on an NTP-less host verifies or rewrites the RTC, so
-it may still be wrong or drifting, and the telescope connect line says so.
+accurate it is: nothing on an NTP-less host verifies the RTC, so it may still
+be wrong or drifting, and the telescope connect line says so.
+
+After the service steps the system clock (a client's `UTCDate` write or a Sync
+Time press) it writes the new system time into that same RTC
+(`ioctl(RTC_SET_TIME)`, UTC, like `hwclock --systohc`), so the correction
+survives a power cycle, and forgets the settled probe so the next periodic
+re-read lets a battery-less RTC that held 2000-01-01 report `rtc` instead of
+`none`. The write is rounded to the nearest second. A step that was skipped or
+failed writes nothing, and so does either path while `sync_system_clock_from_clients`
+is off, and a host with no RTC the kernel booted from is left alone.
+The package ships a udev rule (`/usr/lib/udev/rules.d/60-alpacabridge.rules`)
+that gives the `alpacabridge` group write access to `/dev/rtc*`; without it the
+write fails once with a WARN naming the errno and the clock stays corrected for
+that session only. From a source install, set the device group by hand.
 A working RTC reads `none` whenever the kernel was not the one that loaded it:
 a userspace `hwclock --hctosys` under a non-systemd init, or a kernel without
 `CONFIG_RTC_HCTOSYS`. `rtc` is a new value on a published field, so an older
 client that switches on `ClockSource` should treat any unknown value as
 "not NTP".
 
-### Host check (`HostCheckEnabled`, `AllowedHosts`)
+### Host check (`HostCheckEnabled`, `AllowedHosts`) and `DiscoveryPort`
 
-`GET /management/v1/description` also carries the two settings of the Host
-header check, a guard against DNS rebinding. Both are persisted under `http:` in
+`GET /management/v1/description` also carries `DiscoveryPort` (integer, default
+32227), the saved UDP port of the discovery responder (the responder binds it at the next restart), and the two settings of the Host
+header check, a guard against DNS rebinding. The two Host check settings are persisted under `http:` in
 the config file (`host_check_enabled`, `allowed_hosts`) and have no environment
-override.
+override; `DiscoveryPort` is persisted as `discovery.port` and also has
+`ALPACAHTTP_DISCOVERY_PORT`.
 
 - `HostCheckEnabled` (boolean, default `false`): when `true`, every request
   whose `Host` header is not allowed is refused with HTTP 403, an Alpaca error
@@ -307,6 +322,7 @@ description fields:
 |---|---|---|
 | `HostCheckEnabled` | `HostCheckEnabled`, `hostCheckEnabled`, `host_check_enabled` | boolean, or the string `true`, `false`, `1` or `0` (case-insensitive) |
 | `AllowedHosts` | `AllowedHosts`, `allowedHosts`, `allowed_hosts` | one string, comma-separated; `""` clears the list |
+| `DiscoveryPort` | `DiscoveryPort`, `discoveryPort`, `discovery_port` | JSON integer, or a string of 1 to 5 digits, from 1 to 65535 |
 
 If a body holds several spellings of one field, the first in the order listed
 is used. Values are checked before anything is applied or saved. Errors:
@@ -316,6 +332,8 @@ is used. Values are checked before anything is applied or saved. Errors:
   <name>`. A string that is not one of the four accepted for
   `HostCheckEnabled`: `ErrorNumber` 1025, `Invalid value for parameter:
   <name>`.
+- A `DiscoveryPort` that is not an integer from 1 to 65535: HTTP 400,
+  `ErrorNumber` 1025, `DiscoveryPort must be an integer from 1 to 65535`.
 - More than 64 entries in `AllowedHosts`: HTTP 400, `ErrorNumber` 1025,
   `AllowedHosts holds more than 64 entries`.
 - An entry that is not a host name: HTTP 400, `ErrorNumber` 1025,
@@ -332,13 +350,15 @@ is used. Values are checked before anything is applied or saved. Errors:
   Nothing is changed. Use the server's IP address or add the name in the same
   request.
 - A body with none of `Location`, `ProfileName`, `SyncSystemClockFromClients`,
-  `HostCheckEnabled` or `AllowedHosts`: `ErrorNumber` 1026 (`ValueNotSet`).
+  `HostCheckEnabled`, `AllowedHosts` or `DiscoveryPort`: `ErrorNumber` 1026 (`ValueNotSet`).
 - The config file cannot be written: `ErrorNumber` 1280 (`DriverException`),
   `Failed to persist server settings: <reason>`; the running settings are not
   changed.
 
-The `PUT` response is the new `description` payload. The change takes effect at
-once and is logged at INFO with the client address.
+The `PUT` response is the new `description` payload. The change is logged at
+INFO with the client address. It takes effect at once, except `DiscoveryPort`:
+that is saved under `discovery.port` and the responder uses it after the next
+restart.
 
 ## Related: build info
 

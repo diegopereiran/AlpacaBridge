@@ -14,7 +14,9 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
@@ -27,8 +29,8 @@ enum class ConnectionType {
     Auto
 };
 
-// A ZWO mount discovered by enumerate_zwo_mounts(). Covers any model the
-// mount reports via :GVP (AM3, AM5, AM5N, AM7, ...) on either transport.
+// A ZWO mount discovered by enumerate_zwo_mounts(): AM3, AM5, AM5N or AM7,
+// verified by a hash-terminated :GVP reply on either transport.
 struct ZWODeviceInfo {
     ConnectionType type = ConnectionType::Serial;
     std::string port_path;   // serial transport
@@ -58,6 +60,9 @@ struct ConnectionInfo {
 // (192.168.4.1:4030 per the protocol docs). Returns the found devices with
 // their model names. Used by ConnectionType::Auto.
 std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms = 1500);
+// Candidate-input seam: runs the production probes without scanning real ports or the mount AP.
+std::vector<ZWODeviceInfo> enumerate_zwo_mounts(const std::vector<ZWODeviceInfo>& candidates,
+                                                int probe_timeout_ms = 1500);
 
 enum class MountMode {
     Unknown,
@@ -113,11 +118,19 @@ enum class ParkStatus {
 
 class ZWOMountProtocolWrapper {
 public:
-    static ZWOMountProtocolWrapper& instance();
+    // Driver links require identity admission under the I/O lock; raw transport users keep the default mode.
+    explicit ZWOMountProtocolWrapper(bool require_identity = false,
+                                     std::optional<std::vector<ZWODeviceInfo>> discovery_candidates = std::nullopt);
+    ~ZWOMountProtocolWrapper();
+    ZWOMountProtocolWrapper(const ZWOMountProtocolWrapper&) = delete;
+    ZWOMountProtocolWrapper& operator=(const ZWOMountProtocolWrapper&) = delete;
 
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    bool link_lost() const;
+    void cancel_pending_io();
+    void try_disconnect();
     /// Why the last connect() returned false, written for the operator (a port
     /// another device holds, a failed open); empty when no reason is known.
     std::string last_connect_error() const;
@@ -128,8 +141,11 @@ public:
     void send_command_blind(const std::string& command);
 
     std::string get_mount_info();
+    std::string get_mount_serial_number();
+    // Call only after fresh model/serial verification and the driver's identity claim.
+    void finish_identity_check();
 
-    EquatorialCoordinates get_current_equatorial();
+    EquatorialCoordinates get_current_equatorial(int timeout_ms_override = 0);
     HorizontalCoordinates get_current_horizontal();
 
     EquatorialCoordinates get_target_equatorial();
@@ -181,9 +197,6 @@ public:
     bool has_successful_homing();
 
 private:
-    ZWOMountProtocolWrapper();
-    ~ZWOMountProtocolWrapper();
-
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };

@@ -49,7 +49,9 @@ public:
         add("Azimuth", [this] { return get_azimuth(); });
         add("ShutterStatus", [this] { return get_shutter_status(); });
         add("Slewing", [this] { return get_slewing(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 
@@ -94,11 +96,6 @@ public:
      * @brief Get whether the dome can slave.
      */
     virtual bool get_can_slave() const = 0;
-
-    /**
-     * @brief Get whether the dome can slew.
-     */
-    virtual bool get_can_slew() const = 0;
 
     /**
      * @brief Get whether the dome can sync azimuth.

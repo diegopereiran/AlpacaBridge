@@ -16,17 +16,20 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -37,6 +40,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <regex>
@@ -51,6 +55,29 @@ namespace {
 
 constexpr auto kReadPollDelay = std::chrono::milliseconds(10);
 constexpr int kIdleBreakMs = 100;
+constexpr auto kReadSlice = std::chrono::milliseconds(100);
+// A mount reply never nears this; it caps a runaway line instead of growing a string forever.
+constexpr std::size_t kMaxReplyLen = 65536;
+// After a query times out its reply is "owed": the next exchange waits up to this long after the timeout for it
+// before writing, so the late reply is discarded instead of read as the next command's reply (issue #1527).
+constexpr int kOwedReplyBoundMs = 600;
+// Once the owed reply's terminator has arrived, the fence waits this long for the line to go quiet.
+constexpr int kOwedReplyQuietMs = 30;
+
+bool is_zwo_mount_model(std::string_view model) {
+    return model == "AM3" || model == "AM5" || model == "AM5N" || model == "AM7";
+}
+
+// A device reply quoted in a connect refusal: control and non-ASCII bytes become '?', and it is cut at 48
+// characters, so a hostile reply cannot forge log lines (CWE-117) or the client-facing error.
+std::string sanitize_for_log(std::string_view text) {
+    std::string out;
+    for (const char ch : text) {
+        if (out.size() >= 48) break;
+        out.push_back(ch >= 0x20 && ch < 0x7f ? ch : '?');
+    }
+    return out;
+}
 
 int map_mount_error_to_alpaca(int mount_error_code) {
     switch (mount_error_code) {
@@ -340,7 +367,7 @@ std::string format_utc_minutes_to_protocol_timezone(int utc_offset_minutes) {
 // ---- ZWO mount auto-detection (USB + WiFi) -------------------------------
 //
 // The probes below are self-contained (they open their own fd/socket and do
-// not touch the singleton's mutex), so enumerate_zwo_mounts() can run
+// not touch a live wrapper's mutex), so enumerate_zwo_mounts() can run
 // independently of any live connection. Each probe sends :GVP and reads until
 // the '#' terminator or the probe timeout, returning the mount model string
 // (e.g. "AM5N") on success or empty on failure.
@@ -351,6 +378,61 @@ std::string format_utc_minutes_to_protocol_timezone(int utc_offset_minutes) {
 constexpr const char* kSerialOwner = "ZWO mount";
 
 #ifndef _WIN32
+// Registry lock is a leaf: only memory operations, never DNS, socket I/O, other locks or joins.
+// Explicit pairs keep their existing sharing policy; Auto and probes require an unused endpoint.
+class NetworkEndpointClaim {
+public:
+    ~NetworkEndpointClaim() {
+        auto& reg = registry();
+        std::lock_guard lock(reg.mutex);
+        reg.holders.erase(this);
+    }
+    NetworkEndpointClaim() = default;
+    NetworkEndpointClaim(const NetworkEndpointClaim&) = delete;
+    NetworkEndpointClaim& operator=(const NetworkEndpointClaim&) = delete;
+
+    bool claim(const sockaddr_in& address, bool exclusive) {
+        auto& reg = registry();
+        std::lock_guard lock(reg.mutex);
+        for (const auto& [owner, holder] : reg.holders) {
+            if (holder.address.sin_addr.s_addr == address.sin_addr.s_addr &&
+                holder.address.sin_port == address.sin_port && (exclusive || holder.exclusive)) {
+                return false;
+            }
+        }
+        reg.holders.emplace(this, Holder{address, exclusive});
+        return true;
+    }
+
+private:
+    struct Holder {
+        sockaddr_in address;
+        bool exclusive;
+    };
+    struct Registry {
+        std::mutex mutex;
+        std::map<const NetworkEndpointClaim*, Holder> holders;
+    };
+    static Registry& registry() {
+        // Static wrappers may release their claims at process exit.
+        static auto* reg = new Registry();  // NOLINT(cppcoreguidelines-owning-memory)
+        return *reg;
+    }
+};
+
+bool resolve_network_endpoint(const std::string& host, int port, sockaddr_in& address) {
+    if (port < 1 || port > 65535) return false;
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* result = nullptr;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) return false;
+    address = *reinterpret_cast<sockaddr_in*>(result->ai_addr);
+    address.sin_port = htons(static_cast<uint16_t>(port));
+    freeaddrinfo(result);
+    return true;
+}
+
 // Issue #1202: whether the scan may probe @p port. A port another connected
 // device holds is never opened. One a connected ZWO mount holds is listed at
 // its scan position without being probed (model unknown), so the order of
@@ -397,42 +479,28 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         return "";
     }
 
-    std::string response;
-    const auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
-           timeout_ms) {
-        char ch = '\0';
-        // This read is reached via enumerate_zwo_mounts() called from
-        // Impl::connect(Auto), which deliberately holds mutex_ across the
-        // whole auto-detect probe sequence (see that function's doc comment)
-        // so a concurrent connect can't race it. Each read waits at most
-        // 100 ms; the loop's deadline bounds the probe.
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-        const ssize_t n = util::tty_read(fd, &ch, 1, 100);
-        if (n == 1) {
-            if (ch == '#') {
-                break;
-            }
-            if (ch != '\r' && ch != '\n') {
-                response.push_back(ch);
-            }
-        } else if (n < 0) {
-            break;
-        }
-        if (!response.empty() && n == 0) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    // This read is reached via enumerate_zwo_mounts() called from
+    // Impl::connect(Auto), which deliberately holds mutex_ across the
+    // whole auto-detect probe sequence (see that function's doc comment)
+    // so a concurrent connect can't race it. The read's deadline bounds the
+    // probe. IdleGap keeps the old rule: 100 ms of silence after the first
+    // byte ends the read, and only a '#' seen before that counts as a reply.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::IdleGap;
+    spec.idle_gap = std::chrono::milliseconds(100);
+    spec.skip.clear();
+    // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
+    spec.max_len = 4096;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+    const auto reply = util::read_until(fd, spec, deadline);
     link.close();
 
-    // Trim whitespace; the model is the non-empty body (e.g. "AM5N").
-    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
-    response.erase(response.begin(),
-                   std::find_if(response.begin(), response.end(), [&](char c) { return !is_space(c); }));
-    response.erase(std::find_if(response.rbegin(), response.rend(), [&](char c) { return !is_space(c); }).base(),
-                   response.end());
-    return response;
+    const std::size_t hash = reply.bytes.find('#');
+    const bool terminated = hash != std::string::npos;
+    std::string response = reply.bytes.substr(0, hash);
+    response = trim_copy(std::move(response));
+    return terminated && is_zwo_mount_model(response) ? response : "";
 #endif
 }
 
@@ -443,34 +511,28 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     (void)timeout_ms;
     return "";
 #else
+    sockaddr_in addr{};
+    if (!resolve_network_endpoint(host, port, addr)) return "";
+    NetworkEndpointClaim claim;
+    if (!claim.claim(addr, true)) {
+        ALPACA_LOG_DEBUG("ZWO", "Auto-detect: skipping held network endpoint " + host + ":" + std::to_string(port));
+        return "";
+    }
     const int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         return "";
     }
-
-    sockaddr_in addr{};
-    std::memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<u_short>(port));
-    // getaddrinfo (thread-safe, unlike gethostbyname's static buffer).
-    addrinfo hints{};
-    std::memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* result = nullptr;
-    if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) {
-        close(sock);
-        return "";
-    }
-    addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
-    freeaddrinfo(result);
+    struct SocketCloser {
+        int fd;
+        ~SocketCloser() { ::close(fd); }
+    } closer{sock};  // closes before the endpoint claim releases, including on exceptions
 
     // Non-blocking connect so an unreachable host fails within the probe timeout.
-    const int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    if (!util::set_nonblocking(sock)) {
+        return "";
+    }
     const int rc = ::connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     if (rc < 0 && errno != EINPROGRESS) {
-        close(sock);
         return "";
     }
     fd_set wfds;
@@ -480,18 +542,15 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = static_cast<suseconds_t>(timeout_ms % 1000) * 1000;
     if (select(sock + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
-        close(sock);
         return "";
     }
     int so_error = 0;
     socklen_t len = sizeof(so_error);
     if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
-        close(sock);
         return "";
     }
     // Restore blocking mode (SO_RCVTIMEO below bounds the read loop).
-    if (fcntl(sock, F_SETFL, flags) < 0) {
-        close(sock);
+    if (!util::clear_nonblocking(sock)) {
         return "";
     }
 
@@ -505,11 +564,11 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
 
     const std::string cmd = ":GVP#";
     if (!util::send_all(sock, cmd.c_str(), cmd.size(), MSG_NOSIGNAL)) {
-        close(sock);
         return "";
     }
 
     std::string response;
+    bool terminated = false;
     const auto start = std::chrono::steady_clock::now();
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
            timeout_ms) {
@@ -517,38 +576,42 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
         const ssize_t n = ::recv(sock, &ch, 1, 0);
         if (n == 1) {
             if (ch == '#') {
+                terminated = true;
                 break;
             }
-            if (ch != '\r' && ch != '\n') {
-                response.push_back(ch);
-            }
+            response.push_back(ch);
         } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    close(sock);
-
-    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
-    response.erase(response.begin(),
-                   std::find_if(response.begin(), response.end(), [&](char c) { return !is_space(c); }));
-    response.erase(std::find_if(response.rbegin(), response.rend(), [&](char c) { return !is_space(c); }).base(),
-                   response.end());
-    return response;
+    response = trim_copy(std::move(response));
+    return terminated && is_zwo_mount_model(response) ? response : "";
 #endif
 }
 
 }  // namespace
 
+std::vector<ZWODeviceInfo> enumerate_zwo_mounts(const std::vector<ZWODeviceInfo>& candidates, int probe_timeout_ms) {
+    std::vector<ZWODeviceInfo> results;
+    for (auto candidate : candidates) {
+        if (candidate.type == ConnectionType::Serial) {
+#ifndef _WIN32
+            if (!zwo_mount_candidate_free(candidate.port_path, candidate.label, results)) continue;
+#endif
+            candidate.model_name = probe_serial_mount(candidate.port_path, probe_timeout_ms);
+        } else if (candidate.type == ConnectionType::Network) {
+            candidate.model_name = probe_network_mount(candidate.host, candidate.tcp_port, probe_timeout_ms);
+        } else {
+            continue;
+        }
+        if (!candidate.model_name.empty()) results.push_back(std::move(candidate));
+    }
+    return results;
+}
+
 std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
-    // The probes below open candidate ports/sockets directly and do NOT take
-    // the ZWOMountProtocolWrapper singleton's mutex. This is intentional: the
-    // wrapper is a process-wide singleton holding at most ONE physical ZWO
-    // connection at a time, and enumeration is called from connect() only
-    // after disconnecting any live link. A probe could still race an external
-    // open of the same port in another process, which is a pre-existing
-    // constraint of the serial auto-detect pattern shared with the other
-    // protocol drivers (iOptron, SynScan, ...).
+    // Probes own temporary links; the serial registry keeps them off connected siblings' ports.
     std::vector<ZWODeviceInfo> results;
 
 #ifndef _WIN32
@@ -617,8 +680,10 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
 
 class ZWOMountProtocolWrapper::Impl {
 public:
-    Impl()
-        : connected_(false),
+    explicit Impl(bool require_identity, std::optional<std::vector<ZWODeviceInfo>> discovery_candidates)
+        : require_identity_(require_identity),
+          discovery_candidates_(std::move(discovery_candidates)),
+          connected_(false),
           connection_type_(ConnectionType::Serial)
 #ifdef _WIN32
           ,
@@ -660,14 +725,16 @@ public:
             // entries) block ~5 s per candidate. 1500 ms is plenty for a local
             // :GVP probe and keeps connectionType=auto responsive.
             constexpr int kProbeTimeoutMs = 1500;
-            const auto devices = enumerate_zwo_mounts(std::min(info.response_timeout_ms, kProbeTimeoutMs));
+            const int timeout = std::min(info.response_timeout_ms, kProbeTimeoutMs);
+            const auto devices = discovery_candidates_ ? enumerate_zwo_mounts(*discovery_candidates_, timeout)
+                                                       : enumerate_zwo_mounts(timeout);
             for (const auto& dev : devices) {
                 ConnectionInfo candidate = info;
                 candidate.type = dev.type;
                 candidate.port_path = dev.port_path;
                 candidate.host = dev.host;
                 candidate.tcp_port = dev.tcp_port;
-                if (connect_locked(candidate)) {
+                if (connect_locked(candidate, true)) {
                     std::string connect_msg = "Auto-connected to ";
                     connect_msg += dev.model_name;
                     connect_msg += " via ";
@@ -694,7 +761,7 @@ public:
     }
 
     // Actual connection logic; caller must hold mutex_.
-    bool connect_locked(const ConnectionInfo& info) {
+    bool connect_locked(const ConnectionInfo& info, bool automatic = false) {
         if (info.type == ConnectionType::Serial && info.port_path.empty()) {
             ALPACA_LOG_ERROR("ZWO", "Serial connection requested but port path is empty");
             return false;
@@ -711,21 +778,37 @@ public:
         connection_type_ = info.type;
         connection_info_ = info;
         last_connect_error_.clear();
+        identity_verified_ = false;
 
         bool ok = false;
         if (info.type == ConnectionType::Serial) {
             ok = connect_serial(info.port_path, info.baud_rate);
         } else {
-            ok = connect_network(info.host, info.tcp_port);
+            ok = connect_network(info.host, info.tcp_port, automatic);
         }
 
         connected_ = ok;
+        reply_owed_ = false;
+        link_lost_.store(false);
+        closing_.store(false);
         return ok;
     }
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+    }
+
+    bool link_lost() const { return link_lost_.load(); }
+    void cancel_pending_io() { closing_.store(true); }
+
+    void try_disconnect() {
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (lock.owns_lock())
+            disconnect_locked();
+        else
+            ALPACA_LOG_INFO("ZWO",
+                            "Transport close deferred until Connect/Disconnect: an exchange still owns the link");
     }
 
     bool is_connected() const {
@@ -738,11 +821,19 @@ public:
         return last_connect_error_;
     }
 
+    void finish_identity_check() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_ || closing_.load() || link_lost_.load()) {
+            throw AlpacaException("ZWO mount transport lost during identity check", AlpacaError::NotConnected);
+        }
+        identity_verified_ = true;
+    }
+
     std::string send_command(const std::string& command,
                              bool require_hash_terminator,
                              int timeout_ms_override) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_) {
+        if (!connected_ || closing_.load()) {
             throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
         }
 
@@ -757,8 +848,10 @@ public:
             full_command.push_back('#');
         }
 
-        if (!write_data(full_command)) {
-            throw AlpacaException("Failed to send command to ZWO mount");
+        // Recheck under the I/O lock: an older admitted caller may reach a replacement link.
+        const bool identity_read = full_command == ":GVP#" || full_command == ":GMA#";
+        if (require_identity_ && !identity_verified_ && !identity_read) {
+            throw AlpacaException("ZWO mount identity is not verified", AlpacaError::NotConnected);
         }
 
         int timeout_ms = timeout_ms_override;
@@ -769,15 +862,37 @@ public:
             timeout_ms = 5000;
         }
 
-        std::string response = read_response(require_hash_terminator, timeout_ms);
+        // The fence spends the exchange's own timeout: when the owed reply never comes, the exchange costs no more
+        // than it did before the fence. When the owed reply arrived, the exchange keeps its full timeout.
+        const auto fence_start = std::chrono::steady_clock::now();
+        const bool owed_arrived = settle_owed_reply(fence_start + std::chrono::milliseconds(timeout_ms));
+        if (!owed_arrived) {
+            const auto spent =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - fence_start)
+                    .count();
+            timeout_ms = static_cast<int>(std::max<long long>(0, timeout_ms - spent));
+        }
+        discard_pending_input();
+        if (!write_data(full_command)) {
+            note_transport_error();
+            throw AlpacaException("Failed to send command to ZWO mount");
+        }
+
+        // A getter (":G...") or a '#'-terminated exchange always has a reply; a silent timeout leaves one owed.
+        const bool reply_expected = require_hash_terminator || (full_command.size() > 1 && full_command[1] == 'G');
+        std::string response =
+            read_response(require_hash_terminator, timeout_ms, reply_expected, nullptr, identity_read);
         ALPACA_LOG_TRACE("ZWO", "CMD " + full_command + " RESP " + response);
         return response;
     }
 
     void send_command_blind(const std::string& command) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_) {
+        if (!connected_ || closing_.load()) {
             throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
+        }
+        if (require_identity_ && !identity_verified_) {
+            throw AlpacaException("ZWO mount identity is not verified", AlpacaError::NotConnected);
         }
 
         std::string full_command = command;
@@ -791,21 +906,146 @@ public:
             full_command.push_back('#');
         }
 
+        // A blind command never waits for an owed reply: a guide pulse or an abort (":Q") must not be delayed
+        // by the fence. The owed reply stays owed for the next query to settle, unless this command's own input
+        // flush or 40 ms drain reads the reply's '#': then it is gone and nothing is owed any more.
+        bool saw_hash = false;
+        discard_pending_input(&saw_hash);
         if (!write_data(full_command)) {
+            note_transport_error();
             throw AlpacaException("Failed to send command to ZWO mount");
         }
 
         ALPACA_LOG_TRACE("ZWO", "CMD " + full_command + " (blind)");
 
         try {
-            (void)read_response(false, 40);
+            (void)read_response(false, 40, false, &saw_hash);
         } catch (const std::exception&) {
             // Ignore best-effort drain failures for fire-and-forget commands.
         }
+        if (saw_hash) reply_owed_ = false;
     }
 
 private:
+    // Waits for the reply a timed-out query still owes, then lets the line go quiet, so the next exchange starts
+    // on a clean line (issue #1527). Bounded: it ends at the earlier of kOwedReplyBoundMs after the timeout and
+    // `cap` (the exchange's own timeout, so a short best-effort query is never slower than its timeout), or
+    // kOwedReplyQuietMs after the reply's '#', and the earlier bound still holds after the '#': a line that keeps
+    // sending cannot hold the lock past it. It waits in kReadPollDelay slices and throws NotConnected as soon
+    // as the link closes, before anything is written. An exchange with nothing owed pays nothing.
+    // Returns true when the owed reply arrived. POSIX only; on Windows the plain input purge in
+    // discard_pending_input() remains.
+    bool settle_owed_reply(std::chrono::steady_clock::time_point cap) {
+        if (!reply_owed_) return false;
+        bool terminated = false;
+#ifndef _WIN32
+        using Clock = std::chrono::steady_clock;
+        const int fd = connection_type_ == ConnectionType::Serial ? serial_fd_ : socket_fd_;
+        const auto deadline = std::min(owed_until_, cap);
+        auto quiet_until = Clock::time_point{};
+        while (!closing_.load()) {
+            const auto now = Clock::now();
+            if (now >= deadline || (terminated && now >= quiet_until)) break;
+            const auto end = terminated ? std::min(quiet_until, deadline) : deadline;
+            const int slice_ms = static_cast<int>(std::max<std::chrono::milliseconds::rep>(
+                1,
+                std::min<std::chrono::milliseconds::rep>(
+                    kReadPollDelay.count(), std::chrono::duration_cast<std::chrono::milliseconds>(end - now).count())));
+            char buf[128];
+            ssize_t count = 0;
+            if (connection_type_ == ConnectionType::Serial) {
+                count = util::tty_read(fd, buf, sizeof(buf), slice_ms);
+            } else {
+                pollfd pfd = {fd, POLLIN, 0};
+                const int ready = ::poll(&pfd, 1, slice_ms);
+                if (ready < 0 && errno == EINTR) continue;
+                if (ready < 0)
+                    count = -1;
+                else if (ready > 0)
+                    count = ::recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+                if (ready > 0 && count == 0) link_lost_.store(true);
+                if (count < 0 && (errno == EAGAIN || errno == EINTR)) count = 0;
+            }
+            if (count < 0) {
+                note_transport_error();
+                break;
+            }
+            if (count == 0) {
+                if (link_lost_.load()) break;
+                continue;
+            }
+            if (std::memchr(buf, '#', static_cast<std::size_t>(count)) != nullptr) terminated = true;
+            if (terminated) quiet_until = Clock::now() + std::chrono::milliseconds(kOwedReplyQuietMs);
+        }
+#else
+        (void)cap;
+#endif
+        reply_owed_ = false;
+        if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
+        if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
+        return terminated;
+    }
+
+    // Drops what is queued before a command is written. This cannot tell a stale reply from a fresh one of the
+    // same shape: a late RA reply and the RA reply of the next ":GR" are the same bytes, and the protocol has no
+    // sequence number. settle_owed_reply() narrows the window to a reply later than kOwedReplyBoundMs after its
+    // timeout (or later than the next exchange's own timeout, when that is shorter), or to a reply owed by a command
+    // that was never marked (a blind command); it does not close it.
+    // `saw_hash` (optional) is set when the dropped input held a '#'.
+    void discard_pending_input(bool* saw_hash = nullptr) {
+        if (connection_type_ == ConnectionType::Serial) {
+#ifdef _WIN32
+            if (!PurgeComm(serial_handle_, PURGE_RXCLEAR))
+                throw AlpacaException("Failed to discard ZWO mount serial input");
+#else
+            if (saw_hash != nullptr) {
+                // Look at what is queued before it is flushed (non-blocking), so a consumed reply is noticed.
+                char peek[128];
+                ssize_t got;
+                int reads = 0;
+                while (reads++ < 16 && (got = util::tty_read(serial_fd_, peek, sizeof(peek), 0)) > 0) {
+                    if (std::memchr(peek, '#', static_cast<std::size_t>(got)) != nullptr) *saw_hash = true;
+                }
+            }
+            if (tcflush(serial_fd_, TCIFLUSH) != 0) {
+                note_transport_error();
+                throw AlpacaException("Failed to discard ZWO mount serial input");
+            }
+#endif
+            return;
+        }
+        char discarded[256];
+#ifdef _WIN32
+        u_long available = 0;
+        while (ioctlsocket(socket_handle_, FIONREAD, &available) == 0 && available > 0) {
+            if (recv(socket_handle_, discarded, static_cast<int>(std::min<u_long>(available, sizeof(discarded))), 0) <=
+                0)
+                break;
+        }
+#else
+        ssize_t count;
+        do {
+            count = recv(socket_fd_, discarded, sizeof(discarded), MSG_DONTWAIT);
+            if (count > 0 && saw_hash != nullptr &&
+                std::memchr(discarded, '#', static_cast<std::size_t>(count)) != nullptr)
+                *saw_hash = true;
+        } while (count > 0 || (count < 0 && errno == EINTR));
+        if (count == 0) link_lost_.store(true);
+        if (count < 0) note_transport_error();
+#endif
+    }
+
+    void note_transport_error() {
+#ifndef _WIN32
+        if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF || errno == ENOTSOCK ||
+            errno == ENOTCONN || errno == ECONNRESET || errno == EPIPE) {
+            link_lost_.store(true);
+        }
+#endif
+    }
+
     void disconnect_locked() {
+        identity_verified_ = false;
         if (!connected_) {
             return;
         }
@@ -909,7 +1149,7 @@ private:
 #endif
     }
 
-    bool connect_network(const std::string& host, int port) {
+    bool connect_network(const std::string& host, int port, bool automatic) {
 #ifdef _WIN32
         if (port < 1 || port > static_cast<int>(std::numeric_limits<u_short>::max())) {
             return false;
@@ -950,24 +1190,18 @@ private:
         ioctlsocket(socket_handle_, FIONBIO, &mode);
         return true;
 #else
+        sockaddr_in addr{};
+        if (!resolve_network_endpoint(host, port, addr)) return false;
+        auto claim = std::make_unique<NetworkEndpointClaim>();
+        if (!claim->claim(addr, automatic)) {
+            last_connect_error_ = "ZWO mount network endpoint is held by another ZWO entry or discovery probe";
+            ALPACA_LOG_DEBUG("ZWO", "Skipping held network endpoint " + host + ":" + std::to_string(port));
+            return false;
+        }
         socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (socket_fd_ < 0) {
             return false;
         }
-
-        sockaddr_in addr {};
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-
-        hostent* host_entry = gethostbyname(host.c_str());
-        if (host_entry == nullptr) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
-        }
-
-        addr.sin_addr = *reinterpret_cast<in_addr*>(host_entry->h_addr);
 
         if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             close(socket_fd_);
@@ -976,6 +1210,7 @@ private:
         }
 
         configure_network_timeouts();
+        network_claim_ = std::move(claim);
         return true;
 #endif
     }
@@ -991,6 +1226,7 @@ private:
             close(socket_fd_);
             socket_fd_ = -1;
         }
+        network_claim_.reset();
 #endif
     }
 
@@ -1050,74 +1286,99 @@ private:
 #endif
     }
 
-    std::string read_response(bool require_hash_terminator, int timeout_ms) {
+    // One reply read for both transports: util::read_until on the tty or
+    // util::read_until_socket on the TCP fd, poll()-bounded (no pacing sleep).
+    util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
+#ifndef _WIN32
+        if (connection_type_ == ConnectionType::Serial) {
+            return util::read_until(serial_fd_, spec, deadline);
+        }
+        return util::read_until_socket(socket_fd_, spec, deadline);
+#else
+        (void)spec;
+        (void)deadline;
+        throw AlpacaException("ZWO mount reads are Linux-only");
+#endif
+    }
+
+    std::string read_response(bool require_hash_terminator, int timeout_ms, bool reply_expected,
+                              bool* saw_hash = nullptr, bool preserve_whitespace = false) {
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         std::string response;
-        const auto start = std::chrono::steady_clock::now();
-        auto last_char_time = start;
 
-        while (true) {
-            char ch = '\0';
-            bool got_char = false;
-            if (connection_type_ == ConnectionType::Serial) {
-                got_char = read_serial_char(ch);
-            } else {
-                got_char = read_network_char(ch);
-            }
-
-            if (got_char) {
-                last_char_time = std::chrono::steady_clock::now();
-                if (ch == '\r' || ch == '\n') {
-                    continue;
-                }
-                if (ch == '#') {
-                    break;
-                }
-                response.push_back(ch);
-            }
-
-            const auto now = std::chrono::steady_clock::now();
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
-            if (elapsed.count() > timeout_ms) {
-                if (!require_hash_terminator) {
-                    return response;
-                }
-                throw AlpacaException("Timeout waiting for ZWO mount response", AlpacaError::DriverException);
-            }
-
-            if (!require_hash_terminator && !got_char && !response.empty()) {
-                const auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_char_time);
-                if (idle.count() > kIdleBreakMs) {
-                    break;
-                }
-            }
-
-            std::this_thread::sleep_for(kReadPollDelay);
+        // The terminator ends the reply; without one the reply ends when the line goes quiet for kIdleBreakMs
+        // after its first byte. The read runs in kReadSlice slices so a disconnect (closing_) is noticed within
+        // one slice, as the byte-at-a-time loop did.
+        util::ReadSpec spec;
+        spec.max_len = kMaxReplyLen;
+        if (preserve_whitespace) spec.skip.clear();
+        if (!require_hash_terminator) {
+            spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
+            spec.idle_gap = std::chrono::milliseconds(kIdleBreakMs);
         }
 
-        return response;
-    }
+        // One slice of a read that ends at `until`; a closing or lost link throws NotConnected.
+        const auto read_slice = [&](const util::ReadSpec& s, std::chrono::steady_clock::time_point until) {
+            if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
+            const auto r = read_reply(s, std::min(until, std::chrono::steady_clock::now() + kReadSlice));
+            if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
+            if (r.outcome == util::ReadOutcome::LinkDead) {
+                errno = r.err;
+                note_transport_error();
+                link_lost_.store(true);
+            }
+            if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
+            return r;
+        };
 
-    bool read_serial_char(char& ch) {
-#ifdef _WIN32
-        DWORD bytes_read = 0;
-        if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-            return true;
+        // A read that ended on the '#' holds it as its last byte: the reply is what precedes it, and finding one
+        // tells a blind command its own reply is gone.
+        const auto finish = [&]() {
+            const auto hash = response.find('#');
+            if (hash != std::string::npos) {
+                if (saw_hash != nullptr) *saw_hash = true;
+                response.resize(hash);
+            }
+            return response;
+        };
+
+        while (std::chrono::steady_clock::now() < end) {
+            const auto r = read_slice(spec, end);
+            response += r.bytes;
+            if (response.size() >= kMaxReplyLen) {
+                throw AlpacaException("ZWO mount response too long", AlpacaError::DriverException);
+            }
+
+            if (r.outcome == util::ReadOutcome::Terminator || r.outcome == util::ReadOutcome::Idle ||
+                (r.outcome == util::ReadOutcome::Timeout && !require_hash_terminator && r.bytes.empty() &&
+                 !response.empty() && std::chrono::steady_clock::now() < end)) {
+                return finish();
+            }
         }
-        return false;
-#else
-        // Up to 100 ms for a character, the read window this link always had.
-        return util::tty_read(serial_fd_, &ch, 1, 100) == 1;
-#endif
-    }
 
-    bool read_network_char(char& ch) {
-#ifdef _WIN32
-        const int bytes_received = recv(socket_handle_, &ch, 1, 0);
-        return bytes_received == 1;
-#else
-        const ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);
-        return bytes_received == 1;
-#endif
+        // The timeout ran out. The byte-at-a-time loop checked the timeout after each byte and never after a '#',
+        // so the byte in flight then (one read slice: 100 ms over serial, the socket's 200 ms SO_RCVTIMEO over
+        // TCP) settled the reply: a '#' still ended it, any other byte was kept and the reply had timed out. A
+        // strict deadline would leave a late '#' to answer the next command; a deadline one slice later would take
+        // a whole late reply.
+        util::ReadSpec late_spec;
+        late_spec.stop = util::ReadSpec::Stop::Length;
+        late_spec.length = 1;
+        late_spec.skip = spec.skip;
+        const auto late_until = end + std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
+        std::string late;
+        while (late.empty() && std::chrono::steady_clock::now() < late_until) {
+            late = read_slice(late_spec, late_until).bytes;
+        }
+        response += late;
+        if (late == "#") return finish();
+
+        if (reply_expected) {
+            reply_owed_ = true;
+            owed_until_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(kOwedReplyBoundMs);
+        }
+        if (!require_hash_terminator) return finish();
+        throw AlpacaException("Timeout waiting for ZWO mount response", AlpacaError::DriverException);
     }
 
     void configure_network_timeouts() {
@@ -1143,30 +1404,38 @@ private:
 
 private:
     mutable std::mutex mutex_;
+    const bool require_identity_;
+    const std::optional<std::vector<ZWODeviceInfo>> discovery_candidates_;
+    bool identity_verified_ = false;
     bool connected_;
+    std::atomic<bool> link_lost_{false};
+    std::atomic<bool> closing_{false};
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
+    bool reply_owed_ = false;  // a query timed out with no reply; guarded by mutex_
+    std::chrono::steady_clock::time_point owed_until_{};
 
 #ifdef _WIN32
     HANDLE serial_handle_;
     SOCKET socket_handle_;
 #else
     util::SerialLink link_;
+    std::unique_ptr<NetworkEndpointClaim> network_claim_;
     int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
 #endif
     std::string last_connect_error_;
 };
 
-ZWOMountProtocolWrapper::ZWOMountProtocolWrapper()
-    : pimpl_(std::make_unique<Impl>()) {}
+ZWOMountProtocolWrapper::ZWOMountProtocolWrapper(bool require_identity,
+                                                 std::optional<std::vector<ZWODeviceInfo>> discovery_candidates)
+    : pimpl_(std::make_unique<Impl>(require_identity, std::move(discovery_candidates))) {}
 
 ZWOMountProtocolWrapper::~ZWOMountProtocolWrapper() = default;
 
-ZWOMountProtocolWrapper& ZWOMountProtocolWrapper::instance() {
-    static ZWOMountProtocolWrapper wrapper;
-    return wrapper;
-}
+bool ZWOMountProtocolWrapper::link_lost() const { return pimpl_->link_lost(); }
+void ZWOMountProtocolWrapper::cancel_pending_io() { pimpl_->cancel_pending_io(); }
+void ZWOMountProtocolWrapper::try_disconnect() { pimpl_->try_disconnect(); }
 
 bool ZWOMountProtocolWrapper::connect(const ConnectionInfo& info) {
     return pimpl_->connect(info);
@@ -1195,19 +1464,43 @@ void ZWOMountProtocolWrapper::send_command_blind(const std::string& command) {
 std::string ZWOMountProtocolWrapper::get_mount_info() {
     std::string response = send_command(":GVP");
     throw_if_mount_error(response, ":GVP");
-    return trim_copy(std::move(response));
+    response = trim_copy(std::move(response));
+    if (!is_zwo_mount_model(response)) {
+        throw AlpacaException("Expected a ZWO AM3, AM5, AM5N or AM7 identity, but the device answered '" +
+                                  sanitize_for_log(response) +
+                                  "'; check the configured serial port or host and device type",
+                              AlpacaError::DriverException);
+    }
+    return response;
 }
 
-EquatorialCoordinates ZWOMountProtocolWrapper::get_current_equatorial() {
+std::string ZWOMountProtocolWrapper::get_mount_serial_number() {
+    // ZWO ASCOM 6.5.37 GetMountSN uses :GMA# and validates twelve hexadecimal characters.
+    std::string response = trim_copy(send_command(":GMA"));
+    if (response.size() != 12 ||
+        !std::all_of(response.begin(), response.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; })) {
+        throw AlpacaException(
+            "Unable to verify ZWO mount serial number; check the configured serial port or host "
+            "and mount firmware support",
+            AlpacaError::DriverException);
+    }
+    std::transform(response.begin(), response.end(), response.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    return response;
+}
+
+void ZWOMountProtocolWrapper::finish_identity_check() { pimpl_->finish_identity_check(); }
+
+EquatorialCoordinates ZWOMountProtocolWrapper::get_current_equatorial(int timeout_ms_override) {
     EquatorialCoordinates out;
 
-    const std::string ra_response = send_command(":GR");
+    const std::string ra_response = send_command(":GR", true, timeout_ms_override);
     throw_if_mount_error(ra_response, ":GR");
     if (!parse_hms(ra_response, out.ra_hours)) {
         throw AlpacaException("Invalid RA response from ZWO mount", AlpacaError::DriverException);
     }
 
-    const std::string dec_response = send_command(":GD");
+    const std::string dec_response = send_command(":GD", true, timeout_ms_override);
     throw_if_mount_error(dec_response, ":GD");
     if (!parse_angle_triplet(dec_response, true, out.dec_degrees)) {
         throw AlpacaException("Invalid Dec response from ZWO mount", AlpacaError::DriverException);
@@ -1328,6 +1621,7 @@ void ZWOMountProtocolWrapper::abort_motion() {
 StatusInfo ZWOMountProtocolWrapper::get_status() {
     StatusInfo status;
     status.raw = trim_copy(send_command(":GU", false));
+    if (status.raw.empty()) throw AlpacaException("No ZWO mount status response", AlpacaError::DriverException);
     throw_if_mount_error(status.raw, ":GU");
 
     status.no_tracking = status.raw.find('n') != std::string::npos;

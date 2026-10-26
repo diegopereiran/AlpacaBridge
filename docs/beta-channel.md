@@ -6,17 +6,35 @@ and then promoted to stable. Day-to-day PR work on `main` does not change.
 
 ## For users: opt in to the beta
 
-Do both edits together. The web UI update check does not read apt sources; it fetches only
-`update_packages_url`, and the install always goes through apt. With the apt line alone the
-update card never offers a beta. With the URL alone it offers a beta that apt cannot find.
+**Web UI.** Open the Software Update card on the Server Info tab and set **Update channel** to
+**Beta**. One switch changes both halves: the host's apt source and the index the update check
+reads, so they cannot disagree. Then press **Check for Updates**. Setting it back to **Stable**
+reverses both. See [software-update.md](software-update.md#update-channel) for what the switch
+runs and how it is scoped.
 
-1. Add `beta` to the apt line (same line as the README install step):
+**Headless, by hand.** On a host without the card, make both edits by hand and together: the
+update check reads only `update_packages_url`, and the install always goes through apt. With the
+apt line alone the card never offers a beta. With the URL alone it offers a beta that apt cannot
+find. The beta source plus the beta URL below shows in the card as an
+override ("set by update_packages_url"): the selector is disabled and you remove the URL line to
+hand the channel back to the card.
+
+1. Write the beta apt source, the same file the card's Beta switch writes. Leave
+   `openastro.list` at `main`, as the README install step writes it:
 
    ```sh
-   echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/openastro-archive-keyring.gpg] \
-   https://apt.openastro.net trixie main beta" \
-       | sudo tee /etc/apt/sources.list.d/openastro.list
+   printf '%s\n' 'Types: deb' 'URIs: https://apt.openastro.net' 'Suites: trixie' \
+       'Components: beta' 'Architectures: arm64' \
+       'Signed-By: /usr/share/keyrings/openastro-archive-keyring.gpg' \
+       | sudo tee /etc/apt/sources.list.d/alpacabridge-beta.sources
+   sudo apt update
    ```
+
+   An earlier version of this page, and the 5.0.0-beta.5 release notes, said to add `beta` to the
+   `openastro.list` line instead. If yours reads `trixie main beta`, change it back to `trixie main`.
+   The card does not read `openastro.list`, so with `beta` there it shows Stable while apt still
+   installs betas, choosing Stable changes nothing, and choosing Beta makes `apt update` warn that
+   each beta target "is configured multiple times".
 
 2. Under `server:` in the AlpacaBridge config set (see [software-update.md](software-update.md)):
 
@@ -30,20 +48,48 @@ The URL names `binary-arm64` on purpose: AlpacaBridge ships for arm64 only.
 `alpacabridge_X.Y.Z-beta.N_arm64.deb` and its `.sha256` under Assets. Download both, check the
 file with `sha256sum -c alpacabridge_X.Y.Z-beta.N_arm64.deb.sha256`, then run
 `sudo apt install ./alpacabridge_X.Y.Z-beta.N_arm64.deb`. apt does not offer the next beta to a
-build installed this way; repeat the download for each beta, or opt in as above.
+build installed this way; repeat the download for each beta, or opt in as above. Once pruning is on (it is off until
+`PRUNE_SUPERSEDED_RELEASES` is set), older betas are tags only, with no Release or `.deb`. A pruned
+release can be recreated, `.deb` attached, by re-running that tag's original push-triggered `Release`
+run (`gh run rerun <run id>`); GitHub allows a re-run only within 30 days of the run.
 
 To check the file was built by this repository's release workflow from the beta's tag, and not
 just that it matches its `.sha256`, run on any machine with the GitHub CLI signed in:
 `gh attestation verify alpacabridge_X.Y.Z-beta.N_arm64.deb --repo open-astro/AlpacaBridge`.
-The same works for the `alpacabridge_X.Y.Z_arm64.deb` that every stable Release carries too.
-Each attestation is also listed under the repository's Actions > Attestations.
+The same works for a nightly `.deb` and for the `alpacabridge_X.Y.Z_arm64.deb` that every stable
+Release carries too. Each attestation, and the SBOM attached to it, is also
+listed under the repository's Actions > Attestations.
 
-**Opt out** by removing `beta` from the apt line and restoring the default
-`update_packages_url`. apt does not downgrade on its own, so a user who leaves mid-beta stays
+**Opt out** by choosing **Stable** in the card. On a headless install, delete the beta source
+(`sudo rm /etc/apt/sources.list.d/alpacabridge-beta.sources`, then `sudo apt update`) and remove
+the beta `update_packages_url` line, so the default URL applies again. If an older opt-in left
+`trixie main beta` in `openastro.list`, change it back to `trixie main` too. apt does not downgrade on its own, so a user who leaves mid-beta stays
 on the beta build until the stable release overtakes it.
 
 Every stable release is published to both `main` and `beta`, so the beta index always holds the
 newest build of either kind.
+
+## Nightly builds
+
+`.github/workflows/nightly-build.yml` builds `main` every night (03:17 UTC, skipped when `main` has not
+moved) and replaces the assets of the `nightly-build` pre-release on GitHub, whose tag moves to the built
+commit. A nightly is unreleased, unvalidated code for trying a merged fix before a beta carries it;
+it is never published to apt. Install it the way a beta is installed by hand above: download the
+`.deb` and its `.sha256` from the `nightly-build` release, check the sum, `sudo apt install ./<file>`.
+
+Its version is `<next>~nightly<YYYYMMDDHHMM>.g<sha7>`, where `<next>` is the release `main`'s code
+will ship in (`scripts/nightly_version.py`): what `changelog_fragments.py --bump` prints on `main`, but
+never below `X.(Y+1).0` once a `stable/X.Y` branch or a `vX.Y.Z[-beta.N]` tag exists, since that line
+is built from its stable branch and `main` is already past it. With `stable/5.0` cut, that gives
+`5.0.0~beta4 < 5.0.0 < 5.1.0~nightly202610170317.gabc1234 < 5.1.0`: a nightly is never named after, or
+sorted below, a stable release that lacks its code, and apt upgrades it to the release `main` ships in.
+It also sorts above every beta of the stable line, so apt offers a tester on a nightly no beta of it;
+install one by hand. A maintainer can force a build with
+`gh workflow run nightly-build.yml --repo open-astro/AlpacaBridge -f force=true`.
+
+The same workflow also builds all vendors `Release` and runs the full test suite (job `test-optimized`),
+because CI's all-vendors job is instrumented and unoptimized. The `.deb` is built only after that suite
+passes: a failure fails the run and publishes nothing, and the previous nightly stays up.
 
 ## Branch model
 
@@ -65,7 +111,12 @@ newest build of either kind.
 2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file, builds the arm64
    `.deb` in a Debian trixie container and attaches it and its `alpacabridge-dbgsym` debug-symbols
    package, each with a `.sha256` (job `deb`, which runs for every tag, stable or beta). The `.deb`
-   is also published to the apt `beta` component (outside this repository).
+   is also published to the apt `beta` component (outside this repository). When the repository
+   variable `PRUNE_SUPERSEDED_RELEASES` is `true`, a last job (`prune`) then deletes the GitHub
+   Releases this tag supersedes: beta N removes the releases of `beta.1` to `beta.(N-1)`, and the
+   stable `vX.Y.Z` removes every `vX.Y.Z-beta.*` release (`scripts/release_prune.py`). Tags are
+   never deleted, and stable releases, `nightly-build` and the betas of another X.Y.Z are not
+   touched. Pruning is off until that variable is set.
 3. **Fix.** A bug found in beta that the previous stable release did not have is fixed by a PR
    against `stable/X.Y` (see "Rules for the stable branch"); it is not fixed on `main` first and
    cherry-picked. A defect that release also had, or a fix for code the branch does not have,
@@ -121,7 +172,7 @@ newest build of either kind.
   can read (`CanStopExposure`, `CanPulseGuide`, ...), a rewrite of an exposure or slew state
   machine, and a driver change that would need a fresh ConformU run. New
   test cases over an existing fake are not a new fake: a stable fix carries them as usual,
-  including the fake-SDK test `AGENTS.md` asks for with a connect-path fix. One case overrides
+  including the fake-SDK test `.github/instructions/testing.instructions.md` asks for with a connect-path fix. One case overrides
   this list: a maintainer may admit a fix that meets the test above but hits one of these
   exclusions, by name in an issue on the `X.Y.0 promotion` milestone. That is a deliberate
   decision, not a criterion a contributor can meet by filing an issue, and it never admits a
@@ -130,6 +181,11 @@ newest build of either kind.
   A PR that misses the bar is retargeted with `gh pr edit --base main` before review, not
   reviewed on the branch.
 - Fixes land on the stable branch and reach `main` through the merge down. No cherry-picks.
+- GitHub closes `Closes #N` issues only for a PR merged into `main`, so a merged PR into `stable/**`
+  closes its issues through `.github/workflows/close-linked-issues.yml` (`scripts/close_linked_issues.py`):
+  every issue of this repository named with a closing keyword (`Closes`, `Fixes`, `Resolves` and their
+  other forms) in the PR body is closed as completed with a comment naming the PR and merge commit.
+  `Refs #N`, other repositories and pull-request numbers are ignored.
 - Fix PRs target `stable/X.Y` (`/submit-pr --base stable/X.Y`), run the same CI and review bot, and
   each adds its `changelog.d/` fragment as usual; the fragment travels to `main` in the merge down
   and is consumed at promotion.

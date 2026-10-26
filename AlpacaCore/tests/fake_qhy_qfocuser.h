@@ -97,6 +97,12 @@ public:
     /// stays silent on) is held for @p delay. A connect waiting on that reply stays open that long; used by the
     /// contract sweep to make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+    /// Like hold_next_reply, but the hold waits for the next command with id @p cmd_id (for example 4, the telemetry
+    /// the state poll asks for after the position), so a case can park the poll mid-exchange.
+    void hold_next_reply_to(int cmd_id, std::chrono::milliseconds delay) {
+        hold_id_.store(cmd_id);
+        hold_ms_.store(static_cast<int>(delay.count()));
+    }
 
     /// Model the real GD32 firmware's one-reply-behind behaviour: each reply is
     /// held until a later inbound OUT (a command or the driver's newline kick)
@@ -115,6 +121,18 @@ public:
     /// newlines received so a test can bound the re-kick rate.
     void set_garbage(bool on) { garbage_.store(on); }
     int kicks() const { return kicks_.load(); }
+
+    /// Stay silent: every command is recorded and none is answered, the shape
+    /// of a hung MCU behind a healthy port. The link stays alive, so the driver
+    /// sees timeouts, never a vanished node. Each unanswered exchange costs the
+    /// driver its full serial timeout (3 s).
+    void set_muted(bool on) { muted_.store(on); }
+
+    /// Answer the connect handshake, the settings telemetry (cmd_id 4) and every
+    /// other command except the position poll (cmd_id 5, asked first by
+    /// QhyFocuserDriver::probe(), run by util::PolledState::poll_once()): the
+    /// shape of a connect whose first state frame is lost.
+    void set_state_muted(bool on) { state_muted_.store(on); }
 
 private:
     void run() {
@@ -167,10 +185,17 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             commands_.push_back(cmd);
         }
+        if (muted_.load()) return;
         const int id = field(cmd, "cmd_id");
+        if (state_muted_.load() && id == 5) return;
         std::string reply;
-        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
-            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+        const int hold_id = hold_id_.load();
+        if (hold_id == 0 || hold_id == id) {
+            if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
+                hold_id_.store(0);
+                std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+            }
+        }
 
         switch (id) {
             case 1:
@@ -236,6 +261,7 @@ private:
     std::thread reader_;
     std::atomic<bool> stop_{false};
     std::atomic<int> hold_ms_{0};
+    std::atomic<int> hold_id_{0};  // 0 = hold the next command, whichever it is
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
@@ -252,6 +278,8 @@ private:
     std::atomic<bool> one_behind_{false};
     std::string held_reply_;
     std::atomic<bool> garbage_{false};
+    std::atomic<bool> muted_{false};
+    std::atomic<bool> state_muted_{false};
     std::atomic<int> kicks_{0};
 };
 
