@@ -1,0 +1,3 @@
+### Fixed
+
+- **A review that leaves one decision-record rule out of its checklist is repaired instead of dropped**, CI, issue #1655. The review prompt now carries one `- NNNN-slug.md rule N: VERDICT: reason` line per rule in scope (`check_adr_scope.py --skeleton`) instead of asking the model to expand `rules 1, 3, 4` itself. When the checklist gate's only finding is a left-out rule, one repair pass adds just those lines (`--missing`); `--repair-check` rejects a repair that changes anything else, and the unchanged `--checklist` gate runs again before posting. A second miss, a duplicate verdict or a defect under `✅ Approved` still fails the job. Covered by the `skeleton`, `missing_lines` and `repair_findings` cases in `scripts/check_adr_scope.py --self-test`.

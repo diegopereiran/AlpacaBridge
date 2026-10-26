@@ -28,13 +28,32 @@ Two modes:
            sign-off as the last line (bold, italics or a closing period or
            exclamation mark around it still count). Any finding exits 1, so nothing posts.
 
+  --skeleton SCOPE
+           prints one `- <record file> rule <n>: VERDICT: reason` line per
+           listed rule, for the review prompt to fill in (#1655).
+
+  --missing SCOPE REVIEW
+           prints the skeleton lines of the rules the review left out and
+           exits 0 when that is its only checklist finding (nothing printed
+           means nothing is missing); any other finding exits 1. The workflow
+           runs one repair pass on those lines.
+
+  --repair-check SCOPE BEFORE AFTER
+           the repaired review AFTER may differ from BEFORE only by added
+           checklist lines for the rules BEFORE left out, above an unchanged
+           last line; anything else exits 1. --checklist then runs on AFTER.
+
 Usage:
     check_adr_scope.py --list [--root DIR] < paths
     check_adr_scope.py --checklist SCOPE_FILE REVIEW_FILE
+    check_adr_scope.py --skeleton SCOPE_FILE
+    check_adr_scope.py --missing SCOPE_FILE REVIEW_FILE
+    check_adr_scope.py --repair-check SCOPE_FILE BEFORE_FILE AFTER_FILE
     check_adr_scope.py [--body-file FILE] [--base REV]
     check_adr_scope.py --self-test
 """
 
+import difflib
 import os
 import re
 import subprocess
@@ -150,15 +169,81 @@ def scope_pairs(scope):
     return pairs, bad
 
 
-def checklist_findings(scope, review):
-    """What keeps a review from posting: a listed rule with no verdict, two verdicts, or a defect signed off clean."""
-    expected, bad = scope_pairs(scope)
-    findings = ["the rule scope has a line that is not `<record file>: rules <n>`: %r" % line for line in bad]
+def scope_order(scope):
+    """[(record file, rule number)] from --list output, in the order it lists them; malformed lines are skipped."""
+    pairs = []
+    for line in scope.splitlines():
+        m = SCOPE_LINE_RE.match(line.strip())
+        if m:
+            pairs.extend((m.group(1), int(n)) for n in m.group(2).split(", "))
+    return pairs
+
+
+def skeleton_line(pair):
+    return "- %s rule %d: VERDICT: reason" % pair
+
+
+def skeleton(scope):
+    """One checklist line per listed rule for the review to fill in, so it never has to expand the list itself (#1655)."""
+    return [skeleton_line(pair) for pair in scope_order(scope)]
+
+
+def review_verdicts(review):
+    """{(record file, rule number): {verdict}} for every checklist line in the review."""
     verdicts = {}
     for line in review.splitlines():
         m = CHECKLIST_RE.match(line)
         if m:
             verdicts.setdefault((m.group(1), int(m.group(2))), set()).add(m.group(3).lower())
+    return verdicts
+
+
+def missing_lines(scope, review):
+    """Skeleton lines for the rules the review left out, or None when the review also fails for another reason.
+
+    Only a left-out rule is repairable: the repair pass may add lines, never change one (#1655)."""
+    findings = checklist_findings(scope, review)
+    if any(not f.startswith("the review has no checklist line for ") for f in findings):
+        return None
+    verdicts = review_verdicts(review)
+    return [skeleton_line(pair) for pair in scope_order(scope) if pair not in verdicts]
+
+
+def repair_findings(scope, before, after):
+    """What makes a repair unacceptable: it must only add checklist lines for the rules missing before it."""
+    lines = missing_lines(scope, before)
+    if not lines:
+        return ["the review before the repair has %s" % ("findings a repair cannot fix" if lines is None
+                                                          else "no missing rule to add")]
+    missing = set(scope_order(scope)) - set(review_verdicts(before))
+    old, new = before.splitlines(), after.splitlines()
+    findings = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "insert":
+            findings.append("the repair changed or removed %r" % old[i1:i2])
+        for line in new[j1:j2]:
+            m = CHECKLIST_RE.match(line)
+            if not line.strip():
+                continue
+            if not m:
+                findings.append("the repair added %r, which is not a checklist line" % line)
+            elif (m.group(1), int(m.group(2))) not in missing:
+                findings.append("the repair added a verdict for %s rule %s, which is not one of the missing rules"
+                                % (m.group(1), m.group(2)))
+    last_old = next((l for l in reversed(old) if l.strip()), "")
+    last_new = next((l for l in reversed(new) if l.strip()), "")
+    if last_old != last_new:
+        findings.append("the repair changed the last line from %r to %r" % (last_old, last_new))
+    return findings
+
+
+def checklist_findings(scope, review):
+    """What keeps a review from posting: a listed rule with no verdict, two verdicts, or a defect signed off clean."""
+    expected, bad = scope_pairs(scope)
+    findings = ["the rule scope has a line that is not `<record file>: rules <n>`: %r" % line for line in bad]
+    verdicts = review_verdicts(review)
     findings += ["the review has no checklist line for %s rule %d" % key for key in sorted(expected - set(verdicts))]
     findings += ["the review gives %s rule %d more than one verdict: %s" % (key + (", ".join(sorted(v)),))
                  for key, v in sorted(verdicts.items()) if len(v) > 1]
@@ -197,6 +282,28 @@ def main(argv):
         findings = checklist_findings(scope, review)
         for f in findings:
             print("adr-checklist: " + f)
+        return 1 if findings else 0
+    files = {"--skeleton": "SCOPE_FILE", "--missing": "SCOPE_FILE REVIEW_FILE",
+             "--repair-check": "SCOPE_FILE BEFORE_FILE AFTER_FILE"}
+    if argv[:1] and argv[0] in files:
+        mode = argv[0]
+        if len(argv) != len(files[mode].split()) + 1:
+            print("usage: check_adr_scope.py %s %s" % (mode, files[mode]), file=sys.stderr)
+            return 2
+        texts = [Path(a).read_text(encoding="utf-8", errors="replace") for a in argv[1:]]
+        if mode == "--skeleton":
+            print("\n".join(skeleton(texts[0])))
+            return 0
+        if mode == "--missing":
+            lines = missing_lines(*texts)
+            if lines is None:
+                return 1
+            if lines:
+                print("\n".join(lines))
+            return 0
+        findings = repair_findings(*texts)
+        for f in findings:
+            print("adr-repair: " + f)
         return 1 if findings else 0
     args = iter(argv)
     root, body_file, base = ROOT, None, None
