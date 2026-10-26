@@ -30,7 +30,8 @@ Two modes:
 
   --skeleton SCOPE
            prints one `- <record file> rule <n>: VERDICT: reason` line per
-           listed rule, for the review prompt to fill in (#1655).
+           listed rule, for the review prompt to fill in (#1655); a malformed
+           scope line exits 1.
 
 Usage:
     check_adr_scope.py --list [--root DIR] < paths
@@ -170,7 +171,12 @@ def skeleton_line(pair):
 
 
 def skeleton(scope):
-    """One checklist line per listed rule for the review to fill in, so it never has to expand the list itself (#1655)."""
+    """One checklist line per listed rule for the review to fill in, so it never has to expand the list itself (#1655).
+
+    A malformed scope line raises ValueError, as --checklist reports it, so the two never disagree on the rules."""
+    bad = scope_pairs(scope)[1]
+    if bad:
+        raise ValueError("the rule scope has a line that is not `<record file>: rules <n>`: %r" % bad[0])
     return [skeleton_line(pair) for pair in scope_order(scope)]
 
 
@@ -226,7 +232,12 @@ def main(argv):
         if len(argv) != 2:
             print("usage: check_adr_scope.py --skeleton SCOPE_FILE", file=sys.stderr)
             return 2
-        print("\n".join(skeleton(Path(argv[1]).read_text(encoding="utf-8", errors="replace"))))
+        try:
+            lines = skeleton(Path(argv[1]).read_text(encoding="utf-8", errors="replace"))
+        except ValueError as e:
+            print("adr-skeleton: %s" % e, file=sys.stderr)
+            return 1
+        print("\n".join(lines))
         return 0
     args = iter(argv)
     root, body_file, base = ROOT, None, None
@@ -344,6 +355,11 @@ def self_test():
                   "- 0005-task-clock.md rule 2: VERDICT: reason"], "the skeleton has one line per listed rule, in order: %r" % sk)
     expect(skeleton("none (the base branch has no decision records)\n") == [], "an empty scope has no skeleton")
     expect(all(not CHECKLIST_RE.match(line) for line in sk), "an unfilled skeleton line is not a verdict")
+    try:
+        skeleton(scope + "rm -rf /\n")
+        expect(False, "a malformed scope line fails the skeleton, as it fails the checklist")
+    except ValueError:
+        pass
 
     repro = ("## Defects\n\nnone\n\n## Decision records\n\n- 0003-docs-drift-gates.md rule 1: pass: a\n"
              "- 0005-task-clock.md rule 2: n/a: b\n")

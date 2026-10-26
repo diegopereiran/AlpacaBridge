@@ -417,7 +417,7 @@ jobs:
       # file passes: the post step reports it, and a PR that edits this
       # workflow may get no review at all (see the assert step). The agent
       # runs this same command on its own file before it ends (#1655): its
-      # one Bash rule above allows only `check_adr_scope.py --checklist` from
+      # one python3 Bash rule above allows only `check_adr_scope.py --checklist` from
       # this extracted copy, which reads its arguments and writes nothing,
       # and the Write tool cannot reach RUNNER_TEMP.
       - name: Check the decision-record checklist

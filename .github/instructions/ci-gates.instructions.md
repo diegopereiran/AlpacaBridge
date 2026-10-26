@@ -61,7 +61,7 @@ author must do. Read the docstring before changing a gate.
   over the base branch's records; when a base with records gives no list, the review does not run. The
   prompt carries one `- NNNN-slug.md rule N: VERDICT: reason` line per listed rule (`--skeleton`), and
   the bot fills each in. The bot runs `check_adr_scope.py --checklist` on its own file and fixes what it
-  prints before it ends (its one Bash rule, #1655), and the same check then fails the job before posting
+  prints before it ends (its one `python3` Bash rule, #1655), and the same check then fails the job before posting
   when a line is missing, a rule gets two verdicts, or a defect line sits under the approving sign-off.
   Once that check passes, the "Fold the
   decision-record checklist" step puts the checklist in a `<details>` block under a summary of its
