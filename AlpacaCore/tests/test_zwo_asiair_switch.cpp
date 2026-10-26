@@ -516,3 +516,22 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - off at server start drives every port 
     CHECK(alpacacore::util::PowerPortStateStore::load(driver->get_unique_id())[1] == 100.0);
     driver->set_connected(false);
 }
+
+TEST_CASE("ZWO ASIAIR Pro Switch Driver - a Disconnect before any Connect keeps lines a start holds",
+          "[zwo][switch][asiair][unit][gpio][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    stub_reset_levels(1);
+    auto cfg = alpacacore::vendor::zwo::default_asiair_pro_config();
+    cfg.gpio_chip_path = kStubChip;
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_switch(0, cfg);
+    driver->apply_power_on_state(true);
+    REQUIRE(stub_level(12) == 0);
+    // A client's Disconnect with nothing connected must not release them (decision 0021 rule 5):
+    // the stub records a level for a line only when its request is released.
+    driver->set_connected(false);
+    CHECK(stub_level_at_release(12) == -1);
+    driver->set_connected(true);
+    driver->set_connected(false);
+    CHECK(stub_level_at_release(12) == 0);
+}

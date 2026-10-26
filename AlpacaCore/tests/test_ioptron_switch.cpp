@@ -298,3 +298,38 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - off at server start turns DC1/
     CHECK_FALSE(driver->get_switch(1));
     CHECK(driver->get_switch(0));
 }
+
+TEST_CASE("iOptron iMate PowerBox Switch Driver - a client's write is saved per UniqueID and port",
+          "[ioptron][switch][unit][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    alpacacore::test::FakeIoptronGpio gpio;
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.ports[2].pwm_enabled = true;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg, gpio);
+    driver->set_connected(true);
+    driver->set_switch(1, false);
+    driver->set_switch_value(2, 35.0);
+    CHECK(alpacacore::util::PowerPortStateStore::load(driver->get_unique_id()) ==
+          std::map<int, double>{{1, 0.0}, {2, 35.0}});
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron iMate PowerBox Switch Driver - a Disconnect before any Connect keeps lines a start holds",
+          "[ioptron][switch][unit][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    alpacacore::test::FakeIoptronGpio gpio;
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg, gpio);
+    driver->apply_power_on_state(true);
+    REQUIRE(gpio.claimed());
+    // A client's Disconnect with nothing connected must not release them (decision 0021 rule 5).
+    driver->set_connected(false);
+    CHECK(gpio.claimed());
+    CHECK(gpio.releases() == 0);
+    // A Connect then a Disconnect releases them as before.
+    driver->set_connected(true);
+    driver->set_connected(false);
+    CHECK_FALSE(gpio.claimed());
+    CHECK(gpio.requests() == 1);
+}
