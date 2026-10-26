@@ -45,6 +45,6 @@ The StellaVita is a **Raspberry Pi CM4 (BCM2711)** observatory controller. Its f
 
 - **GPIO mapping (verified on hardware)**: the four DC ports are BCM GPIO **18 (Port 1), 10 (Port 2), 17 (Port 3), 4 (Port 4)** on `/dev/gpiochip0` (`pinctrl-bcm2711`), where the libgpiod line offset equals the BCM GPIO number. Source of truth is the board's `config.txt`: `gpio=18,10,17,4,9,11=op,dh,pu`.
 - **GPIO 9 and 11 are deliberately excluded**: that same config.txt line drives them high too, but they power the on-board **Cypress USB hub** — exposing them as switch channels would let a client cut power to every attached USB camera/focuser. Never add them to `default_stellavita_config()`.
-- **Boot-high preserve / never-power-cycle**: general rules (`op,dh,pu` boot directive).
+- **Connect reads the ports / power-on state / never-power-cycle**: general rules ([decision 0021](../../docs/decisions/0021-power-port-power-on-state.md)); the `op,dh,pu` boot directive powers the ports on before AlpacaBridge runs. `powerOnState` never touches GPIO 9/11: they are not in the port table.
 - **PWM frequency 100 Hz** (`default_stellavita_config()`): hardware-tested sweet spot — some panels flicker at the 50 Hz iMate/ASIAIR default.
 - All four ports are writable and boolean by default, each switchable to soft-PWM (0–100%) — unlike the iMate there is no always-on read-only pass-through port.

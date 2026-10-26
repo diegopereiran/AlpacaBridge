@@ -11,13 +11,17 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/version.h>
 
 #include <cmath>
 #include <functional>
+#include <map>
 
 #include "catch2_compat.h"
+#include "fake_ioptron_gpio.h"
+#include "power_port_test_dir.h"
 
 namespace {
 
@@ -253,4 +257,42 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid GPIO chip path
     auto ok = alpacacore::vendor::ioptron::default_imate_powerbox_config();
     ok.gpio_chip_path = "/dev/gpiochip0";
     CHECK_NOTHROW(alpacacore::vendor::ioptron::create_ioptron_switch(0, ok));
+}
+
+// Issue #300: a connect reads DC1/DC2 instead of assuming the boot left them on.
+TEST_CASE("iOptron iMate PowerBox Switch Driver - connecting reports the line levels and writes nothing",
+          "[ioptron][switch][unit][power-on]") {
+    alpacacore::test::FakeIoptronGpio gpio;
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.ports[2].pwm_enabled = true;
+    gpio.set_level(cfg.ports[1].gpio_line, 0);  // DC1 left off
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg, gpio);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_switch(0));               // DC3 pass-through: always on
+    CHECK_FALSE(driver->get_switch(1));         // DC1 reads its line, not "on"
+    CHECK(driver->get_switch_value(2) == 100);  // DC2 high: a PWM port at full duty
+    CHECK(gpio.writes() == 0);
+    CHECK(gpio.level(cfg.ports[1].gpio_line) == 0);
+}
+
+TEST_CASE("iOptron iMate PowerBox Switch Driver - off at server start turns DC1/DC2 off and holds them",
+          "[ioptron][switch][unit][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    alpacacore::test::FakeIoptronGpio gpio;
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg, gpio);
+    driver->apply_power_on_state(true);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(gpio.claimed());
+    CHECK(gpio.level(cfg.ports[1].gpio_line) == 0);
+    CHECK(gpio.level(cfg.ports[2].gpio_line) == 0);
+    // DC3 has no line and is never part of the plan.
+    CHECK(alpacacore::util::PowerPortStateStore::load(driver->get_unique_id()) ==
+          std::map<int, double>{{1, 0.0}, {2, 0.0}});
+    driver->set_connected(true);
+    CHECK(gpio.requests() == 1);
+    CHECK_FALSE(driver->get_switch(1));
+    CHECK(driver->get_switch(0));
 }

@@ -11,7 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/gpiod_output_claim.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/touptek/touptek_powerbox_wrapper.h>
 #include <gpiod.h>
@@ -63,11 +65,10 @@ public:
             throw AlpacaException("StellaVita PWM frequency out of supported range (1..100000 Hz)",
                                   AlpacaError::InvalidValue);
         }
-        // The cached value mirrors the level the GPIO is (or will be) driven
-        // to. Ports default to "on" so connecting preserves the StellaVita's
-        // stock boot state where config.txt drives the DC lines high — we never
-        // want a connect to cut power to attached gear. For a PWM port "on" is
-        // full duty (100); for a boolean port it is 1.
+        // The cached value mirrors the level the GPIO is driven to. It starts
+        // "on" (100 for a PWM port, 1 for a boolean one) and open() replaces it
+        // with the level the line holds when claimed (reconcile_cached_value),
+        // so a connect never changes a port and reports what the boot left.
         port_states_.reserve(ports_.size());
         for (std::size_t i = 0; i < ports_.size(); ++i) {
             port_states_.emplace_back(std::make_unique<PortState>());
@@ -89,79 +90,22 @@ public:
             return;
         }
 
-        // Collect the offsets/initial values for every port. PWM ports start at
-        // full-on (high); the worker takes over once requested.
         std::vector<unsigned int> offsets;
-        std::vector<gpiod_line_value> initial_values;
         offsets.reserve(ports_.size());
-        initial_values.reserve(ports_.size());
+        for (const auto& p : ports_) {
+            offsets.push_back(p.gpio_line);
+        }
+        // Claim each line at the level it holds now and read that level into
+        // the cache (issue #300): the connect neither powers a port on nor
+        // reports one on that the boot left off.
+        util::GpiodOutputClaim claim = util::claim_outputs_at_current_level(gpio_chip_path_, offsets, kGpioConsumer);
+        chip_ = claim.chip;
+        request_ = claim.request;
         for (std::size_t i = 0; i < ports_.size(); ++i) {
-            offsets.push_back(ports_[i].gpio_line);
-            const int v = port_states_[i]->value.load();
-            initial_values.push_back(to_line_value(ports_[i].pwm_enabled ? 1 : v));
+            const int max_value = ports_[i].pwm_enabled ? 100 : 1;
+            port_states_[i]->value.store(
+                util::reconcile_cached_value(port_states_[i]->value.load(), claim.levels[i], max_value));
         }
-
-        chip_ = ::gpiod_chip_open(gpio_chip_path_.c_str());
-        if (chip_ == nullptr) {
-            int err = errno;
-            throw AlpacaException("Failed to open GPIO chip '" + gpio_chip_path_ + "': " + util::errno_string(err),
-                                  AlpacaError::NotConnected);
-        }
-
-        gpiod_line_settings* settings = nullptr;
-        gpiod_line_config* line_cfg = nullptr;
-        gpiod_request_config* req_cfg = nullptr;
-
-        try {
-            settings = ::gpiod_line_settings_new();
-            if (settings == nullptr) {
-                throw AlpacaException("gpiod_line_settings_new failed", AlpacaError::DriverException);
-            }
-            if (::gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_settings_set_direction failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-
-            line_cfg = ::gpiod_line_config_new();
-            if (line_cfg == nullptr) {
-                throw AlpacaException("gpiod_line_config_new failed", AlpacaError::DriverException);
-            }
-            if (::gpiod_line_config_add_line_settings(line_cfg, offsets.data(), offsets.size(), settings) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_config_add_line_settings failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-            if (::gpiod_line_config_set_output_values(line_cfg, initial_values.data(), initial_values.size()) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_config_set_output_values failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-
-            req_cfg = ::gpiod_request_config_new();
-            if (req_cfg == nullptr) {
-                throw AlpacaException("gpiod_request_config_new failed", AlpacaError::DriverException);
-            }
-            ::gpiod_request_config_set_consumer(req_cfg, kGpioConsumer);
-
-            request_ = ::gpiod_chip_request_lines(chip_, req_cfg, line_cfg);
-            if (request_ == nullptr) {
-                int err = errno;
-                throw AlpacaException("gpiod_chip_request_lines failed: " + util::errno_string(err),
-                                      AlpacaError::NotConnected);
-            }
-        } catch (...) {
-            if (req_cfg) ::gpiod_request_config_free(req_cfg);
-            if (line_cfg) ::gpiod_line_config_free(line_cfg);
-            if (settings) ::gpiod_line_settings_free(settings);
-            ::gpiod_chip_close(chip_);
-            chip_ = nullptr;
-            throw;
-        }
-
-        ::gpiod_request_config_free(req_cfg);
-        ::gpiod_line_config_free(line_cfg);
-        ::gpiod_line_settings_free(settings);
 
         open_.store(true, std::memory_order_release);
 

@@ -142,6 +142,9 @@
 #include "fake_touptek_sdk.h"
 #include "locked_touptek_sdk.h"
 #endif
+#if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
+#include "fake_ioptron_gpio.h"
+#endif
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 
@@ -1797,6 +1800,37 @@ Tier2Host tier2_host_altair_camera() {
 }
 #endif
 
+#if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
+// The iMate PowerBox GPIO side: request_delay holds the connect open, fail_request fails it.
+Tier2Host tier2_host_ioptron_switch() {
+    Tier2Host h{"ioptron_switch",
+                "ioptron",
+                "switch",
+                "fake_ioptron_gpio.h",
+                DeviceType::Switch,
+                "ioptron_switch",
+                {},
+                true,
+                {},
+                ""};
+    const auto make = [](alpacacore::test::FakeIoptronGpio& gpio) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::ioptron::create_ioptron_switch(
+            0, alpacacore::vendor::ioptron::default_imate_powerbox_config(), gpio);
+    };
+    h.connectable = [make](bool hold_open) {
+        auto gpio = std::make_shared<alpacacore::test::FakeIoptronGpio>();
+        if (hold_open) gpio->request_delay = kHold;
+        return host_over(gpio, make);
+    };
+    h.failing = [make]() {
+        auto gpio = std::make_shared<alpacacore::test::FakeIoptronGpio>();
+        gpio->fail_request = true;
+        return host_over(gpio, make);
+    };
+    return h;
+}
+#endif
+
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 // The StellaVita power box: open_delay holds the connect open, fail_open fails it. The fake and its
 // Locked decorator live in one holder, because the driver keeps a reference to the box.
@@ -2094,8 +2128,14 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_SKYWATCHER(X)
 #endif
+#ifdef ALPACACORE_IOPTRON_POWERBOX
+#define CS2_IOPTRON_POWERBOX(X) X(ioptron_switch, PRB)
+#else
+#define CS2_IOPTRON_POWERBOX(X)
+#endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CS2_IOPTRON(X) X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(iguider_camera, CAM)
+#define CS2_IOPTRON(X) \
+    X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(iguider_camera, CAM) CS2_IOPTRON_POWERBOX(X)
 #else
 #define CS2_IOPTRON(X)
 #endif
@@ -2342,6 +2382,10 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #ifndef ALPACACORE_TOUPTEK_STELLAVITA
         // The StellaVita switch is compiled only with libgpiod, so a ToupTek build without it has no such host.
         if (std::string(row.fake_header) == "fake_touptek_powerbox_sdk.h") continue;
+#endif
+#ifndef ALPACACORE_IOPTRON_POWERBOX
+        // Same for the iMate PowerBox.
+        if (std::string(row.fake_header) == "fake_ioptron_gpio.h") continue;
 #endif
         if (enabled.count(row.vendor) != 0) from_roster.emplace(row.vendor, row.device_type, row.fake_header);
     }

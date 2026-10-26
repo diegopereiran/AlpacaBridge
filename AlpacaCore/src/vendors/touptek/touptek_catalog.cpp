@@ -57,6 +57,8 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
             if (auto pwm = record.find(kTouptekPortPwm)) ports[i].pwm_enabled = *pwm;
         }
     }
+    powerbox_config.power_on_state =
+        util::parse_power_on_state(config.get(kTouptekPowerOnState)).value_or(util::PowerOnState::Leave);
     return vendor::touptek::create_touptek_switch(device_number, std::move(powerbox_config));
 #else
     throw AlpacaException(

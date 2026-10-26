@@ -31,6 +31,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Designated initializers of Field<T> leave most members defaulted on purpose.
@@ -92,6 +93,12 @@ inline std::vector<int>& adopted_device_numbers() {
     return numbers;
 }
 
+// (device number, new_boot) of each apply_power_on_state() call on a stub, in order.
+inline std::vector<std::pair<int, bool>>& power_on_calls() {
+    static std::vector<std::pair<int, bool>> calls;
+    return calls;
+}
+
 class StubFocuser final : public alpacacore::AlpacaDriver {
 public:
     StubFocuser(int number, std::string name) : number_(number), name_(std::move(name)) {}
@@ -112,6 +119,7 @@ public:
     bool command_bool(std::string_view, bool) override { return true; }
     std::string command_string(std::string_view, bool) override { return "ok"; }
     void adopt_legacy_state() override { adopted_device_numbers().push_back(number_); }
+    void apply_power_on_state(bool new_boot) override { power_on_calls().emplace_back(number_, new_boot); }
 
 private:
     int number_;

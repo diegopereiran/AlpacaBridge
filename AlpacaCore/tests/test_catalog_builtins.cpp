@@ -2503,7 +2503,7 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ToupTek devi
     CHECK(keys_of(find_view(views, kTouptekWheelKey)) ==
           std::vector<std::string>{"filterwheelIndex", "filterwheelId", "filterNames"});
     CHECK(keys_of(find_view(views, kTouptekSwitchKey)) ==
-          std::vector<std::string>{"switchType", "cameraIndex", "gpioChip", "pwmFrequencyHz", "ports"});
+          std::vector<std::string>{"switchType", "cameraIndex", "gpioChip", "pwmFrequencyHz", "ports", "powerOnState"});
 
     const FieldRef* names = find_field(find_view(views, kTouptekWheelKey)->fields, "filterNames");
     REQUIRE(names != nullptr);
@@ -3143,9 +3143,9 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices 
     CHECK(keys_of(find_view(views, kZwoFocuserKey)) ==
           std::vector<std::string>{"focuserIndex", "focuserId", "maxStep"});
     CHECK(keys_of(find_view(views, kZwoRotatorKey)) == std::vector<std::string>{"rotatorIndex", "rotatorId"});
-    CHECK(keys_of(find_view(views, kZwoSwitchKey)) == std::vector<std::string>{"switchType", "cameraIndex", "cameraId",
-                                                                               "serialNumber", "gpioChip", "devicePath",
-                                                                               "pwmFrequencyHz", "ports"});
+    CHECK(keys_of(find_view(views, kZwoSwitchKey)) ==
+          std::vector<std::string>{"switchType", "cameraIndex", "cameraId", "serialNumber", "gpioChip", "devicePath",
+                                   "pwmFrequencyHz", "ports", "powerOnState"});
     CHECK(find_field(find_view(views, kZwoWheelKey)->fields, "filterNames")->kind == FieldRef::Kind::StringList);
     CHECK(find_field(find_view(views, kZwoSwitchKey)->fields, "ports")->kind == FieldRef::Kind::RecordList);
     CHECK(same_scalar(find_field(find_view(views, kZwoSwitchKey)->fields, "switchType")->default_value,
@@ -3622,7 +3622,7 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the iOptron devi
                                    "responseTimeoutMs", "siteLatitude", "siteLongitude", "siteElevation",
                                    "syncTimeOnConnect", "apertureDiameter", "focalLength"});
     CHECK(keys_of(find_view(views, kIoptronSwitchKey)) ==
-          std::vector<std::string>{"gpioChip", "pwmFrequencyHz", "ports"});
+          std::vector<std::string>{"gpioChip", "pwmFrequencyHz", "ports", "powerOnState"});
     CHECK(keys_of(find_view(views, kIoptronFocuserKey)) ==
           std::vector<std::string>{"connectionType", "portPath", "focuserIndex", "model"});
     CHECK(keys_of(find_view(views, kIoptronFilterWheelKey)) ==

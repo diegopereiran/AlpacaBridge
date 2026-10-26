@@ -25,7 +25,7 @@ namespace alpacacore::vendor::touptek {
 // pinctrl-bcm2711) where the libgpiod line offset equals the BCM GPIO number:
 // Port 1 -> 18, Port 2 -> 10, Port 3 -> 17, Port 4 -> 4. The board's
 // config.txt drives all four high at boot (gpio=...=op,dh,pu), so the ports are
-// energised on power-up; the driver preserves that on connect.
+// energised on power-up; a connect reads and keeps whatever level they hold.
 //
 // BCM GPIO 9 and 11 also exist on the header but power the on-board Cypress USB
 // hub — they are deliberately NOT exposed as switch channels, because cutting
@@ -47,10 +47,12 @@ struct StellaVitaPortConfig {
  * nothing deletes through the interface.
  *
  * Contract: is_open() is lock-free and never waits behind open() or close()
- * (issue #382), because the driver answers get_connected() with it. A port
- * starts "on" (100 for a PWM port, 1 for a boolean one) and open() keeps that
- * cached value, so a connect never cuts power to attached gear. port_config()
- * returns by value so nothing points into a container another thread owns.
+ * (issue #382). open() claims each line at the level it holds and never
+ * changes it (issue #300): a port reads that level, except that a cached value
+ * whose steady level matches the line is kept, so a reconnect resumes a PWM
+ * duty (util::reconcile_cached_value). close() leaves a PWM port at the steady
+ * level of its duty. port_config() returns by value so nothing points into a
+ * container another thread owns.
  */
 class TouptekPowerboxSDK {
 public:

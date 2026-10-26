@@ -183,7 +183,8 @@
       {"key": "ports", "type": "recordList", "required": false, "secret": false, "role": "Plain", "fields": [
         {"key": "name", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
         {"key": "pwm", "type": "bool", "default": false, "required": false, "secret": false, "role": "Plain"}
-        ]}
+        ]},
+      {"key": "powerOnState", "type": "string", "default": "leave", "required": false, "secret": false, "role": "Plain", "enum": ["leave", "restore", "off"]}
     ]
   },
   {
@@ -415,7 +416,8 @@
       {"key": "ports", "type": "recordList", "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "switchType", "value": "stellavita"}, "fields": [
         {"key": "name", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
         {"key": "pwm", "type": "bool", "default": false, "required": false, "secret": false, "role": "Plain"}
-        ]}
+        ]},
+      {"key": "powerOnState", "type": "string", "default": "leave", "required": false, "secret": false, "role": "Plain", "enum": ["leave", "restore", "off"], "appliesWhen": {"key": "switchType", "value": "stellavita"}}
     ]
   },
   {
@@ -551,7 +553,8 @@
         {"key": "gpio", "type": "int", "default": 0, "required": false, "secret": false, "role": "Plain"},
         {"key": "name", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
         {"key": "pwm", "type": "bool", "default": false, "required": false, "secret": false, "role": "Plain"}
-        ]}
+        ]},
+      {"key": "powerOnState", "type": "string", "default": "leave", "required": false, "secret": false, "role": "Plain", "enum": ["leave", "restore", "off"]}
     ]
   },
   {

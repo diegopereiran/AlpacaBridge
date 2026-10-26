@@ -11,7 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/gpiod_output_claim.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/ioptron/ioptron_powerbox_wrapper.h>
 #include <gpiod.h>
@@ -42,74 +44,11 @@ public:
     LibgpiodBackend() = default;
     ~LibgpiodBackend() { drop(); }
 
-    void request(const std::string& chip_path, const std::vector<unsigned int>& offsets,
-                 const std::vector<int>& initial_values) override {
-        std::vector<gpiod_line_value> values;
-        values.reserve(initial_values.size());
-        for (int v : initial_values) {
-            values.push_back(to_line_value(v));
-        }
-        chip_ = ::gpiod_chip_open(chip_path.c_str());
-        if (chip_ == nullptr) {
-            int err = errno;
-            throw AlpacaException("Failed to open GPIO chip '" + chip_path + "': " + util::errno_string(err),
-                                  AlpacaError::NotConnected);
-        }
-
-        gpiod_line_settings* settings = nullptr;
-        gpiod_line_config* line_cfg = nullptr;
-        gpiod_request_config* req_cfg = nullptr;
-
-        try {
-            settings = ::gpiod_line_settings_new();
-            if (settings == nullptr) {
-                throw AlpacaException("gpiod_line_settings_new failed", AlpacaError::DriverException);
-            }
-            if (::gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_settings_set_direction failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-
-            line_cfg = ::gpiod_line_config_new();
-            if (line_cfg == nullptr) {
-                throw AlpacaException("gpiod_line_config_new failed", AlpacaError::DriverException);
-            }
-            if (::gpiod_line_config_add_line_settings(line_cfg, offsets.data(), offsets.size(), settings) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_config_add_line_settings failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-            if (::gpiod_line_config_set_output_values(line_cfg, values.data(), values.size()) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_config_set_output_values failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-
-            req_cfg = ::gpiod_request_config_new();
-            if (req_cfg == nullptr) {
-                throw AlpacaException("gpiod_request_config_new failed", AlpacaError::DriverException);
-            }
-            ::gpiod_request_config_set_consumer(req_cfg, kGpioConsumer);
-
-            request_ = ::gpiod_chip_request_lines(chip_, req_cfg, line_cfg);
-            if (request_ == nullptr) {
-                int err = errno;
-                throw AlpacaException("gpiod_chip_request_lines failed: " + util::errno_string(err),
-                                      AlpacaError::NotConnected);
-            }
-        } catch (...) {
-            if (req_cfg) ::gpiod_request_config_free(req_cfg);
-            if (line_cfg) ::gpiod_line_config_free(line_cfg);
-            if (settings) ::gpiod_line_settings_free(settings);
-            ::gpiod_chip_close(chip_);
-            chip_ = nullptr;
-            throw;
-        }
-
-        ::gpiod_request_config_free(req_cfg);
-        ::gpiod_line_config_free(line_cfg);
-        ::gpiod_line_settings_free(settings);
+    std::vector<int> request(const std::string& chip_path, const std::vector<unsigned int>& offsets) override {
+        util::GpiodOutputClaim claim = util::claim_outputs_at_current_level(chip_path, offsets, kGpioConsumer);
+        chip_ = claim.chip;
+        request_ = claim.request;
+        return std::move(claim.levels);
     }
 
     int set_value(unsigned int offset, int value) override {
@@ -161,12 +100,11 @@ public:
             throw AlpacaException("iMate PowerBox PWM frequency out of supported range (1..100000 Hz)",
                                   AlpacaError::InvalidValue);
         }
-        // The cached value mirrors the level the GPIO is (or will be) driven
-        // to. Controllable ports default to "on" so connecting preserves the
-        // stock boot state where the iMate drives the DC lines high — we never
-        // want a connect to cut power to attached gear. For a PWM port "on" is
-        // full duty (100); for a boolean port it is 1. The always-on
-        // pass-through reports 1 and has no backing line.
+        // The cached value mirrors the level the GPIO is driven to. It starts
+        // "on" (100 for a PWM port, 1 for a boolean one) and open() replaces it
+        // with the level the line holds when claimed (reconcile_cached_value),
+        // so a connect never changes a port and reports what the boot left.
+        // The always-on pass-through reports 1 and has no backing line.
         port_states_.reserve(ports_.size());
         for (std::size_t i = 0; i < ports_.size(); ++i) {
             port_states_.emplace_back(std::make_unique<PortState>());
@@ -188,20 +126,18 @@ public:
             return;
         }
 
-        // Collect the offsets/initial values for the ports that actually have
-        // a GPIO line. The always-on pass-through is skipped entirely. PWM
-        // ports start at full-on (high); the worker takes over once requested.
+        // Collect the offsets of the ports that actually have a GPIO line. The
+        // always-on pass-through is skipped entirely.
         std::vector<unsigned int> offsets;
-        std::vector<int> initial_values;
+        std::vector<std::size_t> line_ports;
         offsets.reserve(ports_.size());
-        initial_values.reserve(ports_.size());
+        line_ports.reserve(ports_.size());
         for (std::size_t i = 0; i < ports_.size(); ++i) {
             if (!ports_[i].has_line) {
                 continue;
             }
             offsets.push_back(ports_[i].gpio_line);
-            const int v = port_states_[i]->value.load();
-            initial_values.push_back(ports_[i].pwm_enabled ? 1 : (v != 0 ? 1 : 0));
+            line_ports.push_back(i);
         }
 
         if (offsets.empty()) {
@@ -211,7 +147,22 @@ public:
             return;
         }
 
-        gpio_.request(gpio_chip_path_, offsets, initial_values);
+        // Claim each line at the level it holds now and read that level into
+        // the cache (issue #300): the connect neither powers a port on nor
+        // reports one on that the boot left off.
+        const std::vector<int> levels = gpio_.request(gpio_chip_path_, offsets);
+        if (levels.size() != offsets.size()) {
+            gpio_.release();
+            throw AlpacaException("iMate PowerBox GPIO backend returned " + std::to_string(levels.size()) +
+                                      " levels for " + std::to_string(offsets.size()) + " lines",
+                                  AlpacaError::DriverException);
+        }
+        for (std::size_t k = 0; k < line_ports.size(); ++k) {
+            const std::size_t i = line_ports[k];
+            const int max_value = ports_[i].pwm_enabled ? 100 : 1;
+            port_states_[i]->value.store(
+                util::reconcile_cached_value(port_states_[i]->value.load(), levels[k], max_value));
+        }
         lines_claimed_ = true;
 
         open_.store(true, std::memory_order_release);

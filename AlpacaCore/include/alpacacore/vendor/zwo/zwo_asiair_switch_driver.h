@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_protocol_wrapper.h>
 
 #include <cstdint>
@@ -32,6 +33,8 @@ struct AsiairSwitchConfig {
     // driver, so the only difference clients see is this label. Defaults to the
     // Pro layout; the router overrides it for the CM4 Plus.
     std::string model_name = "ASIAIR Pro";
+    // What the ports do when the server starts (decision 0021): `powerOnState`.
+    util::PowerOnState power_on_state = util::PowerOnState::Leave;
 };
 
 // Returns the default ASIAIR Pro Pi4 layout: 4 ports on /dev/gpiochip0

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/ioptron/ioptron_powerbox_wrapper.h>
 
 #include <memory>
@@ -35,6 +36,8 @@ struct IoptronSwitchConfig {
     std::uint32_t pwm_frequency_hz = 50;
     // Marketing model used in the device Name/Description/DriverInfo.
     std::string model_name = "iMate PowerBox";
+    // What the ports do when the server starts (decision 0021): `powerOnState`.
+    util::PowerOnState power_on_state = util::PowerOnState::Leave;
 };
 
 // Returns the default iMate PowerBox layout:

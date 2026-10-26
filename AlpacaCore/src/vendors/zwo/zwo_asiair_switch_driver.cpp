@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/version.h>
 
@@ -90,11 +91,11 @@ public:
 
     int get_interface_version() const override { return 3; }
 
-    // Lock-free: is_open() is an atomic the wrapper publishes from inside
-    // its own open()/close() critical sections (issue #382), so this never
-    // waits behind a connect or disconnect and never nests a lock with
-    // AsyncConnectable's pending_mutex_.
-    bool get_connected() const override { return wrapper_.is_open(); }
+    // Lock-free (issue #382): an atomic, so this never waits behind a connect
+    // or disconnect and never nests a lock with AsyncConnectable's
+    // pending_mutex_. Not the wrapper's is_open(): the lines may be held
+    // since the server start without a client connected (decision 0021).
+    bool get_connected() const override { return connected_.load(std::memory_order_acquire); }
 
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
@@ -113,20 +114,63 @@ public:
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
         // newer pending disconnect by staying down.
-        if (!connected && record_disconnect_if_connect_in_flight(wrapper_.is_open())) {
+        if (!connected && record_disconnect_if_connect_in_flight(get_connected())) {
             return;
         }
-        if (connected && consume_pending_disconnect(wrapper_.is_open())) {
+        if (connected && consume_pending_disconnect(get_connected())) {
             return;
         }
         if (connected) {
+            if (get_connected()) {
+                return;
+            }
+            // Lines held since the server start (decision 0021) are taken over as they are.
             if (!wrapper_.is_open()) {
                 wrapper_.open();
             }
+            connected_.store(true, std::memory_order_release);
         } else {
+            // A Disconnect with no client connected keeps lines held since the
+            // server start: releasing them would drop a PWM duty to full on.
+            if (!get_connected()) {
+                return;
+            }
+            connected_.store(false, std::memory_order_release);
             if (wrapper_.is_open()) {
                 wrapper_.close();
             }
+        }
+    }
+
+    void apply_power_on_state(bool new_boot) override {
+        std::lock_guard<std::mutex> transition(transition_mutex_);
+        if (config_.power_on_state == util::PowerOnState::Leave || get_connected()) {
+            return;
+        }
+        std::vector<util::PowerOnPort> ports;
+        ports.reserve(config_.ports.size());
+        for (const auto& p : config_.ports) {
+            ports.push_back({true, p.pwm_enabled});
+        }
+        const auto plan = util::plan_power_on(config_.power_on_state, new_boot, ports,
+                                              util::PowerPortStateStore::load(get_unique_id()));
+        try {
+            for (std::size_t i = 0; i < plan.size(); ++i) {
+                if (!plan[i]) {
+                    continue;
+                }
+                // Keep the lines claimed after the start: a released line loses
+                // a PWM duty, and the first Connect takes them over.
+                if (!wrapper_.is_open()) {
+                    wrapper_.open();
+                }
+                wrapper_.set_value(i, *plan[i]);
+                save_port_state(static_cast<int>(i), *plan[i]);
+                ALPACA_LOG_INFO(kLogCategory,
+                                config_.ports[i].name + " set to " + std::to_string(*plan[i]) + " at server start");
+            }
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN(kLogCategory, std::string("Could not apply the power-on state: ") + e.what());
         }
     }
 
@@ -207,6 +251,7 @@ public:
             throw AlpacaException("Switch value out of range", AlpacaError::InvalidValue);
         }
         wrapper_.set_value(static_cast<std::size_t>(id), static_cast<int>(rounded));
+        save_port_state(id, static_cast<int>(rounded));
     }
 
     void set_async_value(int id, double /*value*/) override {
@@ -256,8 +301,14 @@ public:
     }
 
 private:
+    // Remembers what a client set, for a start that restores it (decision 0021).
+    // A failed save is logged by the store; the port was still set.
+    void save_port_state(int id, int value) {
+        util::PowerPortStateStore::save(get_unique_id(), id, value * 100.0 / get_max_switch_value_unchecked(id));
+    }
+
     void ensure_connected() const {
-        if (!wrapper_.is_open()) {
+        if (!get_connected()) {
             throw AlpacaException("ASIAIR switch not connected", AlpacaError::NotConnected);
         }
     }
@@ -279,8 +330,10 @@ private:
     AsiairProtocolWrapper wrapper_;
 
     mutable std::mutex name_mutex_;
-    // Guards set_connected() against a concurrent set_connected() only (#528).
+    // Guards set_connected() against a concurrent set_connected() only (#528),
+    // and against apply_power_on_state().
     std::mutex transition_mutex_;
+    std::atomic<bool> connected_{false};
     std::vector<std::string> switch_names_;
 };
 

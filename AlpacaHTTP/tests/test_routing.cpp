@@ -16,6 +16,7 @@
 #include <alpacacore/device_registry.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/util/rotator_sync_offset_store.h>
 #include <alpacacore/util/thermal_camera_choice.h>
 #include <alpacacore/util/unique_id.h>
@@ -2313,6 +2314,7 @@ int main() {
                                          {"deviceNumber", 9301},
                                          {"gpioChip", "/dev/gpiochip1"},
                                          {"pwmFrequencyHz", 2000},
+                                         {"powerOnState", "restore"},
                                          // Positional DC3/DC1/DC2 overlay: DC1 dimmable, DC2 plain on/off.
                                          {"ports", {nlohmann::json::object(), {{"pwm", true}}, {{"pwm", false}}}}};
 
@@ -2342,6 +2344,7 @@ int main() {
                 // fields must NOT leak into a switch config.
                 EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip1");
                 EXPECT(cfg.value("pwmFrequencyHz", 0) == 2000);
+                EXPECT(cfg.value("powerOnState", "") == "restore");  // decision 0021
                 EXPECT(cfg.contains("ports"));
                 EXPECT(cfg["ports"].is_array());
                 EXPECT(cfg["ports"].size() == 3);
@@ -3236,12 +3239,14 @@ int main() {
                                            {"switchType", "asiair"},
                                            {"gpioChip", "/dev/gpiochip0"},
                                            {"pwmFrequencyHz", 200},
+                                           {"powerOnState", "restore"},
                                            {"ports", ports}},
                                           "Switch", 9606);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("switchType", "") == "asiair");
         EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip0");
         EXPECT(cfg.value("pwmFrequencyHz", -1) == 200);
+        EXPECT(cfg.value("powerOnState", "") == "restore");  // decision 0021
         EXPECT(cfg.contains("ports"));
         EXPECT(cfg["ports"].size() == 2);
         EXPECT(cfg["ports"][0].value("gpio", -1) == 12);
@@ -3260,12 +3265,14 @@ int main() {
                                            {"switchType", "asiair-plus-rk3568"},
                                            {"devicePath", "/dev/pwm-gpio-misc"},
                                            {"pwmFrequencyHz", 50},
+                                           {"powerOnState", "off"},
                                            {"ports", ports}},
                                           "Switch", 9607);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("switchType", "") == "asiair-plus-rk3568");
         EXPECT(cfg.value("devicePath", "") == "/dev/pwm-gpio-misc");
         EXPECT(cfg.value("pwmFrequencyHz", -1) == 50);
+        EXPECT(cfg.value("powerOnState", "") == "off");  // decision 0021
         EXPECT(cfg.contains("ports"));
         EXPECT(cfg["ports"][0].value("pwm", false) == true);
         // The gpioChip key belongs to the libgpiod variants only.
@@ -3342,15 +3349,26 @@ int main() {
                                            {"switchType", "stellavita"},
                                            {"gpioChip", "/dev/gpiochip0"},
                                            {"pwmFrequencyHz", 100},
+                                           {"powerOnState", "off"},
                                            {"ports", ports}},
                                           "Switch", 9610);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("switchType", "") == "stellavita");
         EXPECT(cfg.value("gpioChip", "") == "/dev/gpiochip0");
         EXPECT(cfg.value("pwmFrequencyHz", -1) == 100);
+        EXPECT(cfg.value("powerOnState", "") == "off");  // decision 0021
         EXPECT(cfg.contains("ports"));
         EXPECT(cfg["ports"][0].value("pwm", false) == true);
         remove_device(router, "touptek", "switch", 9610);
+        // Only the three spellings are accepted; nothing is saved otherwise.
+        const auto refused = roundtrip_config(router,
+                                              {{"vendor", "touptek"},
+                                               {"deviceType", "switch"},
+                                               {"deviceNumber", 9611},
+                                               {"switchType", "stellavita"},
+                                               {"powerOnState", "on"}},
+                                              "Switch", 9611);
+        EXPECT(refused.is_null());
     }
 #endif
 
@@ -8629,6 +8647,63 @@ int main() {
         EXPECT(RotatorSyncOffsetStore::load(configured) == 12.5);
         EXPECT(RotatorSyncOffsetStore::load(removed) == 0.0);
         EXPECT(RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_3") == 3.0);  // not a GUID key: never pruned
+    }
+    {
+        // case: a start asks every device once for its power-on state and says whether it follows a reboot (#300)
+        // Decision 0021: the hook runs at the start only, never for a device
+        // configured on a running server (the web UI's edit removes and re-adds).
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        {
+            std::ofstream out(std::filesystem::path("config") / "registered_devices.json", std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9482}}})
+                       .dump();
+        }
+        using alpacacore::util::PowerPortStateStore;
+        const std::string previous_boot = PowerPortStateStore::set_current_boot_id_for_testing("boot-A");
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto& calls = alpacahttp::test_catalog::power_on_calls();
+        const auto start = [&] {
+            calls.clear();
+            { alpacahttp::Router started(alpacahttp::test_catalog::add_schema_and_factory); }
+            registry.unregister_device(alpacacore::DeviceType::Focuser, 9482);
+            return calls;
+        };
+        using Calls = std::vector<std::pair<int, bool>>;
+        EXPECT(start() == (Calls{{9482, true}}));   // first start of this boot
+        EXPECT(start() == (Calls{{9482, false}}));  // a service restart
+        PowerPortStateStore::set_current_boot_id_for_testing("boot-B");
+        EXPECT(start() == (Calls{{9482, true}}));  // rebooted
+
+        alpacahttp::Router running(alpacahttp::test_catalog::add_schema_and_factory);
+        calls.clear();
+        EXPECT(
+            api_attempt(running, {{"vendor", "zzz"}, {"deviceType", "focuser"}, {"deviceNumber", 9483}}, "Focuser").ok);
+        EXPECT(calls.empty());
+        remove_device(running, "zzz", "focuser", 9483);
+        registry.unregister_device(alpacacore::DeviceType::Focuser, 9482);
+        PowerPortStateStore::set_current_boot_id_for_testing(previous_boot);
+    }
+    {
+        // case: a start drops the saved power port states of a device no longer configured (#300)
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        const std::string configured = alpacacore::util::generate_unique_id();
+        const std::string removed = alpacacore::util::generate_unique_id();
+        {
+            std::ofstream out(std::filesystem::path("config") / "registered_devices.json", std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zzz"},
+                                           {"deviceType", "focuser"},
+                                           {"deviceNumber", 9484},
+                                           {"uniqueId", configured}}})
+                       .dump();
+        }
+        using alpacacore::util::PowerPortStateStore;
+        EXPECT(PowerPortStateStore::save(configured, 0, 100.0));
+        EXPECT(PowerPortStateStore::save(removed, 1, 40.0));
+        { alpacahttp::Router started; }
+        EXPECT(PowerPortStateStore::load(configured).size() == 1);
+        EXPECT(PowerPortStateStore::load(removed).empty());
     }
     {
         // case: a start asks only the entries it gives a first GUID to adopt their old state (#1473)

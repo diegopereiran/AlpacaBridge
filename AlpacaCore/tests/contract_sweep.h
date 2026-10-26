@@ -929,6 +929,8 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
+    // The iMate PowerBox, compiled only with libgpiod.
+    {"ioptron", "switch", "fake_ioptron_gpio.h"},
     {"iguider", "camera", "fake_iguider_v4l2.h"},
     {"astroasis", "focuser", "fake_astroasis_hid.h"},
     {"gemini", "focuser", "fake_gemini_focuser.h"},

@@ -189,6 +189,15 @@
                         <input type="number" id="ioptron-powerbox-pwm-frequency" name="ioptronPowerboxPwmFrequency" data-config-key="pwmFrequencyHz" value="50" min="1" max="100000">
                         <small>Software PWM frequency for any DC port marked PWM below. <strong>50 Hz</strong> dims flat panels (their LED driver cycles fully each period); ~1 kHz is smoothed into on/off by a panel but is fine for dew heaters.</small>
                     </div>
+                    <div class="form-group">
+                        <label for="ioptron-powerbox-power-on-state">At server start:</label>
+                        <select id="ioptron-powerbox-power-on-state" name="ioptronPowerboxPowerOnState" data-config-key="powerOnState">
+                            <option value="leave" selected>Leave ports as they are</option>
+                            <option value="restore">Restore the last setting</option>
+                            <option value="off">Turn every port off</option>
+                        </select>
+                        <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
+                    </div>
                     <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
                     <small style="color: #666;">Tick <em>PWM</em> on DC1/DC2 for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off. DC3 is a hardwired always-on pass-through.</small>
                     <table class="ioptron-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
@@ -815,6 +824,15 @@
                             <input type="number" id="asiair-pwm-frequency" name="asiairPwmFrequency" data-config-key="pwmFrequencyHz" value="1000" min="1" max="100000">
                             <small>Software PWM frequency for any port marked PWM below. 1000 Hz is fine for dew heaters and flat panels.</small>
                         </div>
+                        <div class="form-group">
+                            <label for="asiair-power-on-state">At server start:</label>
+                            <select id="asiair-power-on-state" name="asiairPowerOnState" data-config-key="powerOnState">
+                                <option value="leave" selected>Leave ports as they are</option>
+                                <option value="restore">Restore the last setting</option>
+                                <option value="off">Turn every port off</option>
+                            </select>
+                            <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
+                        </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
                         <small style="color: #666;">Defaults match the Pi 4 ASIAIR Pro physical labels. Tick <em>PWM</em> for dew-heater / flat-panel use (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off.</small>
                         <table class="asiair-ports-table" style="width: 100%; margin-top: 8px; border-collapse: collapse; color: #333;">
@@ -855,6 +873,15 @@
                             <label for="asiair-plus-device-path">Power Control Device:</label>
                             <input type="text" id="asiair-plus-device-path" name="asiairPlusDevicePath" data-config-key="devicePath" value="/dev/pwm-gpio-misc" readonly>
                             <small>Path to the ZWO <code>pwm_gpio.ko</code> kernel module's character device. Default <code>/dev/pwm-gpio-misc</code> is correct for stock ASIAIR Plus (RK3568) hardware.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="asiair-plus-power-on-state">At server start:</label>
+                            <select id="asiair-plus-power-on-state" name="asiairPlusPowerOnState" data-config-key="powerOnState">
+                                <option value="leave" selected>Leave ports as they are</option>
+                                <option value="restore">Restore the last setting</option>
+                                <option value="off">Turn every port off</option>
+                            </select>
+                            <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>Power Ports</strong></p>
                         <small style="color: #666;">The ASIAIR Plus exposes four 12V DC ports through ZWO's kernel module. The kernel index for each port is fixed (DC1=4, DC2=5, DC3=6, DC4=7) so only the channel name and PWM mode are configurable here.</small>
@@ -1354,6 +1381,15 @@
                             <label for="touptek-powerbox-pwm-frequency">PWM Frequency (Hz):</label>
                             <input type="number" id="touptek-powerbox-pwm-frequency" name="touptekPowerboxPwmFrequency" data-config-key="pwmFrequencyHz" value="100" min="1" max="100000">
                             <small>Software PWM frequency for any port marked PWM below. <strong>100 Hz</strong> dims flat panels smoothly (their LED driver cycles fully each period); ~1 kHz is smoothed into on/off by a panel but is fine for dew heaters.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="touptek-powerbox-power-on-state">At server start:</label>
+                            <select id="touptek-powerbox-power-on-state" name="touptekPowerboxPowerOnState" data-config-key="powerOnState">
+                                <option value="leave" selected>Leave ports as they are</option>
+                                <option value="restore">Restore the last setting</option>
+                                <option value="off">Turn every port off</option>
+                            </select>
+                            <small>What AlpacaBridge does to the ports when it starts. <em>Leave</em> keeps whatever the board powered on with (usually on). <em>Restore</em> puts back the value a client last set. <em>Off</em> turns every port off after a reboot; a service restart or update restores the last setting instead, so gear in use keeps its power. Connecting or disconnecting a client never changes a port.</small>
                         </div>
                         <p style="margin: 12px 0 4px 0; color: #333;"><strong>DC Power Ports</strong></p>
                         <small style="color: #666;">Tick <em>PWM</em> on a port for dimmable loads &mdash; dew heaters and flat panels (exposes a 0&ndash;100&#37; slider in clients like NINA); leave it unticked for plain on/off. A flat panel needs a low frequency (~50 Hz) to dim, set above. Cameras, mounts, and other regulated gear should stay on/off.</small>

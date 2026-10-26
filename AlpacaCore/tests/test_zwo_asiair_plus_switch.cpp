@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
 #include <alpacacore/version.h>
 #include <dlfcn.h>
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "power_port_test_dir.h"
 
 // ---------------------------------------------------------------------------
 // ioctl stub. This binary defines ioctl(), so the wrapper's PWM_GPIO_SET_LEVEL
@@ -355,4 +357,54 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - close settles a partial-duty PWM port
     }
     REQUIRE_FALSE(levels.empty());
     CHECK(levels.back() == 0);  // duty 50 settles logically ON (raw 0)
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - off at server start writes OFF to every port without connecting",
+          "[zwo][switch][asiair-plus][unit][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    char tmpl[] = "/tmp/asiair-plus-stub-XXXXXX";
+    const int tfd = ::mkstemp(tmpl);
+    REQUIRE(tfd >= 0);
+    ::close(tfd);
+    auto& st = ioctl_stub();
+    struct Cleanup {
+        const char* path;
+        IoctlStub& stub;
+        ~Cleanup() {
+            {
+                std::lock_guard<std::mutex> lock(stub.m);
+                stub.path.clear();
+            }
+            ::unlink(path);
+        }
+    } cleanup{tmpl, st};
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        st.path = tmpl;
+        st.levels.clear();
+        st.off_writes = 0;
+    }
+
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = tmpl;
+    auto leave = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    leave->apply_power_on_state(true);
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        CHECK(st.levels.empty());  // the default, Leave, writes nothing
+    }
+
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(1, cfg);
+    driver->apply_power_on_state(true);
+    CHECK_FALSE(driver->get_connected());
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        CHECK(st.off_writes == 4);  // raw level 1 = logical OFF, once per port
+    }
+    driver->set_connected(true);
+    for (int i = 0; i < 4; ++i) {
+        CHECK_FALSE(driver->get_switch(i));
+    }
+    driver->set_connected(false);
 }

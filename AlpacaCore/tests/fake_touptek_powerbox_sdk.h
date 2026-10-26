@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/touptek/touptek_powerbox_sdk.h>
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 
@@ -47,8 +48,12 @@ public:
     explicit FakeTouptekPowerboxSDK(std::vector<Port> port_table = vendor::touptek::default_stellavita_config().ports,
                                     std::string chip_path = "/dev/gpiochip0", std::uint32_t frequency_hz = 100)
         : ports_(std::move(port_table)), chip_path_(std::move(chip_path)), frequency_hz_(frequency_hz) {
-        // Ports start on, as the real wrapper's constructor sets them (100 for PWM, 1 otherwise).
-        for (const auto& p : ports_) values_.push_back(p.pwm_enabled ? 100 : 1);
+        // Ports start on, as the real wrapper's constructor sets them (100 for PWM, 1 otherwise),
+        // and every line starts high, as the StellaVita's config.txt boots it.
+        for (const auto& p : ports_) {
+            values_.push_back(p.pwm_enabled ? 100 : 1);
+            line_levels_.push_back(1);
+        }
     }
 
     // While true every open() throws (a connect that must fail); the flag is never cleared.
@@ -61,13 +66,29 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++open_calls_;
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
-        // Values are kept: the real wrapper keeps its cached levels across a reconnect.
+        // As the real wrapper: each line keeps its level and the cache reconciles with it.
+        for (std::size_t i = 0; i < ports_.size(); ++i) {
+            values_[i] = util::reconcile_cached_value(values_[i], line_levels_[i], ports_[i].pwm_enabled ? 100 : 1);
+        }
         open_.store(true, std::memory_order_release);
     }
     void close() override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++close_calls_;
         open_.store(false, std::memory_order_release);
+    }
+
+    // Sets a line's level as the boot or a previous session left it (no open needed).
+    void set_line_level(std::size_t index, int level) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_index(index);
+        line_levels_[index] = level != 0 ? 1 : 0;
+    }
+    // The steady level of a line: a PWM port reads high for any duty above 0.
+    int line_level(std::size_t index) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_index(index);
+        return line_levels_[index];
     }
     bool is_open() const override {
         ++is_open_calls_;
@@ -106,6 +127,7 @@ public:
             throw AlpacaException("GPIO chip is not open", AlpacaError::NotConnected);
         }
         values_[index] = value;
+        line_levels_[index] = value > 0 ? 1 : 0;
     }
 
     std::string gpio_chip_path() const override {
@@ -142,6 +164,7 @@ private:
     mutable std::mutex mutex_;
     std::vector<Port> ports_;
     std::vector<int> values_;
+    std::vector<int> line_levels_;
     std::string chip_path_;
     std::uint32_t frequency_hz_;
     std::atomic<bool> open_{false};

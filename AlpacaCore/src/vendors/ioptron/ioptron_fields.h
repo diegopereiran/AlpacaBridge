@@ -20,6 +20,7 @@
 
 #include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/util/hardware_config_refusal.h>
+#include <alpacacore/util/power_port_state_store.h>
 
 #include <cstdint>
 #include <optional>
@@ -157,6 +158,9 @@ inline std::optional<std::string> iguider_camera_refusal(const DeviceConfig& con
 inline const Field<std::string> kIoptronGpioChip{.key = "gpioChip", .default_value = "/dev/gpiochip1"};
 // The value shown is the driver's own default; the factory reads it with find().
 inline const Field<std::int64_t> kIoptronPwmFrequencyHz{.key = "pwmFrequencyHz", .default_value = 50};
+// What DC1/DC2 do when the server starts (decision 0021): "leave", "restore" or "off".
+inline const Field<std::string> kIoptronPowerOnState{
+    .key = "powerOnState", .default_value = "leave", .allowed_values = util::kPowerOnStateNames};
 
 // One entry of ports[], applied by position onto the fixed DC3/DC1/DC2 layout.
 // The always-on pass-through has no GPIO line, so its pwm flag is ignored.
@@ -170,8 +174,8 @@ inline const Field<std::vector<DeviceConfig>> kIoptronPorts{
     .key = "ports", .default_value = {}, .record_fields = ioptron_port_fields()};
 
 inline const std::vector<FieldRef>& ioptron_switch_fields() {
-    static const std::vector<FieldRef> fields{kIoptronGpioChip.ref(), kIoptronPwmFrequencyHz.ref(),
-                                              kIoptronPorts.ref()};
+    static const std::vector<FieldRef> fields{kIoptronGpioChip.ref(), kIoptronPwmFrequencyHz.ref(), kIoptronPorts.ref(),
+                                              kIoptronPowerOnState.ref()};
     return fields;
 }
 

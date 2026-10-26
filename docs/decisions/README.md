@@ -127,3 +127,4 @@ referred to by its slug until it is written, and numbered then.
 - [Persisted UniqueID per configured device](0018-persisted-unique-id.md)
 - [Connect without a site, refuse what needs one](0019-connect-without-site.md)
 - [Camera capture session](0020-capture-session.md)
+- [Power port power-on state](0021-power-port-power-on-state.md)
