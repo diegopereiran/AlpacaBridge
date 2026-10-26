@@ -263,9 +263,17 @@ jobs:
             records="${listed:-none}"
           fi
           printf '%s\n' "${records}" > "${RUNNER_TEMP}/adr-scope.txt"
+          # The prompt carries one line per rule to fill in, so the review
+          # never expands "rules 1, 3, 4" itself; that is where it dropped
+          # one (#1655).
+          skeleton="$(python3 -I "${tools}/scripts/check_adr_scope.py" --skeleton "${RUNNER_TEMP}/adr-scope.txt")" \
+            || fail "check_adr_scope.py --skeleton exited non-zero"
           {
             echo "records<<ADR_SCOPE_EOF"
             echo "${records}"
+            echo "ADR_SCOPE_EOF"
+            echo "skeleton<<ADR_SCOPE_EOF"
+            echo "${skeleton:-none in scope}"
             echo "ADR_SCOPE_EOF"
           } >> "${GITHUB_OUTPUT}"
 
@@ -362,8 +370,9 @@ jobs:
             ${{ steps.adr_scope.outputs.records }}
 
             Account for every rule listed above, one line each, in a
-            "Decision records" section, exactly in this form:
-              - NNNN-slug.md rule N: VERDICT: reason
+            "Decision records" section. Copy every line of this checklist,
+            in order, and fill in VERDICT and reason on each:
+            ${{ steps.adr_scope.outputs.skeleton }}
             VERDICT is pass, defect or n/a. The reason names the file and
             line you checked. Use n/a only when the rule's own wording does
             not reach the changed lines, and name the wording or Adoption row
@@ -372,7 +381,12 @@ jobs:
             Defects. When nothing is listed, write "none in scope". A workflow
             step checks this section before posting: a listed rule with no
             line, two verdicts for one rule, or a defect under the approving
-            sign-off fails the review and nothing is posted.
+            sign-off fails the review and nothing is posted. After you write
+            review-comment.md, run this exact command, which is that step's
+            check, and fix every line it prints in the file (a missing rule,
+            a second verdict, or a sign-off that does not match Defects),
+            then run it again until it prints nothing:
+              python3 -I ${{ runner.temp }}/adr-tools/scripts/check_adr_scope.py --checklist ${{ runner.temp }}/adr-scope.txt review-comment.md
 
             Review the lines this PR changes, what they directly call, the
             call sites of anything whose signature or contract this PR
@@ -394,14 +408,18 @@ jobs:
             If the file is missing, the run fails.
           claude_args: |
             --model opus
-            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(python3 -I ${{ runner.temp }}/adr-tools/scripts/check_adr_scope.py --checklist:*)"
 
       # Every in-scope rule needs a checklist line before anything posts. The
       # checker is the default branch's copy extracted by the scope step,
       # never the PR's. A failure here skips the post and assert steps, so
       # an incomplete review never reaches the PR as an approval. A missing
       # file passes: the post step reports it, and a PR that edits this
-      # workflow may get no review at all (see the assert step).
+      # workflow may get no review at all (see the assert step). The agent
+      # runs this same command on its own file before it ends (#1655): its
+      # one python3 Bash rule above allows only `check_adr_scope.py --checklist` from
+      # this extracted copy, which reads its arguments and writes nothing,
+      # and the Write tool cannot reach RUNNER_TEMP.
       - name: Check the decision-record checklist
         run: |
           if [ ! -s review-comment.md ]; then
