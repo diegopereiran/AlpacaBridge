@@ -1203,6 +1203,8 @@ public:
         exposure_range_valid_ = false;  // The SDK can change hardware before its re-initialization throws.
         const auto gain = cached_gain_;
         const auto offset = cached_offset_;
+        // Binning only changes under io_mutex_, which this call holds throughout.
+        const int bin = bin_x_;
         auto updated_info = camera_info_;
         mode_change_active_.store(true);
         struct ModeChangeGuard {
@@ -1251,9 +1253,16 @@ public:
 
         // After changing readout mode, refresh chip info as dimensions may change
         const bool info_valid = sdk_.get_chip_info(id, updated_info);
+        // Keep the client's binning (open-astro#1678): the re-initialization may
+        // reset the SDK bin mode, and the ROI is in binned pixels.
+        const int new_max_w = static_cast<int>(updated_info.max_width) / bin;
+        const int new_max_h = static_cast<int>(updated_info.max_height) / bin;
+        try {
+            sdk_.set_bin_mode(id, static_cast<uint32_t>(bin), static_cast<uint32_t>(bin));
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("QHY", "Failed to restore binning after readout mode change: " + std::string(e.what()));
+        }
         if (info_valid) {
-            int new_max_w = static_cast<int>(updated_info.max_width);
-            int new_max_h = static_cast<int>(updated_info.max_height);
             try {
                 sdk_.set_resolution(id, 0, 0, static_cast<uint32_t>(new_max_w), static_cast<uint32_t>(new_max_h));
             } catch (const std::exception& e) {
@@ -1266,8 +1275,8 @@ public:
         readout_mode_ = mode;
         if (info_valid) {
             camera_info_ = updated_info;
-            num_x_ = static_cast<int>(updated_info.max_width);
-            num_y_ = static_cast<int>(updated_info.max_height);
+            num_x_ = new_max_w;
+            num_y_ = new_max_h;
             start_x_ = 0;
             start_y_ = 0;
         }
