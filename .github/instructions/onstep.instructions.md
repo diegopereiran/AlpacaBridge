@@ -300,7 +300,7 @@ it is never reachable through `router.cpp` or the web UI.
   about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
   2.5 degrees at 0.25 deg/s in #1241; it moves from the home position too, HM-17 2026-10-19), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
   sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
-  loss, stops nothing (#521). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway.
+  loss, stops nothing (#521). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway, after waiting out that read's reply timeout.
   They leave tracking as it was: `:Q#` stops a GOTO through `goTo.abort()` and the guide stop and
   never calls `mount.tracking(false)` (HM-17 2026-10-24: `:GU#` `pEW160` before, `NpEW160` after a
   `:Q#` sent mid-GOTO), so nothing has to restore tracking after them.
@@ -330,9 +330,13 @@ it is never reachable through `router.cpp` or the web UI.
   (decision 0009 rule 1); they used to answer from the connect's values, and a site the connect
   could not read was fetched again with no fault check (#1659). `SideOfPier` reads the position
   first, so it still asks the mount, and a good reply clears the fault and lets the site be read.
-  What the driver itself tracks still answers: `IsPulseGuiding` (the requested duration),
-  `Slewing` while a `Park` or `FindHome` is pending, `SiteElevation` (the device config) and the
-  `Can*` and rate constants.
+  Commanded state the driver tracks throws too, as in Sky-Watcher (open-astro#882):
+  `IsPulseGuiding`, `Slewing` (also while a `Park` or `FindHome` is pending or within the slew
+  grace; `AbortSlew` and `MoveAxis(axis, 0)` still send their stops) and the rate getters
+  (`DeclinationRate`, `RightAscensionRate`, `TrackingRate`, which read lock-free from the
+  latched fault text so they never wait behind serial I/O). The client's own values answer, as in
+  Sky-Watcher: `TargetRightAscension`/`TargetDeclination`, `SlewSettleTime`, `SiteElevation` (the
+  device config), `GuideRate` (informational) and the `Can*` constants.
   Within 2 s (`kFaultedReadBackoff`) of a read that failed while faulted, the reads throw the
   fault without asking, so a faulted `DeviceState` costs one reply timeout instead of one per
   getter (#1626). A read that finds the link lost (`NotConnected`) throws it even while a cache is

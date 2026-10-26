@@ -265,6 +265,21 @@ public:
         }
     }
 
+    // The latched fault for the getters that read lock-free, so they never wait
+    // behind serial I/O under mutex_ (#1449): link_fault_text_ has its own narrow
+    // mutex. No staleness check here; the status and position reads make a
+    // standing fault a lost link.
+    void throw_if_faulted_lock_free() const {
+        std::string fault;
+        {
+            std::lock_guard<std::mutex> fault_lock(link_fault_mutex_);
+            fault = link_fault_text_;
+        }
+        if (!fault.empty()) {
+            throw AlpacaException("OnStep mount communications compromised: " + fault, AlpacaError::DriverException);
+        }
+    }
+
     // Why the serial link was lost, kept until the next Connect or Disconnect,
     // or else the latched fault of a silent mount (decision 0009). The wrapper's
     // reason and link_fault_text_ under its own narrow mutex: never waits on mutex_.
@@ -579,6 +594,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_faulted_locked();  // commanded state, not a wire read: refused too (decision 0009 rule 1)
         if (pulse_guiding_active_ && clock_.now() >= pulse_guide_end_time_) {
             pulse_guiding_active_ = false;
         }
@@ -615,6 +631,7 @@ public:
     // is, so the getter never waits behind serial I/O under mutex_ (#1449).
     double get_declination_rate() const override {
         check_connected_lock_free();
+        throw_if_faulted_lock_free();  // as Sky-Watcher's rate getters (decision 0009 rule 1)
         return 0.0;
     }
 
@@ -682,6 +699,7 @@ public:
 
     double get_right_ascension_rate() const override {
         check_connected_lock_free();  // see get_declination_rate()
+        throw_if_faulted_lock_free();
         return 0.0;
     }
 
@@ -857,6 +875,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (park_home_request_) {
+            // This answer asks the mount nothing, so it refuses a latched fault
+            // itself (decision 0009 rule 1); AbortSlew and MoveAxis(axis, 0) still
+            // send their stops while faulted, only this read refuses.
+            throw_if_faulted_locked();
             return true;  // stopping, settling or retrying a Park or FindHome (#1430)
         }
         raise_park_home_error_locked(std::nullopt);
@@ -893,7 +915,11 @@ public:
         target_ra_set_ = true;
     }
 
-    int get_tracking_rate() const override { return 0; }
+    int get_tracking_rate() const override {
+        check_connected_lock_free();
+        throw_if_faulted_lock_free();  // as Sky-Watcher (decision 0009 rule 1)
+        return 0;
+    }
 
     void set_tracking_rate(int rate) override {
         if (rate != 0) {
@@ -1731,6 +1757,10 @@ private:
             try {
                 refresh_status_cache_locked(true);  // best-effort: a failed read does not make the no-op a refusal
             } catch (const AlpacaException& ex) {
+                // A latched fault is swallowed here too: the mount has just
+                // answered "already parked", so the no-op stands (Park's call
+                // refuses a fault before it gets here; its background retries
+                // can reach this with one latched). Only a lost link is reported.
                 if (ex.error_code() == AlpacaError::NotConnected) {
                     throw;  // the link is gone, as for any read
                 }
@@ -2154,6 +2184,7 @@ private:
             clear_manual_motion_locked();
         }
         if (clock_.now() < slew_force_until_) {
+            throw_if_faulted_locked();  // the grace asks the mount nothing (decision 0009 rule 1)
             return true;
         }
         const bool was_slewing = cached_status_.is_slewing;
@@ -2272,11 +2303,10 @@ private:
         }
     }
 
-    // The latched fault as every faulted read reports it (decision 0009 rule 1),
-    // one text for all of them (#1658 review).
     // A read that answers without asking the mount (the site, UTCDate,
-    // SiderealTime, DestinationSideOfPier) throws the latched fault too, as
-    // decision 0009 rule 1 says every read does, after the staleness check.
+    // SiderealTime, DestinationSideOfPier, DoesRefraction, IsPulseGuiding and
+    // Slewing's pending Park/FindHome and grace answers) throws the latched
+    // fault too, after the staleness check (decision 0009 rule 1).
     void throw_if_faulted_locked() const {
         if (link_health_.faulted()) {
             lose_link_if_stale_locked(clock_.now());
@@ -2284,6 +2314,8 @@ private:
         }
     }
 
+    // The latched fault as every faulted read reports it (decision 0009 rule 1),
+    // one text for all of them (#1658 review).
     [[noreturn]] void throw_fault_locked() const {
         throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
                               AlpacaError::DriverException);

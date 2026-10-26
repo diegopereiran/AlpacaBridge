@@ -1137,10 +1137,11 @@ TEST_CASE("OnStep link loss - a site the connect could not read throws the fault
     driver->set_connected(false);
 }
 
-// Decision 0009 rule 1: while faulted every read throws the fault. The reads
-// that ask the mount nothing (the site, UTCDate, SiderealTime,
-// DestinationSideOfPier) used to answer from the connect's values; they throw
-// too now, and answer again once a reply clears the fault.
+// Decision 0009 rule 1: while faulted reads throw the fault. The reads that ask
+// the mount nothing (the site, UTCDate, SiderealTime, DestinationSideOfPier,
+// DoesRefraction) used to answer from the connect's values, and IsPulseGuiding
+// and the rate getters from the driver's own state; they throw too now, as in
+// Sky-Watcher, and answer again once a reply clears the fault.
 TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fault while faulted",
           "[onstep][serial][connected]") {
     WrapperReset reset;
@@ -1151,6 +1152,8 @@ TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fau
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     const double latitude = driver->get_site_latitude();  // the connect read the site
+    driver->pulse_guide(0, 5000);                         // commanded state the driver tracks
+    REQUIRE(driver->get_is_pulse_guiding());
     (void)driver->get_right_ascension();
     clock.advance(std::chrono::milliseconds(2100));  // past the 2 s caches
 
@@ -1171,6 +1174,10 @@ TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fau
         {"SiderealTime", [&] { (void)driver->get_sidereal_time(); }},
         {"DestinationSideOfPier", [&] { (void)driver->get_destination_side_of_pier(2.0, 10.0); }},
         {"DoesRefraction", [&] { (void)driver->get_does_refraction(); }},
+        {"IsPulseGuiding", [&] { (void)driver->get_is_pulse_guiding(); }},
+        {"DeclinationRate", [&] { (void)driver->get_declination_rate(); }},
+        {"RightAscensionRate", [&] { (void)driver->get_right_ascension_rate(); }},
+        {"TrackingRate", [&] { (void)driver->get_tracking_rate(); }},
     };
     for (const auto& [name, read] : reads) {
         INFO(name);
@@ -1190,6 +1197,42 @@ TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fau
     REQUIRE(driver->get_link_fault().empty());
     CHECK(driver->get_site_latitude() == latitude);
     CHECK_NOTHROW((void)driver->get_sidereal_time());
+    CHECK_NOTHROW((void)driver->get_is_pulse_guiding());
+    CHECK_NOTHROW((void)driver->get_tracking_rate());
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 1: within the 2 s slew grace Slewing answers true without
+// asking the mount, so it refuses a latched fault itself, as its pending-Park
+// answer does.
+TEST_CASE("OnStep link loss - Slewing within the slew grace throws the fault", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    alpacacore::test::FakeTaskClock clock;  // not moved: the grace stays open
+    FakeOnStepSerialMount mount;
+    mount.set_reply(":GU#", "NpEo190#");  // tracking, idle: the slew goes out
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(2.0, 20.0));  // the caches are dropped, the grace starts
+    REQUIRE(driver->get_slewing());
+
+    mount.mute(true);
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();        // asks the mount: the position cache was dropped
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // the third throws: the fault latched
+        }
+    }
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    try {
+        (void)driver->get_slewing();
+        FAIL("Slewing answered from the grace during the fault");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+    }
     driver->set_connected(false);
 }
 

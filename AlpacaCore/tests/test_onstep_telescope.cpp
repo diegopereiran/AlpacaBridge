@@ -193,6 +193,8 @@ TEST_CASE("OnStep Telescope Driver - State machine", "[onstep][telescope][unit]"
     require_alpaca_error([&]() { (void)driver->get_is_pulse_guiding(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_at_home(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_at_park(); }, alpacacore::AlpacaError::NotConnected);
+    // TrackingRate too: it answered 0 while disconnected before #1680.
+    require_alpaca_error([&]() { (void)driver->get_tracking_rate(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("OnStep Telescope Driver - Unsupported methods", "[onstep][telescope][unit]") {
@@ -2724,6 +2726,14 @@ TEST_CASE("OnStep Telescope Driver - a command refused for a link fault leaves a
         }
     }
     REQUIRE_FALSE(driver->get_link_fault().empty());
+    // Slewing refuses too while the Park is pending, though it asks the mount
+    // nothing then (decision 0009 rule 1).
+    try {
+        (void)driver->get_slewing();
+        FAIL("Slewing answered during the fault");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
     const auto require_refused = [](const std::function<void()>& fn, const std::string& what) {
         try {
             fn();
@@ -2749,6 +2759,10 @@ TEST_CASE("OnStep Telescope Driver - a command refused for a link fault leaves a
         mount->silent = false;
     }
     mount->clock.advance(std::chrono::milliseconds(2100));  // past the faulted-read back-off
+    // Slewing asks nothing while the Park is pending, so a read that asks the
+    // mount clears the fault first, as a client's position poll does.
+    REQUIRE_NOTHROW((void)driver->get_right_ascension());
+    REQUIRE(driver->get_link_fault().empty());
     const auto waits_before = mount->clock.wait_count();
     {
         std::lock_guard<std::mutex> lock(gate_mutex);
