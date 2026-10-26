@@ -14,7 +14,10 @@
 
 #include <alpacacore/vendor/zwo/zwo_eaf_sdk.h>
 
+#include <cstdint>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,9 +29,13 @@ namespace alpacacore::test {
  * serialises its entry points. Same shape as LockedZWOSDK; a per-SDK class
  * rather than a shared template, because the interfaces share no signatures.
  *
- * Wraps all 16 entry points; the mutex is a leaf (the inner SDK never calls back into
- * this interface). No EAF call blocks, so there is no blocking-mode caveat (the fake's opt-in
- * delays are not used behind this decorator).
+ * Wraps all 18 entry points, each under the mutex (decision 0015 rule 2). The mutex is recursive
+ * because with_link() holds it across its body, which calls back into this decorator's per-device
+ * methods on the same thread (issue #1500); the body may also take the driver's leaf mutex_, which
+ * the driver never holds across an SDK call, so no order inverts. Every other entry point holds the
+ * mutex across the inner call only (the inner SDK never calls back into this interface). No EAF
+ * call blocks, so there is no blocking-mode caveat (the fake's opt-in delays are not used behind
+ * this decorator).
  */
 class LockedZWOEAFSDK final : public vendor::zwo::ZWOEAFSDK {
 public:
@@ -45,11 +52,17 @@ public:
     bool get_focuser_info_by_index(int focuser_index, Info& info) override {
         return locked([&] { return inner_.get_focuser_info_by_index(focuser_index, info); });
     }
-    void open_focuser(int focuser_id) override {
-        locked([&] { inner_.open_focuser(focuser_id); });
+    vendor::zwo::SharedOpenTable::Opened open_focuser_link(int focuser_id) override {
+        return locked([&] { return inner_.open_focuser_link(focuser_id); });
     }
-    void close_focuser(int focuser_id) override {
-        locked([&] { inner_.close_focuser(focuser_id); });
+    std::optional<vendor::zwo::SharedOpenTable::Opened> open_focuser_candidate(int focuser_id) override {
+        return locked([&] { return inner_.open_focuser_candidate(focuser_id); });
+    }
+    void close_focuser_link(int focuser_id, std::uint64_t link) override {
+        locked([&] { inner_.close_focuser_link(focuser_id, link); });
+    }
+    void with_link(int focuser_id, std::uint64_t link, const std::function<void()>& fn) override {
+        locked([&] { inner_.with_link(focuser_id, link, fn); });
     }
     bool is_moving(int focuser_id) override {
         return locked([&] { return inner_.is_moving(focuser_id); });
@@ -88,12 +101,12 @@ public:
 private:
     template <typename Fn>
     auto locked(Fn&& fn) -> decltype(fn()) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         return fn();
     }
 
     ZWOEAFSDK& inner_;
-    std::mutex mutex_;
+    std::recursive_mutex mutex_;
 };
 
 }  // namespace alpacacore::test
