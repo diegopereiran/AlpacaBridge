@@ -265,6 +265,21 @@ public:
         }
     }
 
+    // The latched fault for the getters that read lock-free, so they never wait
+    // behind serial I/O under mutex_ (#1449): link_fault_text_ has its own narrow
+    // mutex. No staleness check here; the status and position reads make a
+    // standing fault a lost link.
+    void throw_if_faulted_lock_free() const {
+        std::string fault;
+        {
+            std::lock_guard<std::mutex> fault_lock(link_fault_mutex_);
+            fault = link_fault_text_;
+        }
+        if (!fault.empty()) {
+            throw AlpacaException("OnStep mount communications compromised: " + fault, AlpacaError::DriverException);
+        }
+    }
+
     // Why the serial link was lost, kept until the next Connect or Disconnect,
     // or else the latched fault of a silent mount (decision 0009). The wrapper's
     // reason and link_fault_text_ under its own narrow mutex: never waits on mutex_.
@@ -353,6 +368,7 @@ public:
             slewing_cached_ = false;
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             pulse_guiding_active_ = false;
+            pulse_guide_axis_ = -1;
             tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
@@ -578,6 +594,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_faulted_locked();  // commanded state, not a wire read: refused too (decision 0009 rule 1)
         if (pulse_guiding_active_ && clock_.now() >= pulse_guide_end_time_) {
             pulse_guiding_active_ = false;
         }
@@ -614,6 +631,7 @@ public:
     // is, so the getter never waits behind serial I/O under mutex_ (#1449).
     double get_declination_rate() const override {
         check_connected_lock_free();
+        throw_if_faulted_lock_free();  // as Sky-Watcher's rate getters (decision 0009 rule 1)
         return 0.0;
     }
 
@@ -681,6 +699,7 @@ public:
 
     double get_right_ascension_rate() const override {
         check_connected_lock_free();  // see get_declination_rate()
+        throw_if_faulted_lock_free();
         return 0.0;
     }
 
@@ -755,6 +774,7 @@ public:
     bool get_does_refraction() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_faulted_locked();  // the connect's :GXEE# value, a mount read (decision 0009 rule 1)
         return refraction_from_firmware_.value_or(does_refraction_);
     }
 
@@ -855,6 +875,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (park_home_request_) {
+            // This answer asks the mount nothing, so it refuses a latched fault
+            // itself (decision 0009 rule 1); AbortSlew and MoveAxis(axis, 0) still
+            // send their stops while faulted, only this read refuses.
+            throw_if_faulted_locked();
             return true;  // stopping, settling or retrying a Park or FindHome (#1430)
         }
         raise_park_home_error_locked(std::nullopt);
@@ -891,7 +915,11 @@ public:
         target_ra_set_ = true;
     }
 
-    int get_tracking_rate() const override { return 0; }
+    int get_tracking_rate() const override {
+        check_connected_lock_free();
+        throw_if_faulted_lock_free();  // as Sky-Watcher (decision 0009 rule 1)
+        return 0;
+    }
 
     void set_tracking_rate(int rate) override {
         if (rate != 0) {
@@ -904,6 +932,7 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_faulted_locked();  // no I/O, but a faulted read throws (decision 0009 rule 1)
         if (!utc_offset_.valid()) {
             // The host clock is not the mount's (ITelescopeV4 UTCDate, #1478). The
             // mount clock is read once at connect, so a getter never waits on it.
@@ -1690,6 +1719,7 @@ private:
                                   AlpacaError::DriverException);
         }
         clear_manual_motion_locked();
+        pulse_guiding_active_ = false;  // AbortSlew's stops end every guide, a pulse guide included
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         tracking_before_slew_ = false;
@@ -1722,7 +1752,19 @@ private:
             return ParkHomeTry::Taken;  // for a park: the reply was lost or garbled, but the mount took it
         }
         if (!home && code == kCeParked) {
-            refresh_status_cache_locked(true);  // AtPark reads the mount's parked state
+            cached_status_.is_parked = true;  // the mount says so; AtPark reads it
+            cached_status_.is_slewing = false;
+            try {
+                refresh_status_cache_locked(true);  // best-effort: a failed read does not make the no-op a refusal
+            } catch (const AlpacaException& ex) {
+                // A latched fault is swallowed here too: the mount has just
+                // answered "already parked", so the no-op stands (Park's call
+                // refuses a fault before it gets here; its background retries
+                // can reach this with one latched). Only a lost link is reported.
+                if (ex.error_code() == AlpacaError::NotConnected) {
+                    throw;  // the link is gone, as for any read
+                }
+            }
             return ParkHomeTry::AlreadyParked;
         }
         if (home && code == kCeSlewInPark) {
@@ -1908,6 +1950,7 @@ private:
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         pulse_guiding_active_ = false;
+        pulse_guide_axis_ = -1;
         utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
         mount_clock_unreadable_.reset();
     }
@@ -1941,6 +1984,18 @@ private:
         }
         char seconds[32];
         std::snprintf(seconds, sizeof(seconds), "%.1f", std::chrono::duration<double>(outage).count());
+        // A park still running is left to finish (#1289 item 5): :Q# would
+        // abort it and leave the mount unparked where it stopped (OnStepX
+        // Park::requestAborted()). A status that cannot be read stops anyway.
+        try {
+            if (protocol.get_status().is_parking) {
+                ALPACA_LOG_INFO("OnStep", std::string("Serial link was last seen alive ") + seconds +
+                                              " s ago; the mount is parking, so the park is left to finish");
+                return;
+            }
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // unknown state: stop, as before
+        }
         ALPACA_LOG_WARN("OnStep", std::string("Serial link was last seen alive ") + seconds +
                                       " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521)");
         // Each stop on its own, as AbortSlew does (#781): a failed :Q# must
@@ -2129,6 +2184,7 @@ private:
             clear_manual_motion_locked();
         }
         if (clock_.now() < slew_force_until_) {
+            throw_if_faulted_locked();  // the grace asks the mount nothing (decision 0009 rule 1)
             return true;
         }
         const bool was_slewing = cached_status_.is_slewing;
@@ -2243,6 +2299,17 @@ private:
         lose_link_if_stale_locked(now);
         if (link_health_.faulted()) {
             faulted_read_failed_at_ = now;  // the back-off window starts (#1626)
+            throw_fault_locked();
+        }
+    }
+
+    // A read that answers without asking the mount (the site, UTCDate,
+    // SiderealTime, DestinationSideOfPier, DoesRefraction, IsPulseGuiding and
+    // Slewing's pending Park/FindHome and grace answers) throws the latched
+    // fault too, after the staleness check (decision 0009 rule 1).
+    void throw_if_faulted_locked() const {
+        if (link_health_.faulted()) {
+            lose_link_if_stale_locked(clock_.now());
             throw_fault_locked();
         }
     }
@@ -2378,6 +2445,11 @@ private:
         if (!connected_) {
             return;
         }
+        // While the link fault is latched every read throws it (decision 0009
+        // rule 1), a cached site included, and a site the connect could not
+        // read is not fetched again: that fetch would wait out the reply
+        // timeout under mutex_ and swallow the failure (#1659).
+        throw_if_faulted_locked();
         // Site coordinates only change via set_site_latitude/longitude
         // (which update the cache directly) — once valid, never re-fetch.
         // Missing this check meant every SiteLatitude/SiteLongitude/
@@ -2389,14 +2461,6 @@ private:
             return;
         }
         auto now = clock_.now();
-        // A site the connect could not read is fetched again here; while the
-        // link fault is latched that fetch would wait out the reply timeout
-        // under mutex_ and swallow the failure, so throw the fault as the
-        // status and position reads do (decision 0009 rule 1; #1658 review).
-        if (link_health_.faulted()) {
-            lose_link_if_stale_locked(now);
-            throw_fault_locked();
-        }
         if (last_site_info_attempt_ != std::chrono::steady_clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
             return;

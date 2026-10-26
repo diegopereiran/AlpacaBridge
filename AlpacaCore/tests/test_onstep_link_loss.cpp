@@ -631,6 +631,23 @@ TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outag
         CHECK(replugged.received(":Qe#"));
         CHECK(replugged.received(":Qw#"));
     }
+    SECTION("outage past the window while the mount parks: the park is left to finish") {
+        REQUIRE_FALSE(driver->get_connected());
+        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
+        replugged.set_reply(":GU#", "nIEo190#");  // parking (#1289 item 5)
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK_FALSE(replugged.received_any_stop());  // :Q# would abort the park
+    }
+    SECTION("outage past the window, status unreadable: the stops are sent anyway") {
+        REQUIRE_FALSE(driver->get_connected());
+        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
+        replugged.set_reply(":GU#", "");  // no reply: whether it parks is unknown
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(replugged.received(":Q#"));
+        CHECK(replugged.received(":Qe#"));
+    }
     SECTION("outage inside the window: motion is left alone") {
         REQUIRE_FALSE(driver->get_connected());  // the loss is seen, and stamped, here
         alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::hours(1));
@@ -1117,6 +1134,105 @@ TEST_CASE("OnStep link loss - a site the connect could not read throws the fault
     REQUIRE_NOTHROW((void)driver->get_side_of_pier());
     CHECK(driver->get_link_fault().empty());
     CHECK(site_reads() > before);
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 1: while faulted reads throw the fault. The reads that ask
+// the mount nothing (the site, UTCDate, SiderealTime, DestinationSideOfPier,
+// DoesRefraction) used to answer from the connect's values, and IsPulseGuiding
+// and the rate getters from the driver's own state; they throw too now, as in
+// Sky-Watcher, and answer again once a reply clears the fault.
+TEST_CASE("OnStep link loss - the reads that ask the mount nothing throw the fault while faulted",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    alpacacore::test::FakeTaskClock clock;
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const double latitude = driver->get_site_latitude();  // the connect read the site
+    driver->pulse_guide(0, 5000);                         // commanded state the driver tracks
+    REQUIRE(driver->get_is_pulse_guiding());
+    (void)driver->get_right_ascension();
+    clock.advance(std::chrono::milliseconds(2100));  // past the 2 s caches
+
+    mount.mute(true);
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // the third throws: the fault latched
+        }
+    }
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    const auto sent = mount.commands().size();
+    const std::vector<std::pair<const char*, std::function<void()>>> reads{
+        {"SiteLatitude", [&] { (void)driver->get_site_latitude(); }},
+        {"SiteLongitude", [&] { (void)driver->get_site_longitude(); }},
+        {"UTCDate", [&] { (void)driver->get_utc_date(); }},
+        {"SiderealTime", [&] { (void)driver->get_sidereal_time(); }},
+        {"DestinationSideOfPier", [&] { (void)driver->get_destination_side_of_pier(2.0, 10.0); }},
+        {"DoesRefraction", [&] { (void)driver->get_does_refraction(); }},
+        {"IsPulseGuiding", [&] { (void)driver->get_is_pulse_guiding(); }},
+        {"DeclinationRate", [&] { (void)driver->get_declination_rate(); }},
+        {"RightAscensionRate", [&] { (void)driver->get_right_ascension_rate(); }},
+        {"TrackingRate", [&] { (void)driver->get_tracking_rate(); }},
+    };
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        try {
+            read();
+            FAIL("answered during the fault");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        }
+    }
+    CHECK(mount.commands().size() == sent);  // they ask the mount nothing
+
+    mount.mute(false);
+    clock.advance(std::chrono::milliseconds(2100));        // past the faulted-read back-off
+    REQUIRE_NOTHROW((void)driver->get_right_ascension());  // a reply clears the fault
+    REQUIRE(driver->get_link_fault().empty());
+    CHECK(driver->get_site_latitude() == latitude);
+    CHECK_NOTHROW((void)driver->get_sidereal_time());
+    CHECK_NOTHROW((void)driver->get_is_pulse_guiding());
+    CHECK_NOTHROW((void)driver->get_tracking_rate());
+    driver->set_connected(false);
+}
+
+// Decision 0009 rule 1: within the 2 s slew grace Slewing answers true without
+// asking the mount, so it refuses a latched fault itself, as its pending-Park
+// answer does.
+TEST_CASE("OnStep link loss - Slewing within the slew grace throws the fault", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    alpacacore::test::FakeTaskClock clock;  // not moved: the grace stays open
+    FakeOnStepSerialMount mount;
+    mount.set_reply(":GU#", "NpEo190#");  // tracking, idle: the slew goes out
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(2.0, 20.0));  // the caches are dropped, the grace starts
+    REQUIRE(driver->get_slewing());
+
+    mount.mute(true);
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();        // asks the mount: the position cache was dropped
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // the third throws: the fault latched
+        }
+    }
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    try {
+        (void)driver->get_slewing();
+        FAIL("Slewing answered from the grace during the fault");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+    }
     driver->set_connected(false);
 }
 

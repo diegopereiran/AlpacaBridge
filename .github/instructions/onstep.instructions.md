@@ -119,7 +119,8 @@ it is never reachable through `router.cpp` or the web UI.
   (`:Mgn####`/`:Mgs####`/`:Mge####`/`:Mgw####`, 4-digit zero-padded milliseconds) — fire-and-forget,
   the mount stops the pulse itself. `IsPulseGuiding` is tracked from the known requested
   duration, not polled from the mount, and ends early on a stop that ends the pulse: `AbortSlew`
-  (`:Q#` ends every guide, OnStepX `Guide::stop()`) and a `MoveAxis(axis, 0)` on the pulse's axis
+  and the same stops a `Park` or `FindHome` sends before a moving mount parks or homes (`:Q#` ends
+  every guide, OnStepX `Guide::stop()`), and a `MoveAxis(axis, 0)` on the pulse's axis
   (`:Qe#`/`:Qw#` or `:Qn#`/`:Qs#` end that axis's guides). Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread. A `Duration` over 9999 ms does not fit the 4-digit field
   and is refused with `InvalidValue` rather than clamped (#1478). Direction and Duration are
@@ -299,7 +300,7 @@ it is never reachable through `router.cpp` or the web UI.
   about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
   2.5 degrees at 0.25 deg/s in #1241; it moves from the home position too, HM-17 2026-10-19), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
   sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
-  loss, stops nothing (#521). The stops also end a park that was running, as AbortSlew's do.
+  loss, stops nothing (#521). A park still running is left to finish (#1289 item 5): the reconnect reads `:GU#` first and sends no stops while it shows `I` (parking), since `:Q#` would abort the park and leave the mount unparked where it stopped (OnStepX `Park::requestAborted()`); a status it cannot read stops anyway, after waiting out that read's reply timeout.
   They leave tracking as it was: `:Q#` stops a GOTO through `goTo.abort()` and the guide stop and
   never calls `mount.tracking(false)` (HM-17 2026-10-24: `:GU#` `pEW160` before, `NpEW160` after a
   `:Q#` sent mid-GOTO), so nothing has to restore tracking after them.
@@ -323,12 +324,19 @@ it is never reachable through `router.cpp` or the web UI.
   third latches a fault (ERROR) and those reads throw `DriverException` "OnStep mount
   communications compromised" while `Connected` stays true and `get_link_fault()` reads "Mount not
   answering (...)"; while faulted no status or position cache is served (not inside the 2 s
-  window, not `SideOfPier`): a read asks the mount, and one good reply clears the fault (INFO).
-  A site the connect could not read is not fetched again while faulted: `SiteLatitude`,
-  `SiteLongitude`, `SiderealTime` and `DestinationSideOfPier` throw the fault instead (#1659;
-  `DestinationSideOfPier` used to answer from a default site after the timeout). `SideOfPier`
-  reads the position first, so it still asks the mount, and a good reply clears the fault and
-  lets the site be fetched.
+  window, not `SideOfPier`): a status or position read asks the mount, and one good reply clears
+  the fault (INFO). The reads of mount values the connect read, `SiteLatitude`, `SiteLongitude`,
+  `UTCDate`, `SiderealTime`, `DestinationSideOfPier` and `DoesRefraction`, throw the fault too
+  (decision 0009 rule 1); they used to answer from the connect's values, and a site the connect
+  could not read was fetched again with no fault check (#1659). `SideOfPier` reads the position
+  first, so it still asks the mount, and a good reply clears the fault and lets the site be read.
+  Commanded state the driver tracks throws too, as in Sky-Watcher (open-astro#882):
+  `IsPulseGuiding`, `Slewing` (also while a `Park` or `FindHome` is pending or within the slew
+  grace; `AbortSlew` and `MoveAxis(axis, 0)` still send their stops) and the rate getters
+  (`DeclinationRate`, `RightAscensionRate`, `TrackingRate`, which read lock-free from the
+  latched fault text so they never wait behind serial I/O). The client's own values answer, as in
+  Sky-Watcher: `TargetRightAscension`/`TargetDeclination`, `SlewSettleTime`, `SiteElevation` (the
+  device config), `GuideRate` (informational) and the `Can*` constants.
   Within 2 s (`kFaultedReadBackoff`) of a read that failed while faulted, the reads throw the
   fault without asking, so a faulted `DeviceState` costs one reply timeout instead of one per
   getter (#1626). A read that finds the link lost (`NotConnected`) throws it even while a cache is
@@ -371,7 +379,8 @@ it is never reachable through `router.cpp` or the web UI.
   too, which the second `:MS#` would also have stopped. A home with home sensors runs as a guide
   move, not a GOTO (`:GU#` shows `h` with `N`), so it is refused separately ("<member> is not allowed
   while the mount is homing"), the syncs included: before, the slew ended the waiting `FindHome` and
-  the mount refused it as already moving (reply `8`). `AbortSlew` ends the grace and the status cache,
+  the mount refused it as already moving (reply `8`). It reads the 2 s status cache, as the GOTO
+  check does, so a home started from the handset less than 2 s before the slew is not seen. `AbortSlew` ends the grace and the status cache,
   so the next slew asks the mount; it goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
   GOTO state while it brakes after `:Q#` (HM-17 2026-10-24: about 1.6 s), and a slew in that time
   is refused, as the firmware would refuse it (reply `5`). A `:MS#` the mount refuses reports its reply digit and reason (the digits are
