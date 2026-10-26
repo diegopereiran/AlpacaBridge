@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -24,7 +25,7 @@ namespace alpacacore::util {
 
 // What a GPIO power-port switch does to its ports when the server starts
 // (decision 0021, issue #300). The device config's `powerOnState` field.
-enum class PowerOnState {
+enum class PowerOnState : std::uint8_t {
     Leave,    // "leave": never touch a port at start; it keeps what the boot gave it
     Restore,  // "restore": put back the value a client last set
     Off,      // "off": every writable port off on the first start after a boot
