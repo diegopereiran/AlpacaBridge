@@ -1,0 +1,10 @@
+### Fixed
+
+- **OnStep: while the link fault is latched, the site, `UTCDate`, `SiderealTime`, `DestinationSideOfPier` and `DoesRefraction` reads throw the fault** (decision 0009 rule 1): they ask the mount nothing, so they kept answering from the values the connect read while every other read threw. They now throw the same `DriverException`, and answer again once a reply clears the fault. `SiteElevation` (a device-config value) is unchanged. Test: `test_onstep_link_loss.cpp` "OnStep link loss - the reads that ask the mount nothing throw the fault while faulted".
+- **OnStep: the stops before a Park or FindHome end `IsPulseGuiding`**, as AbortSlew's do: `:Q#` ends every guide, a pulse guide included. Test: `test_onstep_telescope.cpp` "OnStep Telescope Driver - the stops before a Park or FindHome end IsPulseGuiding".
+- **OnStep: `AtPark` reads true right after a Park the mount answers "already parked"** (OnStep 4.x): the parked state came only from a `:GU#` re-read, and when that read failed the cached status, still unparked, was served. The mount's answer now marks the status cache parked. Test: `test_onstep_telescope.cpp` "OnStep Telescope Driver - a park answered already parked is a no-op and a home answered parked is InvalidWhileParked".
+- **OnStep: a reconnect after a long outage leaves a park in progress to finish** (issue #1289 item 5): it sent AbortSlew's stops whatever the mount was doing, and `:Q#` aborts a running park, so the mount stayed unparked where it stopped. It now reads `:GU#` first and sends no stops while the mount is parking; a status it cannot read stops as before. Test: `test_onstep_link_loss.cpp` "OnStep link loss - the reconnect stops motion only after a long outage".
+
+### Changed (docs)
+
+- `onstep.instructions.md` and decision 0009's OnStep Adoption row: the reads of mount values throw while faulted (the site, `UTCDate`, `SiderealTime` and `DoesRefraction` reads included), while what the driver itself tracks still answers; the homing refusal reads the 2 s status cache, so a handset home started just before a slew is not seen.

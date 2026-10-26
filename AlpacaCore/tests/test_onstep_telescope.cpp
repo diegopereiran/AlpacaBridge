@@ -1706,6 +1706,7 @@ struct ParkHomeFake {
     bool home_ack_25 = false;   // :hC# accepted with :GE# 25 instead of 0
     bool park_zero_ok = false;  // :hP# accepted, reply reads '0', :GE# 00
     std::string ge_reply;       // non-empty: :GE# answers this instead of the code
+    bool silent_after_ge = false;  // goes silent once it has answered a :GE#
     int brake_ms = 300;
     // Every driver timer and this fake's braking run on it (decision 0005).
     alpacacore::test::FakeTaskClock clock;
@@ -1766,6 +1767,7 @@ struct ParkHomeFake {
             if (!ge_reply.empty()) return ge_reply;
             char buf[8];
             std::snprintf(buf, sizeof(buf), "%02d#", last_error);
+            if (silent_after_ge) silent = true;
             return buf;
         }
         last_error = 0;
@@ -2351,6 +2353,17 @@ TEST_CASE(
         CHECK(driver->get_at_park());
         CHECK_FALSE(driver->get_slewing());
     }
+    SECTION("Park answered 9, then a status read that fails: still a no-op") {
+        mount->refuse_code = 9;
+        mount->silent_after_ge = true;  // the re-read of :GU# after the code gets no reply
+        REQUIRE_NOTHROW(driver->park());
+        CHECK(mount->count(":hP#") == 1);
+        CHECK(driver->get_at_park());  // from the mount's 9: the one failed read serves the cache
+        {
+            std::lock_guard<std::mutex> lock(mount->mutex);
+            mount->silent = false;
+        }
+    }
     SECTION("FindHome answered 18") {
         mount->refuse_code = 18;
         try {
@@ -2360,6 +2373,26 @@ TEST_CASE(
             CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
         }
     }
+    driver->set_connected(false);
+}
+
+// Park and FindHome send AbortSlew's stops before a moving mount parks or
+// homes; :Q# ends every guide, a pulse guide included, so IsPulseGuiding ends
+// with them, as it does after AbortSlew.
+TEST_CASE("OnStep Telescope Driver - the stops before a Park or FindHome end IsPulseGuiding",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ParkHomeFake>();
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    driver->pulse_guide(0, 5000);  // the fake shows the guide move: the mount moves
+    REQUIRE(driver->get_is_pulse_guiding());
+    const auto stops_before = mount->count(":Q#");
+    SECTION("Park") { REQUIRE_NOTHROW(driver->park()); }
+    SECTION("FindHome") { REQUIRE_NOTHROW(driver->find_home()); }
+    CHECK(mount->count(":Q#") > stops_before);  // the stops went out
+    CHECK_FALSE(driver->get_is_pulse_guiding());
     driver->set_connected(false);
 }
 

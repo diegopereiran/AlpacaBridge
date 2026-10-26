@@ -353,6 +353,7 @@ public:
             slewing_cached_ = false;
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             pulse_guiding_active_ = false;
+            pulse_guide_axis_ = -1;
             tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
@@ -755,6 +756,7 @@ public:
     bool get_does_refraction() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_faulted_locked();  // the connect's :GXEE# value, a mount read (decision 0009 rule 1)
         return refraction_from_firmware_.value_or(does_refraction_);
     }
 
@@ -904,6 +906,7 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_faulted_locked();  // no I/O, but a faulted read throws (decision 0009 rule 1)
         if (!utc_offset_.valid()) {
             // The host clock is not the mount's (ITelescopeV4 UTCDate, #1478). The
             // mount clock is read once at connect, so a getter never waits on it.
@@ -1690,6 +1693,7 @@ private:
                                   AlpacaError::DriverException);
         }
         clear_manual_motion_locked();
+        pulse_guiding_active_ = false;  // AbortSlew's stops end every guide, a pulse guide included
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         tracking_before_slew_ = false;
@@ -1722,7 +1726,15 @@ private:
             return ParkHomeTry::Taken;  // for a park: the reply was lost or garbled, but the mount took it
         }
         if (!home && code == kCeParked) {
-            refresh_status_cache_locked(true);  // AtPark reads the mount's parked state
+            cached_status_.is_parked = true;  // the mount says so; AtPark reads it
+            cached_status_.is_slewing = false;
+            try {
+                refresh_status_cache_locked(true);  // best-effort: a failed read does not make the no-op a refusal
+            } catch (const AlpacaException& ex) {
+                if (ex.error_code() == AlpacaError::NotConnected) {
+                    throw;  // the link is gone, as for any read
+                }
+            }
             return ParkHomeTry::AlreadyParked;
         }
         if (home && code == kCeSlewInPark) {
@@ -1908,6 +1920,7 @@ private:
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
         pulse_guiding_active_ = false;
+        pulse_guide_axis_ = -1;
         utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
         mount_clock_unreadable_.reset();
     }
@@ -1941,6 +1954,18 @@ private:
         }
         char seconds[32];
         std::snprintf(seconds, sizeof(seconds), "%.1f", std::chrono::duration<double>(outage).count());
+        // A park still running is left to finish (#1289 item 5): :Q# would
+        // abort it and leave the mount unparked where it stopped (OnStepX
+        // Park::requestAborted()). A status that cannot be read stops anyway.
+        try {
+            if (protocol.get_status().is_parking) {
+                ALPACA_LOG_INFO("OnStep", std::string("Serial link was last seen alive ") + seconds +
+                                              " s ago; the mount is parking, so the park is left to finish");
+                return;
+            }
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // unknown state: stop, as before
+        }
         ALPACA_LOG_WARN("OnStep", std::string("Serial link was last seen alive ") + seconds +
                                       " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521)");
         // Each stop on its own, as AbortSlew does (#781): a failed :Q# must
@@ -2249,6 +2274,16 @@ private:
 
     // The latched fault as every faulted read reports it (decision 0009 rule 1),
     // one text for all of them (#1658 review).
+    // A read that answers without asking the mount (the site, UTCDate,
+    // SiderealTime, DestinationSideOfPier) throws the latched fault too, as
+    // decision 0009 rule 1 says every read does, after the staleness check.
+    void throw_if_faulted_locked() const {
+        if (link_health_.faulted()) {
+            lose_link_if_stale_locked(clock_.now());
+            throw_fault_locked();
+        }
+    }
+
     [[noreturn]] void throw_fault_locked() const {
         throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
                               AlpacaError::DriverException);
@@ -2378,6 +2413,11 @@ private:
         if (!connected_) {
             return;
         }
+        // While the link fault is latched every read throws it (decision 0009
+        // rule 1), a cached site included, and a site the connect could not
+        // read is not fetched again: that fetch would wait out the reply
+        // timeout under mutex_ and swallow the failure (#1659).
+        throw_if_faulted_locked();
         // Site coordinates only change via set_site_latitude/longitude
         // (which update the cache directly) — once valid, never re-fetch.
         // Missing this check meant every SiteLatitude/SiteLongitude/
@@ -2389,14 +2429,6 @@ private:
             return;
         }
         auto now = clock_.now();
-        // A site the connect could not read is fetched again here; while the
-        // link fault is latched that fetch would wait out the reply timeout
-        // under mutex_ and swallow the failure, so throw the fault as the
-        // status and position reads do (decision 0009 rule 1; #1658 review).
-        if (link_health_.faulted()) {
-            lose_link_if_stale_locked(now);
-            throw_fault_locked();
-        }
         if (last_site_info_attempt_ != std::chrono::steady_clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
             return;
