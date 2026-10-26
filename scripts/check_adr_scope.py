@@ -28,9 +28,15 @@ Two modes:
            sign-off as the last line (bold, italics or a closing period or
            exclamation mark around it still count). Any finding exits 1, so nothing posts.
 
+  --skeleton SCOPE
+           prints one `- <record file> rule <n>: VERDICT: reason` line per
+           listed rule, for the review prompt to fill in (#1655); a malformed
+           scope line exits 1.
+
 Usage:
     check_adr_scope.py --list [--root DIR] < paths
     check_adr_scope.py --checklist SCOPE_FILE REVIEW_FILE
+    check_adr_scope.py --skeleton SCOPE_FILE
     check_adr_scope.py [--body-file FILE] [--base REV]
     check_adr_scope.py --self-test
 """
@@ -150,6 +156,30 @@ def scope_pairs(scope):
     return pairs, bad
 
 
+def scope_order(scope):
+    """[(record file, rule number)] from --list output, in the order it lists them; malformed lines are skipped."""
+    pairs = []
+    for line in scope.splitlines():
+        m = SCOPE_LINE_RE.match(line.strip())
+        if m:
+            pairs.extend((m.group(1), int(n)) for n in m.group(2).split(", "))
+    return pairs
+
+
+def skeleton_line(pair):
+    return "- %s rule %d: VERDICT: reason" % pair
+
+
+def skeleton(scope):
+    """One checklist line per listed rule for the review to fill in, so it never has to expand the list itself (#1655).
+
+    A malformed scope line raises ValueError, as --checklist reports it, so the two never disagree on the rules."""
+    bad = scope_pairs(scope)[1]
+    if bad:
+        raise ValueError("the rule scope has a line that is not `<record file>: rules <n>`: %r" % bad[0])
+    return [skeleton_line(pair) for pair in scope_order(scope)]
+
+
 def checklist_findings(scope, review):
     """What keeps a review from posting: a listed rule with no verdict, two verdicts, or a defect signed off clean."""
     expected, bad = scope_pairs(scope)
@@ -198,6 +228,17 @@ def main(argv):
         for f in findings:
             print("adr-checklist: " + f)
         return 1 if findings else 0
+    if argv[:1] == ["--skeleton"]:
+        if len(argv) != 2:
+            print("usage: check_adr_scope.py --skeleton SCOPE_FILE", file=sys.stderr)
+            return 2
+        try:
+            lines = skeleton(Path(argv[1]).read_text(encoding="utf-8", errors="replace"))
+        except ValueError as e:
+            print("adr-skeleton: %s" % e, file=sys.stderr)
+            return 1
+        print("\n".join(lines))
+        return 0
     args = iter(argv)
     root, body_file, base = ROOT, None, None
     for arg in args:
@@ -308,6 +349,17 @@ def self_test():
     expect(any("not `<record file>" in x for x in f), "a malformed scope line is reported")
     expect(checklist_findings(scope, "0005-task-clock.md rule 2 passes, and so do the rest\n" + ok) != [],
            "prose that mentions a rule is not a checklist line")
+
+    sk = skeleton(scope)
+    expect(sk == ["- 0003-docs-drift-gates.md rule 3: VERDICT: reason", "- 0005-task-clock.md rule 1: VERDICT: reason",
+                  "- 0005-task-clock.md rule 2: VERDICT: reason"], "the skeleton has one line per listed rule, in order: %r" % sk)
+    expect(skeleton("none (the base branch has no decision records)\n") == [], "an empty scope has no skeleton")
+    expect(all(not CHECKLIST_RE.match(line) for line in sk), "an unfilled skeleton line is not a verdict")
+    try:
+        skeleton(scope + "rm -rf /\n")
+        expect(False, "a malformed scope line fails the skeleton, as it fails the checklist")
+    except ValueError:
+        pass
 
     repro = ("## Defects\n\nnone\n\n## Decision records\n\n- 0003-docs-drift-gates.md rule 1: pass: a\n"
              "- 0005-task-clock.md rule 2: n/a: b\n")
