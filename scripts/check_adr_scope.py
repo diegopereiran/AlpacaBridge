@@ -309,6 +309,30 @@ def self_test():
     expect(checklist_findings(scope, "0005-task-clock.md rule 2 passes, and so do the rest\n" + ok) != [],
            "prose that mentions a rule is not a checklist line")
 
+    sk = skeleton(scope)
+    expect(sk == ["- 0003-docs-drift-gates.md rule 3: VERDICT: reason", "- 0005-task-clock.md rule 1: VERDICT: reason",
+                  "- 0005-task-clock.md rule 2: VERDICT: reason"], "the skeleton has one line per listed rule, in order: %r" % sk)
+    expect(skeleton("none (the base branch has no decision records)\n") == [], "an empty scope has no skeleton")
+    expect(all(not CHECKLIST_RE.match(line) for line in sk), "an unfilled skeleton line is not a verdict")
+    dropped = full.replace("- 0005-task-clock.md rule 2: n/a: the ZWO telescope row is planned\n", "")
+    expect(missing_lines(scope, dropped) == ["- 0005-task-clock.md rule 2: VERDICT: reason"],
+           "a dropped rule is repairable: %r" % missing_lines(scope, dropped))
+    expect(missing_lines(scope, full) == [], "a complete checklist needs no repair")
+    expect(missing_lines(scope, dropped.replace("rule 1: n/a", "rule 1: defect")) is None,
+           "a dropped rule beside a defect under the Approved sign-off is not repairable")
+    expect(missing_lines(scope + "rm -rf /\n", dropped) is None, "a malformed scope is not repairable")
+    expect(repair_findings(scope, dropped, full) == [], "a repair that adds only the dropped line passes")
+    f = repair_findings(scope, dropped, full.replace("no driver file changed", "changed"))
+    expect(any("changed or removed" in x for x in f), "a repair that rewrites a line is reported: %r" % f)
+    f = repair_findings(scope, dropped, full.replace(ok, ok + "\n- 0005-task-clock.md rule 2: n/a: late"))
+    expect(f != [], "a repair that adds a line after the sign-off is reported: %r" % f)
+    f = repair_findings(scope, dropped, full.replace("## Decision records\n", "## Decision records\nInjected text\n"))
+    expect(any("not a checklist line" in x for x in f), "a repair that adds prose is reported: %r" % f)
+    f = repair_findings(scope, dropped, full.replace("## Decision records\n",
+                                                     "## Decision records\n- 0003-docs-drift-gates.md rule 3: defect: x\n"))
+    expect(any("not one of the missing rules" in x for x in f), "a repair that adds a verdict for a present rule is reported: %r" % f)
+    expect(repair_findings(scope, full, full) != [], "a review with nothing missing has nothing to repair")
+
     repro = ("## Defects\n\nnone\n\n## Decision records\n\n- 0003-docs-drift-gates.md rule 1: pass: a\n"
              "- 0005-task-clock.md rule 2: n/a: b\n")
     out = fold_checklist(repro)
