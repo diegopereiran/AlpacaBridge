@@ -17,6 +17,7 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -64,10 +65,17 @@ constexpr int kSetAckTimeoutMs = 1000;
 // a connected OnStep mount (a sibling) from another vendor's device.
 constexpr const char* kSerialOwner = "OnStep mount";
 
-// Per-read wait on the connected link. The fd is non-blocking and every read
-// goes through util::tty_read(), so this is the poll() bound that replaced
-// the old VTIME=1 (100 ms) read window.
+// The connected link's read slice, the old VTIME=1 (100 ms) read window: the
+// idle gap that ends drain_stale(), its shortest wait for a first byte, and
+// how long read_response() waits past its timeout for the byte in flight.
+// The fd is non-blocking and every read is poll()-bounded (util::read_until).
 constexpr int kSerialReadSliceMs = 100;
+
+// A mount reply never nears this; it caps a runaway line instead of growing a string forever.
+constexpr std::size_t kMaxReplyLen = 65536;
+
+// The probe keeps at most 31 bytes before the '#' (a '#' as the 31st byte still ends it).
+constexpr std::size_t kProbeReplyMax = 31;
 
 // Parse a generic sexagesimal LX200 field ("HH:MM:SS", "HH:MM.T", "sDD*MM:SS",
 // "sDD*MM", "sHH.H", ...) into a decimal value. Any run of non-digit,
@@ -275,23 +283,15 @@ std::string probe_query(int fd, const char* cmd, int budget_ms) {
     if (!util::tty_write_all(fd, cmd, std::char_traits<char>::length(cmd))) {
         return "";
     }
-    std::string resp;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
-    while (resp.size() < 31) {
-        const auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-        if (remaining <= 0) {
-            break;
-        }
-        char ch = 0;
-        const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
-        if (r != 1) {
-            break;  // 0: silent for the rest of the budget; -1: read error or hangup
-        }
-        if (ch == '#') {
-            break;
-        }
-        resp.push_back(ch);
+    // Up to 31 bytes before the '#', CR/LF included; a timeout or a hangup
+    // keeps what came, which then fails the identity check.
+    util::ReadSpec spec;
+    spec.skip.clear();
+    spec.max_len = kProbeReplyMax;
+    const auto r = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms));
+    std::string resp = r.bytes;
+    if (r.outcome == util::ReadOutcome::Terminator) {
+        resp.pop_back();
     }
     return resp;
 }
@@ -744,20 +744,22 @@ public:
         drain_stale(50);
     }
 
+    // Discard whatever the mount sends now: wait up to wait_ms (at least one
+    // read slice) for a first byte, then read on until a read slice passes
+    // with none, as the byte-at-a-time loop did. A hangup on the tty loses
+    // the link; over TCP it ends the drain (the seam is never lost).
     void drain_stale(int wait_ms) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
-        bool got_any = false;
-        while (true) {
-            char ch;
-            bool got = (connection_type_ == ConnectionType::Serial) ? read_serial_char(ch) : read_network_char(ch);
-            if (got) {
-                got_any = true;
-                continue;
-            }
-            if (got_any || std::chrono::steady_clock::now() >= deadline) {
-                return;
-            }
-        }
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::IdleGap;
+        spec.idle_gap = read_slice();
+        spec.first_byte_timeout = std::max(std::chrono::milliseconds(wait_ms), read_slice());
+        spec.skip.clear();  // every byte is stale, CR/LF included
+        spec.max_len = kMaxReplyLen;
+        // The deadline only caps a line that never goes idle: max_len bytes, each within one idle gap.
+        (void)checked_read(spec,
+                           std::chrono::steady_clock::now() + *spec.first_byte_timeout +
+                               spec.idle_gap * static_cast<int>(spec.max_len),
+                           /*hangup_throws=*/false);
     }
 
     void flush_input() {
@@ -1165,8 +1167,10 @@ private:
         // reconnects.
         //
         // The read slice is kSerialReadSliceMs (100ms), NOT the probe path's
-        // 2s: read_response()'s and drain_stale()'s software timeout budgets
-        // are only enforced in increments of it, so a long slice made every
+        // 2s: drain_stale() waits at least one slice and ends after a quiet
+        // one, and read_response() reads one slice past its timeout for the
+        // byte in flight. When the timeout budgets were enforced only in
+        // increments of the slice (the byte-at-a-time loop), a long slice made every
         // non-acking blind command (e.g. pulse guide) and every
         // genuinely-silent response cost multiple real seconds instead of the
         // intended tens of milliseconds — confirmed against real hardware
@@ -1284,85 +1288,85 @@ private:
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
 
-    bool read_serial_char(char& ch) {
-        // Bounded read (poll() on a non-blocking fd), held under mutex_ by
-        // design — the mutex provides transaction atomicity for
-        // command/response pairs.
-        const ssize_t bytes_read = util::tty_read(serial_fd_, &ch, 1, kSerialReadSliceMs);
-        if (bytes_read == 1) {
-            return true;
-        }
-        if (bytes_read < 0) {
-            // tty_read() reports a hung-up tty (read() returning 0) as EIO.
-            const int err = errno;
-            if (is_loss_errno(err)) {
-                lose_link_locked("read failed: " + util::errno_string(err));
-            }
-            return false;
-        }
-        // 0 is a read-slice timeout; the node may be gone without the fd
-        // reporting it yet.
-        if (node_removed_locked()) {
-            lose_link_locked("the adapter was removed");
-        }
-        return false;
+    // The read slice of the byte-at-a-time loop: 100 ms over serial, the
+    // socket's 200 ms SO_RCVTIMEO over TCP.
+    std::chrono::milliseconds read_slice() const {
+        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? kSerialReadSliceMs : 200);
     }
 
-    bool read_network_char(char& ch) {
-        // Bounded recv (SO_RCVTIMEO), held under mutex_ by design.
-        ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-        return bytes_received == 1;
+    // One read for both transports: util::read_until on the tty or
+    // util::read_until_socket on the TCP fd, poll()-bounded and held under
+    // mutex_ by design (the mutex makes a command and its reply one
+    // transaction). A hangup on the tty loses the link ("read failed:
+    // <errno>"), and a read that ended on silence checks that the node is
+    // still there, as each empty read slice did. Over TCP a hangup throws
+    // "OnStep network link lost (hangup)" when @p hangup_throws, and is
+    // returned otherwise; the TCP seam has no node and is never lost.
+    util::ReadResult checked_read(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline,
+                                  bool hangup_throws = true) {
+        if (connection_type_ == ConnectionType::Serial) {
+            const auto r = util::read_until(serial_fd_, spec, deadline);
+            if (r.outcome == util::ReadOutcome::LinkDead) {
+                lose_link_locked("read failed: " + util::errno_string(r.err));
+            }
+            if ((r.outcome == util::ReadOutcome::Timeout || r.outcome == util::ReadOutcome::Idle) &&
+                node_removed_locked()) {
+                lose_link_locked("the adapter was removed");
+            }
+            return r;
+        }
+        const auto r = util::read_until_socket(socket_fd_, spec, deadline);
+        if (r.outcome == util::ReadOutcome::LinkDead && hangup_throws) {
+            throw AlpacaException("OnStep network link lost (hangup): " + util::errno_string(r.err));
+        }
+        return r;
+    }
+
+    // The byte the line sends in the read slice after a reply's timeout ran
+    // out, or "" when it stays quiet. The byte-at-a-time loop checked the
+    // timeout after each byte and never after a '#', so the byte in flight when
+    // the timeout ran out settled the reply: a '#' still ended it, any other
+    // byte was kept and the reply had timed out. A strict deadline would leave
+    // a late '#' to answer the next command; a deadline one slice later would
+    // take a whole late reply.
+    std::string late_byte(const std::string& skip) {
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Length;
+        spec.length = 1;
+        spec.skip = skip;
+        return checked_read(spec, std::chrono::steady_clock::now() + read_slice()).bytes;
     }
 
     std::string read_response(bool require_hash_terminator, int timeout_ms) {
-        std::string response;
-        auto start = std::chrono::steady_clock::now();
-        auto last_char_time = start;
-        const int idle_break_ms = 100;
-
-        while (true) {
-            char ch;
-            bool got_char = (connection_type_ == ConnectionType::Serial) ? read_serial_char(ch) : read_network_char(ch);
-            if (got_char) {
-                last_char_time = std::chrono::steady_clock::now();
-                if (ch == '#') {
-                    break;
-                }
-                // Deliberately NOT a `continue` back to the top of the loop:
-                // that would skip the elapsed/idle timeout checks below for
-                // this iteration, and a sustained run of only \r/\n bytes
-                // (line noise, a framing error, a firmware echo quirk) would
-                // then busy-spin forever with no timeout ever firing --
-                // hanging this call, and with it every other Alpaca call for
-                // this device, since read_response() runs under mutex_.
-                if (ch != '\r' && ch != '\n') {
-                    response.push_back(ch);
-                }
-            }
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
-            if (elapsed.count() > timeout_ms) {
-                if (!require_hash_terminator) {
-                    return response;
-                }
+        // The '#' ends the reply; an unterminated ack ("0"/"1" with no '#')
+        // ends when the line goes quiet for 100 ms after its first byte, or at
+        // a '#'. CR/LF are dropped. The wait is poll()-bounded, so the old
+        // 10 ms pacing sleep is gone, and a run of CR/LF cannot spin: the
+        // deadline holds whatever arrives.
+        util::ReadSpec spec;
+        spec.max_len = kMaxReplyLen;
+        if (!require_hash_terminator) {
+            spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
+            spec.idle_gap = std::chrono::milliseconds(100);
+        }
+        const auto r = checked_read(spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+        switch (r.outcome) {
+            case util::ReadOutcome::Overflow:
+                throw AlpacaException("OnStep response too long");
+            case util::ReadOutcome::Timeout: {
+                const std::string late = late_byte(spec.skip);
+                if (late == "#") return r.bytes;
+                if (!require_hash_terminator) return r.bytes + late;
                 throw AlpacaException("Timeout waiting for OnStep response");
             }
-            if (!require_hash_terminator && !got_char && !response.empty()) {
-                auto idle_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_char_time);
-                if (idle_elapsed.count() > idle_break_ms) {
-                    break;
-                }
+            case util::ReadOutcome::Terminator: {
+                std::string bytes = r.bytes;
+                bytes.pop_back();  // the '#'
+                return bytes;
             }
-            // For a '#'-terminated reply, back off only when nothing arrived:
-            // a pause after every character cost ~10 ms each (a 14-char :GRa#
-            // reply took ~0.16 s at 9600 baud, where the bytes take ~15 ms).
-            // An unterminated ack keeps it: its idle break needs this pause
-            // plus one VTIME wait to pass 100 ms, or it waits a second cycle.
-            if (!got_char || !require_hash_terminator) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
+            default:
+                return r.bytes;
         }
-        return response;
     }
 
     // ── Link-loss helpers (decision 0009, #1241) ──
