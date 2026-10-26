@@ -10,9 +10,9 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The connected-path reply read of the iOptron, Celestron NexStar, SynScan and
-// ZWO mount wrappers goes through util::read_until (issue #1644, slice of
-// #1604). Two properties, each per wrapper over a pty:
+// The connected-path reply read of the iOptron, Celestron NexStar, SynScan,
+// ZWO and OnStep mount wrappers goes through util::read_until (issue #1644 and
+// the OnStep slice after it, both of #1604). Two properties, each per wrapper over a pty:
 // - a line that goes away while a command waits for its reply reads as a
 //   hangup at once, not as a timeout after the full reply window: the "mount"
 //   takes the command and then severs the pty, so the write succeeds and the
@@ -31,6 +31,11 @@
 // up to 16 stale bytes, each waited for one 200 ms read slice; and so does the
 // serial blind-command ack drain: once an ack byte came it reads on until
 // 100 ms of silence, past its 300 ms wait.
+// OnStep keeps its own hangup handling: a hangup on the tty loses the link
+// (NotConnected, "read failed: <errno>", decision 0009), and over TCP, a test
+// seam that is never lost, a peer that hangs up reads as a hangup at once
+// instead of a timeout. Its drain after a blind command still waits at least
+// one read slice for a stray ack, as the old loop's first read did.
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
@@ -57,6 +62,9 @@
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
+#endif
+#ifdef ALPACACORE_ENABLE_ONSTEP
+#include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #endif
 
 namespace {
@@ -655,6 +663,171 @@ TEST_CASE("ZWO mount - a reply that starts after the timeout is still a timeout"
         [&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); }, "Slow");
     wrapper.disconnect();
     CHECK(result.first.find("Timeout") != std::string::npos);
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ONSTEP
+namespace {
+
+// The OnStep wrapper is a process-wide singleton: each case starts and ends with it closed and its loss stamps taken.
+struct OnStepReset {
+    OnStepReset() { reset(); }
+    ~OnStepReset() { reset(); }
+    OnStepReset(const OnStepReset&) = delete;
+    OnStepReset& operator=(const OnStepReset&) = delete;
+    static void reset() {
+        auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+        wrapper.disconnect();
+        (void)wrapper.consume_link_lost_at();
+        (void)wrapper.consume_last_alive_before_loss();
+    }
+};
+
+alpacacore::vendor::onstep::ConnectionInfo onstep_serial_info(const std::string& path) {
+    alpacacore::vendor::onstep::ConnectionInfo info;
+    info.type = alpacacore::vendor::onstep::ConnectionType::Serial;
+    info.port_path = path;
+    info.baud_rate = 9600;
+    return info;
+}
+
+alpacacore::vendor::onstep::ConnectionInfo onstep_network_info(int port) {
+    alpacacore::vendor::onstep::ConnectionInfo info;
+    info.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = port;
+    return info;
+}
+
+}  // namespace
+
+// Falsified by: onstep_protocol_wrapper.cpp checked_read() not sending a LinkDead on the tty to lose_link_locked() (the
+// read times out after 3 s with "Timeout waiting for OnStep response" and the link reads alive)
+TEST_CASE("OnStep mount - a hangup while a command waits for its reply loses the link",
+          "[onstep][serial][serial_read][issue1644]") {
+    OnStepReset reset;
+    HangupMount mount;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(onstep_serial_info(mount.slave_path())));
+    mount.sever_on_next_command();
+    const auto start = Clock::now();
+    int code = 0;
+    std::string message;
+    try {
+        (void)wrapper.send_command(":GVP#", true, 3000);
+    } catch (const alpacacore::AlpacaException& e) {
+        code = e.error_code();
+        message = e.what();
+    }
+    const auto took = Clock::now() - start;
+    INFO("message: " << message);
+    CHECK(code == alpacacore::AlpacaError::NotConnected);
+    CHECK(message.find("link lost (read failed: ") != std::string::npos);
+    CHECK(wrapper.link_lost_reason().find("read failed: ") != std::string::npos);
+    CHECK_FALSE(wrapper.link_alive());
+    CHECK(took < std::chrono::seconds(2));
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp checked_read() returning a LinkDead on the TCP fd as a timeout (the old
+// recv() loop read a closed peer as silence and timed out after 3 s with "Timeout waiting for OnStep response")
+TEST_CASE("OnStep mount - a TCP hangup while a command waits for its reply reads as a hangup",
+          "[onstep][network][serial_read][issue1644]") {
+    OnStepReset reset;
+    std::atomic<bool> asked{false};
+    alpacacore::test::FakeMountServer server([&asked](const std::string& chunk) {
+        if (chunk.rfind(":Hang", 0) == 0) asked.store(true);
+        return std::string();
+    });
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(onstep_network_info(server.port())));
+    // The "mount" takes the command and then closes the connection: the write succeeded, the reply never comes.
+    std::thread dropper([&] {
+        const auto give_up = Clock::now() + std::chrono::seconds(2);
+        while (!asked.load() && Clock::now() < give_up) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        (void)server.drop_connections();
+    });
+    Clock::duration took{};
+    const auto message = hangup_message([&] { (void)wrapper.send_command("Hang", true, 3000); }, took);
+    dropper.join();
+    INFO("message: " << message);
+    CHECK(message.find("OnStep network link lost (hangup): ") != std::string::npos);
+    CHECK(took < std::chrono::seconds(2));
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp drain_stale() waiting only its 50 ms for a first byte (an ack 120 ms after
+// a blind command, inside the 200 ms TCP read slice, stays and answers "Next" with "11")
+TEST_CASE("OnStep mount - a blind-command drain waits one read slice for a stray ack",
+          "[onstep][network][serial_read][issue1644]") {
+    OnStepReset reset;
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) {
+        if (chunk.rfind(":Blind", 0) == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            return std::string("1");
+        }
+        if (chunk.rfind(":Next", 0) == 0) return std::string("1#");
+        return std::string();
+    });
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(onstep_network_info(server.port())));
+    wrapper.send_command_blind("Blind");
+    std::string next;
+    try {
+        next = wrapper.send_command("Next", true, 1000);
+    } catch (const alpacacore::AlpacaException& e) {
+        next = std::string("threw: ") + e.what();
+    }
+    wrapper.disconnect();
+    CHECK(next == "1");
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp read_response() using ReadSpec::Stop::IdleGap for the no-'#' read (the
+// busy line keeps it reading past the '#' until the 3 s deadline)
+TEST_CASE("OnStep mount - a read that does not require the '#' ends at the '#'",
+          "[onstep][serial][serial_read][issue1644]") {
+    OnStepReset reset;
+    HangupMount mount;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(onstep_serial_info(mount.slave_path())));
+    mount.trickle_after_reply_on_next_command();
+    Clock::duration took{};
+    const auto reply = timed_reply([&] { return wrapper.send_command(":GXEE#", false, 3000); }, took);
+    wrapper.disconnect();
+    CHECK(reply == "1");
+    CHECK(took < std::chrono::seconds(1));
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp read_response() without late_byte() on a timeout (the read times out at
+// 300 ms and the late '#' answers "Next")
+TEST_CASE("OnStep mount - a '#' that arrives within one read slice after the timeout ends its own reply",
+          "[onstep][network][serial_read][issue1644]") {
+    OnStepReset reset;
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(onstep_network_info(server.port())));
+    const auto [error, next] =
+        late_then_next([&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); });
+    wrapper.disconnect();
+    INFO("error: " << error);
+    CHECK(error.empty());
+    CHECK(next == "1");
+}
+
+// Falsified by: onstep_protocol_wrapper.cpp read_response() reading to the timeout plus one read slice (the late "1#"
+// is read as the reply)
+TEST_CASE("OnStep mount - a reply that starts after the timeout is still a timeout",
+          "[onstep][network][serial_read][issue1644]") {
+    OnStepReset reset;
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(onstep_network_info(server.port())));
+    const auto result = late_then_next(
+        [&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); }, "Slow");
+    wrapper.disconnect();
+    CHECK(result.first.find("Timeout waiting for OnStep response") != std::string::npos);
 }
 #endif
 

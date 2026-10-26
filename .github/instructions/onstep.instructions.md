@@ -279,13 +279,23 @@ it is never reachable through `router.cpp` or the web UI.
   implementation) hung every slew/site/time write until timeout and was the root cause of the
   first several ConformU failures (`SlewToCoordinatesAsync`, site/time writes).
   `kSetAckTimeoutMs = 1000` bounds the failure case only; real acks arrive in well under 100ms.
-- **The serial per-read window must be 100 ms, not higher** (`util::tty_read(..., 100)` since
-  #1202; it was `VTIME=1` on a blocking fd before): an earlier version copied Gemini's one-time
+- **Replies are read with `util::read_until`** (`util/serial_read.h`, the shared
+  [serial rule](serial-autodetect.instructions.md#serial--socket-io-always-use-the-shared-helpers-utilserial_ioh)):
+  `read_response()` waits in `poll()` for the `#`, or for an unterminated ack the `#` or 100 ms of
+  silence after its first byte, with no per-byte pacing sleep; when the timeout runs out the byte in
+  the next read slice still settles the reply (a late `#` ends it). The probe's `:GVP#`/`:GVN#`
+  reads and `drain_stale()` are `read_until` calls too. A hangup on the tty loses the link
+  ("read failed: <errno text>", below), a read that ends on silence checks the node, and over the
+  TCP test seam a hangup throws `DriverException` "OnStep network link lost (hangup): <errno text>"
+  instead of timing out (`test_mount_read_until_hangup.cpp`, the `OnStep mount - ...` cases).
+- **The serial read slice must be 100 ms, not higher** (`kSerialReadSliceMs`; it was `VTIME=1` on
+  a blocking fd before #1202): an earlier version copied Gemini's one-time
   probe `VTIME=20` (2s) into the production `connect_serial()` path, causing every read
   to cost up to 2 real seconds — most visibly a ~2s stall on `PulseGuide` and pushing `AbortSlew`
   (5 sequential blind commands) toward ConformU's 1.0s STANDARD timeout. `send_command_blind()`'s
   stale-input drain window is `50ms` (half a read window) for the same reason — `120ms` (2+ windows)
-  pushed `AbortSlew` to 1.04s, just over budget. After an aborted GOTO, `AbortSlew` also reads
+  pushed `AbortSlew` to 1.04s, just over budget. The drain still waits at least one read slice for
+  a first byte and ends after a quiet slice, as the byte-at-a-time loop did. After an aborted GOTO, `AbortSlew` also reads
   `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17. The fd is
   non-blocking (`util::SerialLink`), so a port another program retunes to `VMIN=1` can no longer park
   the drain after a blind command (the TeSeek HM-17 hang reported on #1202).

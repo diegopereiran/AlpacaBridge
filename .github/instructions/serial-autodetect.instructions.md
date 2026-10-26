@@ -42,23 +42,26 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   overloads, not a `ByteChannel` (decision 0013 section 7). The rule binds new reads and the ones migrated so far: the
   Gemini focuser and flat panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that
   hears a hangup logs "no ack" and does not report a lost link), the serial auto-detect probe and handshake loops
-  (Gemini, iEAF/iEFW, iOptron, Celestron, SynScan, ZWO mount, Sky-Watcher probe, the four Wanderer handshakes), the
+  (Gemini, iEAF/iEFW, iOptron, Celestron, SynScan, ZWO mount, OnStep, Sky-Watcher probe, the four Wanderer handshakes), the
   SynScan handset probe and the QHY CFW3 `read_reply`, and the connected-path `read_response()` of the iOptron mount,
-  Celestron NexStar, SynScan and ZWO mount, over serial and TCP (`read_until()` / `read_until_socket()`; the iOptron
+  Celestron NexStar, SynScan, ZWO mount and OnStep, over serial and TCP, with the OnStep `drain_stale()` after a blind
+  command (`read_until()` / `read_until_socket()`; the iOptron
   serial blind-command ack drain, which reads on past its wait until 100 ms of silence once an ack byte came, and the
   iOptron TCP `flush_input()`, which still waits one 200 ms read slice for each of up to 16 stale bytes). A read there that does not require the `#` still ends at the `#`
   (`TerminatorOrIdleGap`). When their timeout runs out, the next byte within one read slice (100 ms over serial,
   200 ms over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
   is a timeout. The Celestron and SynScan binary payloads are the exception: each payload byte within one read slice
-  of the last is still payload, so a payload that starts after the timeout is read whole. On those four a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
+  of the last is still payload, so a payload that starts after the timeout is read whole. On those five a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
   a `DriverException` "<mount> serial link lost (hangup): <errno text>" ("network" over TCP), and the ZWO mount feeds
   it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
-  is noticed. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
+  is noticed. OnStep keeps its decision 0009 loss on the tty (`lose_link_locked("read failed: <errno text>")`,
+  `NotConnected`; a read that ends on silence checks the node, as each empty read slice did) and throws a
+  `DriverException` "OnStep network link lost (hangup): <errno text>" over its TCP test seam, which is never lost; its
+  drain waits at least one read slice and ends after a quiet one, and over TCP a hangup just ends it. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
   the Wanderer cover and filter wheel probes, which back off 50 ms and keep listening until their deadline as before.
   The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial or overflowed reply as it stands;
   the Wanderer probes drop an overflowed token and keep listening. Still on their own loops, moving in later slices
-  (upstream issue #1604): the Q-Focuser JSON reader, the OnStep probe and connected reader (and its
-  `read_network_char`), the ZWO owed-reply drain and pre-flush peek, the iOptron TCP ack drain
+  (upstream issue #1604): the Q-Focuser JSON reader, the ZWO owed-reply drain and pre-flush peek, the iOptron TCP ack drain
   (`drain_network_stale`), and the iOptron and ZWO mount TCP probes (`probe_ioptron_network`, `probe_network_mount`).
   The Sky-Watcher connected path and the Celestron CGX loops (decision 0017 rule 9) and the stream readers (Wanderer,
   Gemini PDH) keep their own shape.

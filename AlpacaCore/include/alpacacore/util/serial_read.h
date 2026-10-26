@@ -114,7 +114,9 @@ inline ssize_t socket_read_byte(int fd, char* c, int timeout_ms) {
         errno = EBADF;
         return -1;
     }
-    const ssize_t n = ::recv(fd, c, 1, MSG_DONTWAIT);
+    // Callers hold their wrapper mutex across I/O. This recv cannot block:
+    // MSG_DONTWAIT, and poll() just reported data (or it returns EAGAIN at once).
+    const ssize_t n = ::recv(fd, c, 1, MSG_DONTWAIT);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
     if (n == 1) return 1;
     if (n == 0) {
         errno = ECONNRESET;
