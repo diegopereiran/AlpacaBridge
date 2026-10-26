@@ -886,6 +886,32 @@ TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumX after
     driver->set_connected(false);
 }
 
+// open-astro#1678: a readout mode change used to reset NumX/NumY to the unbinned
+// sensor while keeping BinX, so StartExposure refused its own geometry.
+TEST_CASE("QHY Camera Driver - a readout mode change keeps binning and sizes the ROI to it", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_bin_x(2);
+    const int bin_mode_writes = fake.call_count("set_bin_mode");
+
+    driver->set_readout_mode(1);
+    CHECK(driver->get_bin_x() == 2);
+    CHECK(driver->get_bin_y() == 2);
+    CHECK(driver->get_num_x() == driver->get_camera_x_size() / 2);
+    CHECK(driver->get_num_y() == driver->get_camera_y_size() / 2);
+    CHECK(driver->get_start_x() == 0);
+    CHECK(driver->get_start_y() == 0);
+    // The re-initialization behind a mode change may reset the SDK bin mode.
+    CHECK(fake.call_count("set_bin_mode") == bin_mode_writes + 1);
+
+    driver->start_exposure(0.001, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumY after NumY changes", "[qhy][camera][unit]") {
     auto fake = make_fake();
     fake.frame_width = 2;
