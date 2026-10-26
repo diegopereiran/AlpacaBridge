@@ -111,6 +111,8 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, [[maybe_
             }
         }
     }
+    powerbox_config.power_on_state =
+        util::parse_power_on_state(config.get(kIoptronPowerOnState)).value_or(util::PowerOnState::Leave);
     return vendor::ioptron::create_ioptron_switch(device_number, std::move(powerbox_config));
 #else
     throw AlpacaException(

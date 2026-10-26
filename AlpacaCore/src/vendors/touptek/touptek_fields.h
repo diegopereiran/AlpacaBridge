@@ -20,6 +20,7 @@
 
 #include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/util/hardware_config_refusal.h>
+#include <alpacacore/util/power_port_state_store.h>
 
 #include <cstdint>
 #include <optional>
@@ -67,6 +68,12 @@ inline const Field<std::string> kTouptekGpioChip{
     .key = "gpioChip", .default_value = "/dev/gpiochip0", .applies_when = AppliesWhen{"switchType", "stellavita"}};
 inline const Field<std::int64_t> kTouptekPwmFrequencyHz{
     .key = "pwmFrequencyHz", .default_value = 100, .applies_when = AppliesWhen{"switchType", "stellavita"}};
+// What the StellaVita ports do when the server starts (decision 0021): "leave",
+// "restore" or "off".
+inline const Field<std::string> kTouptekPowerOnState{.key = "powerOnState",
+                                                     .default_value = "leave",
+                                                     .applies_when = AppliesWhen{"switchType", "stellavita"},
+                                                     .allowed_values = util::kPowerOnStateNames};
 
 // One entry of ports[]: applied positionally onto the fixed Port 1..4 layout.
 // An absent name / pwm leaves the port's own default.
@@ -99,8 +106,8 @@ inline const std::vector<FieldRef>& touptek_filterwheel_fields() {
 
 inline const std::vector<FieldRef>& touptek_switch_fields() {
     static const std::vector<FieldRef> fields{kTouptekSwitchType.ref(), kTouptekThermalCameraIndex.ref(),
-                                              kTouptekGpioChip.ref(), kTouptekPwmFrequencyHz.ref(),
-                                              kTouptekPorts.ref()};
+                                              kTouptekGpioChip.ref(),   kTouptekPwmFrequencyHz.ref(),
+                                              kTouptekPorts.ref(),      kTouptekPowerOnState.ref()};
     return fields;
 }
 

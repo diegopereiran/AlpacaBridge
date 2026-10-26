@@ -12,6 +12,18 @@ Pick the section that matches your hardware.
 | [ToupTek StellaVita](#touptek-stellavita-raspberry-pi-cm4) | Available — ConformU pending | Raspberry Pi CM4 (BCM2711) | libgpiod v2 |
 | [iOptron iMate](#ioptron-imate) | Available — ConformU pending | OrangePi 3 LTS (Allwinner H6) | libgpiod v2 |
 
+## What the ports do when AlpacaBridge starts
+
+Every board in the table powers its DC ports on at boot, before AlpacaBridge runs. A dew heater you left at 30% would otherwise come back at full power after a reboot. Each power-port Switch device has an **At server start** setting in the web UI (`powerOnState` in the device config):
+
+| Setting | What happens when AlpacaBridge starts |
+|----|----|
+| **Leave ports as they are** (default) | Nothing. The ports keep whatever the board powered on with. |
+| **Restore the last setting** | Each port goes back to the value a client (NINA, the web UI) last set. A port never set is left alone. |
+| **Turn every port off** | After a reboot, every switchable port is turned off. After a service restart or an update within the same boot, the last setting is restored instead, so gear in use keeps its power. |
+
+AlpacaBridge remembers the last value a client set on each port in `config/power_port_states.json` (in `/var/lib/alpacabridge/` on an installed system). Connecting or disconnecting a client never changes a port, and a connect reports what each port is actually doing. The ports are still on between power-on and the AlpacaBridge start (about 26 seconds on an ASIAIR Plus CM4); making them come up off before that is a change to the board's boot configuration (the `gpio=` lines below).
+
 ---
 
 ## ZWO ASIair Pro (Raspberry Pi 4)
@@ -66,7 +78,7 @@ sudo grep -q '^gpio=18,12,13,26=op,dh,pu' /boot/firmware/config.txt \
   || echo 'gpio=18,12,13,26=op,dh,pu' | sudo tee -a /boot/firmware/config.txt
 ```
 
-Reboot for the change to take effect. Skip this step if you want the ports to come up OFF until the driver claims them.
+Reboot for the change to take effect. Without this line the ports come up OFF and stay off until a client turns them on, or until AlpacaBridge restores them at start ([At server start](#what-the-ports-do-when-alpacabridge-starts)). Connecting does not turn them on.
 
 ### 4. Install AlpacaBridge
 
@@ -211,7 +223,7 @@ sudo grep -q '^gpio=12,13,18,26=op,dh' /boot/firmware/config.txt \
   || echo 'gpio=12,13,18,26=op,dh' | sudo tee -a /boot/firmware/config.txt
 ```
 
-Reboot for the change to take effect. Skip this step if you want the ports to come up OFF until the driver claims them.
+Reboot for the change to take effect. Without this line the ports come up OFF and stay off until a client turns them on, or until AlpacaBridge restores them at start ([At server start](#what-the-ports-do-when-alpacabridge-starts)). Connecting does not turn them on.
 
 ### 4. Install AlpacaBridge
 
@@ -489,7 +501,7 @@ The defaults match the StellaVita wiring. The configurable fields are the PWM fr
 
 ### Disconnect behavior — important for unattended observatories
 
-At connect the wrapper claims all four lines at their "on" default — so gear plugged into them is powered as soon as the device connects, preserving the board's boot-high state — and when the ASCOM client (or the Web UI) disconnects, the wrapper releases its libgpiod request **without driving a boolean line LOW first**. (A PWM port stops its worker and is first driven to a defined steady level — on for any duty > 0, off at 0% — so it never strands the line low mid-cycle.) Connecting and disconnecting therefore never power-cycle attached gear.
+At connect the wrapper claims all four lines at the level each one already has — a port the board powered on stays on and reports on, one you turned off stays off — and when the ASCOM client (or the Web UI) disconnects, the wrapper releases its libgpiod request **without driving a boolean line LOW first**. (A PWM port stops its worker and is first driven to a defined steady level — on for any duty > 0, off at 0% — so it never strands the line low mid-cycle.) Connecting and disconnecting therefore never power-cycle attached gear.
 
 If you want a port OFF after disconnect, toggle it OFF in your client **before** disconnecting. For unattended setups, keep AlpacaBridge connected for the duration of the session rather than relying on a disconnected-but-powered state.
 
@@ -597,7 +609,7 @@ The fixed DC3/DC1/DC2 layout is not remappable; the configurable fields are the 
 
 ### Disconnect behavior
 
-Same policy as the ASIair drivers: at connect the wrapper claims DC1/DC2 at their "on" default — so gear plugged into them is powered as soon as the device connects — and when the ASCOM client (or the Web UI) disconnects, the wrapper releases its libgpiod request **without driving the lines LOW first**. (A PWM port stops its worker and is first driven to a defined steady level — on for any duty > 0, off at 0% — so it never strands the line low mid-cycle.) Connecting and disconnecting therefore never power-cycle attached gear. The always-on DC3 jack is hardwired live and unaffected by the driver entirely. If you want DC1 or DC2 OFF after disconnect, toggle it OFF in your client **before** disconnecting.
+Same policy as the ASIair drivers: at connect the wrapper claims DC1/DC2 at the level each one already has — so a connect never turns a port on or off — and when the ASCOM client (or the Web UI) disconnects, the wrapper releases its libgpiod request **without driving the lines LOW first**. (A PWM port stops its worker and is first driven to a defined steady level — on for any duty > 0, off at 0% — so it never strands the line low mid-cycle.) Connecting and disconnecting therefore never power-cycle attached gear. The always-on DC3 jack is hardwired live and unaffected by the driver entirely. If you want DC1 or DC2 OFF after disconnect, toggle it OFF in your client **before** disconnecting.
 
 > libgpiod releases the line on `close()`, so for unattended setups keep AlpacaBridge connected for the duration of the session rather than relying on a disconnected-but-powered state.
 

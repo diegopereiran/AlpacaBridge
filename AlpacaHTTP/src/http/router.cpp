@@ -21,6 +21,7 @@
 #include <alpacacore/util/hardware_config_refusal.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/util/rotator_sync_offset_store.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/unique_id.h>
@@ -6429,6 +6430,7 @@ void Router::load_persisted_devices() {
     // Entries this start gives their first GUID (the upgrade, or a hand-edited
     // file): only their drivers adopt state saved under a driver-built ID.
     std::set<std::string> first_unique_ids;
+    bool new_boot = false;
     {
         std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
         if (persisted_devices_loaded_) {
@@ -6436,6 +6438,9 @@ void Router::load_persisted_devices() {
         }
 
         persisted_devices_loaded_ = true;
+        // Decision 0021: once per start, whatever the file holds, so the boot ID
+        // is recorded even before the first device is configured.
+        new_boot = alpacacore::util::PowerPortStateStore::begin_server_start();
 
         try {
             if (!std::filesystem::exists(kPersistedDevicesFile)) {
@@ -6490,6 +6495,11 @@ void Router::load_persisted_devices() {
     if (const std::size_t pruned = alpacacore::util::RotatorSyncOffsetStore::prune_unknown_unique_ids(live_unique_ids);
         pruned > 0) {
         util::log_info("Removed " + std::to_string(pruned) + " sync offset(s) of rotators no longer configured");
+    }
+    if (const std::size_t pruned = alpacacore::util::PowerPortStateStore::prune_unknown_unique_ids(live_unique_ids);
+        pruned > 0) {
+        util::log_info("Removed " + std::to_string(pruned) +
+                       " saved power port state(s) of devices no longer configured");
     }
 
     for (const auto& entry : payload) {
@@ -6554,6 +6564,17 @@ void Router::load_persisted_devices() {
             } catch (const std::exception& e) {
                 util::log_warning("Could not move the saved state of " + device->get_unique_id() + ": " + e.what());
             }
+        }
+    }
+
+    // Decision 0021: power ports take their power-on state here, once per start.
+    // Never at connect and never for a device added or edited later, so neither
+    // a client reconnecting nor a config edit changes a live output.
+    for (const auto& device : alpacacore::management::DeviceRegistry::instance().get_all_devices()) {
+        try {
+            device->apply_power_on_state(new_boot);
+        } catch (const std::exception& e) {
+            util::log_warning("Could not apply the power-on state of " + device->get_unique_id() + ": " + e.what());
         }
     }
 }

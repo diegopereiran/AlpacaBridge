@@ -11,15 +11,18 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/touptek/touptek_powerbox_wrapper.h>
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 
 #include <functional>
+#include <map>
 #include <string>
 
 #include "catch2_compat.h"
 #include "fake_touptek_powerbox_sdk.h"
 #include "locked_touptek_powerbox_sdk.h"
+#include "power_port_test_dir.h"
 
 // The StellaVita power-box seam (issue #1326): the switch driver runs over a scripted fake,
 // directly and behind the Locked decorator that serialises every call.
@@ -181,4 +184,117 @@ TEST_CASE("ToupTek powerbox seam - a box whose port count differs from the confi
     auto cfg = touptek::default_stellavita_config();
     FakeTouptekPowerboxSDK fake(std::vector<touptek::StellaVitaPortConfig>(cfg.ports.begin(), cfg.ports.begin() + 2));
     CHECK(error_code([&] { touptek::create_touptek_switch(0, cfg, fake); }) == alpacacore::AlpacaError::InvalidValue);
+}
+
+// Issue #300: a connect reads each line instead of assuming the boot left it on.
+TEST_CASE("ToupTek powerbox seam - connecting reports a port the boot left off as off",
+          "[touptek][switch][unit][fake-sdk][power-on]") {
+    const auto cfg = mixed_config();
+    FakeTouptekPowerboxSDK fake(cfg.ports);
+    fake.set_line_level(0, 0);
+    fake.set_line_level(1, 0);
+    auto driver = touptek::create_touptek_switch(0, cfg, fake);
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_switch(0));
+    CHECK(driver->get_switch_value(1) == Catch::Approx(0.0));  // PWM port: 0 %, not 100 %
+    CHECK(driver->get_switch(2));
+    CHECK(fake.set_value_calls() == 0);
+    CHECK(fake.line_level(0) == 0);
+}
+
+TEST_CASE("ToupTek powerbox seam - a client's write is saved per UniqueID and port",
+          "[touptek][switch][unit][fake-sdk][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    const auto cfg = mixed_config();
+    FakeTouptekPowerboxSDK fake(cfg.ports);
+    auto driver = touptek::create_touptek_switch(0, cfg, fake);
+    driver->set_connected(true);
+    driver->set_switch(0, false);
+    driver->set_switch_value(1, 35.0);
+    driver->set_switch(2, true);
+    const auto saved = alpacacore::util::PowerPortStateStore::load(driver->get_unique_id());
+    CHECK(saved == std::map<int, double>{{0, 0.0}, {1, 35.0}, {2, 100.0}});
+}
+
+TEST_CASE("ToupTek powerbox seam - restore at server start sets the saved ports and holds them without connecting",
+          "[touptek][switch][unit][fake-sdk][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    auto cfg = mixed_config();
+    cfg.power_on_state = alpacacore::util::PowerOnState::Restore;
+    FakeTouptekPowerboxSDK fake(cfg.ports);
+    auto driver = touptek::create_touptek_switch(0, cfg, fake);
+    REQUIRE(alpacacore::util::PowerPortStateStore::save(driver->get_unique_id(), 0, 0.0));
+    REQUIRE(alpacacore::util::PowerPortStateStore::save(driver->get_unique_id(), 1, 35.0));
+
+    driver->apply_power_on_state(true);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.is_open());  // held: a released PWM line would lose its duty
+    CHECK(fake.get_value(0) == 0);
+    CHECK(fake.get_value(1) == 35);
+    CHECK(fake.get_value(2) == 1);  // nothing saved: left as it was
+    CHECK(error_code([&] { driver->get_switch(0); }) == alpacacore::AlpacaError::NotConnected);
+
+    // A Disconnect before any Connect keeps the hold.
+    driver->set_connected(false);
+    CHECK(fake.is_open());
+    CHECK(fake.close_calls() == 0);
+
+    // The first Connect takes the held lines over as they are.
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(fake.open_calls() == 1);
+    CHECK(driver->get_switch_value(1) == Catch::Approx(35.0));
+    CHECK_FALSE(driver->get_switch(0));
+}
+
+TEST_CASE("ToupTek powerbox seam - off turns writable ports off after a boot and restores after a restart",
+          "[touptek][switch][unit][fake-sdk][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    auto cfg = mixed_config();
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    {
+        FakeTouptekPowerboxSDK fake(cfg.ports);
+        auto driver = touptek::create_touptek_switch(0, cfg, fake);
+        driver->apply_power_on_state(true);
+        CHECK(fake.get_value(0) == 0);
+        CHECK(fake.get_value(1) == 0);
+        CHECK(fake.get_value(2) == 0);
+        CHECK(fake.get_value(3) == 1);  // read-only: never written
+        // What the boot applied is saved, so a restart cannot bring back an older "on".
+        CHECK(alpacacore::util::PowerPortStateStore::load(driver->get_unique_id()) ==
+              std::map<int, double>{{0, 0.0}, {1, 0.0}, {2, 0.0}});
+        driver->set_connected(true);
+        driver->set_switch(2, true);
+    }
+    // A service restart in the same boot: the client's last setting comes back.
+    FakeTouptekPowerboxSDK fake(cfg.ports);
+    auto driver = touptek::create_touptek_switch(0, cfg, fake);
+    driver->apply_power_on_state(false);
+    CHECK(fake.get_value(0) == 0);
+    CHECK(fake.get_value(2) == 1);
+}
+
+TEST_CASE("ToupTek powerbox seam - leave never touches the box at server start",
+          "[touptek][switch][unit][fake-sdk][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    const auto cfg = mixed_config();  // power_on_state defaults to Leave
+    FakeTouptekPowerboxSDK fake(cfg.ports);
+    auto driver = touptek::create_touptek_switch(0, cfg, fake);
+    REQUIRE(alpacacore::util::PowerPortStateStore::save(driver->get_unique_id(), 0, 0.0));
+    driver->apply_power_on_state(true);
+    CHECK(fake.open_calls() == 0);
+    CHECK(fake.set_value_calls() == 0);
+}
+
+TEST_CASE("ToupTek powerbox seam - the server-start state never changes a port a client already connected to",
+          "[touptek][switch][unit][fake-sdk][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    auto cfg = mixed_config();
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    FakeTouptekPowerboxSDK fake(cfg.ports);
+    auto driver = touptek::create_touptek_switch(0, cfg, fake);
+    driver->set_connected(true);
+    driver->apply_power_on_state(true);
+    CHECK(fake.set_value_calls() == 0);
+    CHECK(driver->get_switch(0));
 }

@@ -103,6 +103,8 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
             }
             plus_config.ports = std::move(ports);
         }
+        plus_config.power_on_state =
+            util::parse_power_on_state(config.get(kZwoPowerOnState)).value_or(util::PowerOnState::Leave);
         return vendor::zwo::create_zwo_asiair_plus_switch(device_number, plus_config);
     }
 
@@ -130,6 +132,8 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
             }
             asiair_config.ports = std::move(ports);
         }
+        asiair_config.power_on_state =
+            util::parse_power_on_state(config.get(kZwoPowerOnState)).value_or(util::PowerOnState::Leave);
         return vendor::zwo::create_zwo_asiair_switch(device_number, std::move(asiair_config));
     }
 

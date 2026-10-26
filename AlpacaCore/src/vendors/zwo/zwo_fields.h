@@ -22,6 +22,7 @@
 
 #include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/util/hardware_config_refusal.h>
+#include <alpacacore/util/power_port_state_store.h>
 
 #include <algorithm>
 #include <cctype>
@@ -148,6 +149,11 @@ inline const Field<std::string> kZwoDevicePath{.key = "devicePath",
 // Shown value is the Pro's; the factory reads it with find() so an unset value
 // keeps each backend's own default (the RK3568 runs at 50 Hz).
 inline const Field<std::int64_t> kZwoPwmFrequencyHz{.key = "pwmFrequencyHz", .default_value = 1000};
+// What the ASIAIR power ports do when the server starts (decision 0021): "leave"
+// (never touch them), "restore" (put back what a client last set) or "off". The
+// dew heater ignores it.
+inline const Field<std::string> kZwoPowerOnState{
+    .key = "powerOnState", .default_value = "leave", .allowed_values = util::kPowerOnStateNames};
 
 // One entry of ports[]. The Pro / CM4 layout requires an integer gpio, one of the
 // board's four lines, each at most once; the RK3568 layout ignores gpio. A port is
@@ -196,7 +202,7 @@ inline const std::vector<FieldRef>& zwo_rotator_fields() {
 inline const std::vector<FieldRef>& zwo_switch_fields() {
     static const std::vector<FieldRef> fields{kZwoSwitchType.ref(),     kZwoCameraIndex.ref(), kZwoCameraId.ref(),
                                               kZwoSwitchSerial.ref(),   kZwoGpioChip.ref(),    kZwoDevicePath.ref(),
-                                              kZwoPwmFrequencyHz.ref(), kZwoPorts.ref()};
+                                              kZwoPwmFrequencyHz.ref(), kZwoPorts.ref(),       kZwoPowerOnState.ref()};
     return fields;
 }
 

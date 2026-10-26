@@ -267,10 +267,20 @@ notes carry only the pin map and per-board deltas.
   `gpiod_line_request*` owns all lines together; values go through
   `gpiod_line_request_set_value`. Never port back to the v1 per-line API. The daemon
   user needs `gpio`-group access to the chip/char device via a udev rule.
-- **Boot-high preserve**: these boards drive the DC ports HIGH at boot
-  (`gpio=...=op,dh[,pu]`), so attached gear is powered before userspace runs. The
-  wrapper requests lines with an initial value of high and defaults its cached state
-  to "on" — connecting the driver must not glitch power.
+- **A connect reads the ports and changes none** (issue #300): these boards drive
+  the DC ports high at boot (`gpio=...=op,dh[,pu]`), but a user may have changed
+  that or a previous session left a port off. A libgpiod wrapper claims its lines
+  through `util::claim_outputs_at_current_level()` (request as-is, read, reconfigure
+  to outputs at the read levels) and its cache follows the line through
+  `util::reconcile_cached_value()`; never request a line with an initial value. The
+  RK3568 cannot read its pads (`GET_LEVEL` lies), so it keeps its "on" cache.
+- **Power-on state is applied once per server start, never at connect**
+  ([decision 0021](../../docs/decisions/0021-power-port-power-on-state.md)):
+  `powerOnState` = `leave` (default) / `restore` / `off`, applied by
+  `apply_power_on_state()` from the router's start; `off` only on the first start of a
+  boot. Every successful write saves through `util::PowerPortStateStore`. Lines a start
+  drove stay claimed with `Connected` false; a driver's `get_connected()` is its own
+  flag, never the wrapper's `is_open()`. A new GPIO power-port driver implements all of it.
 - **Never power-cycle on disconnect**: `close()` releases the lines without driving a
   boolean line low; a PWM port first stops its worker and drives a defined steady
   level (duty > 0 ⇒ high). Users who want a port off must set it off in the client

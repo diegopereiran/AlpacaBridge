@@ -3941,6 +3941,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             { pwm: dc1Pwm },
             { pwm: dc2Pwm },
         ];
+        deviceData.powerOnState = formData.get('ioptronPowerboxPowerOnState') || 'leave';
     } else if (deviceData.vendor === 'ioptron' && normalizeDeviceType(deviceData.deviceType) === 'filterwheel') {
         // iEFW: USB-serial only, fixed baud — no baudRate/network fields.
         deviceData.connectionType = formData.get('ioptronFilterwheelConnectionType') || 'auto';
@@ -4191,6 +4192,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (ports.length > 0) {
                     deviceData.ports = ports;
                 }
+                deviceData.powerOnState = formData.get('asiairPowerOnState') || 'leave';
             }
             if (deviceData.vendor === 'zwo' && switchType === 'asiair-plus-rk3568') {
                 const devicePath = formData.get('asiairPlusDevicePath');
@@ -4211,6 +4213,7 @@ document.getElementById('device-form').addEventListener('submit', async function
                     });
                 }
                 deviceData.ports = plusPorts;
+                deviceData.powerOnState = formData.get('asiairPlusPowerOnState') || 'leave';
             }
         }
         if (normalizedType === 'camera' || normalizedType === 'switch') {
@@ -4416,6 +4419,7 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.ports = portPwm.map(function(pwm) {
                 return { pwm: pwm };
             });
+            deviceData.powerOnState = formData.get('touptekPowerboxPowerOnState') || 'leave';
         }
     } else if (deviceData.vendor === 'touptek') {
         if (normalizeDeviceType(deviceData.deviceType) === 'focuser') {

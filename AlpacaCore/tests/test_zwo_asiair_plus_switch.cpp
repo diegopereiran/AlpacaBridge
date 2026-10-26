@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
 #include <alpacacore/version.h>
 #include <dlfcn.h>
@@ -24,11 +25,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "catch2_compat.h"
+#include "power_port_test_dir.h"
 
 // ---------------------------------------------------------------------------
 // ioctl stub. This binary defines ioctl(), so the wrapper's PWM_GPIO_SET_LEVEL
@@ -355,4 +358,127 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - close settles a partial-duty PWM port
     }
     REQUIRE_FALSE(levels.empty());
     CHECK(levels.back() == 0);  // duty 50 settles logically ON (raw 0)
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - off at server start writes OFF to every port without connecting",
+          "[zwo][switch][asiair-plus][unit][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    char tmpl[] = "/tmp/asiair-plus-stub-XXXXXX";
+    const int tfd = ::mkstemp(tmpl);
+    REQUIRE(tfd >= 0);
+    ::close(tfd);
+    auto& st = ioctl_stub();
+    struct Cleanup {
+        const char* path;
+        IoctlStub& stub;
+        ~Cleanup() {
+            {
+                std::lock_guard<std::mutex> lock(stub.m);
+                stub.path.clear();
+            }
+            ::unlink(path);
+        }
+    } cleanup{tmpl, st};
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        st.path = tmpl;
+        st.levels.clear();
+        st.off_writes = 0;
+    }
+
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = tmpl;
+    auto leave = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    leave->apply_power_on_state(true);
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        CHECK(st.levels.empty());  // the default, Leave, writes nothing
+    }
+
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(1, cfg);
+    driver->apply_power_on_state(true);
+    CHECK_FALSE(driver->get_connected());
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        CHECK(st.off_writes == 4);  // raw level 1 = logical OFF, once per port
+    }
+    driver->set_connected(true);
+    for (int i = 0; i < 4; ++i) {
+        CHECK_FALSE(driver->get_switch(i));
+    }
+    driver->set_connected(false);
+}
+
+namespace {
+
+// Points the ioctl stub at a fresh temp file for one case; restores and removes it on exit.
+struct StubDeviceFile {
+    char path[64] = "/tmp/asiair-plus-stub-XXXXXX";
+    StubDeviceFile() {
+        const int fd = ::mkstemp(path);
+        if (fd >= 0) ::close(fd);
+        auto& st = ioctl_stub();
+        std::lock_guard<std::mutex> lock(st.m);
+        st.path = path;
+        st.levels.clear();
+        st.off_writes = 0;
+    }
+    ~StubDeviceFile() {
+        auto& st = ioctl_stub();
+        {
+            std::lock_guard<std::mutex> lock(st.m);
+            st.path.clear();
+        }
+        ::unlink(path);
+    }
+    StubDeviceFile(const StubDeviceFile&) = delete;
+    StubDeviceFile& operator=(const StubDeviceFile&) = delete;
+
+    // How many of this process's file descriptors are open on the stub file.
+    int open_fds() const {
+        int n = 0;
+        for (int fd = 0; fd < 1024; ++fd) {
+            char buf[256];
+            const std::string link = "/proc/self/fd/" + std::to_string(fd);
+            const ssize_t len = ::readlink(link.c_str(), buf, sizeof(buf) - 1);
+            if (len > 0 && std::string(buf, static_cast<std::size_t>(len)) == path) ++n;
+        }
+        return n;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - a client's write is saved per UniqueID and port",
+          "[zwo][switch][asiair-plus][unit][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    StubDeviceFile stub;
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = stub.path;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    driver->set_connected(true);
+    driver->set_switch(0, false);
+    driver->set_switch(2, true);
+    CHECK(alpacacore::util::PowerPortStateStore::load(driver->get_unique_id()) ==
+          std::map<int, double>{{0, 0.0}, {2, 100.0}});
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - a Disconnect before any Connect keeps the fd a start opened",
+          "[zwo][switch][asiair-plus][unit][power-on]") {
+    alpacacore::test::TempPowerPortDir dir;
+    StubDeviceFile stub;
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = stub.path;
+    cfg.power_on_state = alpacacore::util::PowerOnState::Off;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    driver->apply_power_on_state(true);
+    REQUIRE(stub.open_fds() == 1);
+    // A client's Disconnect with nothing connected must not close it (decision 0021 rule 5).
+    driver->set_connected(false);
+    CHECK(stub.open_fds() == 1);
+    driver->set_connected(true);
+    driver->set_connected(false);
+    CHECK(stub.open_fds() == 0);
 }

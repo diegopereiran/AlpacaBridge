@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/power_port_state_store.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_protocol_wrapper.h>
 
 #include <cstdint>
@@ -26,6 +27,8 @@ struct AsiairPlusSwitchConfig {
     std::string device_path = "/dev/pwm-gpio-misc";
     std::uint32_t pwm_frequency_hz = 50;
     std::vector<AsiairPlusPortConfig> ports;
+    // What the ports do when the server starts (decision 0021): `powerOnState`.
+    util::PowerOnState power_on_state = util::PowerOnState::Leave;
 };
 
 // Returns the default ASIAIR Plus RK3568 layout: 4 boolean ports labelled

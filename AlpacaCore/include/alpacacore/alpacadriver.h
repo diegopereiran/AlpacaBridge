@@ -93,6 +93,17 @@ public:
     virtual void adopt_legacy_state() {}
 
     /**
+     * @brief Put the device's outputs in their power-on state (decision 0021).
+     * The router calls this once per server start, after registration, for
+     * every configured device: never at connect and never for a device added
+     * or edited later, so a client reconnecting or a config edit cannot change
+     * a live output. @p new_boot is true on the first start since the machine
+     * booted. Default: nothing to do. Implemented by the GPIO power-port
+     * switches; must not throw out (log instead).
+     */
+    virtual void apply_power_on_state(bool new_boot) { (void)new_boot; }
+
+    /**
      * @brief Get the device description.
      */
     virtual std::string get_description() const = 0;

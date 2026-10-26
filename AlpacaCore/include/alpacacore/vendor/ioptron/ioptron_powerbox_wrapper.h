@@ -43,10 +43,11 @@ struct IoptronPowerPortConfig {
 // `delete` through the interface does not compile (the QHYSDK shape).
 class IoptronGpioBackend {
 public:
-    /// Claim @p offsets on @p chip_path as outputs driven to @p initial_values
-    /// (0 or 1 each). Throws AlpacaException on failure; nothing stays claimed then.
-    virtual void request(const std::string& chip_path, const std::vector<unsigned int>& offsets,
-                         const std::vector<int>& initial_values) = 0;
+    /// Claim @p offsets on @p chip_path as outputs, each held at the level it
+    /// has now, and return those levels (0 or 1 each, in the order given;
+    /// issue #300). Claiming must not change a line. Throws AlpacaException on
+    /// failure; nothing stays claimed then.
+    virtual std::vector<int> request(const std::string& chip_path, const std::vector<unsigned int>& offsets) = 0;
     /// Drive one claimed line. Returns 0, or -1 with errno set.
     virtual int set_value(unsigned int offset, int value) = 0;
     /// Release the claimed lines and the chip. Safe when nothing is claimed.
@@ -64,8 +65,8 @@ protected:
 // Each controllable line is driven either as a boolean (0 = off / low, 1 = on /
 // high) or, when pwm_enabled, as a soft-PWM channel: a per-port worker thread
 // bit-bangs the line at pwm_frequency_hz with a 0-100% duty cycle (same
-// approach as the ZWO ASIAIR switch). Matches the stock iMate behaviour where
-// the ports are configured as outputs and driven high at boot.
+// approach as the ZWO ASIAIR switch). open() claims each line at the level the
+// boot (stock: driven high) or the last session left it, and reports that level.
 class IoptronPowerboxWrapper {
 public:
     /// @p backend null = the libgpiod default; otherwise it must outlive this wrapper.

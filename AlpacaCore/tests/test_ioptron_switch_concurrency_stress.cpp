@@ -33,82 +33,17 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 
-#include <cerrno>
-#include <map>
 #include <memory>
-#include <mutex>
-#include <string>
-#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_ioptron_gpio.h"
 
 using alpacacore::AlpacaDriver;
 
 namespace {
 
-class FakeGpio final : public alpacacore::vendor::ioptron::IoptronGpioBackend {
-public:
-    void request(const std::string& chip_path, const std::vector<unsigned int>& offsets,
-                 const std::vector<int>& initial_values) override {
-        std::lock_guard<std::mutex> lock(m_);
-        if (claimed_) {
-            throw alpacacore::AlpacaException("FakeGpio: lines already claimed",
-                                              alpacacore::AlpacaError::DriverException);
-        }
-        chip_path_ = chip_path;
-        levels_.clear();
-        for (std::size_t i = 0; i < offsets.size(); ++i) {
-            levels_[offsets[i]] = initial_values[i];
-        }
-        claimed_ = true;
-        ++requests_;
-    }
-
-    int set_value(unsigned int offset, int value) override {
-        std::lock_guard<std::mutex> lock(m_);
-        const auto it = levels_.find(offset);
-        if (!claimed_ || it == levels_.end()) {
-            errno = EBADF;
-            return -1;
-        }
-        it->second = value;
-        ++writes_;
-        return 0;
-    }
-
-    void release() override {
-        std::lock_guard<std::mutex> lock(m_);
-        if (claimed_) ++releases_;
-        claimed_ = false;
-    }
-
-    int requests() const {
-        std::lock_guard<std::mutex> lock(m_);
-        return requests_;
-    }
-    int releases() const {
-        std::lock_guard<std::mutex> lock(m_);
-        return releases_;
-    }
-    int writes() const {
-        std::lock_guard<std::mutex> lock(m_);
-        return writes_;
-    }
-    bool claimed() const {
-        std::lock_guard<std::mutex> lock(m_);
-        return claimed_;
-    }
-
-private:
-    mutable std::mutex m_;
-    std::string chip_path_;
-    std::map<unsigned int, int> levels_;
-    bool claimed_ = false;
-    int requests_ = 0;
-    int releases_ = 0;
-    int writes_ = 0;
-};
+using FakeGpio = alpacacore::test::FakeIoptronGpio;
 
 std::unique_ptr<alpacacore::SwitchDriver> make_switch(FakeGpio& gpio) {
     return alpacacore::vendor::ioptron::create_ioptron_switch(
