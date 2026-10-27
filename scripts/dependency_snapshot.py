@@ -735,12 +735,14 @@ def check_coverage(root: Path, table: dict) -> list[str]:
     documents = table.get("documents", [])
     libraries = table.get("system_libraries", [])
     names = {e["name"] for e in table["sdks"]} | {d["name"] for d in documents} | {lib["name"] for lib in libraries if lib.get("name")}
-    # Debian-provided libraries need an upstream to compare and the baseline Debian ships.
+    # Debian-provided libraries need an upstream to compare and a baseline (the version Debian
+    # trixie ships, or a newer upstream release already reviewed).
     for lib in libraries:
         missing = [k for k in ("name", "repo", "baseline") if not lib.get(k)]
         if missing:
             errors.append(f"{TABLE}: system_libraries entry {lib.get('name', '?')!r} has no {', '.join(missing)}: "
-                          "give its GitHub repo (owner/name) and the version Debian trixie ships as baseline")
+                          "give its GitHub repo (owner/name) and, as baseline, the version Debian trixie ships "
+                          "or a newer upstream release already reviewed")
     # Rule 1: every SDK has an update source.
     for e in table["sdks"]:
         if not (e.get("updates") or {}).get("provider"):
