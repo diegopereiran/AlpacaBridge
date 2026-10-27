@@ -1211,6 +1211,7 @@ struct SdkGate {
 struct CoolerReviewSDK : LockedQHYSDK {
     explicit CoolerReviewSDK(FakeQHYSDK& fake) : LockedQHYSDK(fake) {}
     SdkGate* temperature_gate = nullptr;
+    SdkGate* pwm_gate = nullptr;
     std::atomic<int> regulation_calls{0};
     std::atomic<int> pwm_off_writes{0};
     std::atomic<int> pwm_writes_at_close{-1};
@@ -1241,6 +1242,7 @@ struct CoolerReviewSDK : LockedQHYSDK {
         off_running = running;
         auto action = LockedQHYSDK::prepare_cooler_off(id, std::move(running));
         return [this, action = std::move(action)] {
+            if (pwm_gate != nullptr) pwm_gate->hold();
             action();
             ++pwm_off_writes;
         };
@@ -2864,6 +2866,40 @@ TEST_CASE("QHY Camera Driver - repeated cooler off still writes physical PWM zer
     CHECK_FALSE(driver->get_cooler_on());
     disconnect_stepping(clock, *driver);
     CHECK(sdk.pwm_off_writes.load() == pwm_before_off + 1);
+}
+
+TEST_CASE("QHY Camera Driver - off on off stops replacement regulation while PWM zero is in flight",
+          "[qhy][camera][unit][cooler-review]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    CoolerReviewSDK sdk(fake);
+    sdk.pwm_gate = &gate;
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(2, seconds(2)));
+    driver->set_cooler_on(false);
+    step_until(clock, [&] { return gate.entered.load(); });
+    REQUIRE(gate.entered.load());  // The old PID worker has exited; zero is already issued.
+    driver->set_cooler_on(true);
+    REQUIRE(driver->get_cooler_on());
+    REQUIRE(clock.wait_for_waiters(2, seconds(2)));  // replacement PID + telemetry
+    const int regulation_before_off = sdk.regulation_calls.load();
+    driver->set_cooler_on(false);
+    CHECK_FALSE(driver->get_cooler_on());
+    gate.release = true;
+    REQUIRE(eventually([&] { return !sdk.off_running->load(); }));
+    clock.advance(seconds(1));
+    REQUIRE(clock.wait_for_woken_settled(seconds(2)));
+    CHECK(sdk.pwm_off_writes.load() == 1);
+    CHECK(sdk.regulation_calls.load() == regulation_before_off);
+    CHECK_FALSE(driver->get_cooler_on());
+
+    driver->set_cooler_on(true);
+    REQUIRE(eventually([&] { return sdk.regulation_calls.load() > regulation_before_off; }));
+    CHECK(driver->get_cooler_on());
+    disconnect_stepping(clock, *driver);
 }
 
 TEST_CASE("QHY Camera Driver - plain disconnect never requests physical cooler off",

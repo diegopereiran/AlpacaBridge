@@ -807,6 +807,8 @@ public:
                 throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
             }
             cooler_on_ = false;
+            // Even a coalesced OFF must stop a worker started by an intervening ON.
+            temp_thread_stop_->request_stop();
             if (!cooler_off_running_->load() || cooler_off_request_->load() != CoolerOffState::Issued) {
                 cooler_off_request_->store(CoolerOffState::Pending);
             }
