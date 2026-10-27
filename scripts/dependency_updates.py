@@ -399,7 +399,7 @@ def update_body(r: dict) -> str:
 
 def system_body(r: dict) -> str:
     return (f"{marker({'kind': 'update', 'key': r['key'], 'version': r['latest'], 'current': r['current']})}\n"
-            f"Upstream `{r['name']}` is ahead of the version this project builds against.\n\n"
+            f"Upstream `{r['name']}` is ahead of the recorded baseline.\n\n"
             f"| Field | Value |\n|---|---|\n| Recorded baseline (Debian `{r['debian']}` or reviewed upstream) | `{r['current']}` |\n"
             f"| Upstream | `{r['latest']}` |\n| Source | {r['source']} |\n\n"
             "The build takes this library from Debian (`debian/control`), so there is no pin to bump. Review "
@@ -1246,6 +1246,9 @@ def self_test() -> int:
     for body in (update_body({**lib, "system": False, "where": "w"}), system_body(lib),
                  document_body({**lib, "document": True, "path": "p"})):
         assert "| | |" not in body and "| Field | Value |\n|---|---|\n" in body, body
+    # The baseline can be a reviewed upstream release newer than the Debian build, so the
+    # opening sentence names the baseline, not the build.
+    assert "ahead of the recorded baseline" in system_body(lib), system_body(lib)
 
     # --- Changelogs in issues ---
     pages["https://api.github.com/repos/gphoto/libgphoto2/releases/tags/v2.5.34"] = json.dumps(
