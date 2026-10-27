@@ -249,14 +249,10 @@ public:
             }
             if (mode_ == Mode::Io) {
                 driver_->io_mutex_.lock();
-                if (held != nullptr) {
-                    held->io = true;
-                }
+                held->io = true;
             }
             driver_->mutex_.lock();
-            if (held != nullptr) {
-                held->state = true;
-            }
+            held->state = true;
             owned_ = true;
         }
         void unlock() {
@@ -324,18 +320,30 @@ private:
             }
             driver_.run_single_read_before_io_hook();
             driver_.io_mutex_.lock();
+            // Recorded for the call, so a nested wire() or check_connected() inside `f` sees the operation
+            // lock as held instead of taking io_mutex_ again (#1728 review). Cleared by the guard below, on a
+            // throw too, after the state lock is back and before io_mutex_ is released.
+            HeldLocks* io_slot = held != nullptr ? held : held_locks(&driver_, true);
+            if (io_slot != nullptr) {
+                io_slot->io = true;
+            }
             struct Release {
                 const OnStepTelescopeDriver& driver;
                 HeldLocks* held;
+                HeldLocks* io_slot;
                 bool had_state;
                 ~Release() {
                     if (had_state) {
                         driver.mutex_.lock();
                         held->state = true;
                     }
+                    if (io_slot != nullptr) {
+                        io_slot->io = false;
+                        release_slot(io_slot);
+                    }
                     driver.io_mutex_.unlock();
                 }
-            } release{driver_, held, had_state};
+            } release{driver_, held, io_slot, had_state};
             // Re-checked under io_mutex_, as check_connected() answers: a session that ended while this
             // thread waited is not read from, and a newer one is not this getter's to read.
             if (!driver_.connected_.load() || driver_.session_generation_.load() != session) {
@@ -1731,12 +1739,28 @@ public:
         disconnect_before_close_hook_ = std::move(hook);
     }
 
+    void set_move_axis_resend_before_send_hook_for_testing(std::function<bool()> hook) {
+        std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
+        move_axis_resend_before_send_hook_ = std::move(hook);
+    }
+
     void set_single_read_before_io_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
         single_read_before_io_hook_ = std::move(hook);
     }
 
 private:
+    // Test seam: runs in the re-send tick after its reads, under mutex_ and io_mutex_; true makes the tick
+    // end the move there, as a cancel landing between the reads and the re-send would.
+    bool run_move_axis_resend_before_send_hook() const {
+        std::function<bool()> hook;
+        {
+            std::lock_guard<std::mutex> hook_lock(disconnect_hook_mutex_);
+            hook = move_axis_resend_before_send_hook_;
+        }
+        return hook && hook();
+    }
+
     // Test seam: runs in Wire's single-read path with no driver lock held, before io_mutex_ is taken.
     // Runs once: it is cleared as it is taken.
     void run_single_read_before_io_hook() const {
@@ -1784,8 +1808,12 @@ private:
     // cancel() may be called with mutex_ held (async_operation.h rule 10).
     // Slews, Park, FindHome and AbortSlew end the re-send here with cancel() rather
     // than a supersede (decision 0006 rule 3): safe, because the body checks
-    // ctx.stop_reason() under mutex_ before it sends anything, and these
-    // callers hold mutex_.
+    // ctx.stop_reason() under mutex_ before its tick starts, and those commands
+    // hold io_mutex_, so none of them lands inside a tick (decision 0016). A
+    // Slewing read that finds the move ended calls this with mutex_ alone,
+    // which a tick drops for each exchange: the tick re-checks the stop reason
+    // and each axis's re-send flag under mutex_ right before it re-sends
+    // (resend_tick_locked()).
     void clear_manual_motion_locked() const {
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -1912,7 +1940,7 @@ private:
                 if (!due[0] && !due[1]) {
                     continue;  // a newer MoveAxis moved the due time
                 }
-                const bool keep_going = resend_tick_locked(due);
+                const bool keep_going = resend_tick_locked(ctx, due);
                 // Due again a full interval after this tick ends, whatever it
                 // did: a skipped tick never spins, and mutex_ is free between
                 // ticks.
@@ -1930,7 +1958,7 @@ private:
     }
 
     // One re-send tick for the axes in `due` (#1378). False ends the body.
-    bool resend_tick_locked(const bool (&due)[2]) {
+    bool resend_tick_locked(const util::OperationContext& ctx, const bool (&due)[2]) {
         const Wire protocol = wire();
         if (!protocol.link_alive()) {
             return false;
@@ -1965,8 +1993,16 @@ private:
         if (!resend_within_altitude_limits_locked(protocol)) {
             return true;  // the firmware ends the move; 'g' then ends it here
         }
+        if (run_move_axis_resend_before_send_hook()) {
+            clear_manual_motion_locked();  // test seam: a cancel that landed in the gap
+        }
         for (int axis = 0; axis < 2; ++axis) {
-            if (!due[axis]) {
+            // Re-checked under mutex_ after the reads above, which dropped it (decision 0006 rule 3):
+            // a cancel, or a stop that cleared this axis's re-send, may have landed meanwhile.
+            if (ctx.stop_reason() != util::StopReason::None) {
+                return false;
+            }
+            if (!due[axis] || !manual_axis_resend_[axis]) {
                 continue;
             }
             try {
@@ -3013,6 +3049,7 @@ private:
     mutable std::mutex disconnect_hook_mutex_;
     std::function<void()> disconnect_before_close_hook_;
     mutable std::function<void()> single_read_before_io_hook_;
+    std::function<bool()> move_axis_resend_before_send_hook_;
     // The tail of a Park or FindHome that must first wait for motion to end
     // (#1430). Declared last with the re-send slot, for the same reason.
     util::OperationGeneration park_home_generation_;
@@ -3085,6 +3122,12 @@ void set_park_home_before_start_for_testing(TelescopeDriver& driver, std::functi
 void set_disconnect_before_close_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
         onstep->set_disconnect_before_close_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_move_axis_resend_before_send_hook_for_testing(TelescopeDriver& driver, std::function<bool()> hook) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_move_axis_resend_before_send_hook_for_testing(std::move(hook));
     }
 }
 

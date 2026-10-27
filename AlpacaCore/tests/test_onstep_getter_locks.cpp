@@ -495,6 +495,37 @@ TEST_CASE("OnStep getters - a stale-cache read that waited out a reconnect reads
     CHECK(rig.driver->get_connected());                    // the new session stands
 }
 
+// Decision 0006 rule 3 (#1728 review): the re-send tick drops mutex_ for its
+// :GU#, altitude and limit reads, so a cancel or a cleared re-send flag can land
+// before the re-send. The seam ends the move in that gap; the tick must re-check
+// and send nothing.
+TEST_CASE("OnStep getters - a MoveAxis ended between the re-send tick's reads and its re-send is not re-sent",
+          "[onstep][getter-locks]") {
+    Rig rig;
+    REQUIRE(rig.server.ok());
+    rig.driver->set_connected(true);
+    REQUIRE(rig.driver->get_connected());
+    rig.mount->moving = true;  // the mount shows the move ('g'), so the tick would re-send it
+
+    const auto waits = rig.clock.wait_count();
+    rig.driver->move_axis(0, 1.0);
+    REQUIRE(rig.clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));
+    const std::size_t moves = rig.mount->count(":Me#");
+    std::atomic<bool> hook_ran{false};
+    onstep::set_move_axis_resend_before_send_hook_for_testing(*rig.driver, [&] {
+        hook_ran = true;
+        return true;
+    });
+    rig.clock.advance(std::chrono::seconds(7));
+    REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    onstep::set_move_axis_resend_before_send_hook_for_testing(*rig.driver, nullptr);
+
+    REQUIRE(hook_ran);
+    REQUIRE(rig.mount->count(":Go#") >= 1);    // the tick got through its reads
+    CHECK(rig.mount->count(":Me#") == moves);  // and re-sent nothing
+    rig.mount->moving = false;
+}
+
 TEST_CASE("OnStep getters - a connect on the wire holds up no getter and reads as not connected",
           "[onstep][getter-locks]") {
     Rig rig;
