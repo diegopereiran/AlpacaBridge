@@ -326,8 +326,8 @@ private:
                     join_exposure_thread();
                 }
             }
-            // Join the cooler-off worker before taking mutex_ below: it takes
-            // mutex_ itself and joins the temp thread.
+            // Bound the wait for OFF cleanup, which polls the old PID worker's
+            // running flag; the OFF body never takes mutex_ or joins PID.
             join_cooler_off_thread();
             std::thread temp_to_join;
             std::thread telemetry_to_join;
@@ -535,6 +535,7 @@ private:
             gain_state_ = gain;
             offset_state_ = offset;
             max_bin_ = max_bin;
+            cooler_off_request_->store(CoolerOffState::None);
             reset_exposure_state_locked();
             telemetry_ccd_temp_c_ = temperature;
             telemetry_temp_valid_ = temp_valid;
@@ -801,6 +802,7 @@ public:
         }
 
         {
+            std::lock_guard<std::mutex> request_lock(*cooler_off_request_mutex_);
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             if (camera_info_valid_ && !camera_info_.has_cooler) {
@@ -2166,8 +2168,8 @@ private:
     // join; joined in disconnect and the destructor.
     std::thread cooler_off_thread_;
     std::mutex cooler_off_lifecycle_mutex_;
-    // True while a cooler-off worker is in flight; lets a second CoolerOn=false
-    // return immediately instead of blocking on the join (see set_cooler_on).
+    // True until the retained action is released; request state decides whether
+    // a repeated OFF coalesces with this worker or needs another PWM-zero attempt.
     // shared_ptr, not a plain member: SetQHYCCDParam(MANULPWM) can hang
     // indefinitely on real hardware with no SDK-side timeout (ConformU
     // finding), so join_cooler_off_thread() bounds its wait and detaches on
@@ -2177,6 +2179,8 @@ private:
     std::shared_ptr<std::atomic<bool>> cooler_off_running_{std::make_shared<std::atomic<bool>>(false)};
     std::shared_ptr<std::atomic<CoolerOffState>> cooler_off_request_{
         std::make_shared<std::atomic<CoolerOffState>>(CoolerOffState::None)};
+    // OFF acceptance and a cancelled worker's claim/retirement are indivisible.
+    std::shared_ptr<std::mutex> cooler_off_request_mutex_{std::make_shared<std::mutex>()};
 
     // Serialises temp/telemetry thread starts: two concurrent starters could
     // both pass the joinable() pre-check and the loser would destroy a
@@ -2398,38 +2402,43 @@ private:
         }
         try {
             auto action = sdk_.prepare_cooler_off(id, running);
-            cooler_off_thread_ =
-                std::thread([action = std::move(action), running, temp_running, request = cooler_off_request_,
-                             hook = on_worker_start_, clock = &clock_]() mutable {
-                    struct RunningGuard {
-                        std::function<void()> action;
-                        std::shared_ptr<std::atomic<bool>> flag;
-                        ~RunningGuard() {
-                            action = {};  // Release the physical handle before allowing a reopen.
-                            flag->store(false);
-                        }
-                    } guard{std::move(action), running};
-                    try {
-                        if (hook) hook(QHYWorker::CoolerOff);
-                        // shortcut: a permanently wedged PID retains this handle; use cancellation if QHY adds it.
-                        while (temp_running->load()) clock->sleep_for(std::chrono::milliseconds(20));
-                        auto pending = CoolerOffState::Pending;
-                        if (!request->compare_exchange_strong(pending, CoolerOffState::Issued)) return;
-                        const auto started = clock->now();
-                        ALPACA_LOG_INFO("QHY", "Calling SetQHYCCDParam(MANULPWM,0)...");
-                        try {
-                            guard.action();
-                            const auto ms =
-                                std::chrono::duration_cast<std::chrono::milliseconds>(clock->now() - started).count();
-                            ALPACA_LOG_INFO(
-                                "QHY", "SetQHYCCDParam(MANULPWM,0) returned OK after " + std::to_string(ms) + "ms");
-                        } catch (const std::exception& e) {
-                            ALPACA_LOG_ERROR("QHY", "SetQHYCCDParam(MANULPWM,0) failed: " + std::string(e.what()));
-                        }
-                    } catch (const std::exception& e) {
-                        ALPACA_LOG_ERROR("QHY", "Cooler OFF cleanup failed: " + std::string(e.what()));
+            cooler_off_thread_ = std::thread([action = std::move(action), running, temp_running,
+                                              request = cooler_off_request_, request_mutex = cooler_off_request_mutex_,
+                                              hook = on_worker_start_, clock = &clock_]() mutable {
+                // Declared before the guard: a failed claim releases the action
+                // and clears running before another OFF can publish Pending.
+                std::unique_lock<std::mutex> request_lock(*request_mutex, std::defer_lock);
+                struct RunningGuard {
+                    std::function<void()> action;
+                    std::shared_ptr<std::atomic<bool>> flag;
+                    ~RunningGuard() {
+                        action = {};  // Release the physical handle before allowing a reopen.
+                        flag->store(false);
                     }
-                });
+                } guard{std::move(action), running};
+                try {
+                    if (hook) hook(QHYWorker::CoolerOff);
+                    // shortcut: a permanently wedged PID retains this handle; use cancellation if QHY adds it.
+                    while (temp_running->load()) clock->sleep_for(std::chrono::milliseconds(20));
+                    auto pending = CoolerOffState::Pending;
+                    request_lock.lock();
+                    if (!request->compare_exchange_strong(pending, CoolerOffState::Issued)) return;
+                    request_lock.unlock();
+                    const auto started = clock->now();
+                    ALPACA_LOG_INFO("QHY", "Calling SetQHYCCDParam(MANULPWM,0)...");
+                    try {
+                        guard.action();
+                        const auto ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(clock->now() - started).count();
+                        ALPACA_LOG_INFO("QHY",
+                                        "SetQHYCCDParam(MANULPWM,0) returned OK after " + std::to_string(ms) + "ms");
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_ERROR("QHY", "SetQHYCCDParam(MANULPWM,0) failed: " + std::string(e.what()));
+                    }
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_ERROR("QHY", "Cooler OFF cleanup failed: " + std::string(e.what()));
+                }
+            });
         } catch (...) {
             running->store(false);
             throw;
@@ -2460,8 +2469,8 @@ private:
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         // Do not hold mutex_ across join: temp and telemetry threads acquire
         // mutex_ in their loops; joining while holding it would deadlock.
-        // The cooler-off worker takes mutex_ and joins the temp thread, so it
-        // too must be joined without mutex_ held.
+        // OFF cleanup only polls the old PID worker's running flag. Bound its
+        // wait here too; join_cooler_off_thread takes the lifecycle lock first.
         join_cooler_off_thread();
         std::thread temp_to_join;
         std::thread telemetry_to_join;
