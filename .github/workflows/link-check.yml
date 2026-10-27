@@ -8,6 +8,9 @@
 # CHANGELOG.md and changelog.d/ are skipped: old entries are a record, not a
 # promise, and a fragment's links are relative to the repository root, where
 # it ends up in CHANGELOG.md, not to changelog.d/.
+# AlpacaCore/external/OnStep/COMMAND_REFERENCE.md is skipped too: an unmodified
+# OnStepX copy whose relative links name sibling notes in OnStepX's docs/ that
+# are not vendored here, and the copy itself is never edited (#1684).
 
 name: Link check
 
@@ -49,6 +52,7 @@ jobs:
           args: >-
             --offline --no-progress
             --exclude-path CHANGELOG.md --exclude-path changelog.d
+            --exclude-path AlpacaCore/external/OnStep/COMMAND_REFERENCE.md
             './**/*.md' '.github/**/*.md' '.claude/**/*.md'
           fail: true
           jobSummary: true
@@ -63,6 +67,7 @@ jobs:
             --max-retries 2 --timeout 20
             --cache --max-cache-age 14d --cache-exclude-status '400..=599'
             --exclude-path CHANGELOG.md --exclude-path changelog.d
+            --exclude-path AlpacaCore/external/OnStep/COMMAND_REFERENCE.md
             './**/*.md' '.github/**/*.md' '.claude/**/*.md'
           fail: true
           jobSummary: true

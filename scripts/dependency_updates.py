@@ -15,8 +15,8 @@ graph, so there is one inventory. What is checked:
   ``page`` (the highest version a regex matches) or ``github-release`` (the repository's latest
   release), against the recorded ``baseline``;
 - every entry in its ``system_libraries`` list (libraries the build takes from Debian, such as
-  LibRaw): the upstream repository's latest release against the version Debian
-  trixie ships.
+  LibRaw): the upstream repository's latest release against the recorded ``baseline``, the
+  version Debian trixie ships or a newer upstream release already reviewed for the driver.
 
 Other Debian, Ubuntu and docker entries are not checked: apt and the image tag already resolve
 to the newest package at build time, and .github/workflows/osv-scan.yml reports their
@@ -283,7 +283,8 @@ def targets(snap: dict, table: dict) -> tuple[list[dict], list[str]]:
         else:
             manual.append(d["name"])
     # Libraries the build takes from Debian (debian/control), checked against their upstream
-    # releases; the baseline is the version Debian trixie ships.
+    # releases; the baseline is the version Debian trixie ships, or a newer upstream release
+    # already reviewed for the driver.
     for lib in table.get("system_libraries", []):
         out[lib["name"]] = {"key": lib["name"], "name": lib["name"], "current": lib["baseline"],
                             "where": snapshot.TABLE, "check": ("github", lib["repo"]), "compare": "version",
@@ -398,8 +399,8 @@ def update_body(r: dict) -> str:
 
 def system_body(r: dict) -> str:
     return (f"{marker({'kind': 'update', 'key': r['key'], 'version': r['latest'], 'current': r['current']})}\n"
-            f"Upstream `{r['name']}` is ahead of the version this project builds against.\n\n"
-            f"| Field | Value |\n|---|---|\n| Recorded baseline (Debian trixie `{r['debian']}`) | `{r['current']}` |\n"
+            f"Upstream `{r['name']}` is ahead of the recorded baseline.\n\n"
+            f"| Field | Value |\n|---|---|\n| Recorded baseline (Debian `{r['debian']}` or reviewed upstream) | `{r['current']}` |\n"
             f"| Upstream | `{r['latest']}` |\n| Source | {r['source']} |\n\n"
             "The build takes this library from Debian (`debian/control`), so there is no pin to bump. Review "
             "what the new release adds or fixes for the driver (for LibRaw: new camera raw formats), and set "
@@ -1245,6 +1246,9 @@ def self_test() -> int:
     for body in (update_body({**lib, "system": False, "where": "w"}), system_body(lib),
                  document_body({**lib, "document": True, "path": "p"})):
         assert "| | |" not in body and "| Field | Value |\n|---|---|\n" in body, body
+    # The baseline can be a reviewed upstream release newer than the Debian build, so the
+    # opening sentence names the baseline, not the build.
+    assert "ahead of the recorded baseline" in system_body(lib), system_body(lib)
 
     # --- Changelogs in issues ---
     pages["https://api.github.com/repos/gphoto/libgphoto2/releases/tags/v2.5.34"] = json.dumps(
