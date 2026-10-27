@@ -663,10 +663,11 @@ TEST_CASE("SkyWatcher serial - Connected=true on a stale link reconnects instead
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
-    // A redundant connect on a LIVE link is still a no-op: nothing on the wire.
-    const std::size_t frames_before = board->frames().size();
+    // A redundant connect on a LIVE link is still a no-op: no connect sequence
+    // on the wire. Count ':e' only; the 100 ms status poll sends j/f frames.
+    const int identity_queries_before = board->count_frames('e');
     driver->set_connected(true);
-    CHECK(board->frames().size() == frames_before);
+    CHECK(board->count_frames('e') == identity_queries_before);
 
     // devpts assigns st_ino = index + 3, so link_alive() would call a
     // recycled index the same node. The test owns the old index itself: the
