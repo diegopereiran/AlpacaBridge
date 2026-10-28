@@ -728,8 +728,9 @@ void Server::run_server() {
         }
         // One permit per worker still alive from a previous generation
         // (detached across a restart), so each wakes, sees its generation is
-        // stale, and exits, however many there are. The new pool is counted
-        // below, after this, so none of these permits are consumed by it.
+        // stale, and exits, however many there are. A new worker can still
+        // take one while the old worker is busy, so an exiting worker passes
+        // the permit it took on (worker_thread()).
         ready_signal_.release(static_cast<std::ptrdiff_t>(worker_count_.load(std::memory_order_relaxed)));
         worker_threads_.reserve(pool_size);
         for (size_t i = 0; i < pool_size; ++i) {
@@ -1235,9 +1236,12 @@ void Server::worker_thread(std::uint64_t generation) {
             std::lock_guard<std::mutex> lock(queue_mutex_);
             if (worker_generation_ != generation) {
                 // A newer generation of workers owns the queue now. This
-                // thread was detached by a stop() it called itself (a
-                // request handler that restarted the server synchronously);
-                // whatever is queued belongs to the new pool.
+                // thread outlived a restart: stop() was called on it, or
+                // join_or_abandon() detached it after a failed join.
+                // Whatever is queued belongs to the new pool, and so does the
+                // permit just taken: it may be a queued connection's, the one
+                // released for this thread having gone to a new worker.
+                ready_signal_.release();
                 break;
             }
             if (shutdown_workers_ && ready_queue_.empty()) {
