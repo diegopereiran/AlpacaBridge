@@ -1807,7 +1807,9 @@ public:
         if (!moving && axis == 0 && tracking_mode_cached_ > 0) {
             // A variable-rate P slew replaces tracking on the handset, so the stop leaves the RA motor stopped;
             // ASCOM resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked).
+            tracking_mode_valid_ = false;  // a failed restore leaves the handset's mode unknown (#1722)
             protocol.set_tracking_mode(tracking_mode_cached_);
+            tracking_mode_valid_ = true;
         }
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
@@ -1898,7 +1900,9 @@ public:
                     // requested mode only after both axes have stopped. The motion
                     // state is already clear, so a throwing write cannot leave
                     // Slewing true over stopped axes (#830).
+                    tracking_mode_valid_ = false;  // a failed restore leaves the handset's mode unknown (#1722)
                     protocol.set_tracking_mode(tracking_mode_cached_);
+                    tracking_mode_valid_ = true;
                     invalidate_readback_top_locked();
                 }
             }
@@ -2238,7 +2242,9 @@ private:
         for (int attempt = 0; attempt < 3 && !stopped; ++attempt) {
             try {
                 if (axis == 0 && tracking_mode_cached_ > 0) {
+                    tracking_mode_valid_ = false;  // a failed restore leaves the handset's mode unknown (#1722)
                     protocol.set_tracking_mode(tracking_mode_cached_);  // ends the RA move, see ra_motor_rate_locked
+                    tracking_mode_valid_ = true;
                 } else {
                     protocol.move_axis_variable_rate(axis, 0.0);
                 }

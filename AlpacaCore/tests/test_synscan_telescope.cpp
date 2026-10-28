@@ -734,12 +734,8 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
     REQUIRE(driver->get_slewing());
     fail_t->store(true);
 
-    SECTION("AbortSlew") {
-        CHECK_THROWS(driver->abort_slew());
-    }
-    SECTION("MoveAxis stop") {
-        CHECK_THROWS(driver->move_axis(0, 0.0));
-    }
+    SECTION("AbortSlew") { CHECK_THROWS(driver->abort_slew()); }
+    SECTION("MoveAxis stop") { CHECK_THROWS(driver->move_axis(0, 0.0)); }
 
     CHECK_FALSE(driver->get_tracking());
     driver->set_connected(false);
