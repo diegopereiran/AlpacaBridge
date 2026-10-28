@@ -615,12 +615,14 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         return at_home_;
     }
 
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         return parked_;
     }
 
@@ -646,6 +648,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         const auto now = std::chrono::steady_clock::now();
         for (std::size_t axis = 0; axis < pulse_guiding_active_.size(); ++axis) {
             if (pulse_guiding_active_[axis] && now >= pulse_guide_end_time_[axis]) {
@@ -719,6 +722,7 @@ public:
     }
 
     double get_declination_rate() const override {
+        throw_if_link_faulted();
         return 0.0;
     }
 
@@ -730,6 +734,7 @@ public:
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         return get_tracking_locked();
     }
 
@@ -774,6 +779,7 @@ public:
 
     GuideRate get_guide_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         return guide_rate_;
     }
 
@@ -804,6 +810,7 @@ public:
     }
 
     double get_right_ascension_rate() const override {
+        throw_if_link_faulted();
         return 0.0;
     }
 
@@ -815,6 +822,7 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         try {
             char side = SynScanProtocolWrapper::instance().get_pointing_state();
             side_of_pier_cached_ = map_pointing_state_to_side(side);
@@ -836,6 +844,7 @@ public:
         (void)dec;
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
         }
@@ -873,6 +882,7 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
         }
@@ -893,6 +903,7 @@ public:
 
     double get_site_latitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
         }
@@ -916,6 +927,7 @@ public:
 
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted();
         if (!site_info_valid_) {
             ensure_site_info_cached_locked();
         }
@@ -940,6 +952,7 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         // open-astro#575: surface a stored async-slew failure as an error
         // instead of a silent false, until AbortSlew or a new slew initiator
         // clears it (see last_slew_error_).
@@ -986,6 +999,7 @@ public:
     }
 
     int get_tracking_rate() const override {
+        throw_if_link_faulted();
         return 0;
     }
 
@@ -1001,6 +1015,7 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted();
         if (!last_utc_valid_) {
             try {
                 TimeInfo info = SynScanProtocolWrapper::instance().get_time();
@@ -2320,6 +2335,15 @@ private:
     [[noreturn]] void throw_position_link_fault_locked() const {
         throw AlpacaException("SynScan mount communications compromised: " + position_link_health_.fault(),
                               AlpacaError::DriverException);
+    }
+
+    // Rate getters must not queue behind the coarse state lock's device exchanges.
+    void throw_if_link_faulted() const {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        if (!link_fault_text_.empty()) {
+            throw AlpacaException("SynScan mount communications compromised: " + link_fault_text_,
+                                  AlpacaError::DriverException);
+        }
     }
 
     bool get_slewing_locked() const {

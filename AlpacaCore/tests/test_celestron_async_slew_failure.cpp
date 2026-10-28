@@ -33,6 +33,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -47,6 +48,7 @@ struct FakeCelestronState {
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
     std::atomic<bool> shifted_position{false};
     std::atomic<bool> mute{false};
+    std::atomic<int> requests{0};
     std::atomic<unsigned char> model_id{24};  // CGX-L
     std::atomic<unsigned char> firmware_major{5};
     std::atomic<unsigned char> firmware_minor{35};
@@ -90,6 +92,7 @@ struct FakeCelestronState {
 
 alpacacore::test::FakeMountServer::Responder celestron_responder(const std::shared_ptr<FakeCelestronState>& st) {
     return [st](const std::string& chunk) -> std::string {
+        st->requests.fetch_add(1);
         if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'T' || chunk[0] == 'P') {
@@ -403,6 +406,123 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
         CHECK(std::abs(during - held) < 1e-5);
         driver->set_connected(false);
     }
+}
+
+TEST_CASE("Celestron pulse state refuses a latched link fault and recovers",
+          "[celestron][telescope][link][pulseguiding]") {
+    const bool guiding = GENERATE(false, true);
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    REQUIRE_NOTHROW(driver->set_tracking(true));
+    if (guiding) REQUIRE_NOTHROW(driver->pulse_guide(0, 60000));
+    REQUIRE(driver->get_is_pulse_guiding() == guiding);
+    const double altitude = driver->get_altitude();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // stable's 2 s position cache
+    st->mute.store(true);
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_altitude();
+            FAIL("An unanswered position read must fail");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        }
+    }
+    REQUIRE(driver->get_connected());
+    const auto fault = driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const int requests = st->requests.load();
+    try {
+        (void)driver->get_is_pulse_guiding();
+        FAIL("A faulted link must not answer from pulse timers");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()) == "Celestron mount communications compromised: " + fault);
+    }
+    // Active guides have an independent hardware-chunk worker; only idle has no background wire traffic.
+    if (!guiding) CHECK(st->requests.load() == requests);
+    st->mute.store(false);
+    CHECK(driver->get_altitude() == altitude);
+    CHECK(driver->get_link_fault().empty());
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron commanded state refuses a latched fault while safety stops still reach the handset",
+          "[celestron][telescope][link]") {
+    const bool moving = GENERATE(false, true);
+    auto st = std::make_shared<FakeCelestronState>();
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    const std::vector<std::pair<const char*, std::function<void()>>> reads{
+        {"AtHome", [&] { (void)driver->get_at_home(); }},
+        {"AtPark", [&] { (void)driver->get_at_park(); }},
+        {"Slewing", [&] { (void)driver->get_slewing(); }},
+        {"Tracking", [&] { (void)driver->get_tracking(); }},
+        {"DeclinationRate", [&] { (void)driver->get_declination_rate(); }},
+        {"RightAscensionRate", [&] { (void)driver->get_right_ascension_rate(); }},
+        {"TrackingRate", [&] { (void)driver->get_tracking_rate(); }},
+        {"GuideRate", [&] { (void)driver->get_guide_rate(); }},
+        {"SideOfPier", [&] { (void)driver->get_side_of_pier(); }},
+        {"DestinationSideOfPier", [&] { (void)driver->get_destination_side_of_pier(5.0, 20.0); }},
+        {"SiteLatitude", [&] { (void)driver->get_site_latitude(); }},
+        {"SiteLongitude", [&] { (void)driver->get_site_longitude(); }},
+        {"SiderealTime", [&] { (void)driver->get_sidereal_time(); }},
+        {"UTCDate", [&] { (void)driver->get_utc_date(); }},
+    };
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        REQUIRE_NOTHROW(read());
+    }
+    if (moving) driver->move_axis(1, 0.01);
+    REQUIRE(driver->get_slewing() == moving);
+    (void)driver->get_altitude();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    st->mute.store(true);
+    for (int i = 0; i < 3; ++i) {
+        CHECK_THROWS_AS(driver->get_altitude(), alpacacore::AlpacaException);
+    }
+    const auto fault = driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const int requests = st->requests.load();
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        try {
+            read();
+            CHECK(false);
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(e.what()) == "Celestron mount communications compromised: " + fault);
+        }
+    }
+    CHECK(st->requests.load() == requests);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_can_pulse_guide());
+    CHECK_FALSE(driver->get_name().empty());
+    for (const auto& value : driver->get_device_state()) {
+        CHECK(value.name == "TimeStamp");
+    }
+    st->mute.store(false);  // replies work again, but no position read has cleared the latch
+    const int before_stop = st->command_count('P');
+    REQUIRE_NOTHROW(driver->move_axis(1, 0.0));
+    CHECK(st->command_count('P') > before_stop);
+    const int before_abort = st->command_count('P');
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(st->command_count('P') > before_abort);
+    CHECK(driver->get_link_fault() == fault);
+    (void)driver->get_altitude();
+    CHECK(driver->get_link_fault().empty());
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        CHECK_NOTHROW(read());
+    }
+    driver->set_connected(false);
 }
 
 TEST_CASE("Celestron position - stale cache faults after repeated failed polls and recovers",
