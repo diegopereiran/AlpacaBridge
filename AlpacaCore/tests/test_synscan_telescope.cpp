@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -730,12 +731,28 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
         alpacacore::vendor::synscan::create_synscan_telescope(0, conn, alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
-    driver->move_axis(0, 1.0);
-    REQUIRE(driver->get_slewing());
-    fail_t->store(true);
-
-    SECTION("AbortSlew") { CHECK_THROWS(driver->abort_slew()); }
-    SECTION("MoveAxis stop") { CHECK_THROWS(driver->move_axis(0, 0.0)); }
+    SECTION("AbortSlew") {
+        driver->move_axis(0, 1.0);
+        REQUIRE(driver->get_slewing());
+        fail_t->store(true);
+        CHECK_THROWS_AS(driver->abort_slew(), alpacacore::AlpacaException);
+    }
+    SECTION("MoveAxis stop") {
+        driver->move_axis(0, 1.0);
+        REQUIRE(driver->get_slewing());
+        fail_t->store(true);
+        CHECK_THROWS_AS(driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+    }
+    SECTION("PulseGuide end") {
+        driver->pulse_guide(2, 300);  // East, RA
+        fail_t->store(true);          // the pulse end's tracking restore fails on all three attempts
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        // The failed stop reports the axis as still slewing, in the same locked step that drops the cached mode.
+        while (!driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        REQUIRE(driver->get_slewing());
+    }
 
     CHECK_FALSE(driver->get_tracking());
     driver->set_connected(false);

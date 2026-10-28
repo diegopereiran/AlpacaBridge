@@ -1488,6 +1488,10 @@ public:
                 // AbortSlew/MoveAxis(0) or disconnect clears it.
                 if (connected_) {
                     manual_axis_slewing_[axis] = true;
+                    // The restore may not have landed: the next Tracking read asks the handset.
+                    if (end_tracking_mode > 0) {
+                        tracking_mode_valid_ = false;
+                    }
                 }
             }
         });
