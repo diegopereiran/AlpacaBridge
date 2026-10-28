@@ -32,6 +32,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -56,6 +57,7 @@ struct FakeSynScanState {
     std::atomic<bool> reject_tracking{false};  // true: swallow the tracking write 'T' -> the wrapper times out
     std::atomic<bool> reject_tracking_read{false};  // true: swallow the tracking read 't' -> the wrapper times out
     std::atomic<bool> mute{false};
+    std::atomic<int> requests{0};
     std::atomic<unsigned char> model_id{50};
     // The handset's tracking mode ('t' reads it, 'T' writes it). A test sets it directly to stand in for the
     // keypad changing it outside the driver.
@@ -94,6 +96,7 @@ struct FakeSynScanState {
 
 alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
     return [st](const std::string& chunk) -> std::string {
+        st->requests.fetch_add(1);
         if (st->mute.load()) return "";
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'P' || chunk[0] == 'T' || chunk[0] == 'r' || chunk[0] == 'R') {
@@ -494,6 +497,15 @@ TEST_CASE("SynScan - get_link_fault does not wait on a connect holding the drive
     std::string fault;
     std::thread reader([&] { fault = driver->get_link_fault(); });
     reader.join();
+    for (const auto& read : std::vector<std::function<void()>>{[&] { (void)driver->get_right_ascension_rate(); },
+                                                               [&] { (void)driver->get_declination_rate(); },
+                                                               [&] { (void)driver->get_tracking_rate(); }}) {
+        try {
+            read();
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        }
+    }
     const auto ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     // Well under the multi-second handshake timeout a lock wait would cost,
@@ -501,6 +513,120 @@ TEST_CASE("SynScan - get_link_fault does not wait on a connect holding the drive
     CHECK(ms < 1000);
     CHECK(fault.empty());
     REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 30000));
+}
+
+TEST_CASE("SynScan pulse state refuses a latched link fault without I/O and recovers",
+          "[synscan][telescope][link][pulseguiding]") {
+    const bool guiding = GENERATE(false, true);
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    REQUIRE_NOTHROW(driver->set_tracking(true));
+    if (guiding) REQUIRE_NOTHROW(driver->pulse_guide(0, 60000));
+    REQUIRE(driver->get_is_pulse_guiding() == guiding);
+    const double altitude = driver->get_altitude();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // stable's 2 s position cache
+    st->mute.store(true);
+    for (int i = 0; i < 3; ++i) {
+        require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::DriverException);
+    }
+    REQUIRE(driver->get_connected());
+    const auto fault = driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const int requests = st->requests.load();
+    try {
+        (void)driver->get_is_pulse_guiding();
+        FAIL("A faulted link must not answer from pulse timers");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()) == "SynScan mount communications compromised: " + fault);
+    }
+    CHECK(st->requests.load() == requests);
+    st->mute.store(false);
+    CHECK(driver->get_altitude() == altitude);
+    CHECK(driver->get_link_fault().empty());
+    CHECK(driver->get_is_pulse_guiding() == guiding);
+    driver->abort_slew();
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan commanded state refuses a latched fault while safety stops still reach the handset",
+          "[synscan][telescope][link]") {
+    const bool moving = GENERATE(false, true);
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    const std::vector<std::pair<const char*, std::function<void()>>> reads{
+        {"AtHome", [&] { (void)driver->get_at_home(); }},
+        {"AtPark", [&] { (void)driver->get_at_park(); }},
+        {"Slewing", [&] { (void)driver->get_slewing(); }},
+        {"Tracking", [&] { (void)driver->get_tracking(); }},
+        {"DeclinationRate", [&] { (void)driver->get_declination_rate(); }},
+        {"RightAscensionRate", [&] { (void)driver->get_right_ascension_rate(); }},
+        {"TrackingRate", [&] { (void)driver->get_tracking_rate(); }},
+        {"GuideRate", [&] { (void)driver->get_guide_rate(); }},
+        {"SideOfPier", [&] { (void)driver->get_side_of_pier(); }},
+        {"DestinationSideOfPier", [&] { (void)driver->get_destination_side_of_pier(5.0, 20.0); }},
+        {"SiteLatitude", [&] { (void)driver->get_site_latitude(); }},
+        {"SiteLongitude", [&] { (void)driver->get_site_longitude(); }},
+        {"SiderealTime", [&] { (void)driver->get_sidereal_time(); }},
+        {"UTCDate", [&] { (void)driver->get_utc_date(); }},
+    };
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        REQUIRE_NOTHROW(read());
+    }
+    if (moving) driver->move_axis(1, 0.01);
+    REQUIRE(driver->get_slewing() == moving);
+    (void)driver->get_altitude();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    st->mute.store(true);
+    for (int i = 0; i < 3; ++i) {
+        require_alpaca_error([&] { (void)driver->get_altitude(); }, alpacacore::AlpacaError::DriverException);
+    }
+    const auto fault = driver->get_link_fault();
+    REQUIRE_FALSE(fault.empty());
+    const int requests = st->requests.load();
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        try {
+            read();
+            CHECK(false);
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(e.what()) == "SynScan mount communications compromised: " + fault);
+        }
+    }
+    CHECK(st->requests.load() == requests);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_can_pulse_guide());
+    CHECK_FALSE(driver->get_name().empty());
+    for (const auto& value : driver->get_device_state()) {
+        CHECK(value.name == "TimeStamp");
+    }
+    st->mute.store(false);  // replies work again, but no position read has cleared the latch
+    const int before_stop = st->command_count('P');
+    REQUIRE_NOTHROW(driver->move_axis(1, 0.0));
+    CHECK(st->command_count('P') > before_stop);
+    const int before_abort = st->command_count('P');
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(st->command_count('P') > before_abort);
+    CHECK(driver->get_link_fault() == fault);
+    (void)driver->get_altitude();
+    CHECK(driver->get_link_fault().empty());
+    for (const auto& [name, read] : reads) {
+        INFO(name);
+        CHECK_NOTHROW(read());
+    }
+    driver->set_connected(false);
 }
 
 TEST_CASE("SynScan position - stale cache faults after repeated failed polls and recovers",
