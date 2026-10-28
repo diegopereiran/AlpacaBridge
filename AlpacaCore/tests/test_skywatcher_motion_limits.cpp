@@ -721,8 +721,19 @@ TEST_CASE("SkyWatcher limits - a floor crossed before the guard's first sample i
     auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
     REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
 
+    // The 100 ms status poll refreshes the position cache the pre-dispatch
+    // baseline is taken from: left running, one poll between the jump and the
+    // MoveAxis seeds the baseline outside the floor and nothing stops the axis.
+    // Pause it and let a poll already in flight finish before the jump.
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    for (int polls = -1; polls != mount.frames_seen('j');) {
+        polls = mount.frames_seen('j');
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+
     mount.jump_axis_degrees(2, kGuardDecAxisDeg + 10.0);  // about 4 deg below the floor
     driver->move_axis(1, -kMaxMoveAxisRate);
+    sw::set_status_poll_paused_for_testing(*driver, false);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     CHECK(wait_until([&] { return !mount.axis_running(2); }, 6000));
     CHECK(wait_until([&] { return !driver->get_slewing(); }, 6000));

@@ -1,0 +1,3 @@
+### Fixed
+
+- **Nightly ASan job**, issue #1796. The nightly all-vendors ASan + UBSan job no longer aborts on the libgphoto2 `libusb_get_device_list` leak behind `gp_camera_autodetect` (`scripts/lsan_suppressions.txt`, scoped to `gp_port_usb_find_device`, also applied by the `ci_preflight.sh` sanitizer run). `run_all_tests.sh` now gives each test a 900 s ctest timeout (`CTEST_TIMEOUT`), so a hang fails that one test by name. The SkyWatcher test "a floor crossed before the guard's first sample is stopped" pauses the status poll around the jump, so a poll can no longer refresh the position cache and seed the baseline outside the floor (`AlpacaCore/tests/test_skywatcher_motion_limits.cpp`).
