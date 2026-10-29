@@ -100,6 +100,8 @@ struct LandingOffsetHandset {
     std::atomic<bool> ignore_nudges{false};
     std::atomic<int> nudge_starts{0};
     std::atomic<int> nudge_count{0};  // moves ended, by a stop or (RA) a tracking command
+    // When set, a `T` halts tracking (tracking_mode 0) and gets no reply, so the write times out (#1722).
+    std::atomic<bool> fail_t{false};
     // The site's hemisphere as the `w` reply reports it; it decides which RA code runs westward.
     std::atomic<bool> southern{false};
     // The `m` reply: 50 is an EQ mount (GermanPolar); 128..159 and 160 are Alt-Az.
@@ -296,6 +298,10 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 return "#";
             }
             case 'T':
+                if (st->fail_t.load()) {
+                    st->tracking_mode.store(0);
+                    return "";
+                }
                 st->tracking_mode.store(chunk.size() > 1 ? static_cast<unsigned char>(chunk[1]) : 0);
                 st->set_ra_motor(chunk.size() > 1 && chunk[1] != 0 ? kSiderealArcsecPerSec : 0.0, false);
                 return "#";
@@ -513,6 +519,27 @@ TEST_CASE("SynScan GOTO landing - a Dec-only refinement pass leaves the RA aim a
     // RA was inside its tolerance, so the second GOTO aims at the same RA as the first.
     CHECK(st->commanded_ra[1].load() == st->commanded_ra[0].load());
     CHECK(dec_error_arcsec(*driver, kTargetDec) < 3.0);
+    driver->set_connected(false);
+}
+
+// Falsified by: remove the tracking_mode_valid_ = false in nudge_axis_locked (synscan_telescope_driver.cpp), and the
+// Tracking read serves the cached sidereal mode over a halted RA motor.
+TEST_CASE("SynScan GOTO landing - a failed tracking restore after the RA landing move drops the cached mode (#1722)",
+          "[synscan][telescope][goto-landing]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    REQUIRE(driver->get_tracking());
+    st->fail_t.store(true);
+
+    CHECK_THROWS_AS(run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }),
+                    alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_tracking());
     driver->set_connected(false);
 }
 

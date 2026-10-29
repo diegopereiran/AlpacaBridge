@@ -1,0 +1,3 @@
+### Fixed
+
+- **A server stop or restart no longer waits out a synchronous slew or connect** - AlpacaHTTP, issue #1705. `Server::stop()` now tells the router, so a `SlewToCoordinates`/`SlewToTarget` request leaves its wait at once with a `DriverException` saying the server is stopping and the slew continues (poll Slewing), and a `PUT connected` leaves its connect wait and withdraws the connect with a `DriverException` saying the server is stopping and the connect was abandoned; before, a stop during a long slew could take the full 90 s and end in SIGKILL. The slew is not aborted. Covered by `Server::stop() ends the waits of synchronous slews and connects` in `AlpacaHTTP/tests/test_routing.cpp`, which also checks that a restart waits as before.
