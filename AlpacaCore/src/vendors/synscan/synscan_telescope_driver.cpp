@@ -1879,7 +1879,8 @@ public:
                 return;  // overtaken before its turn (disconnect): the rate was never sent
             }
         } catch (...) {
-            // A restore that did not land leaves the RA motor stopped under a cached mode (#1722): Tracking reads false.
+            // A restore that did not land leaves the RA motor stopped under a cached mode (#1722): Tracking reads
+            // false.
             if (restore_mode > 0) {
                 ra_stop_unconfirmed_ = true;
             }
