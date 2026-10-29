@@ -667,7 +667,8 @@ TEST_CASE("SynScan pulse state refuses a latched link fault without I/O and reco
     REQUIRE(driver->get_is_pulse_guiding() == guiding);
     const double altitude = driver->get_altitude();
     st->mute.store(true);
-    for (int i = 0; i < 3; ++i) {
+    // A poll that meets the background poll returns without counting: poll until the third failure latches.
+    for (int i = 0; i < 50 && driver->get_link_fault().empty(); ++i) {
         poll_status_now_for_testing(*driver);
     }
     REQUIRE(driver->get_connected());
@@ -729,7 +730,8 @@ TEST_CASE("SynScan commanded state refuses a latched fault while safety stops st
     REQUIRE(driver->get_slewing() == moving);
     (void)driver->get_altitude();
     st->mute.store(true);
-    for (int i = 0; i < 3; ++i) {
+    // A poll that meets the background poll returns without counting: poll until the third failure latches.
+    for (int i = 0; i < 50 && driver->get_link_fault().empty(); ++i) {
         poll_status_now_for_testing(*driver);
     }
     const auto fault = driver->get_link_fault();
