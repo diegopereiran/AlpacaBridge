@@ -2889,7 +2889,9 @@ private:
     mutable int tracking_mode_cached_;
     mutable bool tracking_mode_valid_;
     // A pulse-guide end whose tracking restore failed: the RA motor may be off while the cache still holds the mode.
-    // Only the public Tracking read consults it; a GOTO needs Tracking true, so it is refused while this is set.
+    // Only the public Tracking read consults it. A GOTO is refused while it is set; a pulse end that fails while a
+    // GOTO reaps it sets the flag after the Tracking gate, and it stays set across the GOTO because that T never
+    // landed.
     mutable bool ra_stop_unconfirmed_ = false;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
