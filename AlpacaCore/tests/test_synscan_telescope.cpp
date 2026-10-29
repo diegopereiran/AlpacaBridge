@@ -758,4 +758,67 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
     driver->set_connected(false);
 }
 
+// After a failed pulse-guide end restore the axis still runs at guide rate with tracking off. AbortSlew must restore
+// the mode captured before the pulse, not the 0 the handset now reports mid-motion.
+// Falsified by: synscan_telescope_driver.cpp pulse-guide failure branch, set tracking_mode_valid_ = false instead of
+// ra_stop_unconfirmed_ = true.
+TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end restores tracking",
+          "[synscan][telescope][unit]") {
+    auto fail_t = std::make_shared<std::atomic<bool>>(false);
+    auto handset_mode = std::make_shared<std::atomic<char>>(1);
+    alpacacore::test::FakeMountServer server([fail_t, handset_mode](const std::string& command) {
+        switch (command.empty() ? '\0' : command[0]) {
+            case 'K':
+                return std::string(1, command.size() > 1 ? command[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return std::string("12AB0500,20000500#");
+            case 't':
+                return std::string(1, handset_mode->load()) + "#";
+            case 'T':
+                if (fail_t->load()) {
+                    handset_mode->store(0);
+                    return std::string();
+                }
+                handset_mode->store(command.size() > 1 ? command[1] : 0);
+                return std::string("#");
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            case 'L':
+                return std::string("0#");
+            default:
+                return std::string("#");
+        }
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver =
+        alpacacore::vendor::synscan::create_synscan_telescope(0, conn, alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(driver->get_tracking());
+
+    driver->pulse_guide(2, 300);  // East, RA
+    fail_t->store(true);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    REQUIRE(driver->get_slewing());
+    CHECK_FALSE(driver->get_tracking());  // the restore failed
+
+    fail_t->store(false);
+    driver->abort_slew();
+    CHECK(handset_mode->load() != 0);  // AbortSlew sent the captured mode
+    CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

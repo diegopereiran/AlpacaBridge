@@ -525,6 +525,7 @@ public:
             guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            ra_stop_unconfirmed_ = false;
             position_link_health_.reset();
             publish_link_fault_locked();
         }
@@ -1156,6 +1157,7 @@ public:
             guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            ra_stop_unconfirmed_ = false;
             at_home_ = false;
             parking_ = true;
             ++motion_generation_;
@@ -1488,9 +1490,10 @@ public:
                 // AbortSlew/MoveAxis(0) or disconnect clears it.
                 if (connected_) {
                     manual_axis_slewing_[axis] = true;
-                    // The restore may not have landed: the next Tracking read asks the handset.
+                    // The restore may not have landed. Keep the captured mode for AbortSlew/MoveAxis(0) to restore;
+                    // Tracking reports false until one of them clears this.
                     if (end_tracking_mode > 0) {
-                        tracking_mode_valid_ = false;
+                        ra_stop_unconfirmed_ = true;
                     }
                 }
             }
@@ -1593,6 +1596,7 @@ public:
             target_dec_set_ = true;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
+            ra_stop_unconfirmed_ = false;
             parked_ = false;
             at_home_ = false;
             clear_pulse_guiding_locked();
@@ -1794,6 +1798,9 @@ public:
             }
         }
         manual_axis_slewing_[axis] = moving;
+        if (axis == 0) {
+            ra_stop_unconfirmed_ = false;
+        }
         if (moving) {
             parked_ = false;
             at_home_ = false;
@@ -1898,6 +1905,7 @@ public:
                 position_override_until_ = std::chrono::steady_clock::time_point::min();
                 manual_axis_slewing_[0] = false;
                 manual_axis_slewing_[1] = false;
+                ra_stop_unconfirmed_ = false;
                 if (tracking_mode_cached_ > 0) {
                     // Stopping an RA guide pulse also stops sidereal tracking.
                     // AbortSlew owns this stop, so restore the currently
@@ -2419,7 +2427,7 @@ private:
             tracking_mode_cached_ = SynScanProtocolWrapper::instance().get_tracking_mode();
             tracking_mode_valid_ = true;
         }
-        return tracking_mode_cached_ != 0;
+        return tracking_mode_cached_ != 0 && !ra_stop_unconfirmed_;
     }
 
     AlignmentMode alignment_mode_locked() const {
@@ -2559,6 +2567,7 @@ private:
         target_dec_set_ = true;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
+        ra_stop_unconfirmed_ = false;
         parked_ = false;
         at_home_ = false;
     }
@@ -2880,6 +2889,8 @@ private:
     mutable bool last_utc_valid_;
     mutable int tracking_mode_cached_;
     mutable bool tracking_mode_valid_;
+    // A pulse-guide end whose tracking restore failed: the RA motor may be off while the cache still holds the mode.
+    mutable bool ra_stop_unconfirmed_ = false;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
     // ValueNotSet until that property itself has been written. One shared flag
