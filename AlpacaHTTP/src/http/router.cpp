@@ -3146,6 +3146,11 @@ Response Router::dispatch_device_method(
                         if (unregister_client_connection(device.get(), client_key) == 0) {
                             device->disconnect();
                         }
+                        if (stopping()) {
+                            throw alpacacore::AlpacaException(
+                                device->get_name() + ": the server is stopping; the connect was abandoned",
+                                alpacacore::AlpacaError::DriverException);
+                        }
                         throw alpacacore::AlpacaException(
                             device->get_name() + " was still connecting after " +
                                 std::to_string(std::chrono::duration_cast<std::chrono::seconds>(limit).count()) +
@@ -3181,7 +3186,7 @@ Response Router::dispatch_device_method(
                     // finished, letting the next Connect() race the still-running
                     // task and get silently dropped by AsyncConnectable's
                     // connect-vs-in-flight-disconnect rule (QHY ConformU failure).
-                    while (device->get_connecting() && !stopping() && std::chrono::steady_clock::now() < deadline) {
+                    while (device->get_connecting() && std::chrono::steady_clock::now() < deadline) {
                         std::this_thread::sleep_for(
                             std::chrono::milliseconds(50));
                     }

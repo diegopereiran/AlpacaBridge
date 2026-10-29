@@ -1351,7 +1351,8 @@ int main() {
         stopper.join();
         EXPECT(connect_ms < 2000);
         EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x500);
-        EXPECT(json.value("ErrorMessage", "").find("still connecting") != std::string::npos);
+        EXPECT(json.value("ErrorMessage", "").find("stopping") != std::string::npos);
+        EXPECT(json.value("ErrorMessage", "").find("after ") == std::string::npos);
 
         // Restart: start() cleared the flag, the slew waits to its limit again.
         stop_server.start_async();
