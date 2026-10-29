@@ -1492,7 +1492,7 @@ public:
                 if (connected_) {
                     manual_axis_slewing_[axis] = true;
                     // The restore may not have landed. Keep the captured mode for AbortSlew/MoveAxis(0) to restore;
-                    // Tracking reports false until one of them or a Tracking write clears this.
+                    // Tracking reports false until one of them, a Park, a disconnect or a Tracking write clears this.
                     if (end_tracking_mode > 0) {
                         ra_stop_unconfirmed_ = true;
                     }
@@ -1597,7 +1597,6 @@ public:
             target_dec_set_ = true;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
-            ra_stop_unconfirmed_ = false;
             parked_ = false;
             at_home_ = false;
             clear_pulse_guiding_locked();
@@ -2568,7 +2567,6 @@ private:
         target_dec_set_ = true;
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
-        ra_stop_unconfirmed_ = false;
         parked_ = false;
         at_home_ = false;
     }
@@ -2891,6 +2889,7 @@ private:
     mutable int tracking_mode_cached_;
     mutable bool tracking_mode_valid_;
     // A pulse-guide end whose tracking restore failed: the RA motor may be off while the cache still holds the mode.
+    // Only the public Tracking read consults it; a GOTO needs Tracking true, so it is refused while this is set.
     mutable bool ra_stop_unconfirmed_ = false;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw

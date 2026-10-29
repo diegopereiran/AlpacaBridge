@@ -830,6 +830,37 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end r
         driver->set_tracking(true);
         CHECK(driver->get_tracking());
     }
+
+    // Falsified by: synscan_telescope_driver.cpp disconnect, remove the ra_stop_unconfirmed_ = false.
+    SECTION("a disconnect and reconnect clears the unconfirmed stop") {
+        fail_pulse_end();
+        driver->set_connected(false);
+        handset_mode->store(1);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        CHECK(driver->get_tracking());
+    }
+
+    // Falsified by: synscan_telescope_driver.cpp move_axis, remove the ra_stop_unconfirmed_ = false for axis 0.
+    SECTION("MoveAxis on the RA axis clears the unconfirmed stop") {
+        fail_pulse_end();
+        driver->move_axis(0, 0.0);
+        handset_mode->store(1);
+        CHECK(driver->get_tracking());
+    }
+
+    // A GOTO needs Tracking true, so it is refused while the stop is unconfirmed and never has to clear the flag.
+    // Falsified by: synscan_telescope_driver.cpp get_tracking_locked, drop the !ra_stop_unconfirmed_ term.
+    SECTION("a GOTO is refused while the stop is unconfirmed") {
+        fail_pulse_end();
+        CHECK_THROWS_AS(driver->slew_to_coordinates(5.0, 20.0), alpacacore::AlpacaException);
+        CHECK_THROWS_AS(driver->slew_to_coordinates_async(5.0, 20.0), alpacacore::AlpacaException);
+    }
+    // Falsified by: synscan_telescope_driver.cpp park, remove the ra_stop_unconfirmed_ = false.
+    SECTION("Park clears the unconfirmed stop") {
+        fail_pulse_end();
+        driver->park();
+        CHECK(driver->get_tracking());
+    }
     driver->set_connected(false);
 }
 
