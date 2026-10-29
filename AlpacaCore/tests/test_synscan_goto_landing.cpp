@@ -92,6 +92,9 @@ struct LandingOffsetHandset {
     std::atomic<bool> ignore_nudges{false};
     std::atomic<int> nudge_starts{0};
     std::atomic<int> nudge_count{0};  // moves ended, by a stop or (RA) a tracking command
+    // When set, a `T` halts tracking (handset_mode 0) and gets no reply, so the write times out (#1722).
+    std::atomic<bool> fail_t{false};
+    std::atomic<char> handset_mode{1};
     // The site's hemisphere as the `w` reply reports it; it decides which RA code runs westward.
     std::atomic<bool> southern{false};
     // The `m` reply: 50 is an EQ mount (GermanPolar); 128..159 and 160 are Alt-Az.
@@ -261,12 +264,16 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 return "#";
             }
             case 'T':
+                if (st->fail_t.load()) {
+                    st->handset_mode.store(0);
+                    return "";
+                }
                 st->set_ra_motor(chunk.size() > 1 && chunk[1] != 0 ? kSiderealArcsecPerSec : 0.0, false);
                 return "#";
             case 'm':
                 return std::string(1, static_cast<char>(st->model_id.load())) + "#";
             case 't':  // tracking mode read: sidereal tracking on
-                return std::string(1, '\x01') + "#";
+                return std::string(1, st->handset_mode.load()) + "#";
             case 'w': {
                 std::string location(8, '\0');
                 if (st->southern.load()) {
@@ -369,6 +376,25 @@ TEST_CASE(
     CHECK(dec_error_arcsec(*driver, kTargetDec) < 3.0);
     CHECK(st->goto_count.load() == 1);  // never another GOTO: the handset re-rolls each landing by a second
     CHECK(st->nudge_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// Falsified by: remove the tracking_mode_valid_ = false in nudge_axis_locked (synscan_telescope_driver.cpp), and the
+// Tracking read serves the cached sidereal mode over a halted RA motor.
+TEST_CASE("SynScan GOTO landing - a failed tracking restore after the RA landing move drops the cached mode (#1722)",
+          "[synscan][telescope][goto-landing]") {
+    auto st = std::make_shared<LandingOffsetHandset>();
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    REQUIRE(driver->get_tracking());
+    st->fail_t.store(true);
+
+    CHECK_THROWS_AS(driver->slew_to_coordinates(kTargetRa, kTargetDec), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_tracking());
     driver->set_connected(false);
 }
 
