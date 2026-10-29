@@ -1216,7 +1216,8 @@ TEST_CASE("SynScan - a park whose position check cannot read the mount fails wit
                                            alpacacore::AlpacaError::DriverException);
     // Whether the three unread positions have latched the link fault yet is timing: AtPark is false, or the fault.
     try {
-        CHECK_FALSE(driver->get_at_park());
+        const bool at_park = driver->get_at_park();  // a CHECK around the call would record the throw as a failure
+        CHECK_FALSE(at_park);
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
