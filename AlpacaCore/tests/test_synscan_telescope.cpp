@@ -805,19 +805,31 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end r
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     REQUIRE(driver->get_tracking());
 
-    driver->pulse_guide(2, 300);  // East, RA
-    fail_t->store(true);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    REQUIRE(driver->get_slewing());
-    CHECK_FALSE(driver->get_tracking());  // the restore failed
+    auto fail_pulse_end = [&] {
+        driver->pulse_guide(2, 300);  // East, RA
+        fail_t->store(true);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        REQUIRE(driver->get_slewing());
+        CHECK_FALSE(driver->get_tracking());  // the restore failed
+        fail_t->store(false);
+    };
 
-    fail_t->store(false);
-    driver->abort_slew();
-    CHECK(handset_mode->load() != 0);  // AbortSlew sent the captured mode
-    CHECK(driver->get_tracking());
+    SECTION("AbortSlew restores the captured mode") {
+        fail_pulse_end();
+        driver->abort_slew();
+        CHECK(handset_mode->load() != 0);  // AbortSlew sent the captured mode
+        CHECK(driver->get_tracking());
+    }
+
+    // Falsified by: synscan_telescope_driver.cpp set_tracking() not clearing ra_stop_unconfirmed_ after the write.
+    SECTION("a successful Tracking write clears the unconfirmed stop") {
+        fail_pulse_end();
+        driver->set_tracking(true);
+        CHECK(driver->get_tracking());
+    }
     driver->set_connected(false);
 }
 

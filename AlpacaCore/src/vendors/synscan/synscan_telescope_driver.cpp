@@ -764,6 +764,7 @@ public:
             tracking_mode_cached_ = 0;
         }
         tracking_mode_valid_ = true;
+        ra_stop_unconfirmed_ = false;  // the write landed, so the mode is known again
         invalidate_readback_tick_locked();
     }
 
@@ -1491,7 +1492,7 @@ public:
                 if (connected_) {
                     manual_axis_slewing_[axis] = true;
                     // The restore may not have landed. Keep the captured mode for AbortSlew/MoveAxis(0) to restore;
-                    // Tracking reports false until one of them clears this.
+                    // Tracking reports false until one of them or a Tracking write clears this.
                     if (end_tracking_mode > 0) {
                         ra_stop_unconfirmed_ = true;
                     }
