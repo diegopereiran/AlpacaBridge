@@ -522,10 +522,9 @@ TEST_CASE("SynScan GOTO landing - a Dec-only refinement pass leaves the RA aim a
     driver->set_connected(false);
 }
 
-// The failed `T` write leaves the handset at mode 0. The cached mode stays sidereal; the case passes because the poll
-// publishes the handset's t=0 and the Tracking read serves that frame.
-// Falsified by: synscan_telescope_driver.cpp, drop the `frame.tracking_mode = *raw.tracking_mode;` copy in the poll
-// frame, and Tracking serves the cached sidereal mode over a halted RA motor.
+// The failed `T` write leaves the handset at mode 0, and the poll publishes that mode in its frame, so Tracking reads
+// false after the landing move. Falsified by: synscan_telescope_driver.cpp, drop the `frame.tracking_mode = ...` copy
+// in the poll frame; Tracking then stays unknown and the case fails at the setup read, before the landing move.
 TEST_CASE("SynScan GOTO landing - Tracking reads the halted mode after a failed RA landing restore (#1722)",
           "[synscan][telescope][goto-landing]") {
     alpacacore::test::FakeTaskClock clock;
