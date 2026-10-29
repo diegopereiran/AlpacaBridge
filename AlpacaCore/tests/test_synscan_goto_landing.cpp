@@ -522,9 +522,11 @@ TEST_CASE("SynScan GOTO landing - a Dec-only refinement pass leaves the RA aim a
     driver->set_connected(false);
 }
 
-// Falsified by: remove the tracking_mode_valid_ = false in nudge_axis_locked (synscan_telescope_driver.cpp), and the
-// Tracking read serves the cached sidereal mode over a halted RA motor.
-TEST_CASE("SynScan GOTO landing - a failed tracking restore after the RA landing move drops the cached mode (#1722)",
+// The failed `T` write leaves the handset at mode 0. The cached mode stays sidereal; the case passes because the poll
+// publishes the handset's t=0 and the Tracking read serves that frame.
+// Falsified by: synscan_telescope_driver.cpp, drop the `frame.tracking_mode = *raw.tracking_mode;` copy in the poll
+// frame, and Tracking serves the cached sidereal mode over a halted RA motor.
+TEST_CASE("SynScan GOTO landing - Tracking reads the halted mode after a failed RA landing restore (#1722)",
           "[synscan][telescope][goto-landing]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<LandingOffsetHandset>();

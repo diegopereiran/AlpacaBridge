@@ -800,6 +800,18 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
     driver->set_connected(false);
 }
 
+// Steps the fake clock until `pred` holds, so a pulse timer parked on it fires without a sleep. Each step waits for
+// the woken task to settle; the 10 s bound is real time (the handset's response timeouts run on it).
+bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!pred() && std::chrono::steady_clock::now() < deadline) {
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    return pred();
+}
+
 // A failed `T` restore after an RA stop leaves the handset in an unknown tracking state (the stop itself ends
 // sidereal tracking), so the cached mode must not be served by the next Tracking read.
 TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop drops the cached mode",
@@ -839,8 +851,10 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto driver =
-        alpacacore::vendor::synscan::create_synscan_telescope(0, conn, alpacacore::vendor::synscan::SynScanVersion::V4);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     SECTION("AbortSlew") {
@@ -858,12 +872,8 @@ TEST_CASE("SynScan Telescope Driver - failed tracking restore after an RA stop d
     SECTION("PulseGuide end") {
         driver->pulse_guide(2, 300);  // East, RA
         fail_t->store(true);          // the pulse end's tracking restore fails on all three attempts
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         // The failed stop reports the axis as still slewing, in the same locked step that drops the cached mode.
-        while (!driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        REQUIRE(driver->get_slewing());
+        REQUIRE(advance_until(clock, [&] { return driver->get_slewing(); }));
     }
 
     CHECK_FALSE(driver->get_tracking());
@@ -912,19 +922,17 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end r
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 200;
-    auto driver =
-        alpacacore::vendor::synscan::create_synscan_telescope(0, conn, alpacacore::vendor::synscan::SynScanVersion::V4);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     REQUIRE(driver->get_tracking());
 
     auto fail_pulse_end = [&] {
         driver->pulse_guide(2, 300);  // East, RA
         fail_t->store(true);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        while (!driver->get_slewing() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        REQUIRE(driver->get_slewing());
+        REQUIRE(advance_until(clock, [&] { return driver->get_slewing(); }));
         CHECK_FALSE(driver->get_tracking());  // the restore failed
         fail_t->store(false);
     };
@@ -961,8 +969,8 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end r
     }
 
     // A GOTO needs Tracking true, so it is refused with InvalidOperation while the stop is unconfirmed.
-    // Falsified by: synscan_telescope_driver.cpp:1519, bypass the sync Tracking check (only the sync assert fails).
-    // Falsified by: synscan_telescope_driver.cpp:1556, bypass the async Tracking check (only the async assert fails).
+    // Falsified by: synscan_telescope_driver.cpp:1518, bypass the sync Tracking check (only the sync assert fails).
+    // Falsified by: synscan_telescope_driver.cpp:1557, bypass the async Tracking check (only the async assert fails).
     SECTION("a GOTO is refused while the stop is unconfirmed") {
         fail_pulse_end();
         require_alpaca_error([&]() { driver->slew_to_coordinates(5.0, 20.0); },
@@ -974,7 +982,8 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew after a failed pulse-guide end r
     SECTION("Park clears the unconfirmed stop") {
         fail_pulse_end();
         driver->park();
-        CHECK(driver->get_tracking());
+        handset_mode->store(1);  // as the sections above: the handset runs sidereal again for the next poll tick
+        CHECK(advance_until(clock, [&] { return driver->get_tracking(); }));
     }
     driver->set_connected(false);
 }
