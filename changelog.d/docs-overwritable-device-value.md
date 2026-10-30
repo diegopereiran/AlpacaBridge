@@ -1,0 +1,2 @@
+### Changed (docs)
+- **A device value the client can overwrite counts as one it can set** (docs, raised in the #1902 review): the `InvalidOperation` row of the ASCOM exception vocabulary in `ascom-contract.instructions.md` now says so, and names the case: a mount clock that could not be read stays `InvalidOperation` (Celestron, SynScan and OnStep telescopes), because writing `UTCDate` sets it. No code changes.
