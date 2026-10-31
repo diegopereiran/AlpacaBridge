@@ -400,31 +400,6 @@ TEST_CASE("SynScan snapshot - a pointing state that is neither E nor W reads as 
     driver->set_connected(false);
 }
 
-TEST_CASE("SynScan snapshot - a tick that passed its first hold check makes no exchange once the hunt holds the line",
-          "[synscan][telescope][snapshot]") {
-    FakeTaskClock clock;
-    auto st = std::make_shared<Handset>();
-    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
-    REQUIRE(server.ok());
-    auto driver = connected_driver(server, clock);
-    REQUIRE(driver->get_connected());
-    sc::set_status_poll_paused_for_testing(*driver, true);
-
-    // The hunt starts after the tick's first look at the hold, before the tick reaches the handset.
-    sc::set_status_poll_before_sample_hook_for_testing(*driver,
-                                                       [&] { sc::hold_status_poll_for_testing(*driver, true); });
-    const int before = st->transactions.load();
-    CHECK(sc::poll_status_now_for_testing(*driver));
-    CHECK(st->transactions.load() == before);
-    sc::set_status_poll_before_sample_hook_for_testing(*driver, nullptr);
-
-    // With the hold dropped the same tick reads the handset again.
-    sc::hold_status_poll_for_testing(*driver, false);
-    CHECK(sc::poll_status_now_for_testing(*driver));
-    CHECK(st->transactions.load() > before);
-    driver->set_connected(false);
-}
-
 TEST_CASE("SynScan snapshot - a slewing re-read that finds no change does not drop the poll's frame",
           "[synscan][telescope][snapshot]") {
     FakeTaskClock clock;

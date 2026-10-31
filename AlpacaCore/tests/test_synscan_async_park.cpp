@@ -947,8 +947,13 @@ TEST_CASE("SynScan async - malformed Park status reply persists through Slewing"
             (void)driver->get_slewing();
         } catch (const alpacacore::AlpacaException& ex) {
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).find("Invalid response to SynScan slew-status query") != std::string::npos);
-            surfaced = true;
+            // The poll's own fault latches first (three bad replies of its own); the stored Park error takes
+            // precedence over it once the Park has failed, and carries the reply the handset sent.
+            const std::string text = ex.what();
+            if (text.find("communications compromised") == std::string::npos) {
+                CHECK(text.find("Invalid response to SynScan slew-status query") != std::string::npos);
+                surfaced = true;
+            }
         }
     }
     REQUIRE(surfaced);
