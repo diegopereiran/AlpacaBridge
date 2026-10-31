@@ -711,4 +711,42 @@ TEST_CASE("SynScan snapshot - the status poll keeps ticking after an async and a
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan snapshot - Tracking and GuideRate do not wait for a connect that is in flight",
+          "[synscan][telescope][snapshot][connect]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 1000;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    st->latency_ms = 200;  // every handshake exchange pays 200 ms: the connect takes seconds
+    std::thread connecting([&] { driver->set_connected(true); });
+    // The handshake is under way once the handset has seen a few of its commands.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (st->transactions.load() < 3 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() >= 3);
+
+    const auto swallow = [](const std::function<void()>& read) {
+        try {
+            read();
+        } catch (const alpacacore::AlpacaException&) {  // NotConnected or "not known yet" is an answer too
+        }
+    };
+    CHECK(timed([&] { swallow([&] { (void)driver->get_tracking(); }); }) < kGetterBudget);
+    CHECK(timed([&] { swallow([&] { (void)driver->get_guide_rate(); }); }) < kGetterBudget);
+    CHECK(timed([&] { swallow([&] { (void)driver->get_at_park(); }); }) < kGetterBudget);
+    CHECK(timed([&] { swallow([&] { (void)driver->get_is_pulse_guiding(); }); }) < kGetterBudget);
+    connecting.join();
+    driver->set_connected(false);
+}
+
+
+
 #endif
