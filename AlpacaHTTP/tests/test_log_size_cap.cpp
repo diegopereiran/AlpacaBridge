@@ -185,7 +185,7 @@ int main() {
     }
 
     {
-        // case: the default cap fits what the viewer shows inline (5 MiB) and what read_log_file reads
+        // case: the default cap fits what the viewer and archive will read
         alpacahttp::Config config;
         EXPECT(config.log_max_file_size_mb() == 5);
         EXPECT(static_cast<std::uintmax_t>(config.log_max_file_size_mb()) * kMiB <= util::kMaxLogFileReadBytes);
