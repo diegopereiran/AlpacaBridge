@@ -6596,7 +6596,7 @@ private:
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
     uint64_t pulse_owner_gen_[2] = {0, 0};  // the generation a pulse dispatch's own stop-wait holds, 0 = none
-    uint64_t pulse_wait_gen_[2] = {0, 0};  // a pulse dispatch's stop-wait generation per axis, 0 = none (#1706)
+    uint64_t pulse_wait_gen_[2] = {0, 0};   // a pulse dispatch's stop-wait generation per axis, 0 = none (#1706)
     bool park_position_set_ = false;
     double park_ra_axis_deg_ = 0.0;
     double park_dec_axis_deg_ = 0.0;
