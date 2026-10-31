@@ -801,6 +801,7 @@ public:
 
     void set_site_latitude(double latitude) override {
         util::validate_latitude(latitude);
+        std::lock_guard<std::mutex> config(config_write_mutex_);  // the other coordinate is read before the `W`
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         LocationInfo info = current_location(lock);
@@ -821,6 +822,7 @@ public:
 
     void set_site_longitude(double longitude) override {
         util::validate_longitude(longitude);
+        std::lock_guard<std::mutex> config(config_write_mutex_);  // the other coordinate is read before the `W`
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         LocationInfo info = current_location(lock);
@@ -898,15 +900,18 @@ public:
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
+        std::lock_guard<std::mutex> config(config_write_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        apply_utc_date(utc, lock);
+        apply_utc_date(utc, lock, true);
     }
 
 private:
-    // Body of set_utc_date. `lock` (mutex_) is held on entry and on return; the `h` write runs with it released. The
-    // connect calls it before connected_ is set, so it does not check the connection.
-    void apply_utc_date(std::chrono::system_clock::time_point utc, std::unique_lock<std::mutex>& lock) {
+    // Body of set_utc_date. `lock` (mutex_) is held on entry and on return; the `H` write runs with it released. The
+    // connect calls it before connected_ is set, so only set_utc_date asks for the connection check after the write:
+    // a disconnect during the `H` makes the write report NotConnected, as the site writes do.
+    void apply_utc_date(std::chrono::system_clock::time_point utc, std::unique_lock<std::mutex>& lock,
+                        bool require_connected) {
         std::time_t utc_time_t = std::chrono::system_clock::to_time_t(utc);
         LocalTimeInfo tz_info = compute_local_timezone_info(utc_time_t);
 
@@ -929,6 +934,9 @@ private:
 
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         without_lock(lock, [&info] { SynScanProtocolWrapper::instance().set_time(info); });
+        if (require_connected) {
+            check_connected();
+        }
         invalidate_readback_tick_locked();
         timezone_offset_minutes_ = tz_info.offset_minutes;
         timezone_offset_valid_ = true;
@@ -1977,6 +1985,9 @@ private:
             std::chrono::system_clock::time_point mount_utc;
             try {
                 TimeInfo info = without_lock(lock, [] { return SynScanProtocolWrapper::instance().get_time(); });
+                if (utc_offset_.valid()) {
+                    return;  // a write landed during the read; it is newer than this reading
+                }
                 timezone_offset_minutes_ = info.timezone_offset_minutes;
                 timezone_offset_valid_ = true;
                 dst_observed_ = info.dst_enabled;
@@ -2267,7 +2278,7 @@ private:
     // The constructor runs with `lock` (mutex_) held: it takes the ticket, releases `lock` to wait (nobody waits for
     // a turn while holding mutex_, and the holder of a turn may need mutex_), and returns with the turn and `lock`
     // both held. The destructor passes the turn on, on every path. Lock order: transition_mutex_, initiator_mutex_,
-    // turn, the wrapper mutex; mutex_ is a leaf and is never held while a protocol call runs.
+    // config_write_mutex_, turn, mutex_ (a leaf, never held while a protocol call runs), the wrapper mutex.
     class WireTurn {
     public:
         WireTurn(SynScanTelescopeDriver& driver, std::unique_lock<std::mutex>& lock) : driver_(driver) {
@@ -2854,6 +2865,7 @@ private:
     // The tracking mode the control path just commanded, written through as set_slewing_locked() is.
     void set_tracking_mode_cached_locked(int mode) const {
         tracking_mode_cached_ = mode;
+        ++tracking_mode_generation_;
         polled_.write([mode](PolledFrame& frame) { frame.tracking_mode = mode; });
     }
 
@@ -2999,7 +3011,9 @@ private:
             }
             if (site) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                apply_site_info_locked(*site);
+                if (!site_info_valid_) {  // a site write during the `w` is newer than it
+                    apply_site_info_locked(*site);
+                }
             }
         }
         RawSample raw;
@@ -3149,6 +3163,7 @@ private:
             return;
         }
         int mode = 0;
+        const uint64_t generation = tracking_mode_generation_;
         try {
             mode = without_lock(lock, [] { return SynScanProtocolWrapper::instance().get_tracking_mode(); });
         } catch (...) {
@@ -3158,13 +3173,16 @@ private:
             }
             throw;
         }
-        // Written through to the frame Tracking serves only when it changed: every write drops the poll tick in
-        // flight, as for the slewing flag (note_slewing_read_locked).
-        const auto reading = polled_.read();
-        if (reading && reading->value.tracking_mode != mode) {
-            set_tracking_mode_cached_locked(mode);
-        } else {
-            tracking_mode_cached_ = mode;
+        // A mode the control path wrote during the read is newer than the reading, so it stays. Otherwise written
+        // through to the frame Tracking serves only when it changed: every write drops the poll tick in flight, as for
+        // the slewing flag (note_slewing_read_locked).
+        if (tracking_mode_generation_ == generation) {
+            const auto reading = polled_.read();
+            if (reading && reading->value.tracking_mode != mode) {
+                set_tracking_mode_cached_locked(mode);
+            } else {
+                tracking_mode_cached_ = mode;
+            }
         }
         tracking_mode_valid_ = true;
     }
@@ -3179,8 +3197,11 @@ private:
 
     bool get_tracking_locked(std::unique_lock<std::mutex>& lock) const {
         if (!tracking_mode_valid_) {
-            tracking_mode_cached_ =
-                without_lock(lock, [] { return SynScanProtocolWrapper::instance().get_tracking_mode(); });
+            const uint64_t generation = tracking_mode_generation_;
+            const int mode = without_lock(lock, [] { return SynScanProtocolWrapper::instance().get_tracking_mode(); });
+            if (tracking_mode_generation_ == generation) {  // else a write during the read is newer than it
+                tracking_mode_cached_ = mode;
+            }
             tracking_mode_valid_ = true;
         }
         return tracking_mode_cached_ != 0 && !ra_stop_unconfirmed_;
@@ -3240,10 +3261,12 @@ private:
             return;
         }
         try {
-            apply_site_info_locked(
-                without_lock(lock, [] { return SynScanProtocolWrapper::instance().get_location(); }));
-        } catch (...) {
-            site_info_valid_ = false;
+            const LocationInfo info =
+                without_lock(lock, [] { return SynScanProtocolWrapper::instance().get_location(); });
+            if (!site_info_valid_) {  // a SiteLatitude/SiteLongitude write during the `w` is newer than it
+                apply_site_info_locked(info);
+            }
+        } catch (...) {  // NOLINT(bugprone-empty-catch): an unread site stays unread, one written meanwhile known
         }
     }
 
@@ -3626,7 +3649,9 @@ private:
         }
     }
 
-    void sync_mount_time(std::unique_lock<std::mutex>& lock) { apply_utc_date(std::chrono::system_clock::now(), lock); }
+    void sync_mount_time(std::unique_lock<std::mutex>& lock) {
+        apply_utc_date(std::chrono::system_clock::now(), lock, false);
+    }
 
     int device_number_;
     ConnectionInfo connection_info_;
@@ -3683,6 +3708,7 @@ private:
     mutable bool dst_observed_;
     mutable util::UtcOffset utc_offset_;
     mutable int tracking_mode_cached_;
+    mutable uint64_t tracking_mode_generation_ = 0;  // bumped on every control-path write of tracking_mode_cached_
     mutable bool tracking_mode_valid_;
     // A pulse-guide end whose tracking restore failed: the RA motor may be off while the cache still holds the mode.
     // Only the public Tracking read consults it. A GOTO is refused while it is set; a pulse end that fails while a
@@ -3761,6 +3787,11 @@ private:
     std::mutex initiator_mutex_;
     // Serialises set_connected() calls; no getter takes it. First in the lock order.
     std::mutex transition_mutex_;
+    // Serialises SiteLatitude, SiteLongitude and UTCDate writes, each across its read of the other value, its wire
+    // write and its publish, so two concurrent writes cannot lose one. After initiator_mutex_, before the turn: such a
+    // write never waits for a motion initiator. The connect does not take it (a public setter refuses while
+    // connected_ is false).
+    std::mutex config_write_mutex_;
     // Wall time behind every local-sidereal-time read (park and SetPark target, DestinationSideOfPier,
     // SiderealTime). Only a test replaces it, so hardware keeps std::chrono::system_clock. Own mutex: the
     // reads run on client calls (some under mutex_), the test setter on another thread.

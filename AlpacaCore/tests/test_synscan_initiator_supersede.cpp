@@ -69,6 +69,10 @@ struct FakeSynScanState {
     std::atomic<Clock::rep> gate_t_entered{0};
     std::atomic<int> gate_s_ms{0};  // >0: the next sync command is held this long before it is answered
     std::atomic<Clock::rep> gate_s_entered{0};
+    std::atomic<int> gate_w_ms{0};  // >0: the next site write is held this long before it is answered
+    std::atomic<Clock::rep> gate_w_entered{0};
+    std::atomic<int> gate_h_ms{0};  // >0: the next time write is held this long before it is answered
+    std::atomic<Clock::rep> gate_h_entered{0};
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -159,7 +163,16 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
             case 'w':
                 return std::string(8, '\0') + "#";
             case 'W':
+            case 'H': {  // site and time writes
+                auto& gate_ms = chunk[0] == 'W' ? st->gate_w_ms : st->gate_h_ms;
+                auto& gate_entered = chunk[0] == 'W' ? st->gate_w_entered : st->gate_h_entered;
+                const int hold = gate_ms.exchange(0);
+                if (hold > 0) {
+                    gate_entered.store(Clock::now().time_since_epoch().count());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                }
                 return "#";
+            }
             default:
                 return "0#";
         }
@@ -524,6 +537,44 @@ TEST_CASE("SynScan initiator supersede - Park waits for a SyncToCoordinates whos
     sync.join();
     park.join();
     CHECK(rig.driver->get_slewing());  // the Park ran after the sync
+}
+
+// SiteLatitude and SiteLongitude each write both coordinates in one `W`, the other one taken from the cache. The two
+// writes are serialised across that read, the `W` and the publish (config_write_mutex_), so a SiteLongitude write that
+// arrives while a SiteLatitude `W` is held sends after it and keeps the new latitude.
+TEST_CASE("SynScan initiator supersede - concurrent SiteLatitude and SiteLongitude writes keep both values",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.st->gate_w_ms.store(800);
+    std::thread lat([&] { rig.driver->set_site_latitude(-33.856784); });
+    REQUIRE(wait_until([&] { return rig.st->gate_w_entered.load() != 0; }, 5000));
+    std::thread lon([&] { rig.driver->set_site_longitude(151.215297); });
+    lat.join();
+    lon.join();
+    CHECK(rig.driver->get_site_latitude() == Catch::Approx(-33.856784).margin(0.01));
+    CHECK(rig.driver->get_site_longitude() == Catch::Approx(151.215297).margin(0.01));
+}
+
+// A disconnect while a UTCDate `H` write is held ends the session the write was for: the write reports NotConnected,
+// as the site writes do, instead of reporting success and publishing its offset into the torn-down session.
+TEST_CASE("SynScan initiator supersede - a UTCDate write cut by a disconnect reports NotConnected",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*rig.driver, true);  // a prompt teardown
+    rig.st->gate_h_ms.store(800);
+    std::atomic<int> write_error{-1};
+    std::thread write([&] {
+        try {
+            rig.driver->set_utc_date(std::chrono::system_clock::now());
+            write_error = 0;
+        } catch (const alpacacore::AlpacaException& ex) {
+            write_error = ex.error_code();
+        }
+    });
+    REQUIRE(wait_until([&] { return rig.st->gate_h_entered.load() != 0; }, 5000));
+    rig.driver->set_connected(false);
+    write.join();
+    CHECK(write_error.load() == alpacacore::AlpacaError::NotConnected);
 }
 
 #endif  // _WIN32
