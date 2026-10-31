@@ -169,12 +169,14 @@ int main() {
         write_lines(2000);
         EXPECT(util::is_valid_log_filename(part_name(1)));
         EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.0.log"));
-        EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.10.log"));
+        EXPECT(util::is_valid_log_filename("alpacabridge-2026-01-01.19.log"));
+        EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.01.log"));
+        EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.100.log"));
         const auto files = util::list_log_files();
         EXPECT(files.size() == static_cast<std::size_t>(util::kMaxRotatedLogFiles) + 1);
         EXPECT(files[0].name == util::current_log_filename());
         for (std::size_t i = 1; i < files.size(); ++i) {
-            EXPECT(files[i].name == part_name(static_cast<int>(i)));  // .1 before .2 ... .9
+            EXPECT(files[i].name == part_name(static_cast<int>(i)));  // .1, .2, ... .10 in number order
         }
         EXPECT(util::read_log_file(part_name(1)) == read_all(dir / part_name(1)));
         util::delete_log_file(part_name(1));
@@ -183,9 +185,9 @@ int main() {
     }
 
     {
-        // case: the default cap fits what the viewer and archive will read
+        // case: the default cap fits what the viewer shows inline (5 MiB) and what read_log_file reads
         alpacahttp::Config config;
-        EXPECT(config.log_max_file_size_mb() == 10);
+        EXPECT(config.log_max_file_size_mb() == 5);
         EXPECT(static_cast<std::uintmax_t>(config.log_max_file_size_mb()) * kMiB <= util::kMaxLogFileReadBytes);
     }
 
@@ -235,12 +237,12 @@ int main() {
             return c.log_max_file_size_mb();
         };
         ::unsetenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB");
-        EXPECT(loaded("") == 10);
+        EXPECT(loaded("") == 5);
         EXPECT(loaded("25") == 25);
         EXPECT(loaded("0") == 0);
-        EXPECT(loaded("-5") == 10);
-        EXPECT(loaded("abc") == 10);
-        EXPECT(loaded("99999999999999999999") == 10);
+        EXPECT(loaded("-5") == 5);
+        EXPECT(loaded("abc") == 5);
+        EXPECT(loaded("99999999999999999999") == 5);
 
         ::setenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB", "3", 1);
         EXPECT(loaded("25") == 3);
@@ -249,7 +251,7 @@ int main() {
         ::setenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB", "-1", 1);
         EXPECT(loaded("25") == 25);
         ::setenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB", "junk", 1);
-        EXPECT(loaded("") == 10);
+        EXPECT(loaded("") == 5);
         ::unsetenv("ALPACAHTTP_LOG_MAX_FILE_SIZE_MB");
         ::unlink(path.c_str());
     }

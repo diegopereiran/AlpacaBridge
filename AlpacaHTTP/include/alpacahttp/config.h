@@ -202,7 +202,7 @@ private:
     std::string log_directory_ = "/var/log/AlpacaBridge";
     bool file_logging_enabled_ = true;
     int log_retention_days_ = 90;  // 0 = forever
-    int log_max_file_size_mb_ = 10;  // 0 = no cap
+    int log_max_file_size_mb_ = 5;  // 0 = no cap
     std::string config_path_;
 
     // Device enable/disable map: "devicetype:number" -> enabled

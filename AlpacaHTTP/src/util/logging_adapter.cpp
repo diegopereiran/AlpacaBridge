@@ -51,8 +51,8 @@ namespace {
     std::uintmax_t g_log_file_bytes = 0;      // size of the open file: at open plus bytes written
 
     // A day's file, or one of its rotated parts (.1 newest .. .kMaxRotatedLogFiles).
-    static_assert(kMaxRotatedLogFiles >= 1 && kMaxRotatedLogFiles <= 9, "part numbers are one digit");
-    const std::regex kLogFilenameRegex(R"(^alpacabridge-(\d{4})-(\d{2})-(\d{2})(\.[1-9])?\.log$)");
+    static_assert(kMaxRotatedLogFiles >= 1 && kMaxRotatedLogFiles <= 99, "part numbers are one or two digits");
+    const std::regex kLogFilenameRegex(R"(^alpacabridge-(\d{4})-(\d{2})-(\d{2})(\.[1-9]\d?)?\.log$)");
 
     const char* level_to_string(alpacacore::logging::LogLevel level) {
         switch (level) {
@@ -399,8 +399,10 @@ std::vector<LogFileInfo> list_log_files() {
     }
 
     // Newest first: by date, then the day's current file before its parts .1, .2, ...
-    // (a plain name sort would put .9 before .1).
-    const auto part = [](const std::string& name) { return name.size() == 29 ? name[24] : '0'; };
+    // in number order (a plain name sort would put .9 before .1 and .10 before .2).
+    const auto part = [](const std::string& name) {
+        return name.size() > 27 ? std::stoi(name.substr(24, name.size() - 28)) : 0;  // "alpacabridge-YYYY-MM-DD.N.log"
+    };
     std::sort(result.begin(), result.end(), [&part](const LogFileInfo& a, const LogFileInfo& b) {
         const auto a_date = a.name.substr(13, 10);
         const auto b_date = b.name.substr(13, 10);
