@@ -4344,9 +4344,12 @@ private:
     // landing in the unlock window otherwise saw its goto re-dispatched).
     // open-astro#1706: a pulse's dispatch owns only its own axis, so a speed start on the other axis
     // (MoveAxis) moves the pulse's generation along instead of superseding it. Any other bump
-    // (goto, abort, stop) leaves pulse_wait_gen_ behind and still supersedes.
+    // (goto, abort, stop) leaves pulse_wait_gen_ behind and still supersedes. Only the pulse's own
+    // wait (gen == pulse_owner_gen_) follows; an older waiter on the same axis stays superseded.
     [[nodiscard]] bool superseded_locked(int channel, uint64_t gen) const {
-        return motion_generation_ != gen && motion_generation_ != pulse_wait_gen_[channel - 1];
+        const int i = channel - 1;
+        return motion_generation_ != gen &&
+               !(gen == pulse_owner_gen_[i] && motion_generation_ == pulse_wait_gen_[i]);
     }
 
     [[nodiscard]] bool stop_axis_and_wait_locked(StateLock& lock, int channel, uint64_t gen) {
@@ -4403,13 +4406,21 @@ private:
         if (anchor_model) {
             advance_model_anchor_locked();
         }
+        // Clears the pulse's slot on every exit, a stop timeout included.
+        struct PulseSlot {
+            uint64_t& owner;
+            uint64_t& wait;
+            bool armed;
+            ~PulseSlot() {
+                if (armed) {
+                    owner = wait = 0;
+                }
+            }
+        } pulse_slot{pulse_owner_gen_[channel - 1], pulse_wait_gen_[channel - 1], pulse};
         if (pulse) {
-            pulse_wait_gen_[channel - 1] = gen;
+            pulse_owner_gen_[channel - 1] = pulse_wait_gen_[channel - 1] = gen;
         }
         const bool kept = stop_axis_and_wait_locked(lock, channel, gen);
-        if (pulse) {
-            pulse_wait_gen_[channel - 1] = 0;
-        }
         if (!kept) {
             throw AlpacaException("Motion superseded before dispatch");
         }
@@ -6585,6 +6596,7 @@ private:
     bool dec_offset_running_ = false;
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
+    uint64_t pulse_owner_gen_[2] = {0, 0};  // the generation a pulse dispatch's own stop-wait holds, 0 = none
     uint64_t pulse_wait_gen_[2] = {0, 0};  // a pulse dispatch's stop-wait generation per axis, 0 = none (#1706)
     bool park_position_set_ = false;
     double park_ra_axis_deg_ = 0.0;

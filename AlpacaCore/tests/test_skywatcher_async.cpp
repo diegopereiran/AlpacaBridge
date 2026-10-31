@@ -833,6 +833,42 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
+// #1706 review: the pulse exception must belong to the pulse's own wait. An older MoveAxis(Dec)
+// stop-wait on the same axis stays superseded, or both commands own Dec and the pulse times out.
+TEST_CASE("SkyWatcher async - a Dec pulse dispatch supersedes an older MoveAxis(Dec) stop-wait (#1706)",
+          "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->move_axis(1, 1.0);
+    REQUIRE(mount.axis_running(2));
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread mover([&] {
+        try {
+            driver->move_axis(1, 2.0);
+        } catch (const alpacacore::AlpacaException&) {
+            threw = true;
+        }
+        done = true;
+    });
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // MoveAxis parked in the Dec stop-wait
+    driver->pulse_guide(0, 500);
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the pulse dispatch parked too
+    const bool settled = run_clock_until(
+        clock, [&] { return done.load() && !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(20000));
+    mover.join();
+    CHECK(settled);
+    CHECK(threw.load());
+    clock.advance(std::chrono::milliseconds(2000));
+    clock.wait_for_woken_settled(kRendezvous);
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
 // The same-axis no-op: reaping the Dec pulse here would leave Dec turning,
 // because MoveAxis(Dec, 0) with no manual motion commands nothing.
 TEST_CASE("SkyWatcher async - MoveAxis(Dec, 0) with no manual motion leaves a running Dec pulse to end itself (#630)",
