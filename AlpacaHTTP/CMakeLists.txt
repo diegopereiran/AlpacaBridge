@@ -497,7 +497,7 @@ if(ALPACAHTTP_BUILD_TESTS)
     file(MAKE_DIRECTORY ${TEST_ROUTER_LOG_LEVEL_DIR})
     add_test(NAME test_router_log_level COMMAND test_router_log_level WORKING_DIRECTORY ${TEST_ROUTER_LOG_LEVEL_DIR})
 
-    # open-astro#1739: the shutdown and restart handlers' delayed thread reads no Router state.
+    # open-astro#1739: the shutdown and restart delayed thread is joined, not detached.
     # Own working directory, like test_router_log_level.
     add_executable(test_router_shutdown tests/test_router_shutdown.cpp)
     target_link_libraries(test_router_shutdown alpacahttp)

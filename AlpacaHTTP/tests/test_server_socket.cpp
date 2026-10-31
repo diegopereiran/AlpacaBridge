@@ -1046,7 +1046,7 @@ int main() {
     }
 
     // The management restart endpoint tears the server down and brings it
-    // back on a detached thread while the requesting client's connection is
+    // back on a delayed thread while the requesting client's connection is
     // still alive. Two restarts back to back, each followed by a fresh
     // client that must be served, a keep-alive bystander that stop() closes
     // rather than leaks, and the RTC probe thread coming back with each

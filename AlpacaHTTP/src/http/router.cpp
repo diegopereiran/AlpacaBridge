@@ -1269,8 +1269,18 @@ void Router::start_delayed_callback(std::function<void()> callback) {
     if (delayed_pending_ || delayed_cancelled_) {
         return;
     }
+    // A finished thread is past its callback, so joining it cannot deadlock.
+    for (auto it = delayed_threads_.begin(); it != delayed_threads_.end();) {
+        if (it->finished->load()) {
+            it->thread.join();
+            it = delayed_threads_.erase(it);
+        } else {
+            ++it;
+        }
+    }
     delayed_pending_ = true;
-    delayed_threads_.emplace_back([this, cb = std::move(callback)]() {
+    auto finished = std::make_shared<std::atomic<bool>>(false);
+    auto body = [this, finished, cb = std::move(callback)]() {
         {
             std::unique_lock<std::mutex> wait_lock(delayed_mutex_);
             if (delayed_cv_.wait_for(wait_lock, std::chrono::milliseconds(100),
@@ -1279,22 +1289,24 @@ void Router::start_delayed_callback(std::function<void()> callback) {
             }
             delayed_pending_ = false;
         }
-        // Reads no Router state from here on: the callback may destroy the Router.
+        // Touches no Router member after the delay: the callback may destroy the Router.
         cb();
-    });
+        finished->store(true);
+    };
+    delayed_threads_.push_back({std::thread(std::move(body)), finished});
 }
 
 void Router::cancel_delayed_callback() {
-    std::vector<std::thread> threads;
+    std::vector<DelayedThread> threads;
     {
         std::lock_guard<std::mutex> lock(delayed_mutex_);
         delayed_cancelled_ = true;
         threads.swap(delayed_threads_);
     }
     delayed_cv_.notify_all();
-    for (auto& thread : threads) {
+    for (auto& entry : threads) {
         // A callback that destroys the Server joins itself: join_or_abandon detaches then (ADR 0002).
-        detail::join_or_abandon(thread, "cancel_delayed_callback");
+        detail::join_or_abandon(entry.thread, "cancel_delayed_callback");
     }
 }
 

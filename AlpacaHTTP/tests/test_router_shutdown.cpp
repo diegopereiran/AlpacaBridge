@@ -10,8 +10,8 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The detached thread behind POST shutdown and restart must not read the
-// Router after the handler returns (open-astro#1739).
+// The delayed thread behind POST shutdown and restart must not read the Router
+// after the delay and must not outlive the Server (open-astro#1739).
 
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
@@ -82,6 +82,22 @@ void check_server_teardown(const std::string& path, void (alpacahttp::Server::*s
     EXPECT(*count == 0);
 }
 
+// Repeated restarts must not pile up finished threads (open-astro#1739).
+void check_finished_threads_reaped() {
+    auto router = std::make_unique<alpacahttp::Router>();
+    auto count = std::make_shared<std::atomic<int>>(0);
+    router->set_restart_callback([count] { ++*count; });
+    for (int i = 1; i <= 3; ++i) {
+        EXPECT(route_post(*router, "/management/v1/restart").status_code() == 200);
+        for (int wait = 0; wait < 500 && *count < i; ++wait) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // flag is set after the callback returns
+    }
+    EXPECT(*count == 3);
+    EXPECT(router->delayed_thread_count_for_test() == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -94,6 +110,8 @@ int main() {
     check_server_teardown("/management/v1/shutdown", &alpacahttp::Server::set_shutdown_callback);
     // case: POST restart then Server teardown never runs the callback or reaches the Server (#1739)
     check_server_teardown("/management/v1/restart", &alpacahttp::Server::set_restart_callback);
+    // case: repeated restarts join their finished delayed threads (#1739)
+    check_finished_threads_reaped();
     std::cout << "Router shutdown tests passed\n";
     return 0;
 }

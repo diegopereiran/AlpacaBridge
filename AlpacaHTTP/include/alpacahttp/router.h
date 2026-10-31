@@ -233,6 +233,10 @@ public:
     // Server::~Server() calls this first, so the callback (which reaches the
     // Server) cannot run after teardown starts (open-astro#1739).
     void cancel_delayed_callback();
+    std::size_t delayed_thread_count_for_test() {
+        std::lock_guard<std::mutex> lock(delayed_mutex_);
+        return delayed_threads_.size();
+    }
 
     // Route request and generate response
     Response route(const Request& request, std::uint32_t server_transaction_id);
@@ -247,14 +251,19 @@ private:
 
     // The 100 ms delayed shutdown/restart callback. A second request while one
     // is waiting out the delay is dropped; once its callback runs, a later
-    // request (a restart can repeat) starts a new thread. Threads stay in
-    // delayed_threads_ until cancel_delayed_callback() joins them.
+    // request (a restart can repeat) starts a new thread. A thread sets its
+    // `finished` flag after the callback returns; the next start joins and drops
+    // finished threads, and cancel_delayed_callback() joins the rest.
     void start_delayed_callback(std::function<void()> callback);
     std::mutex delayed_mutex_;
     std::condition_variable delayed_cv_;
     bool delayed_cancelled_ = false;
     bool delayed_pending_ = false;
-    std::vector<std::thread> delayed_threads_;
+    struct DelayedThread {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> finished;
+    };
+    std::vector<DelayedThread> delayed_threads_;
 
     // open-astro#392: normalized allowed_hosts entries, replaced wholesale by
     // set_allowed_hosts() and read by every request; the lock guards only the
