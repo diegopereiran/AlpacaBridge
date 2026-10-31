@@ -2630,7 +2630,7 @@ public:
                 // whether a newer motion command took over while it polled
                 // (PR #216 round-5 finding — the restore otherwise re-starts
                 // tracking a concurrent SetTracking(false) just stopped).
-                stop_task_generation = ++motion_generation_;
+                stop_task_generation = bump_motion_generation_locked(channel);
                 need_stop_task = true;
             }
             // MoveAxis(axis, 0) on an axis with no manual motion is a no-op:
@@ -4342,13 +4342,25 @@ private:
     // slew task was cancelled) — the caller MUST NOT issue further motor
     // commands for its now-stale operation (PR #216 review: an AbortSlew
     // landing in the unlock window otherwise saw its goto re-dispatched).
-    // open-astro#1706: a pulse's dispatch owns only its own axis, so a speed start on the other axis
-    // (MoveAxis) moves the pulse's generation along instead of superseding it. Any other bump
-    // (goto, abort, stop) leaves pulse_wait_gen_ behind and still supersedes. Only the pulse's own
-    // wait (gen == pulse_owner_gen_) follows; an older waiter on the same axis stays superseded.
+    // open-astro#1706: a pulse's dispatch owns only its own axis, so a command on the other axis alone
+    // (a start or a stop, bump_motion_generation_locked()) moves the pulse's generation along instead of
+    // superseding it. A command that owns both axes (goto, Park, sync, abort, home, reconnect) bumps
+    // motion_generation_ directly, leaves pulse_wait_gen_ behind and still supersedes. Only the pulse's
+    // own wait (gen == pulse_owner_gen_) follows; an older waiter on the same axis stays superseded.
     [[nodiscard]] bool superseded_locked(int channel, uint64_t gen) const {
         const int i = channel - 1;
         return motion_generation_ != gen && !(gen == pulse_owner_gen_[i] && motion_generation_ == pulse_wait_gen_[i]);
+    }
+
+    // The bump for a command on `channel` alone: a pulse dispatch waiting on the other axis follows it.
+    uint64_t bump_motion_generation_locked(int channel) {
+        uint64_t& other_pulse_wait = pulse_wait_gen_[2 - channel];
+        const bool other_pulse_follows = other_pulse_wait == motion_generation_;
+        const uint64_t gen = ++motion_generation_;
+        if (other_pulse_follows) {
+            other_pulse_wait = gen;
+        }
+        return gen;
     }
 
     [[nodiscard]] bool stop_axis_and_wait_locked(StateLock& lock, int channel, uint64_t gen) {
@@ -4396,12 +4408,7 @@ private:
     void start_speed_motion_locked(StateLock& lock, int channel, double signed_rate_deg_per_sec,
                                    bool anchor_model = false, bool pulse = false) {
         const Wire protocol = wire();
-        uint64_t& other_pulse_wait = pulse_wait_gen_[2 - channel];
-        const bool other_pulse_follows = other_pulse_wait == motion_generation_;
-        const uint64_t gen = ++motion_generation_;
-        if (other_pulse_follows) {
-            other_pulse_wait = gen;
-        }
+        const uint64_t gen = bump_motion_generation_locked(channel);
         if (anchor_model) {
             advance_model_anchor_locked();
         }
@@ -4530,7 +4537,7 @@ private:
         if (rate == 0.0) {
             dec_duty_rate_deg_s_ = 0.0;
             if (dec_offset_running_ && !defer_motion) {
-                const uint64_t gen = ++motion_generation_;
+                const uint64_t gen = bump_motion_generation_locked(kAxisDec);
                 static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
             }
             dec_offset_running_ = false;
@@ -4555,7 +4562,7 @@ private:
             start_speed_motion_locked(lock, kAxisDec, rate);
         } else {
             if (dec_offset_running_ && !defer_motion) {
-                const uint64_t gen = ++motion_generation_;
+                const uint64_t gen = bump_motion_generation_locked(kAxisDec);
                 static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, gen));
             }
             dec_duty_rate_deg_s_ = rate;
@@ -4624,7 +4631,7 @@ private:
                         } else {
                             uint64_t stop_gen = ax[i].gen;
                             if (motion_generation_ != ax[i].gen) {
-                                stop_gen = ++motion_generation_;  // cross-axis bump: still ours
+                                stop_gen = bump_motion_generation_locked(channel);  // cross-axis bump: still ours
                             }
                             static_cast<void>(stop_axis_and_wait_locked(lock, channel, stop_gen));
                             if (duty_rate_locked(channel) == ax[i].rate) {
@@ -4691,7 +4698,7 @@ private:
             StateLock lock(lock_gate_);
             for (int channel = 1; channel <= 2; ++channel) {
                 if (duty_rate_locked(channel) != 0.0 && connected_) {
-                    const uint64_t gen = ++motion_generation_;
+                    const uint64_t gen = bump_motion_generation_locked(channel);
                     static_cast<void>(stop_axis_and_wait_locked(lock, channel, gen));
                 }
             }
@@ -4721,7 +4728,7 @@ private:
             start_speed_motion_locked(lock, kAxisRa, eff);
             return;
         }
-        const uint64_t gen = ++motion_generation_;
+        const uint64_t gen = bump_motion_generation_locked(kAxisRa);
         static_cast<void>(stop_axis_and_wait_locked(lock, kAxisRa, gen));
         ra_duty_rate_deg_s_ = eff;  // 0.0 = stay stopped; else the worker bursts
         cmd_axis_rate_deg_s_[0] = eff;
@@ -4809,7 +4816,7 @@ private:
             apply_ra_drive_locked(lock);
             apply_dec_rate_offset_locked(lock);
         } else {
-            const uint64_t gen = ++motion_generation_;
+            const uint64_t gen = bump_motion_generation_locked(kAxisRa);
             // Cleared on every exit (success, timeout, supersession).
             struct PendingOffGuard {
                 int& depth;
@@ -4835,7 +4842,7 @@ private:
                 throw AlpacaException("Tracking change superseded by a concurrent motion command");
             }
             if (dec_offset_running_) {
-                const uint64_t dgen = ++motion_generation_;
+                const uint64_t dgen = bump_motion_generation_locked(kAxisDec);
                 static_cast<void>(stop_axis_and_wait_locked(lock, kAxisDec, dgen));
                 dec_offset_running_ = false;
             }
@@ -5404,7 +5411,7 @@ private:
             if (attempt == 0) {
                 // Re-checked immediately above by sleep_unlocked(); bump the
                 // generation only now that we know the axis is still ours.
-                const uint64_t gen = ++motion_generation_;
+                const uint64_t gen = bump_motion_generation_locked(kAxisRa);
                 if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
                     // A supersession exit, and it has to say so: the check has
                     // already stopped the RA axis by this point, and .github/instructions/skywatcher.instructions.md
