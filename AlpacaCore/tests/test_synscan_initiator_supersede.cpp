@@ -473,7 +473,8 @@ TEST_CASE("SynScan initiator supersede - a failed AbortSlew during a Park ends t
 
 // PulseGuide's mode read and its rate command are one wire turn (decision 0006, "Claim"): a Tracking write that
 // arrives while the mode read is in flight queues behind the pulse, so its `T` lands after the rate `P` and the pulse
-// end restores the mode the pulse used. Without the turn the write's `T` goes out between the read and the rate.
+// end restores the mode the pulse used. A pulse that gave its turn up after the read would let the write's `T` go out
+// between the read and the rate.
 TEST_CASE(
     "SynScan initiator supersede - PulseGuide sends its rate command before a Tracking write queued during its mode "
     "read",
@@ -483,6 +484,9 @@ TEST_CASE(
     std::thread pulse([&] { rig.driver->pulse_guide(2, 600000); });  // west: the RA axis reads the tracking mode
     REQUIRE(wait_until([&] { return rig.st->gate_t_entered.load() != 0; }, 5000));
     std::thread tracking([&] { rig.driver->set_tracking(false); });
+    // The write takes its ticket well inside the 600 ms the `t` reply is held; tickets are served in order, so a
+    // pulse that left the turn after its read would queue its rate command behind the write.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     pulse.join();
     tracking.join();
     int first_rate = -1;
