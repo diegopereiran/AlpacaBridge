@@ -15,7 +15,9 @@
 
 #include <alpacahttp/request.h>
 #include <alpacahttp/router.h>
+#include <alpacahttp/server.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -24,6 +26,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "test_assert.h"
 
@@ -66,6 +69,19 @@ void check(const std::string& path, void (alpacahttp::Router::*setter)(std::func
     EXPECT(calls.replacement == 0);
 }
 
+// POST `path` to a heap Server, destroy the Server at once, and wait past the
+// 100 ms delay: the embedder callback must never run, and the delayed thread
+// must not reach the dead Server (open-astro#1739; ASan reports it otherwise).
+void check_server_teardown(const std::string& path, void (alpacahttp::Server::*setter)(std::function<void()>)) {
+    auto count = std::make_shared<std::atomic<int>>(0);
+    auto server = std::make_unique<alpacahttp::Server>(alpacahttp::Config{});
+    (*server.*setter)([count] { ++*count; });
+    EXPECT(route_post(server->router_for_test(), path).status_code() == 200);
+    server.reset();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT(*count == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -74,6 +90,10 @@ int main() {
     check("/management/v1/shutdown", &alpacahttp::Router::set_shutdown_callback);
     // case: POST restart runs the callback it saw, not whatever the Router holds later (#1739)
     check("/management/v1/restart", &alpacahttp::Router::set_restart_callback);
+    // case: POST shutdown then Server teardown never runs the callback or reaches the Server (#1739)
+    check_server_teardown("/management/v1/shutdown", &alpacahttp::Server::set_shutdown_callback);
+    // case: POST restart then Server teardown never runs the callback or reaches the Server (#1739)
+    check_server_teardown("/management/v1/restart", &alpacahttp::Server::set_restart_callback);
     std::cout << "Router shutdown tests passed\n";
     return 0;
 }
