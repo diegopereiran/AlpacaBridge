@@ -985,6 +985,131 @@ TEST_CASE(
     driver->set_connected(false);
 }
 
+// #1706 review: Tracking=false, and a RightAscensionRate that takes RA under the slow-mode floor
+// (1.0 cancels the sidereal drive), stop RA only. Their bump left a Dec pulse's wait behind.
+// Falsified by: skywatcher_telescope_driver.cpp:4820 a bare ++motion_generation_ in place of
+// bump_motion_generation_locked(kAxisRa) (the Tracking=false instance; the same change at :4732, the rate one).
+TEST_CASE("SkyWatcher async - an RA-only stop during a Dec pulse's dispatch stop-wait does not drop the pulse (#1706)",
+          "[skywatcher][async][pulseguide]") {
+    const bool tracking_off = GENERATE(true, false);  // else RightAscensionRate 1.0
+    CAPTURE(tracking_off);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    driver->move_axis(1, 1.0);  // Dec jog: the pulse's dispatch must stop it first
+    REQUIRE(mount.axis_running(1));
+    REQUIRE(mount.axis_running(2));
+    const int dec_starts = mount.start_count(2);
+
+    driver->pulse_guide(0, 500);
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // dispatch parked in the Dec stop-wait
+    std::thread command([&] {
+        if (tracking_off) {
+            driver->set_tracking(false);
+        } else {
+            driver->set_right_ascension_rate(1.0);
+        }
+    });
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the command parked in its RA stop-wait
+    CHECK(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
+    mount.set_stop_ramp_ms(0);  // stops land at once from here: a ramping duty stop-wait would block the disconnect
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    command.join();
+    clock.advance(std::chrono::milliseconds(2000));  // a stop sent under the 800 ms ramp lands
+    clock.wait_for_woken_settled(kRendezvous);
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK(driver->get_tracking() != tracking_off);
+    driver->set_connected(false);
+}
+
+// #1706 review: a DeclinationRate write that stops a running Dec offset, to zero or down to a
+// duty-cycled rate under the floor, commands Dec only. An RA pulse that stops and restarts RA
+// (0.97x sidereal East under tracking) was dropped and left RA stopped: tracking lost.
+// Falsified by: skywatcher_telescope_driver.cpp:4541 a bare ++motion_generation_ in place of
+// bump_motion_generation_locked(kAxisDec) (the 0.0 instance; the same change at :4566, the 0.1 one).
+TEST_CASE(
+    "SkyWatcher async - a Dec offset stop during an RA pulse's dispatch stop-wait does not drop the pulse (#1706)",
+    "[skywatcher][async][pulseguide]") {
+    const double dec_rate = GENERATE(0.0, 0.1);  // arcsec/s: off, or under the ~0.26 floor
+    CAPTURE(dec_rate);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_guide_rate(
+        {0.97 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.5 * FakeSkyWatcherMount::kSiderealDegPerSec});
+    driver->set_tracking(true);
+    driver->set_declination_rate(10.0);  // continuous Dec offset
+    REQUIRE(mount.axis_running(1));
+    REQUIRE(mount.axis_running(2));
+    const int ra_starts = mount.start_count(1);
+
+    driver->pulse_guide(2, 500);                                      // East
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // dispatch parked in the RA stop-wait
+    std::thread write([&] { driver->set_declination_rate(dec_rate); });
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the write parked in its Dec stop-wait
+    CHECK(run_clock_until(clock, [&] { return mount.start_count(1) > ra_starts; }, std::chrono::milliseconds(5000)));
+    mount.set_stop_ramp_ms(0);  // stops land at once from here: a ramping duty stop-wait would block the disconnect
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    write.join();
+    clock.advance(std::chrono::milliseconds(2000));  // a stop sent under the 800 ms ramp lands
+    clock.wait_for_woken_settled(kRendezvous);
+    CHECK(mount.axis_running(1));  // handed back to tracking
+    driver->set_connected(false);
+}
+
+// #1706 review: the duty worker stops a sub-floor RA burst with its own bump, at the burst's end and
+// when a rate write restarts the worker. A Dec pulse in its stop-wait must still run.
+// Falsified by: skywatcher_telescope_driver.cpp:4635 a bare ++motion_generation_ in place of
+// bump_motion_generation_locked(channel) (the burst-end instance; the same change at :4702, the restart one).
+TEST_CASE("SkyWatcher async - an RA duty stop during a Dec pulse's dispatch stop-wait does not drop the pulse (#1706)",
+          "[skywatcher][async][pulseguide]") {
+    const bool burst_end = GENERATE(true, false);  // else a DeclinationRate write restarts the worker
+    CAPTURE(burst_end);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->set_tracking(true);
+    driver->set_right_ascension_rate(0.99);  // ~0.15 arcsec/s: 1590 ms floor-rate bursts every 3 s
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the worker started a burst and parked
+    REQUIRE(mount.axis_running(1));
+    driver->move_axis(1, 1.0);  // Dec jog: the pulse's dispatch must stop it first
+    REQUIRE(mount.axis_running(2));
+    mount.set_stop_ramp_ms(800);
+    if (burst_end) {
+        REQUIRE(advance_through(clock, std::chrono::milliseconds(1000)));  // the burst ends inside the stop-wait
+    }
+    const int dec_starts = mount.start_count(2);
+
+    driver->pulse_guide(0, 500);
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the duty tick and the Dec stop-wait
+    std::thread write;
+    if (!burst_end) {
+        const int ra_stops = mount.stop_count(1);
+        write = std::thread([&] { driver->set_declination_rate(10.0); });  // Dec busy: stored for the pulse end
+        REQUIRE(wait_until([&] { return mount.stop_count(1) > ra_stops; }, 3000));  // the old worker's exit stop
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));
+    }
+    CHECK(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
+    mount.set_stop_ramp_ms(0);  // stops land at once from here: a ramping duty stop-wait would block the disconnect
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    if (write.joinable()) {
+        write.join();
+    }
+    clock.advance(std::chrono::milliseconds(2000));  // a stop sent under the 800 ms ramp lands
+    clock.wait_for_woken_settled(kRendezvous);
+    CHECK(mount.axis_running(2) == !burst_end);  // stopped, or running the offset the pulse end applied
+    driver->set_connected(false);
+}
+
 // The same-axis no-op: reaping the Dec pulse here would leave Dec turning,
 // because MoveAxis(Dec, 0) with no manual motion commands nothing.
 TEST_CASE("SkyWatcher async - MoveAxis(Dec, 0) with no manual motion leaves a running Dec pulse to end itself (#630)",
