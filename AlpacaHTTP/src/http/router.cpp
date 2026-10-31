@@ -5470,12 +5470,11 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         response.set_body(alpaca_response);
         
         // Call callback asynchronously (after response is sent)
-        // Use a small delay to ensure response is sent first
-        std::thread([this]() {
+        // Use a small delay to ensure response is sent first. The thread owns a
+        // copy of the callback and reads no Router state (open-astro#1739).
+        std::thread([cb = shutdown_callback_]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (shutdown_callback_) {
-                shutdown_callback_();
-            }
+            cb();
         }).detach();
         
         return response;
@@ -5933,11 +5932,9 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
         alpaca_response.value = std::string("Restart initiated");
         response.set_body(alpaca_response);
 
-        std::thread([this]() {
+        std::thread([cb = restart_callback_]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (restart_callback_) {
-                restart_callback_();
-            }
+            cb();
         }).detach();
 
         return response;
