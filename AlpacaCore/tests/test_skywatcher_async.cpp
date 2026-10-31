@@ -810,8 +810,9 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA, rate) leaves a running Dec pulse to e
 // #1706: the pulse's dispatch stop-waits a ramping Dec axis with mutex_ released. An RA MoveAxis
 // landing in that window bumped the shared motion_generation_, so the pulse threw "Motion
 // superseded before dispatch" and never started: the correction was dropped.
-TEST_CASE("SkyWatcher async - MoveAxis(RA, rate) during a Dec pulse's dispatch stop-wait does not drop the pulse (#1706)",
-          "[skywatcher][async][pulseguide]") {
+TEST_CASE(
+    "SkyWatcher async - MoveAxis(RA, rate) during a Dec pulse's dispatch stop-wait does not drop the pulse (#1706)",
+    "[skywatcher][async][pulseguide]") {
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());

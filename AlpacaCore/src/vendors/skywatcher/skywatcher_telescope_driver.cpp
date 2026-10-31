@@ -1920,7 +1920,7 @@ public:
                 }
                 const Wire proto = wire();
                 if (axis == kAxisDec) {
-                    start_speed_motion_locked(lock, kAxisDec, dec_rate);
+                    start_speed_motion_locked(lock, kAxisDec, dec_rate, false, /*pulse=*/true);
                 } else if (restore_tracking && !pulse_restart) {
                     // No ":i" readback here: the axis is already running at
                     // the pulse rate once ":I" is acknowledged, and the pulse
@@ -1957,12 +1957,12 @@ public:
                     // north of the equator and >= 0 south of it): a live ":I"
                     // write cannot reverse the axis — stop and restart in the
                     // pulse direction instead.
-                    start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate);
+                    start_speed_motion_locked(lock, kAxisRa, ra_pulse_rate, false, /*pulse=*/true);
                 } else {
                     // Not tracking: nudge the RA axis directly like DEC, in
                     // the hemisphere's axis sense for East/West.
                     double rate = ra_axis_sign_locked() * (direction == 2 ? -guide_rate_.ra : guide_rate_.ra);
-                    start_speed_motion_locked(lock, kAxisRa, rate);
+                    start_speed_motion_locked(lock, kAxisRa, rate, false, /*pulse=*/true);
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
@@ -4342,13 +4342,20 @@ private:
     // slew task was cancelled) — the caller MUST NOT issue further motor
     // commands for its now-stale operation (PR #216 review: an AbortSlew
     // landing in the unlock window otherwise saw its goto re-dispatched).
+    // open-astro#1706: a pulse's dispatch owns only its own axis, so a speed start on the other axis
+    // (MoveAxis) moves the pulse's generation along instead of superseding it. Any other bump
+    // (goto, abort, stop) leaves pulse_wait_gen_ behind and still supersedes.
+    [[nodiscard]] bool superseded_locked(int channel, uint64_t gen) const {
+        return motion_generation_ != gen && motion_generation_ != pulse_wait_gen_[channel - 1];
+    }
+
     [[nodiscard]] bool stop_axis_and_wait_locked(StateLock& lock, int channel, uint64_t gen) {
         // Never emit a stop for a STALE generation (PR #216 round-6): when a
         // dispatch's first axis wait was superseded, a newer command may have
         // legitimately started motion on the second axis — a stale stop here
         // would silently kill it while its bookkeeping says it is running.
         // The newer generation owns the axes now, whatever their state.
-        if (motion_generation_ != gen) {
+        if (superseded_locked(channel, gen)) {
             return false;
         }
         if (channel == kAxisRa) {
@@ -4364,7 +4371,7 @@ private:
             // Generation only: a slot cancellation must not poison unrelated
             // commands (ConformU: Tracking Write failed "Motion superseded").
             // AbortSlew bumps the generation, which is the supersession signal.
-            if (motion_generation_ != gen) {
+            if (superseded_locked(channel, gen)) {
                 return false;
             }
             AxisStatus status = protocol.inquire_status(channel);
@@ -4385,13 +4392,25 @@ private:
     // the old rate and again once the new one starts, so neither rate is
     // applied over the other's time.
     void start_speed_motion_locked(StateLock& lock, int channel, double signed_rate_deg_per_sec,
-                                   bool anchor_model = false) {
+                                   bool anchor_model = false, bool pulse = false) {
         const Wire protocol = wire();
+        uint64_t& other_pulse_wait = pulse_wait_gen_[2 - channel];
+        const bool other_pulse_follows = other_pulse_wait == motion_generation_;
         const uint64_t gen = ++motion_generation_;
+        if (other_pulse_follows) {
+            other_pulse_wait = gen;
+        }
         if (anchor_model) {
             advance_model_anchor_locked();
         }
-        if (!stop_axis_and_wait_locked(lock, channel, gen)) {
+        if (pulse) {
+            pulse_wait_gen_[channel - 1] = gen;
+        }
+        const bool kept = stop_axis_and_wait_locked(lock, channel, gen);
+        if (pulse) {
+            pulse_wait_gen_[channel - 1] = 0;
+        }
+        if (!kept) {
             throw AlpacaException("Motion superseded before dispatch");
         }
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
@@ -6566,6 +6585,7 @@ private:
     bool dec_offset_running_ = false;
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
+    uint64_t pulse_wait_gen_[2] = {0, 0};  // a pulse dispatch's stop-wait generation per axis, 0 = none (#1706)
     bool park_position_set_ = false;
     double park_ra_axis_deg_ = 0.0;
     double park_dec_axis_deg_ = 0.0;
