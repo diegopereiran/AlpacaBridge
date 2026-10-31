@@ -814,10 +814,8 @@ TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with a sta
     driver->set_connected(true);
     // Every fourth tick is a full one and the first tick of the session is full: three short ticks, then the full one.
     REQUIRE(clock.wait_for_waiters(1, milliseconds(3000)));  // the poll is parked on the task clock
-    for (int tick = 1; tick < 4; ++tick) {
-        const auto parked = clock.wait_count();
-        clock.advance(seconds(1));
-        REQUIRE(clock.wait_for_wait_count(parked + 1, milliseconds(3000)));  // the short tick ended and parked again
+    for (int short_tick = 1; short_tick < 4; ++short_tick) {
+        alpacacore::test::tick(clock, seconds(1), milliseconds(3000));
     }
     st->latency_ms = 1200;
     const int before = st->transactions.load();
