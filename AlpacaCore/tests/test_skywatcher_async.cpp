@@ -1093,9 +1093,9 @@ TEST_CASE("SkyWatcher async - an RA duty stop during a Dec pulse's dispatch stop
     REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the duty tick and the Dec stop-wait
     std::thread write;
     if (!burst_end) {
-        const int ra_stops = mount.stop_count(1);
+        const int stops = mount.frames_seen('K');
         write = std::thread([&] { driver->set_declination_rate(10.0); });  // Dec busy: stored for the pulse end
-        REQUIRE(wait_until([&] { return mount.stop_count(1) > ra_stops; }, 3000));  // the old worker's exit stop
+        REQUIRE(mount.wait_for_frames('K', stops + 1, kRendezvous));       // the old worker's exit stop
         REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));
     }
     CHECK(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
