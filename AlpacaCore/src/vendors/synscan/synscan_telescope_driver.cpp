@@ -2065,6 +2065,7 @@ private:
                 without_lock(lock, [&protocol] { return protocol.get_handset_firmware_version(); });
         } catch (...) {
             // TODO: Confirm SynScan firmware query reliability on all V3/V4 handsets.
+            ALPACA_LOG_DEBUG("SynScan", "Handset firmware query failed at connect; firmware stays unknown");
         }
         // Publish to the web-UI getter under its OWN narrow mutex (a leaf).
         {
@@ -2075,6 +2076,7 @@ private:
             mount_model_id_ = without_lock(lock, [&protocol] { return protocol.get_model_id(); });
         } catch (...) {
             // TODO: Confirm SynScan model query reliability on all V3/V4 handsets.
+            ALPACA_LOG_DEBUG("SynScan", "Mount model query failed at connect; model stays unknown");
         }
 
         if (pending_site_latitude_.has_value() && pending_site_longitude_.has_value()) {
@@ -2088,10 +2090,11 @@ private:
                 site_info_valid_ = true;
             } catch (...) {
                 // TODO: Confirm SynScan accepts location updates while aligned.
+                ALPACA_LOG_WARN("SynScan", "Configured site was not written to the handset at connect");
             }
         }
         if (pending_site_elevation_.has_value()) {
-            site_elevation_m_ = pending_site_elevation_.value();
+            site_elevation_m_ = pending_site_elevation_;
         }
         if (sync_time_on_connect_) {
             sync_mount_time(lock);
@@ -2103,6 +2106,7 @@ private:
             site_longitude_cached_ = info.longitude_degrees;
             site_info_valid_ = true;
         } catch (...) {
+            ALPACA_LOG_DEBUG("SynScan", "Handset site read failed at connect; a later site read retries it");
         }
         lock.unlock();  // the poll slot starts without mutex_ held (AsyncOperation rule 10)
 
