@@ -948,6 +948,43 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA, 0) during a Dec pulse's dispatch stop
     driver->set_connected(false);
 }
 
+// #1706 review: an RA pulse that stops RA before it starts waits the same way, on both of its
+// stop-and-start branches: tracking off, and tracking with a pulse rate under the in-place floor
+// (0.97x sidereal East leaves 0.03x, so RA stops and restarts). A Dec MoveAxis in that window
+// commands Dec only and must leave the pulse to run.
+TEST_CASE(
+    "SkyWatcher async - MoveAxis(Dec, rate) during an RA pulse's dispatch stop-wait does not drop the pulse (#1706)",
+    "[skywatcher][async][pulseguide]") {
+    const bool tracking = GENERATE(false, true);
+    CAPTURE(tracking);
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    if (tracking) {
+        driver->set_guide_rate(
+            {0.97 * FakeSkyWatcherMount::kSiderealDegPerSec, 0.5 * FakeSkyWatcherMount::kSiderealDegPerSec});
+        driver->set_tracking(true);
+    } else {
+        driver->move_axis(0, 1.0);  // RA jog: the pulse's dispatch must stop it first
+    }
+    REQUIRE(mount.axis_running(1));
+    const int ra_starts = mount.start_count(1);
+
+    driver->pulse_guide(2, 500);                                      // East
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // dispatch parked in the RA stop-wait
+    driver->move_axis(1, 1.0);                                        // Dec only; Dec is idle, so it does not wait
+    CHECK(run_clock_until(clock, [&] { return mount.start_count(1) > ra_starts; }, std::chrono::milliseconds(5000)));
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    clock.advance(std::chrono::milliseconds(2000));  // the end-of-pulse stop ramps on after IsPulseGuiding drops
+    clock.wait_for_woken_settled(kRendezvous);
+    CHECK(mount.axis_running(1) == tracking);  // stopped, or handed back to tracking
+    CHECK(mount.axis_running(2));              // the Dec jog survives the pulse
+    driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
 // The same-axis no-op: reaping the Dec pulse here would leave Dec turning,
 // because MoveAxis(Dec, 0) with no manual motion commands nothing.
 TEST_CASE("SkyWatcher async - MoveAxis(Dec, 0) with no manual motion leaves a running Dec pulse to end itself (#630)",

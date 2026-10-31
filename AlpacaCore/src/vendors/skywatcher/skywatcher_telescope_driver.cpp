@@ -4353,6 +4353,7 @@ private:
     }
 
     // The bump for a command on `channel` alone: a pulse dispatch waiting on the other axis follows it.
+    // An empty slot (0) never matches: connect bumps first, in reset_runtime_state_locked().
     uint64_t bump_motion_generation_locked(int channel) {
         uint64_t& other_pulse_wait = pulse_wait_gen_[2 - channel];
         const bool other_pulse_follows = other_pulse_wait == motion_generation_;
