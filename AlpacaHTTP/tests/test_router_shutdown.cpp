@@ -1,0 +1,79 @@
+// AlpacaHTTP
+// Copyright (c) 2025-2026 Joey Troy and contributors
+//
+// This file is part of AlpacaHTTP.
+//
+// AlpacaHTTP is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
+
+// The detached thread behind POST shutdown and restart must not read the
+// Router after the handler returns (open-astro#1739).
+
+#include <alpacahttp/request.h>
+#include <alpacahttp/router.h>
+
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
+
+#include "test_assert.h"
+
+namespace {
+
+struct Calls {
+    std::mutex mutex;
+    std::condition_variable cv;
+    int original = 0;
+    int replacement = 0;
+};
+
+alpacahttp::Response route_post(alpacahttp::Router& router, const std::string& path) {
+    alpacahttp::Request request;
+    std::ostringstream raw;
+    raw << "POST " << path << " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}";
+    EXPECT(request.parse(raw.str()));
+    return router.route(request, 1);
+}
+
+// POST `path`, then swap the Router's callback before the handler's 100 ms
+// delay ends. The callback the request saw must be the one that runs.
+void check(const std::string& path, void (alpacahttp::Router::*setter)(std::function<void()>)) {
+    Calls calls;
+    auto bump = [&calls](int Calls::*counter) {
+        return [&calls, counter] {
+            std::lock_guard<std::mutex> lock(calls.mutex);
+            ++(calls.*counter);
+            calls.cv.notify_all();
+        };
+    };
+    auto router = std::make_unique<alpacahttp::Router>();
+    (*router.*setter)(bump(&Calls::original));
+    EXPECT(route_post(*router, path).status_code() == 200);
+    (*router.*setter)(bump(&Calls::replacement));
+
+    std::unique_lock<std::mutex> lock(calls.mutex);
+    calls.cv.wait_for(lock, std::chrono::seconds(5), [&] { return calls.original + calls.replacement > 0; });
+    EXPECT(calls.original == 1);
+    EXPECT(calls.replacement == 0);
+}
+
+}  // namespace
+
+int main() {
+    std::cout << "Testing router shutdown and restart callbacks...\n";
+    // case: POST shutdown runs the callback it saw, not whatever the Router holds later (#1739)
+    check("/management/v1/shutdown", &alpacahttp::Router::set_shutdown_callback);
+    // case: POST restart runs the callback it saw, not whatever the Router holds later (#1739)
+    check("/management/v1/restart", &alpacahttp::Router::set_restart_callback);
+    std::cout << "Router shutdown tests passed\n";
+    return 0;
+}
