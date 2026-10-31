@@ -4348,8 +4348,7 @@ private:
     // wait (gen == pulse_owner_gen_) follows; an older waiter on the same axis stays superseded.
     [[nodiscard]] bool superseded_locked(int channel, uint64_t gen) const {
         const int i = channel - 1;
-        return motion_generation_ != gen &&
-               !(gen == pulse_owner_gen_[i] && motion_generation_ == pulse_wait_gen_[i]);
+        return motion_generation_ != gen && !(gen == pulse_owner_gen_[i] && motion_generation_ == pulse_wait_gen_[i]);
     }
 
     [[nodiscard]] bool stop_axis_and_wait_locked(StateLock& lock, int channel, uint64_t gen) {
