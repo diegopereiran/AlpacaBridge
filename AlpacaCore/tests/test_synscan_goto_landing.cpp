@@ -47,6 +47,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -1573,6 +1574,43 @@ TEST_CASE("SynScan GOTO landing - the hunt reads past a held status tick once it
     CHECK(h.st->position_reads.load() > before);
 }
 
+// The hunt waits for a probe inside its exchanges with mutex_ released (decision 0016 point 2), so a getter that takes
+// mutex_ is not held up by it. Each getter runs on its own thread: with the lock held across the wait the thread
+// blocks until the wait bound (1.5 s) or a clock step ends it, and the case still ends.
+TEST_CASE("SynScan GOTO landing - getters stay in budget while the hunt waits on a held status tick",
+          "[synscan][telescope][goto-landing]") {
+    HuntBehindHeldTick h;
+    const std::vector<std::pair<const char*, std::function<void()>>> getters = {
+        {"Tracking", [&] { (void)h.driver->get_tracking(); }},
+        {"GuideRate", [&] { (void)h.driver->get_guide_rate(); }},
+        {"AtPark", [&] { (void)h.driver->get_at_park(); }},
+        {"IsPulseGuiding", [&] { (void)h.driver->get_is_pulse_guiding(); }},
+        {"RightAscension", [&] { (void)h.driver->get_right_ascension(); }},
+    };
+    for (const auto& [name, read] : getters) {
+        CAPTURE(name);
+        std::atomic<bool> done{false};
+        const auto started = Clock::now();
+        std::thread caller([&] {
+            try {
+                read();
+            } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): an answer too
+            }
+            done = true;
+        });
+        while (!done.load() && Clock::now() - started < std::chrono::milliseconds(500)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const bool in_budget = done.load();
+        while (!done.load()) {
+            h.clock.advance(kVirtualStep);  // lets a mutated driver's wait end so the case can finish
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        caller.join();
+        CHECK(in_budget);
+    }
+}
+
 TEST_CASE("SynScan GOTO landing - a new slew while the hunt waits on a held status tick starts at once (#1247)",
           "[synscan][telescope][goto-landing]") {
     HuntBehindHeldTick h;
@@ -1941,7 +1979,7 @@ TEST_CASE("SynScan GOTO landing - the hunt waits for a poll tick that is inside 
 namespace {
 
 // Virtual time one slew_to_coordinates takes, stepped to completion. With `poll_in_flight` a poll tick is parked
-// between its sample and its publish for the whole slew, so poll_sampling_ stays set at every tick hunt.
+// between its sample and its publish for the whole slew, so probe_sampling_ stays set at every tick hunt.
 std::chrono::nanoseconds virtual_slew_duration(bool poll_in_flight) {
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<LandingOffsetHandset>();

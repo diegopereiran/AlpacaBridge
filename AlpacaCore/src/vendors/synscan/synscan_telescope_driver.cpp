@@ -2209,7 +2209,7 @@ private:
     // Cancels and joins the motion slots only. The status poll is not one of them: it runs for the life of the
     // connection, and a GOTO or Park that joined it would leave every read frozen at the slew-end frame, the
     // link-fault latch and the site retry stopped, and the landing hunt waiting for a tick that never comes. Only the
-    // lifecycle paths (disconnect, relink, the destructor) stop it, through stop_status_poller().
+    // lifecycle paths (disconnect, relink, the destructor) stop it, through polled_.stop_and_join().
     void cancel_async_tasks() {
         slew_.cancel_all_and_join();
         join_pulse_bodies();

@@ -273,13 +273,13 @@ TEST_CASE("SynScan - get_connected() answers at once while a connect is in fligh
     driver->connect();
     REQUIRE(wait_until([&] { return driver->get_connecting(); }, 1000));
     // Past the port open and the echo, inside the stalled firmware query:
-    // the connect task holds mutex_ for the next few hundred milliseconds.
+    // the connect task is in the handshake for the next few hundred milliseconds; it holds transition_mutex_ and
+    // never mutex_ across an exchange.
     // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    // The flag's value mid-task is driver-specific (SynScan raises it before
-    // the warm-up queries, see .github/instructions/alpaca-http-conformance.instructions.md
-    // on why get_connected() is not a completion signal); the contract under test is that the read returns
-    // at once while Connecting is still true.
+    // The flag's value mid-task is driver-specific (SynScan raises it last, after the first frame is held, see
+    // .github/instructions/alpaca-http-conformance.instructions.md on why get_connected() is not a completion
+    // signal); the contract under test is that the read returns at once while Connecting is still true.
     const auto t0 = Clock::now();
     static_cast<void>(driver->get_connected());
     const auto read_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();

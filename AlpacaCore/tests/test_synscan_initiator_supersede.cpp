@@ -65,6 +65,10 @@ struct FakeSynScanState {
     // true: every slewing query, a held one too, is answered with garbage
     std::atomic<bool> fail_l{false};
     std::atomic<int> model{50};  // the handset's model id ('m'): 50 is equatorial, 5 an AZ-EQ mount
+    std::atomic<int> gate_t_ms{0};  // >0: the next tracking-mode read is held this long before it is answered
+    std::atomic<Clock::rep> gate_t_entered{0};
+    std::atomic<int> gate_s_ms{0};  // >0: the next sync command is held this long before it is answered
+    std::atomic<Clock::rep> gate_s_entered{0};
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -89,7 +93,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
         if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'e' || chunk[0] == 'r' || chunk[0] == 'R' ||
-            chunk[0] == 'T') {
+            chunk[0] == 'T' || chunk[0] == 't' || chunk[0] == 's') {
             st->record(chunk);
         }
         switch (chunk[0]) {
@@ -133,8 +137,23 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 return "#";
             case 'm':
                 return std::string(1, static_cast<char>(st->model.load())) + "#";
-            case 't':  // tracking mode read: sidereal tracking on
+            case 't': {  // tracking mode read: sidereal tracking on
+                const int hold = st->gate_t_ms.exchange(0);
+                if (hold > 0) {
+                    st->gate_t_entered.store(Clock::now().time_since_epoch().count());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                }
                 return std::string(1, '\x01') + "#";
+            }
+            case 's':  // sync to coordinates
+            case 'S': {
+                const int hold = st->gate_s_ms.exchange(0);
+                if (hold > 0) {
+                    st->gate_s_entered.store(Clock::now().time_since_epoch().count());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                }
+                return "#";
+            }
             case 'h':  // handset time, 8 binary bytes: 12:00:00 on 1 Jan 2026, UTC (a short answer times out)
                 return std::string("\x0c\x00\x00\x01\x01\x1a\x00\x00", 8) + "#";
             case 'w':
@@ -450,6 +469,57 @@ TEST_CASE("SynScan initiator supersede - a failed AbortSlew during a Park ends t
     // A Park that starts clears the stored AbortSlew error at once; Park during a park returns doing nothing.
     rig.driver->park();
     CHECK(error_of([&] { (void)rig.driver->get_slewing(); }).second.rfind("AbortSlew stop failed: ", 0) != 0);
+}
+
+// PulseGuide's mode read and its rate command are one wire turn (decision 0006, "Claim"): a Tracking write that
+// arrives while the mode read is in flight queues behind the pulse, so its `T` lands after the rate `P` and the pulse
+// end restores the mode the pulse used. Without the turn the write's `T` goes out between the read and the rate.
+TEST_CASE(
+    "SynScan initiator supersede - PulseGuide sends its rate command before a Tracking write queued during its mode "
+    "read",
+    "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.st->gate_t_ms.store(600);
+    std::thread pulse([&] { rig.driver->pulse_guide(2, 600000); });  // west: the RA axis reads the tracking mode
+    REQUIRE(wait_until([&] { return rig.st->gate_t_entered.load() != 0; }, 5000));
+    std::thread tracking([&] { rig.driver->set_tracking(false); });
+    pulse.join();
+    tracking.join();
+    int first_rate = -1;
+    int first_tracking_write = -1;
+    {
+        std::lock_guard<std::mutex> lock(rig.st->command_mutex);
+        for (std::size_t i = 0; i < rig.st->commands.size(); ++i) {
+            const char head = rig.st->commands[i][0];
+            if (head == 'P' && first_rate < 0) first_rate = static_cast<int>(i);
+            if (head == 'T' && first_tracking_write < 0) first_tracking_write = static_cast<int>(i);
+        }
+    }
+    REQUIRE(first_rate >= 0);
+    REQUIRE(first_tracking_write >= 0);
+    CHECK(first_rate < first_tracking_write);
+}
+
+// SyncToCoordinates is an initiator: it holds initiator_mutex_, so a Park cannot claim and publish Slewing between its
+// checks and its write (decision 0016 point 6). The sync's `s` is held; Park, called meanwhile, waits for it.
+TEST_CASE("SynScan initiator supersede - Park waits for a SyncToCoordinates whose exchange is held",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.driver->set_park();  // so Park needs no handset read of its own
+    rig.st->gate_s_ms.store(1500);
+    std::thread sync([&] { rig.driver->sync_to_coordinates(5.5, 20.0); });
+    REQUIRE(wait_until([&] { return rig.st->gate_s_entered.load() != 0; }, 5000));
+    std::atomic<bool> park_returned{false};
+    std::thread park([&] {
+        rig.driver->park();
+        park_returned = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    CHECK_FALSE(park_returned.load());
+    CHECK_FALSE(rig.driver->get_slewing());
+    sync.join();
+    park.join();
+    CHECK(rig.driver->get_slewing());  // the Park ran after the sync
 }
 
 #endif  // _WIN32
