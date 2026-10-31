@@ -747,6 +747,4 @@ TEST_CASE("SynScan snapshot - Tracking and GuideRate do not wait for a connect t
     driver->set_connected(false);
 }
 
-
-
 #endif
