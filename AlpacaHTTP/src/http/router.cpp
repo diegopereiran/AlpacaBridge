@@ -71,6 +71,7 @@
 #include "../core/catalog_json.h"
 #include "device_call.h"
 #include "image_payload.h"
+#include "thread_join.h"
 
 namespace {
 
@@ -1168,7 +1169,7 @@ Router::Router(const CatalogExtension& extend_catalog) : machine_hostname_(read_
     set_server_info("AlpacaHTTP", "AlpacaHTTP", alpacahttp::kVersion, "", "");
     load_persisted_devices();
 }
-Router::~Router() = default;
+Router::~Router() { cancel_delayed_callback(); }
 
 void Router::run_motion_watchdogs(std::chrono::steady_clock::time_point now) {
     const auto interval = motion_watchdog_interval();
@@ -1261,6 +1262,39 @@ void Router::set_shutdown_callback(std::function<void()> callback) {
 
 void Router::set_restart_callback(std::function<void()> callback) {
     restart_callback_ = callback;
+}
+
+void Router::start_delayed_callback(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(delayed_mutex_);
+    if (delayed_pending_ || delayed_cancelled_) {
+        return;
+    }
+    delayed_pending_ = true;
+    delayed_threads_.emplace_back([this, cb = std::move(callback)]() {
+        {
+            std::unique_lock<std::mutex> wait_lock(delayed_mutex_);
+            if (delayed_cv_.wait_for(wait_lock, std::chrono::milliseconds(100), [this] { return delayed_cancelled_; })) {
+                return;
+            }
+            delayed_pending_ = false;
+        }
+        // Reads no Router state from here on: the callback may destroy the Router.
+        cb();
+    });
+}
+
+void Router::cancel_delayed_callback() {
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard<std::mutex> lock(delayed_mutex_);
+        delayed_cancelled_ = true;
+        threads.swap(delayed_threads_);
+    }
+    delayed_cv_.notify_all();
+    for (auto& thread : threads) {
+        // A callback that destroys the Server joins itself: join_or_abandon detaches then (ADR 0002).
+        detail::join_or_abandon(thread, "cancel_delayed_callback");
+    }
 }
 
 Response Router::route(const Request& request, std::uint32_t server_transaction_id) {
@@ -5469,13 +5503,9 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         alpaca_response.value = std::string("Shutdown initiated");
         response.set_body(alpaca_response);
 
-        // Call callback asynchronously (after response is sent)
-        // Use a small delay to ensure response is sent first. The thread owns a
-        // copy of the callback and reads no Router state (open-astro#1739).
-        std::thread([cb = shutdown_callback_]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            cb();
-        }).detach();
+        // Call callback asynchronously (after response is sent). The delay
+        // lets the response go out first; the Router owns and joins the thread.
+        start_delayed_callback(shutdown_callback_);
 
         return response;
     } else {
@@ -5932,10 +5962,7 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
         alpaca_response.value = std::string("Restart initiated");
         response.set_body(alpaca_response);
 
-        std::thread([cb = restart_callback_]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            cb();
-        }).detach();
+        start_delayed_callback(restart_callback_);
 
         return response;
     }

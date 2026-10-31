@@ -95,6 +95,8 @@ void Server::set_restart_callback(std::function<void()> callback) {
 }
 
 Server::~Server() {
+    // First: the delayed shutdown/restart callback reaches this Server.
+    router_.cancel_delayed_callback();
     stop();
     {
         // Anything stop() could not join because it ran on that thread.
