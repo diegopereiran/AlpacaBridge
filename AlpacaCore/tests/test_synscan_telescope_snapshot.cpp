@@ -77,7 +77,6 @@ struct Handset {
     std::atomic<bool> w_entered{false};
     std::atomic<bool> w_silent{false};  // the handset ignores `w` (site) entirely
     std::atomic<int> w_count{0};
-    std::atomic<bool> slow_after_w{false};  // the connect's last exchange (`w`) makes every later reply slow
     std::atomic<bool> w_site{false};  // `w` answers a site (33d51'24" S, 151d12'54" E) instead of an unparseable '#'
     std::atomic<uint32_t> ra_counts{0x5CECE2};  // the position `e` answers (24-bit); a GOTO (`r`) lands on its aim
     std::atomic<uint32_t> dec_counts{0xD001B9};
@@ -122,7 +121,6 @@ std::string reply(Handset& st, const std::string& chunk) {
             return "#";
         case 'w':
             st.w_count.fetch_add(1);
-            if (st.slow_after_w.load()) st.latency_ms.store(1200);
             if (st.w_silent.load()) {
                 st.w_entered.store(true);
                 return "";
@@ -797,8 +795,9 @@ TEST_CASE("SynScan snapshot - each no-I/O getter alone is in budget while a conn
     driver->set_connected(false);
 }
 
-// A status tick that is mid-exchange on a slow link: the disconnect ends it between exchanges instead of joining a
-// whole tick (5 exchanges at 1.2 s = 6 s here), so it returns within 5 s.
+// A full status tick that is mid-exchange on a slow link: the disconnect ends it between exchanges instead of joining
+// the whole tick (5 exchanges at 1.2 s = 6 s here), so it returns within 5 s. The ticks are stepped on the task clock
+// so the full one is in flight whether the poll runs its first tick at once or after one period.
 TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with a status tick mid-exchange",
           "[synscan][telescope][snapshot][connect]") {
     FakeTaskClock clock;
@@ -812,11 +811,22 @@ TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with a sta
     info.response_timeout_ms = 3000;
     auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
                                                          false, sc::SynScanAlignmentSetting::Auto, clock);
-    st->slow_after_w = true;
-    driver->set_connected(true);  // the connect's last exchange turned every later reply slow
-    REQUIRE(st->latency_ms.load() == 1200);
-    // The first status tick is a full one (five exchanges); it is inside its first by now.
-    std::this_thread::sleep_for(milliseconds(300));
+    driver->set_connected(true);
+    // Every fourth tick is a full one and the first tick of the session is full: three short ticks, then the full one.
+    REQUIRE(clock.wait_for_waiters(1, milliseconds(3000)));  // the poll is parked on the task clock
+    for (int tick = 1; tick < 4; ++tick) {
+        const auto parked = clock.wait_count();
+        clock.advance(seconds(1));
+        REQUIRE(clock.wait_for_wait_count(parked + 1, milliseconds(3000)));  // the short tick ended and parked again
+    }
+    st->latency_ms = 1200;
+    const int before = st->transactions.load();
+    clock.advance(seconds(1));
+    const auto deadline = std::chrono::steady_clock::now() + seconds(2);
+    while (st->transactions.load() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() > before);  // the full tick is inside its first exchange
     const auto elapsed = timed([&] { driver->set_connected(false); });
     CHECK(elapsed < seconds(5));
 }
