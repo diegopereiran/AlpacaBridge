@@ -835,6 +835,8 @@ TEST_CASE(
 
 // #1706 review: the pulse exception must belong to the pulse's own wait. An older MoveAxis(Dec)
 // stop-wait on the same axis stays superseded, or both commands own Dec and the pulse times out.
+// The two waiters poll 25 ms apart, so MoveAxis always sees the stopped axis first: without the
+// stagger, which one restarted Dec was a thread race and the case failed only 3 runs in 10.
 TEST_CASE("SkyWatcher async - a Dec pulse dispatch supersedes an older MoveAxis(Dec) stop-wait (#1706)",
           "[skywatcher][async][pulseguide]") {
     FakeTaskClock clock;
@@ -856,8 +858,10 @@ TEST_CASE("SkyWatcher async - a Dec pulse dispatch supersedes an older MoveAxis(
         done = true;
     });
     REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // MoveAxis parked in the Dec stop-wait
+    REQUIRE(step_clock(clock, std::chrono::milliseconds(25)));
     driver->pulse_guide(0, 500);
     REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the pulse dispatch parked too
+    REQUIRE(advance_through(clock, std::chrono::milliseconds(1000), std::chrono::milliseconds(25)));
     const bool settled = run_clock_until(
         clock, [&] { return done.load() && !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(20000));
     mover.join();
@@ -866,6 +870,53 @@ TEST_CASE("SkyWatcher async - a Dec pulse dispatch supersedes an older MoveAxis(
     clock.advance(std::chrono::milliseconds(2000));
     clock.wait_for_woken_settled(kRendezvous);
     CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+// #1706 gate: a second Dec pulse joins the first pulse's body before it dispatches, so the first
+// pulse's exit cannot clear the second's slot, and an RA MoveAxis during the second pulse's
+// stop-wait still leaves it to run.
+TEST_CASE("SkyWatcher async - MoveAxis(RA, rate) during a back-to-back Dec pulse's stop-wait does not drop it (#1706)",
+          "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(2, 45.0);
+    driver->move_axis(1, 1.0);  // Dec jog: the first pulse's dispatch must stop it first
+    REQUIRE(mount.axis_running(2));
+
+    driver->pulse_guide(0, 2000);
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // first pulse parked in the Dec stop-wait
+    std::atomic<bool> second_returned{false};
+    std::atomic<bool> second_threw{false};
+    std::thread second([&] {
+        try {
+            driver->pulse_guide(1, 500);  // joins the first pulse's body, then dispatches
+        } catch (const alpacacore::AlpacaException&) {
+            second_threw = true;
+        }
+        second_returned = true;
+    });
+    const bool first_exited =
+        run_clock_until(clock, [&] { return second_returned.load(); }, std::chrono::milliseconds(5000));
+    second.join();
+    REQUIRE(first_exited);
+    REQUIRE_FALSE(second_threw.load());
+    REQUIRE(mount.axis_running(2));  // the first pulse started Dec; the second must stop it again
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // second pulse parked in the Dec stop-wait
+    const int dec_starts = mount.start_count(2);
+
+    driver->move_axis(0, 1.0);  // RA only; RA is idle, so it does not wait
+    REQUIRE(run_clock_until(clock, [&] { return mount.start_count(2) > dec_starts; }, std::chrono::milliseconds(5000)));
+    CHECK(driver->get_is_pulse_guiding());
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(10000)));
+    clock.advance(std::chrono::milliseconds(2000));  // the end-of-pulse stop ramps on after IsPulseGuiding drops
+    clock.wait_for_woken_settled(kRendezvous);
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK(mount.axis_running(1));  // the RA jog survives both pulses
+    driver->move_axis(0, 0.0);
     driver->set_connected(false);
 }
 

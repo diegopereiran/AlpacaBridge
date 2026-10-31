@@ -4405,7 +4405,8 @@ private:
         if (anchor_model) {
             advance_model_anchor_locked();
         }
-        // Clears the pulse's slot on every exit, a stop timeout included.
+        // Clears the pulse's slot on every exit, a stop timeout included. The slot is always this pulse's:
+        // pulse_ops_ runs one body per axis and pulse_guide() joins the old body before the new one starts.
         struct PulseSlot {
             uint64_t& owner;
             uint64_t& wait;
