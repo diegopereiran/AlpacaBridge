@@ -87,7 +87,7 @@ bool is_valid_log_filename(const std::string& name);
 void set_log_retention_days(int days);
 
 // Rotated parts kept per day (alpacabridge-YYYY-MM-DD.1.log is the newest).
-inline constexpr int kMaxRotatedLogFiles = 4;
+inline constexpr int kMaxRotatedLogFiles = 9;
 
 // Cap one day's log file at `bytes` (0 = unlimited). When the next line would
 // not fit, the file is rotated to part .1 (older parts shift up, the part past

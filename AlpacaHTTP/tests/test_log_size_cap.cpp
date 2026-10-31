@@ -166,14 +166,16 @@ int main() {
         // case: parts are log files the viewer lists (newest first), reads and deletes
         const fs::path dir = make_dir();
         start(dir, 4096);
-        write_lines(500);
+        write_lines(2000);
         EXPECT(util::is_valid_log_filename(part_name(1)));
         EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.0.log"));
         EXPECT(!util::is_valid_log_filename("alpacabridge-2026-01-01.10.log"));
         const auto files = util::list_log_files();
-        EXPECT(files.size() >= 2);
+        EXPECT(files.size() == static_cast<std::size_t>(util::kMaxRotatedLogFiles) + 1);
         EXPECT(files[0].name == util::current_log_filename());
-        EXPECT(files[1].name == part_name(1));
+        for (std::size_t i = 1; i < files.size(); ++i) {
+            EXPECT(files[i].name == part_name(static_cast<int>(i)));  // .1 before .2 ... .9
+        }
         EXPECT(util::read_log_file(part_name(1)) == read_all(dir / part_name(1)));
         util::delete_log_file(part_name(1));
         EXPECT(!fs::exists(dir / part_name(1)));
