@@ -4352,8 +4352,8 @@ private:
         return motion_generation_ != gen && !(gen == pulse_owner_gen_[i] && motion_generation_ == pulse_wait_gen_[i]);
     }
 
-    // The bump for a command on `channel` alone: a pulse dispatch waiting on the other axis follows it.
-    // An empty slot (0) never matches: connect bumps first, in reset_runtime_state_locked().
+    // The bump for a command on `channel` (kAxisRa or kAxisDec) alone: a pulse dispatch waiting on the other axis
+    // follows it. An empty slot (0) never matches: connect bumps first, in reset_runtime_state_locked().
     uint64_t bump_motion_generation_locked(int channel) {
         uint64_t& other_pulse_wait = pulse_wait_gen_[2 - channel];
         const bool other_pulse_follows = other_pulse_wait == motion_generation_;
@@ -4413,8 +4413,8 @@ private:
         if (anchor_model) {
             advance_model_anchor_locked();
         }
-        // Clears the pulse's slot on every exit, a stop timeout included. The slot is always this pulse's:
-        // pulse_ops_ runs one body per axis and pulse_guide() joins the old body before the new one starts.
+        // Clears the pulse's slot on every exit (a stop timeout included) with mutex_ held, as every exit of
+        // stop_axis_and_wait_locked() is. Always this pulse's: pulse_guide() joins its axis's old body first.
         struct PulseSlot {
             uint64_t& owner;
             uint64_t& wait;
