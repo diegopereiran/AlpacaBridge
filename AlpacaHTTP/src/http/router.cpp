@@ -1273,7 +1273,8 @@ void Router::start_delayed_callback(std::function<void()> callback) {
     delayed_threads_.emplace_back([this, cb = std::move(callback)]() {
         {
             std::unique_lock<std::mutex> wait_lock(delayed_mutex_);
-            if (delayed_cv_.wait_for(wait_lock, std::chrono::milliseconds(100), [this] { return delayed_cancelled_; })) {
+            if (delayed_cv_.wait_for(wait_lock, std::chrono::milliseconds(100),
+                                     [this] { return delayed_cancelled_; })) {
                 return;
             }
             delayed_pending_ = false;
