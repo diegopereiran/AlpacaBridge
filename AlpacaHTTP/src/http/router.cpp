@@ -5468,7 +5468,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
         alpaca_response.value = std::string("Shutdown initiated");
         response.set_body(alpaca_response);
-        
+
         // Call callback asynchronously (after response is sent)
         // Use a small delay to ensure response is sent first. The thread owns a
         // copy of the callback and reads no Router state (open-astro#1739).
@@ -5476,7 +5476,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             cb();
         }).detach();
-        
+
         return response;
     } else {
         AlpacaResponse alpaca_response = make_error_response(
