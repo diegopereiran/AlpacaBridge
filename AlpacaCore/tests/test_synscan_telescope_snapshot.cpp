@@ -77,6 +77,7 @@ struct Handset {
     std::atomic<bool> w_entered{false};
     std::atomic<bool> w_silent{false};  // the handset ignores `w` (site) entirely
     std::atomic<int> w_count{0};
+    std::atomic<bool> slow_after_w{false};  // the connect's last exchange (`w`) makes every later reply slow
     std::atomic<bool> w_site{false};  // `w` answers a site (33d51'24" S, 151d12'54" E) instead of an unparseable '#'
     std::atomic<uint32_t> ra_counts{0x5CECE2};  // the position `e` answers (24-bit); a GOTO (`r`) lands on its aim
     std::atomic<uint32_t> dec_counts{0xD001B9};
@@ -121,6 +122,7 @@ std::string reply(Handset& st, const std::string& chunk) {
             return "#";
         case 'w':
             st.w_count.fetch_add(1);
+            if (st.slow_after_w.load()) st.latency_ms.store(1200);
             if (st.w_silent.load()) {
                 st.w_entered.store(true);
                 return "";
@@ -745,6 +747,78 @@ TEST_CASE("SynScan snapshot - Tracking and GuideRate do not wait for a connect t
     CHECK(timed([&] { swallow([&] { (void)driver->get_is_pulse_guiding(); }); }) < kGetterBudget);
     connecting.join();
     driver->set_connected(false);
+}
+
+// Each getter alone: the case above runs the four in a row, so the first one that waits for the connect hides whether
+// the others would have waited too.
+TEST_CASE("SynScan snapshot - each no-I/O getter alone is in budget while a connect is in flight",
+          "[synscan][telescope][snapshot][connect]") {
+    const int which = GENERATE(0, 1, 2, 3);
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 1000;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    st->latency_ms = 200;
+    std::thread connecting([&] { driver->set_connected(true); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (st->transactions.load() < 3 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE(st->transactions.load() >= 3);
+
+    const auto elapsed = timed([&] {
+        try {
+            switch (which) {
+                case 0:
+                    (void)driver->get_tracking();
+                    break;
+                case 1:
+                    (void)driver->get_guide_rate();
+                    break;
+                case 2:
+                    (void)driver->get_at_park();
+                    break;
+                default:
+                    (void)driver->get_is_pulse_guiding();
+                    break;
+            }
+        } catch (const alpacacore::AlpacaException&) {  // NotConnected is an answer too
+        }
+    });
+    CHECK(elapsed < kGetterBudget);
+    connecting.join();
+    driver->set_connected(false);
+}
+
+// A status tick that is mid-exchange on a slow link: the disconnect ends it between exchanges instead of joining a
+// whole tick (5 exchanges at 1.2 s = 6 s here), so it returns within 5 s.
+TEST_CASE("SynScan snapshot - set_connected(false) returns within 5 s with a status tick mid-exchange",
+          "[synscan][telescope][snapshot][connect]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 3000;
+    auto driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                         false, sc::SynScanAlignmentSetting::Auto, clock);
+    st->slow_after_w = true;
+    driver->set_connected(true);  // the connect's last exchange turned every later reply slow
+    REQUIRE(st->latency_ms.load() == 1200);
+    // The first status tick is a full one (five exchanges); it is inside its first by now.
+    std::this_thread::sleep_for(milliseconds(300));
+    const auto elapsed = timed([&] { driver->set_connected(false); });
+    CHECK(elapsed < seconds(5));
 }
 
 #endif
