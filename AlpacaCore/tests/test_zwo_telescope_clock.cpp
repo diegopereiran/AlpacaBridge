@@ -30,6 +30,7 @@
 #include <string>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 #include "fake_zwo_mount.h"
 
@@ -40,6 +41,7 @@ using alpacacore::AlpacaException;
 using alpacacore::TelescopeDriver;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::FakeZwoMount;
+using alpacacore::test::require_alpaca_error;
 using namespace std::chrono_literals;
 
 constexpr auto kReal = 5s;  // real-time bound on a rendezvous, never a driver timer
@@ -161,8 +163,8 @@ TEST_CASE("ZWO telescope clock - IsPulseGuiding holds for the pulse plus 500 ms 
     rig.advance(1ms);
     CHECK_FALSE(rig.driver->get_is_pulse_guiding());
     CHECK(rig.mount.count(":GD") == positions);  // the poll stayed paused until the pulse ended
-    // The worker's last two pulse steps; the second ends in the reconciliation read (":GD") before the worker
-    // registers its hold step, so both advances settle.
+    // The pulse body's reconciliation read ran when its one 250 ms step wait ended; the poll resumes at its next
+    // 50 ms check after the pulse end and reads the position (":GD").
     rig.advance(100ms);
     rig.advance(100ms);
     CHECK(rig.mount.wait_for_count(":GD", positions + 1, kReal));
@@ -405,6 +407,66 @@ TEST_CASE("ZWO a new GOTO during Sync settling keeps its own target across a ret
     CHECK(rig.mount.count(":CM") == 1);
 }
 
+TEST_CASE("ZWO an older Sync never aborts a GOTO accepted while it settled",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its first ":Q" and waits out the 200 ms settle
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();  // the GOTO is accepted: it owns the motion now
+    const int stops_before = rig.mount.count(":Q");
+    rig.advance_until([&] { return ready(sync); }, 200ms, 3s);
+    REQUIRE(ready(sync, kReal));
+    CHECK(rig.mount.count(":Q") == stops_before);  // the older Sync stopped nothing
+    CHECK(rig.mount.count(":SMMC") == 1);          // nor retried its sync over the GOTO
+    CHECK(rig.mount.count(":CM") == 0);
+    CHECK(rig.driver->get_slewing());  // the GOTO still runs
+    require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("ZWO an older Sync sends no last-resort :CM once a newer GOTO is accepted",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.mount.override_reply(":SMMC", "e4", 2);
+    auto& sync = rig.call([&] { rig.driver->sync_to_coordinates(6.0, -15.0); });
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 1, kReal));
+    rig.wait_for_blocked_caller();
+    rig.advance(200ms);
+    REQUIRE(rig.mount.wait_for_count(":SMMC", 2, kReal));
+    rig.wait_for_blocked_caller();  // Sync sent its last-resort ":Q" and waits out the 300 ms settle
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(rig.mount.wait_for_count(":MS", 1, kReal));
+    rig.await_poll_resumed();  // the GOTO is accepted: it owns the motion now
+    rig.advance(300ms);
+    REQUIRE(ready(sync, kReal));
+    CHECK(rig.mount.count(":Sr06:00:00") == 0);  // the GOTO's target registers stay its own
+    CHECK(rig.mount.count(":CM") == 0);
+    CHECK(rig.driver->get_slewing());  // the GOTO still runs
+    require_alpaca_error([&] { sync.get(); }, AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("ZWO SyncToCoordinates sends its own pair, not a target set earlier",
+          "[zwo][telescope][unit][clock][sync-fence]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->set_target_right_ascension(3.0);
+    rig.driver->set_target_declination(10.0);
+    rig.driver->sync_to_coordinates(6.0, -15.0);
+    bool saw_pair = false;
+    for (const auto& command : rig.mount.commands()) {
+        if (command.starts_with(":SMMC")) {
+            CHECK(command.starts_with(":SMMC06:00:00&-15"));
+            saw_pair = true;
+        }
+    }
+    CHECK(saw_pair);
+}
+
 TEST_CASE("ZWO telescope clock - FindHome publishes completion only when the forced slew window ends",
           "[zwo][telescope][unit][clock]") {
     const auto duration = GENERATE(0ms, 6000ms);
@@ -599,6 +661,60 @@ TEST_CASE("ZWO telescope clock - Unpark reports Slewing for the 2 s forced windo
     CHECK_FALSE(rig.driver->get_at_park());
     for (int i = 0; i < 2; ++i) rig.advance(250ms);  // 2.25 s
     CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// Operation slot, pulse family: the body waits a pulse step as one clock wait that a cancel wakes, not as 100 ms
+// chunks. One advance over the whole step therefore ends the step and the body reconciles against the mount.
+// Falsified by: run_pulse_task() waiting the pulse in 100 ms clock_.wait_for chunks (pulse_cv_), so one advance
+// wakes one chunk and the reconciliation read (":GD") does not follow.
+TEST_CASE("ZWO telescope clock - a pulse step is one clock wait, so one advance ends it",
+          "[zwo][telescope][unit][clock][operation-slot]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 1000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    const int positions = rig.mount.count(":GD");
+    rig.wait_for_blocked_caller();  // the pulse body, besides the poll loop
+    rig.advance(1000ms);
+    // Real-time bound on a wire event (the reconciliation read), not a driver timer.
+    CHECK(rig.mount.wait_for_count(":GD", positions + 1, 500ms));
+}
+
+// PIN (passes on the current code; must keep passing once the pulse body moves to an operation slot): an accepted
+// PulseGuide is never dropped because a slew superseded the pulse before it. Pulse, slew mid-step, pulse again:
+// the second pulse still reaches the mount.
+// Falsified by: pulse_guide() leaving a pulse queued behind a superseded drain body that never sends it.
+TEST_CASE("ZWO telescope clock - a pulse queued after a slew superseded the previous pulse is still sent (PIN)",
+          "[zwo][telescope][unit][clock][operation-slot]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 3000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    rig.driver->slew_to_coordinates_async(6.0, 30.0);  // mid-step: supersedes the pulse and clears its queue
+    CHECK(rig.mount.wait_for_count(":MS", 1, kReal));  // the slew reached the mount
+    rig.driver->pulse_guide(1, 500);
+    // Virtual time only: the superseded body wakes and the new pulse is drained.
+    rig.advance_until([&] { return rig.mount.count(":Mg") >= 2; }, 100ms, 10s);
+    CHECK(rig.mount.wait_for_count(":Mg", 2, kReal));
+}
+
+// Round 2 finding 3: the flag that says a pulse drain runs is cleared on disconnect and on connect, so a pulse after
+// a reconnect starts a new drain and reaches the mount.
+// Falsified by: zwo_telescope_driver.cpp stop_pulse_drain() and the connect reset (reset_session_state_for_connect)
+// both keeping pulse_drain_active_ (the two clears removed together), so the pulse after the reconnect waits for a
+// drain that no longer runs and no ":Mg" is sent.
+TEST_CASE("ZWO telescope clock - a pulse after a reconnect reaches the mount",
+          "[zwo][telescope][unit][clock][operation-slot]") {
+    Rig rig;
+    rig.connect();
+    rig.driver->pulse_guide(0, 3000);
+    REQUIRE(rig.mount.wait_for_count(":Mg", 1, kReal));
+    rig.driver->set_connected(false);  // the teardown runs on: the pulse body is still being stopped
+    require_alpaca_error([&] { rig.driver->pulse_guide(2, 500); }, AlpacaError::NotConnected);
+    rig.connect();
+    const int pulses = rig.mount.count(":Mg");
+    rig.driver->pulse_guide(2, 500);
+    CHECK(rig.mount.wait_for_count(":Mg", pulses + 1, kReal));
 }
 
 #endif  // !_WIN32
