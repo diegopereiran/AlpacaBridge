@@ -1382,3 +1382,26 @@ TEST_CASE("ZWO fake SDK - a close that throws still lets the next open initialis
     CHECK(sdk.holders(id) == 1);
     sdk.close_camera_link(id, again.link);
 }
+
+// Repro (user report, 5.0.2): the SDK reuses a camera id for another body after a USB drop.
+// The entry stays bound by serial, but the disconnected name is read by the cached id.
+TEST_CASE("ZWO fake SDK - disconnected name follows the bound serial, not a reused camera id",
+          "[zwo][camera][unit]") {
+    FakeZWOSDK sdk;
+    sdk.camera.name = "ZWO ASI432MM";
+    sdk.serial = "aaaa";
+    alpacacore::vendor::zwo::ZwoCameraBinding binding;
+    binding.identity.serial = "aaaa";
+    binding.identity.camera_name = "ZWO ASI432MM";
+    binding.identity.camera_id = sdk.camera.camera_id;
+    binding.unique_id = "ZWO_UID_0123456789abcdef";
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(1, binding, sdk);
+    // The real by-id read needs no open (issue #738); the fake answers only for an open id.
+    const auto held = sdk.open_camera_link(sdk.camera.camera_id);
+    CHECK(camera->get_name() == "ZWO ASI432MM");
+
+    sdk.camera.name = "ZWO ASI533MC Pro";
+    sdk.serial = "bbbb";
+    CHECK(camera->get_name() != "ZWO ASI533MC Pro");
+    sdk.close_camera_link(sdk.camera.camera_id, held.link);
+}
