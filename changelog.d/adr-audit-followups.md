@@ -16,6 +16,7 @@
 
 ### Changed (docs)
 
+- **The ZWO camera meets decision 0020 rule 5** (docs, issue #2721): a rig run on SDK 1.41 showed that `ASIGetDataAfterExp` copies a frame the SDK has already transferred (8 to 10 ms for an 18 MB ASI533MC Pro frame, 2 ms for an ASI120MM Mini frame), not a multi-second USB download, so the 0020 ZWO camera row is `adopted` and two code comments no longer say otherwise.
 - **Decision records agree with the code and with each other again** (docs, issue #2716): an audit of the 27 records fixed contradictions in 0005, 0006, 0010, 0016, 0021 and 0027, stale text in 0007, 0009, 0020, 0023 and 0024, and Adoption rows that named closed issues; decision 0027 is `accepted`; 0022 rule 2 now says an abort whose stop failed leaves the hold window armed; 0009 names a TCP peer hangup as a lost link (issue #2718) and marks the rows that keep no `LinkLostStamp` as `partial` (issue #2717); the README no longer allows `Scope: **` in 0013.
 
 ### Fixed
